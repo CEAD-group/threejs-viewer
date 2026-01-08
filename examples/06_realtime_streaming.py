@@ -18,7 +18,9 @@ v.clear()
 v.stop_animation()  # Clear any previous animation UI
 
 # Ground
-v.add_box("ground", width=15, height=15, depth=0.02, color=0x333333, position=[0, 0, -0.01])
+v.add_box(
+    "ground", width=15, height=15, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+)
 
 # Create a grid of bouncing spheres
 GRID_SIZE = 5
@@ -73,7 +75,10 @@ try:
 
         # Rotating center box
         angle = t * 0.8
-        transforms["center_box"] = {"position": [0, 0, 2 + 0.5 * math.sin(t * 2)], "rotation": [t * 0.3, angle, t * 0.2]}
+        transforms["center_box"] = {
+            "position": [0, 0, 2 + 0.5 * math.sin(t * 2)],
+            "rotation": [t * 0.3, angle, t * 0.2],
+        }
 
         # Send batch update
         v.batch_update(transforms)

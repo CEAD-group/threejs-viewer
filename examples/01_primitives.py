@@ -16,7 +16,9 @@ v.clear()
 v.stop_animation()
 
 # Add a ground plane (flat box)
-v.add_box("ground", width=10, height=10, depth=0.05, color=0x444444, position=[0, 0, -0.025])
+v.add_box(
+    "ground", width=10, height=10, depth=0.05, color=0x444444, position=[0, 0, -0.025]
+)
 
 # Add colored spheres in a row
 colors = [0xFF0000, 0xFF7F00, 0xFFFF00, 0x00FF00, 0x0000FF, 0x8B00FF]

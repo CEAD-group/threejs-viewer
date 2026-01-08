@@ -36,9 +36,11 @@ def main():
         print(viewer_path)
     elif cmd == "code":
         import subprocess
+
         subprocess.run(["code", str(viewer_path)])
     elif cmd == "open":
         import webbrowser
+
         url = f"file://{viewer_path.resolve()}"
         print(f"Opening {url}")
         webbrowser.open(url)
@@ -52,6 +54,7 @@ def get_version() -> str:
     """Get package version."""
     try:
         from . import __version__
+
         return __version__
     except ImportError:
         return "0.0.0"

@@ -16,7 +16,9 @@ v.clear()
 v.stop_animation()
 
 # Add a subtle ground reference
-v.add_box("ground", width=12, height=12, depth=0.02, color=0x333333, position=[0, 0, -0.01])
+v.add_box(
+    "ground", width=12, height=12, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+)
 
 
 # === Helix with height-based coloring (viridis) ===
@@ -30,7 +32,9 @@ def make_helix(radius, height, turns, n_points):
 
 helix1 = make_helix(radius=1.5, height=4, turns=5, n_points=500)
 z_values = helix1[:, 2]  # Color by height
-v.add_polyline("helix_viridis", helix1, colors=z_values, colormap="viridis", line_width=4)
+v.add_polyline(
+    "helix_viridis", helix1, colors=z_values, colormap="viridis", line_width=4
+)
 
 
 # === Spiral with velocity coloring (plasma) ===
@@ -50,7 +54,9 @@ spiral[:, 0] += 5
 # Color by "velocity" (derivative magnitude)
 velocity = np.sqrt(np.sum(np.diff(spiral, axis=0) ** 2, axis=1))
 velocity = np.append(velocity, velocity[-1])  # Match length
-v.add_polyline("spiral_plasma", spiral, colors=velocity, colormap="plasma", line_width=3)
+v.add_polyline(
+    "spiral_plasma", spiral, colors=velocity, colormap="plasma", line_width=3
+)
 
 
 # === Lissajous curve with parameter coloring (turbo) ===
@@ -69,7 +75,9 @@ lissajous[:, 2] += 2  # Raise above ground
 
 # Color by parameter t
 t_param = np.linspace(0, 1, 1000)
-v.add_polyline("lissajous_turbo", lissajous, colors=t_param, colormap="turbo", line_width=3)
+v.add_polyline(
+    "lissajous_turbo", lissajous, colors=t_param, colormap="turbo", line_width=3
+)
 
 
 # === Simple white polyline (no colormap) ===
