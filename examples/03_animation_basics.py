@@ -9,7 +9,6 @@ Run: uv run python examples/03_animation_basics.py
 
 import math
 
-import numpy as np
 
 from threejs_viewer import Animation, viewer
 
