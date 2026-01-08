@@ -46,7 +46,6 @@ include = [
     "/src",
     "/README.md",
     "/DESIGN.md",
-    "/EXAMPLES.md",
 ]
 
 # Force include viewer.html in wheel (it's not a .py file)
@@ -61,3 +60,6 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
