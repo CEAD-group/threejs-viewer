@@ -16,7 +16,24 @@ from threejs_viewer import Animation, viewer
 
 def make_transform_matrix(position, scale=1.0):
     """Create a simple translation matrix."""
-    return [scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, position[0], position[1], position[2], 1]
+    return [
+        scale,
+        0,
+        0,
+        0,
+        0,
+        scale,
+        0,
+        0,
+        0,
+        0,
+        scale,
+        0,
+        position[0],
+        position[1],
+        position[2],
+        1,
+    ]
 
 
 def lissajous_3d(t, a, b, c, delta_x=0, delta_y=0, scale=3):
@@ -31,7 +48,9 @@ v = viewer()
 v.clear()
 
 # Ground plane
-v.add_box("ground", width=10, height=10, depth=0.02, color=0x333333, position=[0, 0, -0.01])
+v.add_box(
+    "ground", width=10, height=10, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+)
 
 # Curve parameters (interesting ratios create beautiful patterns)
 A, B, C = 3, 4, 5  # Frequency ratios

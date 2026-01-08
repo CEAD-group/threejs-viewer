@@ -24,8 +24,14 @@ def torus_knot(t: np.ndarray, p: int = 3, q: int = 7, scale: float = 5.0):
     y = scale * (np.sin(p * t) * (1 + r * np.cos(q * t)))
     z = scale * (r * np.sin(q * t))
 
-    dx = scale * (-p * np.sin(p * t) * (1 + r * np.cos(q * t)) - r * q * np.cos(p * t) * np.sin(q * t))
-    dy = scale * (p * np.cos(p * t) * (1 + r * np.cos(q * t)) - r * q * np.sin(p * t) * np.sin(q * t))
+    dx = scale * (
+        -p * np.sin(p * t) * (1 + r * np.cos(q * t))
+        - r * q * np.cos(p * t) * np.sin(q * t)
+    )
+    dy = scale * (
+        p * np.cos(p * t) * (1 + r * np.cos(q * t))
+        - r * q * np.sin(p * t) * np.sin(q * t)
+    )
     dz = scale * (r * q * np.cos(q * t))
 
     return (x, y, z), (dx, dy, dz)
@@ -93,7 +99,9 @@ v.stop_animation()
 
 print("Sending polyline to viewer...")
 start = time.time()
-v.add_polyline("tube", points, colors=t.astype(np.float32), colormap="turbo", line_width=2)
+v.add_polyline(
+    "tube", points, colors=t.astype(np.float32), colormap="turbo", line_width=2
+)
 print(f"Sent in {time.time() - start:.2f}s")
 
 # Create followers with different primitives
@@ -118,29 +126,41 @@ for i in range(NUM_FOLLOWERS):
     elif ptype == "box":
         v.add_box(fid, width=size, height=size, depth=size * 2, color=color)
     elif ptype == "cylinder":
-        v.add_cylinder(fid, radius_top=size * 0.4, radius_bottom=size * 0.4, height=size * 2, color=color)
+        v.add_cylinder(
+            fid,
+            radius_top=size * 0.4,
+            radius_bottom=size * 0.4,
+            height=size * 2,
+            color=color,
+        )
     elif ptype == "capsule":
         v.add_capsule(fid, radius=size * 0.4, length=size, color=color)
     elif ptype == "cone":
-        v.add_cylinder(fid, radius_top=0, radius_bottom=size * 0.5, height=size * 2, color=color)
+        v.add_cylinder(
+            fid, radius_top=0, radius_bottom=size * 0.5, height=size * 2, color=color
+        )
 
-    followers.append({
-        "id": fid,
-        "speed": random.uniform(5, 30),
-        "offset": random.randint(0, NUM_POINTS - 1),
-    })
+    followers.append(
+        {
+            "id": fid,
+            "speed": random.uniform(5, 30),
+            "offset": random.randint(0, NUM_POINTS - 1),
+        }
+    )
 
 # Add teapots
 print(f"Adding {NUM_TEAPOTS} teapots...")
 for i in range(NUM_TEAPOTS):
     fid = f"teapot{i}"
     v.add_model_binary(fid, TEAPOT_PATH, format="obj")
-    followers.append({
-        "id": fid,
-        "speed": random.uniform(5, 20),
-        "offset": random.randint(0, NUM_POINTS - 1),
-        "scale": 0.2,  # 20% scale
-    })
+    followers.append(
+        {
+            "id": fid,
+            "speed": random.uniform(5, 20),
+            "offset": random.randint(0, NUM_POINTS - 1),
+            "scale": 0.2,  # 20% scale
+        }
+    )
 
 
 def quaternion_from_direction(direction):
@@ -200,5 +220,5 @@ try:
 
 except KeyboardInterrupt:
     elapsed = time.time() - t_start
-    print(f"\nStopped: {frame} frames, {frame/elapsed:.1f} fps avg")
+    print(f"\nStopped: {frame} frames, {frame / elapsed:.1f} fps avg")
     v.disconnect()

@@ -66,13 +66,22 @@ N_TEAPOTS = 12
 TEAPOT_SCALE = 0.4  # Scale for the Three.js teapot model
 
 # Add ground plane
-v.add_box("ground", width=20, height=20, depth=0.05, color=0x2A2A2A, position=[0, 0, -0.025])
+v.add_box(
+    "ground", width=20, height=20, depth=0.05, color=0x2A2A2A, position=[0, 0, -0.025]
+)
 
 # Add some reference pillars
 for i in range(4):
     angle = i * math.pi / 2 + math.pi / 4
     x, y = 8 * math.cos(angle), 8 * math.sin(angle)
-    v.add_cylinder(f"pillar_{i}", radius_top=0.3, radius_bottom=0.4, height=6, color=0x666666, position=[x, y, 3])
+    v.add_cylinder(
+        f"pillar_{i}",
+        radius_top=0.3,
+        radius_bottom=0.4,
+        height=6,
+        color=0x666666,
+        position=[x, y, 3],
+    )
 
 # Load teapots via websocket
 print(f"Loading {N_TEAPOTS} teapots...")
@@ -116,7 +125,9 @@ for i in range(n_frames):
 
     for teapot_idx in range(N_TEAPOTS):
         pos, rot = flight_path(t, teapot_idx)
-        transforms[f"teapot_{teapot_idx}"] = make_transform_matrix(pos, rot, TEAPOT_SCALE)
+        transforms[f"teapot_{teapot_idx}"] = make_transform_matrix(
+            pos, rot, TEAPOT_SCALE
+        )
 
     animation.add_frame(time=t, transforms=transforms)
 

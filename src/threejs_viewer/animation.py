@@ -87,7 +87,15 @@ class Animation:
         opacity: dict[str, float] | None = None,
     ) -> None:
         """Add a frame to the animation."""
-        self.frames.append(Frame(time=time, transforms=transforms, colors=colors, visibility=visibility, opacity=opacity))
+        self.frames.append(
+            Frame(
+                time=time,
+                transforms=transforms,
+                colors=colors,
+                visibility=visibility,
+                opacity=opacity,
+            )
+        )
 
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:
         """Add a labeled marker on the timeline."""
@@ -110,7 +118,8 @@ class Animation:
                 for f in self.frames
             ],
             "markers": [
-                {"time": m.time, "label": m.label, "color": m.color} for m in self.markers
+                {"time": m.time, "label": m.label, "color": m.color}
+                for m in self.markers
             ],
         }
 
@@ -159,7 +168,9 @@ class Animation:
         return cls(frames=frames, loop=loop)
 
     @classmethod
-    def record(cls, duration: float, fps: float = 30.0, loop: bool = True) -> "AnimationRecorder":
+    def record(
+        cls, duration: float, fps: float = 30.0, loop: bool = True
+    ) -> "AnimationRecorder":
         """
         Create a recorder context manager.
 
@@ -206,7 +217,13 @@ class AnimationRecorder:
     ) -> None:
         """Add a frame at the current time."""
         self._frames.append(
-            Frame(time=self._current_time, transforms=transforms, colors=colors, visibility=visibility, opacity=opacity)
+            Frame(
+                time=self._current_time,
+                transforms=transforms,
+                colors=colors,
+                visibility=visibility,
+                opacity=opacity,
+            )
         )
         self._current_time += self._time_step
 

@@ -46,10 +46,34 @@ v.add_sphere("sun", radius=1.0, color=0xFFDD00, position=[0, 0, 0])
 
 # Create planets
 planets = [
-    {"id": "mercury", "radius": 0.15, "color": 0x888888, "orbit_radius": 2.0, "period": 2.0},
-    {"id": "venus", "radius": 0.25, "color": 0xFFAA55, "orbit_radius": 3.0, "period": 3.5},
-    {"id": "earth", "radius": 0.3, "color": 0x4488FF, "orbit_radius": 4.5, "period": 5.0},
-    {"id": "mars", "radius": 0.2, "color": 0xFF4422, "orbit_radius": 6.0, "period": 7.0},
+    {
+        "id": "mercury",
+        "radius": 0.15,
+        "color": 0x888888,
+        "orbit_radius": 2.0,
+        "period": 2.0,
+    },
+    {
+        "id": "venus",
+        "radius": 0.25,
+        "color": 0xFFAA55,
+        "orbit_radius": 3.0,
+        "period": 3.5,
+    },
+    {
+        "id": "earth",
+        "radius": 0.3,
+        "color": 0x4488FF,
+        "orbit_radius": 4.5,
+        "period": 5.0,
+    },
+    {
+        "id": "mars",
+        "radius": 0.2,
+        "color": 0xFF4422,
+        "orbit_radius": 6.0,
+        "period": 7.0,
+    },
 ]
 
 for planet in planets:

@@ -42,7 +42,9 @@ class ViewerClient:
         print(f"Waiting for viewer to connect on ws://{self.host}:{self.port} ...")
         print(f"Open viewer: {self.viewer_path}")
         if not self._connected_event.wait(timeout=timeout):
-            raise TimeoutError(f"No viewer connected within {timeout}s. Open the HTML viewer in a browser.")
+            raise TimeoutError(
+                f"No viewer connected within {timeout}s. Open the HTML viewer in a browser."
+            )
         print("Viewer connected!")
         return self
 
@@ -53,7 +55,9 @@ class ViewerClient:
 
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
-        with sync_serve(self._handle_connection, self.host, self.port, max_size=64 * 1024 * 1024) as server:
+        with sync_serve(
+            self._handle_connection, self.host, self.port, max_size=64 * 1024 * 1024
+        ) as server:
             self._server = server
             server.serve_forever()
 
@@ -65,10 +69,14 @@ class ViewerClient:
         # Re-send animation if one was loaded (browser may have refreshed)
         if self._current_animation is not None:
             try:
-                websocket.send(json.dumps({
-                    "type": "load_animation",
-                    "animation": self._current_animation,
-                }))
+                websocket.send(
+                    json.dumps(
+                        {
+                            "type": "load_animation",
+                            "animation": self._current_animation,
+                        }
+                    )
+                )
             except Exception:
                 pass
 
@@ -127,9 +135,14 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a box primitive to the scene."""
-        self._add_primitive(id, "box", {
-            "width": width, "height": height, "depth": depth, "color": color
-        }, position, rotation, scale)
+        self._add_primitive(
+            id,
+            "box",
+            {"width": width, "height": height, "depth": depth, "color": color},
+            position,
+            rotation,
+            scale,
+        )
 
     def add_sphere(
         self,
@@ -141,9 +154,9 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a sphere primitive to the scene."""
-        self._add_primitive(id, "sphere", {
-            "radius": radius, "color": color
-        }, position, rotation, scale)
+        self._add_primitive(
+            id, "sphere", {"radius": radius, "color": color}, position, rotation, scale
+        )
 
     def add_cylinder(
         self,
@@ -157,10 +170,19 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a cylinder primitive to the scene."""
-        self._add_primitive(id, "cylinder", {
-            "radiusTop": radius_top, "radiusBottom": radius_bottom,
-            "height": height, "color": color
-        }, position, rotation, scale)
+        self._add_primitive(
+            id,
+            "cylinder",
+            {
+                "radiusTop": radius_top,
+                "radiusBottom": radius_bottom,
+                "height": height,
+                "color": color,
+            },
+            position,
+            rotation,
+            scale,
+        )
 
     def add_capsule(
         self,
@@ -173,9 +195,14 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene."""
-        self._add_primitive(id, "capsule", {
-            "radius": radius, "length": length, "color": color
-        }, position, rotation, scale)
+        self._add_primitive(
+            id,
+            "capsule",
+            {"radius": radius, "length": length, "color": color},
+            position,
+            rotation,
+            scale,
+        )
 
     def add_model(
         self,
@@ -205,15 +232,17 @@ class ViewerClient:
         if scale:
             transform["scale"] = scale
 
-        self._send({
-            "type": "add_object",
-            "id": id,
-            "object": {
-                "model": url,
-                "format": format,
-                "transform": transform if transform else None,
+        self._send(
+            {
+                "type": "add_object",
+                "id": id,
+                "object": {
+                    "model": url,
+                    "format": format,
+                    "transform": transform if transform else None,
+                },
             }
-        })
+        )
 
     def add_model_binary(
         self,
@@ -237,11 +266,13 @@ class ViewerClient:
                 raise FileNotFoundError(f"Mesh file not found: {path}")
             mesh_bytes = path.read_bytes()
 
-        header = json.dumps({
-            "type": "add_model_binary",
-            "id": id,
-            "format": format,
-        }).encode("utf-8")
+        header = json.dumps(
+            {
+                "type": "add_model_binary",
+                "id": id,
+                "format": format,
+            }
+        ).encode("utf-8")
 
         # Pad header to 4-byte alignment
         padding_needed = (4 - (len(header) % 4)) % 4
@@ -289,7 +320,7 @@ class ViewerClient:
             n_points = len(points) // 3
 
         # Process colors if provided
-        color_bytes = b''
+        color_bytes = b""
         has_vertex_colors = False
         if colors is not None:
             colors = np.asarray(colors)
@@ -307,19 +338,21 @@ class ViewerClient:
 
         raw_bytes = points.tobytes() + color_bytes
 
-        header = json.dumps({
-            "type": "add_polyline_binary",
-            "id": id,
-            "color": color,
-            "lineWidth": line_width,
-            "hasVertexColors": has_vertex_colors,
-            "numPoints": n_points,
-        }).encode('utf-8')
+        header = json.dumps(
+            {
+                "type": "add_polyline_binary",
+                "id": id,
+                "color": color,
+                "lineWidth": line_width,
+                "hasVertexColors": has_vertex_colors,
+                "numPoints": n_points,
+            }
+        ).encode("utf-8")
 
         padding_needed = (4 - (len(header) % 4)) % 4
-        header = header + b'\x00' * padding_needed
+        header = header + b"\x00" * padding_needed
 
-        header_len = struct.pack('<I', len(header))
+        header_len = struct.pack("<I", len(header))
         binary_msg = header_len + header + raw_bytes
 
         ws = self._ws
@@ -328,7 +361,9 @@ class ViewerClient:
         with self._send_lock:
             ws.send(binary_msg)
 
-    def _apply_colormap(self, values: np.ndarray, colormap: str, cmin: float, cmax: float) -> np.ndarray:
+    def _apply_colormap(
+        self, values: np.ndarray, colormap: str, cmin: float, cmax: float
+    ) -> np.ndarray:
         """Apply a colormap to scalar values."""
         if cmax == cmin:
             normalized = np.zeros_like(values)
@@ -338,20 +373,38 @@ class ViewerClient:
 
         colormaps = {
             "viridis": [
-                (0.267, 0.004, 0.329), (0.282, 0.140, 0.458), (0.254, 0.265, 0.530),
-                (0.207, 0.372, 0.553), (0.164, 0.471, 0.558), (0.128, 0.567, 0.551),
-                (0.135, 0.659, 0.518), (0.267, 0.749, 0.441), (0.478, 0.821, 0.318),
-                (0.741, 0.873, 0.150), (0.993, 0.906, 0.144),
+                (0.267, 0.004, 0.329),
+                (0.282, 0.140, 0.458),
+                (0.254, 0.265, 0.530),
+                (0.207, 0.372, 0.553),
+                (0.164, 0.471, 0.558),
+                (0.128, 0.567, 0.551),
+                (0.135, 0.659, 0.518),
+                (0.267, 0.749, 0.441),
+                (0.478, 0.821, 0.318),
+                (0.741, 0.873, 0.150),
+                (0.993, 0.906, 0.144),
             ],
             "plasma": [
-                (0.050, 0.030, 0.528), (0.295, 0.012, 0.615), (0.492, 0.012, 0.659),
-                (0.665, 0.139, 0.614), (0.798, 0.280, 0.470), (0.899, 0.396, 0.301),
-                (0.973, 0.559, 0.055), (0.940, 0.975, 0.131),
+                (0.050, 0.030, 0.528),
+                (0.295, 0.012, 0.615),
+                (0.492, 0.012, 0.659),
+                (0.665, 0.139, 0.614),
+                (0.798, 0.280, 0.470),
+                (0.899, 0.396, 0.301),
+                (0.973, 0.559, 0.055),
+                (0.940, 0.975, 0.131),
             ],
             "turbo": [
-                (0.190, 0.072, 0.232), (0.217, 0.336, 0.855), (0.134, 0.659, 0.918),
-                (0.121, 0.866, 0.706), (0.400, 0.974, 0.371), (0.691, 0.974, 0.171),
-                (0.938, 0.847, 0.102), (0.999, 0.582, 0.084), (0.945, 0.278, 0.086),
+                (0.190, 0.072, 0.232),
+                (0.217, 0.336, 0.855),
+                (0.134, 0.659, 0.918),
+                (0.121, 0.866, 0.706),
+                (0.400, 0.974, 0.371),
+                (0.691, 0.974, 0.171),
+                (0.938, 0.847, 0.102),
+                (0.999, 0.582, 0.084),
+                (0.945, 0.278, 0.086),
                 (0.700, 0.072, 0.150),
             ],
         }
@@ -365,7 +418,10 @@ class ViewerClient:
         frac = indices - lower
 
         cmap_arr = np.array(cmap)
-        result = cmap_arr[lower] * (1 - frac[:, np.newaxis]) + cmap_arr[upper] * frac[:, np.newaxis]
+        result = (
+            cmap_arr[lower] * (1 - frac[:, np.newaxis])
+            + cmap_arr[upper] * frac[:, np.newaxis]
+        )
         return result.astype(np.float32)
 
     def _add_primitive(
@@ -386,84 +442,63 @@ class ViewerClient:
         if scale:
             transform["scale"] = scale
 
-        self._send({
-            "type": "add_object",
-            "id": id,
-            "object": {
-                "primitive": primitive,
-                "params": params,
-                "transform": transform if transform else None,
+        self._send(
+            {
+                "type": "add_object",
+                "id": id,
+                "object": {
+                    "primitive": primitive,
+                    "params": params,
+                    "transform": transform if transform else None,
+                },
             }
-        })
+        )
 
     # === Transform Updates ===
 
     def set_position(self, id: str, x: float, y: float, z: float):
         """Set object position."""
-        self._send({
-            "type": "update_transform",
-            "id": id,
-            "transform": {"position": [x, y, z]}
-        })
+        self._send(
+            {"type": "update_transform", "id": id, "transform": {"position": [x, y, z]}}
+        )
 
     def set_rotation(self, id: str, x: float, y: float, z: float):
         """Set object rotation (Euler angles in radians)."""
-        self._send({
-            "type": "update_transform",
-            "id": id,
-            "transform": {"rotation": [x, y, z]}
-        })
+        self._send(
+            {"type": "update_transform", "id": id, "transform": {"rotation": [x, y, z]}}
+        )
 
     def set_matrix(self, id: str, matrix: List[float]):
         """Set object transform via 4x4 matrix (column-major order)."""
-        self._send({
-            "type": "update_transform",
-            "id": id,
-            "transform": {"matrix": matrix}
-        })
+        self._send(
+            {"type": "update_transform", "id": id, "transform": {"matrix": matrix}}
+        )
 
     def batch_update(self, transforms: Dict[str, dict]):
         """
         Update multiple object transforms in a single message.
         Optimized for high-frequency updates (60fps).
         """
-        self._send({
-            "type": "batch_update",
-            "transforms": transforms
-        })
+        self._send({"type": "batch_update", "transforms": transforms})
 
     def set_transforms(self, matrices: Dict[str, List[float]]):
         """Update multiple objects with 4x4 matrices in a single call."""
         transforms = {id: {"matrix": matrix} for id, matrix in matrices.items()}
-        self._send({
-            "type": "batch_update",
-            "transforms": transforms
-        })
+        self._send({"type": "batch_update", "transforms": transforms})
 
     # === Object Operations ===
 
     def delete(self, id: str) -> None:
         """Delete an object from the scene."""
-        self._send({
-            "type": "delete_object",
-            "id": id
-        })
+        self._send({"type": "delete_object", "id": id})
 
     def set_visible(self, id: str, visible: bool = True):
         """Set object visibility."""
-        self._send({
-            "type": "set_visibility",
-            "id": id,
-            "visible": visible
-        })
+        self._send({"type": "set_visibility", "id": id, "visible": visible})
 
     def set_color(self, id: str, color: int):
         """Set object material color."""
-        self._send({
-            "type": "set_color",
-            "id": id,
-            "color": color
-        })
+        self._send({"type": "set_color", "id": id, "color": color})
 
     def hide(self, id: str):
         """Hide an object."""
@@ -514,11 +549,13 @@ class ViewerClient:
 
         # Add missing
         for obj_id in to_add:
-            self._send({
-                "type": "add_object",
-                "id": obj_id,
-                "object": objects[obj_id],
-            })
+            self._send(
+                {
+                    "type": "add_object",
+                    "id": obj_id,
+                    "object": objects[obj_id],
+                }
+            )
 
         return {"added": list(to_add), "deleted": list(to_delete)}
 
@@ -547,10 +584,12 @@ class ViewerClient:
         """
         animation_dict = animation.to_dict()
         self._current_animation = animation_dict  # Store for reconnect
-        self._send({
-            "type": "load_animation",
-            "animation": animation_dict,
-        })
+        self._send(
+            {
+                "type": "load_animation",
+                "animation": animation_dict,
+            }
+        )
 
     def stop_animation(self) -> None:
         """Stop animation playback and return to real-time mode."""
