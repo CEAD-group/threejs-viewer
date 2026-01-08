@@ -8,6 +8,7 @@ Run: uv run python examples/01_primitives.py
 """
 
 from threejs_viewer import viewer
+import math
 
 # Connect to viewer (starts WebSocket server, waits for browser)
 v = viewer()
@@ -22,9 +23,6 @@ colors = [0xFF0000, 0xFF7F00, 0xFFFF00, 0x00FF00, 0x0000FF, 0x8B00FF]
 for i, color in enumerate(colors):
     x = (i - 2.5) * 1.5
     v.add_sphere(f"sphere_{i}", radius=0.4, color=color, position=[x, 0, 0.4])
-
-# Add some boxes with rotation
-import math
 
 for i in range(4):
     angle = i * math.pi / 4

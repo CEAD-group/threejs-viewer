@@ -23,9 +23,9 @@ def main():
         print(f"threejs-viewer {get_version()}")
         print()
         print("Commands:")
-        print(f"  path   - Print path to viewer.html")
-        print(f"  open   - Open viewer in default browser")
-        print(f"  code   - Open viewer in VS Code")
+        print("  path   - Print path to viewer.html")
+        print("  open   - Open viewer in default browser")
+        print("  code   - Open viewer in VS Code")
         print()
         print(f"Viewer path: {viewer_path}")
         return
