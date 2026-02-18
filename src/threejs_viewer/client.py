@@ -6,14 +6,40 @@ Runs a WebSocket server that the browser connects to directly.
 """
 
 import json
-import struct
 import threading
 import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
+
+
+class _BlobHandler(BaseHTTPRequestHandler):
+    """Serves binary blobs over HTTP for fast transfer to browser."""
+
+    def do_GET(self):
+        blob = self.server.blob_store.get(self.path)
+        if blob is not None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(blob)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP request logging
 
 
 class ViewerClient:
@@ -33,9 +59,18 @@ class ViewerClient:
         self._responses: Dict[str, dict] = {}
         self._send_lock = threading.Lock()
         self._current_animation = None  # Stored for re-sending on reconnect
+        self._http_server = None
+        self._blob_store: Dict[str, bytes] = {}
 
     def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect."""
+        # Start HTTP server for fast binary transfers
+        self._http_port = self.port + 1
+        http_server = HTTPServer((self.host, self._http_port), _BlobHandler)
+        http_server.blob_store = self._blob_store
+        self._http_server = http_server
+        threading.Thread(target=http_server.serve_forever, daemon=True).start()
+
         self._server_thread = threading.Thread(target=self._run_server, daemon=True)
         self._server_thread.start()
 
@@ -56,7 +91,10 @@ class ViewerClient:
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
         with sync_serve(
-            self._handle_connection, self.host, self.port, max_size=64 * 1024 * 1024
+            self._handle_connection,
+            self.host,
+            self.port,
+            max_size=256 * 1024 * 1024,
         ) as server:
             self._server = server
             server.serve_forever()
@@ -244,6 +282,13 @@ class ViewerClient:
             }
         )
 
+    def _send_binary(self, header_dict: dict, payload: bytes) -> None:
+        """Send binary data via HTTP blob + JSON notification over WebSocket."""
+        blob_key = f"/blob_{uuid.uuid4().hex}"
+        self._blob_store[blob_key] = payload
+        header_dict["blob_url"] = f"http://{self.host}:{self._http_port}{blob_key}"
+        self._send(header_dict)
+
     def add_model_binary(
         self,
         id: str,
@@ -266,27 +311,10 @@ class ViewerClient:
                 raise FileNotFoundError(f"Mesh file not found: {path}")
             mesh_bytes = path.read_bytes()
 
-        header = json.dumps(
-            {
-                "type": "add_model_binary",
-                "id": id,
-                "format": format,
-            }
-        ).encode("utf-8")
-
-        # Pad header to 4-byte alignment
-        padding_needed = (4 - (len(header) % 4)) % 4
-        header = header + b"\x00" * padding_needed
-
-        # Build binary message: [header_len (4 bytes)][header][mesh bytes]
-        header_len = struct.pack("<I", len(header))
-        binary_msg = header_len + header + mesh_bytes
-
-        ws = self._ws
-        if not ws:
-            raise RuntimeError("No viewer connected.")
-        with self._send_lock:
-            ws.send(binary_msg)
+        self._send_binary(
+            {"type": "add_model_binary", "id": id, "format": format},
+            mesh_bytes,
+        )
 
     def add_polyline(
         self,
@@ -338,7 +366,7 @@ class ViewerClient:
 
         raw_bytes = points.tobytes() + color_bytes
 
-        header = json.dumps(
+        self._send_binary(
             {
                 "type": "add_polyline_binary",
                 "id": id,
@@ -346,20 +374,9 @@ class ViewerClient:
                 "lineWidth": line_width,
                 "hasVertexColors": has_vertex_colors,
                 "numPoints": n_points,
-            }
-        ).encode("utf-8")
-
-        padding_needed = (4 - (len(header) % 4)) % 4
-        header = header + b"\x00" * padding_needed
-
-        header_len = struct.pack("<I", len(header))
-        binary_msg = header_len + header + raw_bytes
-
-        ws = self._ws
-        if not ws:
-            raise RuntimeError("No viewer connected.")
-        with self._send_lock:
-            ws.send(binary_msg)
+            },
+            raw_bytes,
+        )
 
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
@@ -569,8 +586,8 @@ class ViewerClient:
         """
         Load an animation for playback in the viewer.
 
-        The viewer will display playback controls (play/pause, timeline,
-        speed control, frame stepping) for interactive exploration.
+        Uses binary transfer for transform data (fast) with JSON for
+        sparse channels (colors, visibility, opacity, clip_times).
 
         Args:
             animation: Animation object with pre-computed frames
@@ -586,12 +603,96 @@ class ViewerClient:
             animation = Animation(frames=frames, loop=True)
             viewer.load_animation(animation)
         """
-        animation_dict = animation.to_dict()
-        self._current_animation = animation_dict  # Store for reconnect
+        n_frames = len(animation.frames)
+
+        # Use pre-built binary data if available (fastest path)
+        if animation._transform_data is not None and animation._object_ids is not None:
+            all_ids = animation._object_ids
+            n_objects = len(all_ids)
+            transform_data = animation._transform_data
+        else:
+            # Build from frame dicts
+            all_ids = (
+                list(animation.frames[0].transforms.keys()) if n_frames > 0 else []
+            )
+            id_set = set(all_ids)
+            for frame in animation.frames[1:]:
+                for obj_id in frame.transforms:
+                    if obj_id not in id_set:
+                        all_ids.append(obj_id)
+                        id_set.add(obj_id)
+
+            n_objects = len(all_ids)
+
+            # Fast path: uniform keys across all frames
+            first_keys = (
+                list(animation.frames[0].transforms.keys()) if n_frames > 0 else []
+            )
+            uniform = len(first_keys) == n_objects and all(
+                list(f.transforms.keys()) == first_keys for f in animation.frames
+            )
+
+            if uniform:
+                transform_data = np.array(
+                    [list(f.transforms.values()) for f in animation.frames],
+                    dtype=np.float32,
+                )
+            else:
+                identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+                id_to_idx = {obj_id: i for i, obj_id in enumerate(all_ids)}
+                transform_data = np.tile(
+                    np.array(identity, dtype=np.float32), (n_frames, n_objects, 1)
+                )
+                for fi, frame in enumerate(animation.frames):
+                    for obj_id, matrix in frame.transforms.items():
+                        transform_data[fi, id_to_idx[obj_id], :] = matrix
+
+        frame_times = [f.time for f in animation.frames]
+        frames_meta = []
+
+        for fi, frame in enumerate(animation.frames):
+            meta = {}
+            if frame.colors:
+                meta["colors"] = frame.colors
+            if frame.visibility:
+                meta["visibility"] = frame.visibility
+            if frame.opacity:
+                meta["opacity"] = frame.opacity
+            if frame.clip_times:
+                meta["clip_times"] = frame.clip_times
+            if meta:
+                meta["index"] = fi
+                frames_meta.append(meta)
+
+        binary_payload = np.ascontiguousarray(
+            transform_data, dtype=np.float32
+        ).tobytes()
+
+        # Serve binary via HTTP (fast native transfer) instead of WebSocket
+        self._blob_store.clear()
+        blob_key = f"/animation_{uuid.uuid4().hex}"
+        self._blob_store[blob_key] = binary_payload
+        blob_url = f"http://{self.host}:{self._http_port}{blob_key}"
+
+        # Store JSON version for reconnect (browser refresh)
+        self._current_animation = animation.to_dict()
+
+        # Send small JSON message over WS telling browser to fetch binary via HTTP
         self._send(
             {
-                "type": "load_animation",
-                "animation": animation_dict,
+                "type": "load_animation_http",
+                "blob_url": blob_url,
+                "object_ids": all_ids,
+                "frame_count": n_frames,
+                "frame_times": frame_times,
+                "duration": animation.duration,
+                "fps": animation.fps,
+                "loop": animation.loop,
+                "markers": [
+                    {"time": m.time, "label": m.label, "color": m.color}
+                    for m in animation.markers
+                ],
+                "frames_meta": frames_meta,
             }
         )
 
