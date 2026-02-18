@@ -62,6 +62,11 @@ class Animation:
     loop: bool = True
     markers: list[Marker] = field(default_factory=list)
 
+    # Optional pre-built binary transform data for fast transfer.
+    # Set via set_transform_data() — bypasses dict-to-numpy conversion in load_animation.
+    _transform_data: np.ndarray | None = field(default=None, repr=False)
+    _object_ids: list[str] | None = field(default=None, repr=False)
+
     @property
     def duration(self) -> float:
         """Animation duration in seconds."""
@@ -101,6 +106,21 @@ class Animation:
                 clip_times=clip_times,
             )
         )
+
+    def set_transform_data(self, object_ids: list[str], data: np.ndarray) -> None:
+        """
+        Set pre-built transform data for fast binary transfer.
+
+        This bypasses the per-frame dict-to-numpy conversion in load_animation,
+        which is the main bottleneck for large animations.
+
+        Args:
+            object_ids: Ordered list of object IDs matching axis 1 of data
+            data: numpy array of shape (n_frames, n_objects, 16), dtype float32
+                  Column-major 4x4 matrices.
+        """
+        self._object_ids = object_ids
+        self._transform_data = np.ascontiguousarray(data, dtype=np.float32)
 
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:
         """Add a labeled marker on the timeline."""
