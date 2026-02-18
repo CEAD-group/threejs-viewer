@@ -9,6 +9,8 @@ A Python client runs a WebSocket server that a browser-based Three.js viewer con
 ## Features
 
 - **Simple API**: Add primitives, load models, update transforms
+- **GLB/PBR support**: Load GLB models with PBR materials, studio environment lighting
+- **Embedded animations**: Drive GLTF skeletal/morph animations from Python via `clip_times`
 - **Animation support**: Pre-compute animations, scrub timeline, adjust playback speed
 - **Binary transfer**: Efficient loading of large meshes and polylines
 - **Auto-reconnect**: Browser reconnects automatically, animations persist
@@ -86,6 +88,7 @@ for t in times:
         time=t,
         transforms=compute_transforms(t),
         colors={"robot": 0xFF0000 if collision else 0x00FF00},
+        clip_times={"glb_model": t},  # drive embedded GLTF animations
     )
 animation.add_marker(3.5, "Collision detected")
 
@@ -93,6 +96,16 @@ client.load_animation(animation)
 ```
 
 Viewer controls: Space (play/pause), Arrow keys (step frames), 1-5 (speed), L (loop)
+
+### GLB Models with Embedded Animations
+
+```python
+# Load a GLB with embedded animations (skeletal, morph targets)
+client.add_model_binary("fox", "fox.glb", format="glb")
+
+# Seek embedded animation to a specific time (seconds)
+client.set_clip_time("fox", 1.5)
+```
 
 ## Documentation
 
