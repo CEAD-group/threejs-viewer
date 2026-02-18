@@ -95,6 +95,17 @@
             width: 2px;
             height: 100%;
             background: #ff6600;
+            pointer-events: auto;
+            cursor: pointer;
+        }
+        /* Invisible wide hit area */
+        .timeline-marker::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -8px;
+            width: 18px;
+            height: 100%;
         }
         .timeline-marker::after {
             content: attr(data-label);
@@ -112,6 +123,7 @@
             transition: opacity 0.2s;
         }
         #timeline-container:hover .timeline-marker::after { opacity: 1; }
+        .timeline-marker:hover { background: #ffaa00; box-shadow: 0 0 6px #ffaa0088; }
 
         .time-display {
             font-family: monospace;
@@ -129,13 +141,22 @@
             background: #444;
             border: none;
             color: white;
-            padding: 4px 8px;
+            width: 28px;
+            height: 28px;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         .speed-control button:hover { background: #555; }
-        .speed-control button.active { background: #0066cc; }
+        .speed-control span {
+            font-family: monospace;
+            font-size: 12px;
+            min-width: 50px;
+            text-align: center;
+        }
 
         .loop-toggle {
             background: #444;
@@ -170,9 +191,9 @@
         <div class="timeline-row">
             <div class="transport-buttons">
                 <button id="btn-start" title="Jump to start (Home)">⏮</button>
-                <button id="btn-prev-frame" title="Previous frame (←)">◀</button>
+                <button id="btn-prev-frame" title="Previous frame (←)">◁</button>
                 <button id="btn-play" title="Play/Pause (Space)">▶</button>
-                <button id="btn-next-frame" title="Next frame (→)">▶</button>
+                <button id="btn-next-frame" title="Next frame (→)">▷</button>
                 <button id="btn-end" title="Jump to end (End)">⏭</button>
             </div>
             <div id="timeline-container">
@@ -183,16 +204,14 @@
                 <span id="current-time">0.00</span>s / <span id="total-time">0.00</span>s
             </div>
             <div class="speed-control">
-                <button data-speed="0.25">0.25x</button>
-                <button data-speed="0.5">0.5x</button>
-                <button data-speed="1" class="active">1x</button>
-                <button data-speed="2">2x</button>
-                <button data-speed="4">4x</button>
+                <button id="btn-slower" title="Slower (↓)">−</button>
+                <span id="speed-display">1x</span>
+                <button id="btn-faster" title="Faster (↑)">+</button>
             </div>
             <button id="btn-loop" class="loop-toggle active" title="Toggle loop (L)">⟳ Loop</button>
             <div class="frame-display">Frame <span id="current-frame">0</span>/<span id="total-frames">0</span></div>
         </div>
-        <div class="keyboard-hint">Space: Play/Pause | ←→: Step frames | Shift+←→: Step 10 | Home/End: Jump | L: Loop | 1-5: Speed</div>
+        <div class="keyboard-hint">Space: Play/Pause | ←→: Step frames | Shift+←→: Step 10 | Home/End: Jump | L: Loop | ↑↓: Speed</div>
     </div>
 
     <!-- Three.js from CDN -->
@@ -330,6 +349,25 @@
             animationPlaying = false;
             lastAnimationUpdate = performance.now();
 
+            // Pre-build object reference array for binary animations (avoids Map.get per object per frame)
+            if (animation.binaryTransforms && animation.objectIds) {
+                const refs = new Array(animation.nObjects);
+                for (let i = 0; i < animation.nObjects; i++) {
+                    const obj = objects.get(animation.objectIds[i]);
+                    refs[i] = obj || null;
+                    if (obj) {
+                        obj.matrixAutoUpdate = false;
+                    }
+                }
+                animation.objectRefs = refs;
+            }
+
+            // Pre-compute frame time step for O(1) frame lookup (assumes uniform FPS)
+            if (animation.frames.length >= 2) {
+                const dt = animation.frames[1].time - animation.frames[0].time;
+                animation.uniformDt = dt > 0 ? dt : 0;
+            }
+
             // Store baseline visibility for all objects before animation starts
             baselineVisibility.clear();
             for (const [id, obj] of objects) {
@@ -352,6 +390,10 @@
                     el.className = 'timeline-marker';
                     el.style.left = `${(marker.time / animation.duration) * 100}%`;
                     el.setAttribute('data-label', marker.label);
+                    el.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        seekToTime(marker.time);
+                    });
                     timelineMarkersEl.appendChild(el);
                 }
             }
@@ -362,6 +404,8 @@
         }
 
         function stopAnimation() {
+            // Restore matrixAutoUpdate on all objects
+            objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
             // Restore baseline visibility when stopping
             for (const [id, baselineVisible] of baselineVisibility) {
                 const obj = objects.get(id);
@@ -381,14 +425,26 @@
             const frame = animation.frames[frameIndex];
 
             // Apply transforms
-            if (frame.transforms) {
+            if (animation.binaryTransforms) {
+                // Fast path: read directly from Float32Array with pre-built object refs
+                const floatData = animation.binaryTransforms;
+                const refs = animation.objectRefs;
+                const nObjects = animation.nObjects;
+                const baseOffset = frameIndex * nObjects * 16;
+                for (let oi = 0; oi < nObjects; oi++) {
+                    const obj = refs[oi];
+                    if (obj) {
+                        obj.matrix.fromArray(floatData, baseOffset + oi * 16);
+                        obj.matrixWorldNeedsUpdate = true;
+                    }
+                }
+            } else if (frame.transforms) {
                 for (const [id, matrix] of Object.entries(frame.transforms)) {
                     const obj = objects.get(id);
                     if (obj) {
-                        const m = new THREE.Matrix4();
-                        m.fromArray(matrix);
-                        obj.matrix.copy(m);
-                        obj.matrix.decompose(obj.position, obj.quaternion, obj.scale);
+                        obj.matrixAutoUpdate = false;
+                        obj.matrix.fromArray(matrix);
+                        obj.matrixWorldNeedsUpdate = true;
                     }
                 }
             }
@@ -449,7 +505,12 @@
 
         function getFrameAtTime(time) {
             if (!animation || animation.frames.length === 0) return 0;
-            // Find frame index for given time
+            // O(1) for uniform FPS (common case)
+            if (animation.uniformDt > 0) {
+                const idx = Math.floor(time / animation.uniformDt);
+                return Math.max(0, Math.min(animation.frames.length - 1, idx));
+            }
+            // Fallback: linear scan for non-uniform frame times
             for (let i = animation.frames.length - 1; i >= 0; i--) {
                 if (animation.frames[i].time <= time) {
                     return i;
@@ -468,6 +529,7 @@
             currentTimeEl.textContent = animationTime.toFixed(2);
             currentFrameEl.textContent = frameIndex + 1;
             btnPlay.textContent = animationPlaying ? '⏸' : '▶';
+
         }
 
         function stepFrames(delta) {
@@ -495,11 +557,24 @@
             updateAnimationUI();
         }
 
+        // Logarithmic speed steps: 0.001x to 1000x
+        const speedSteps = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000];
+        let speedIndex = 6;  // starts at 1x
+        const speedDisplayEl = document.getElementById('speed-display');
+
         function setSpeed(speed) {
             animationSpeed = speed;
-            document.querySelectorAll('.speed-control button').forEach(btn => {
-                btn.classList.toggle('active', parseFloat(btn.dataset.speed) === speed);
-            });
+            // Format: show integer for >=1, otherwise show decimals
+            if (speed >= 1) {
+                speedDisplayEl.textContent = `${speed}x`;
+            } else {
+                speedDisplayEl.textContent = `${speed}x`;
+            }
+        }
+
+        function stepSpeed(delta) {
+            speedIndex = Math.max(0, Math.min(speedSteps.length - 1, speedIndex + delta));
+            setSpeed(speedSteps[speedIndex]);
         }
 
         // Animation controls event listeners
@@ -513,16 +588,42 @@
             btnLoop.classList.toggle('active', animationLoop);
         });
 
-        document.querySelectorAll('.speed-control button').forEach(btn => {
-            btn.addEventListener('click', () => setSpeed(parseFloat(btn.dataset.speed)));
-        });
+        document.getElementById('btn-slower').addEventListener('click', () => stepSpeed(-1));
+        document.getElementById('btn-faster').addEventListener('click', () => stepSpeed(1));
 
-        document.getElementById('timeline-container').addEventListener('click', (e) => {
+        const timelineContainer = document.getElementById('timeline-container');
+        let scrubbing = false;
+        let wasPlayingBeforeScrub = false;
+
+        function scrubFromEvent(e) {
             if (!animation) return;
-            const rect = e.target.getBoundingClientRect();
-            const x = e.clientX - rect.left;
+            const rect = timelineContainer.getBoundingClientRect();
+            const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
             const ratio = x / rect.width;
             seekToTime(ratio * animation.duration);
+        }
+
+        timelineContainer.addEventListener('mousedown', (e) => {
+            if (!animation) return;
+            scrubbing = true;
+            wasPlayingBeforeScrub = animationPlaying;
+            animationPlaying = false;
+            scrubFromEvent(e);
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (scrubbing) scrubFromEvent(e);
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (scrubbing) {
+                scrubbing = false;
+                if (wasPlayingBeforeScrub) {
+                    animationPlaying = true;
+                    lastAnimationUpdate = performance.now();
+                }
+                updateAnimationUI();
+            }
         });
 
         // Keyboard shortcuts
@@ -554,20 +655,13 @@
                     animationLoop = !animationLoop;
                     btnLoop.classList.toggle('active', animationLoop);
                     break;
-                case 'Digit1':
-                    setSpeed(0.25);
+                case 'ArrowUp':
+                    e.preventDefault();
+                    stepSpeed(1);
                     break;
-                case 'Digit2':
-                    setSpeed(0.5);
-                    break;
-                case 'Digit3':
-                    setSpeed(1);
-                    break;
-                case 'Digit4':
-                    setSpeed(2);
-                    break;
-                case 'Digit5':
-                    setSpeed(4);
+                case 'ArrowDown':
+                    e.preventDefault();
+                    stepSpeed(-1);
                     break;
             }
         });
@@ -822,7 +916,14 @@
         let reconnectTimeout = null;
         const WS_PORT = 5666;  // Must match Python client port
 
-        function connect() {
+        async function connect() {
+            // Probe with fetch first to avoid browser-level WebSocket error spam
+            try {
+                await fetch(`http://localhost:${WS_PORT}`, { mode: 'no-cors' });
+            } catch {
+                reconnectTimeout = setTimeout(connect, 1000);
+                return;
+            }
             ws = new WebSocket(`ws://localhost:${WS_PORT}`);
 
             ws.onopen = () => {
@@ -833,12 +934,10 @@
             ws.onclose = () => {
                 statusEl.textContent = 'Waiting for Python...';
                 statusEl.className = 'disconnected';
-                reconnectTimeout = setTimeout(connect, 50);
+                reconnectTimeout = setTimeout(connect, 500);
             };
 
-            ws.onerror = (e) => {
-                console.error('WebSocket error:', e);
-            };
+            ws.onerror = () => {};
 
             ws.onmessage = async (event) => {
                 // Handle binary messages (for large polylines)
@@ -932,6 +1031,56 @@
                         } catch (e) {
                             console.error(`Error loading model:`, e);
                         }
+                    } else if (header.type === 'load_animation_binary') {
+                        try {
+                            const t0 = performance.now();
+                            const dataOffset = 4 + headerLen;
+                            const floatData = new Float32Array(buffer, dataOffset);
+                            console.log(`Binary animation: ${((buffer.byteLength - dataOffset) / 1024 / 1024).toFixed(1)}MB received in ${(performance.now() - t0).toFixed(0)}ms`);
+                            const objectIds = header.object_ids;
+                            const nObjects = objectIds.length;
+                            const nFrames = header.frame_count;
+
+                            // Build sparse channel lookup from frames_meta
+                            const metaByFrame = {};
+                            if (header.frames_meta) {
+                                for (const meta of header.frames_meta) {
+                                    metaByFrame[meta.index] = meta;
+                                }
+                            }
+
+                            // Build lightweight frames (no transform dicts — read from buffer in applyFrame)
+                            const frames = [];
+                            for (let fi = 0; fi < nFrames; fi++) {
+                                const frame = { time: header.frame_times[fi] };
+                                const meta = metaByFrame[fi];
+                                if (meta) {
+                                    if (meta.colors) frame.colors = meta.colors;
+                                    if (meta.visibility) frame.visibility = meta.visibility;
+                                    if (meta.opacity) frame.opacity = meta.opacity;
+                                    if (meta.clip_times) frame.clip_times = meta.clip_times;
+                                }
+                                frames.push(frame);
+                            }
+
+                            const t1 = performance.now();
+                            console.log(`  frame build: ${(t1 - t0).toFixed(0)}ms`);
+
+                            loadAnimation({
+                                duration: header.duration,
+                                fps: header.fps,
+                                loop: header.loop,
+                                frames: frames,
+                                markers: header.markers || [],
+                                binaryTransforms: floatData,
+                                objectIds: objectIds,
+                                nObjects: nObjects,
+                            });
+                            console.log(`  loadAnimation: ${(performance.now() - t1).toFixed(0)}ms`);
+                            console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
+                        } catch (e) {
+                            console.error('Error loading binary animation:', e);
+                        }
                     }
                     return;
                 }
@@ -992,6 +1141,130 @@
                     case 'load_animation':
                         loadAnimation(data.animation);
                         break;
+                    case 'load_animation_http':
+                        (async () => {
+                            try {
+                                const t0 = performance.now();
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                const floatData = new Float32Array(buffer);
+                                const t1 = performance.now();
+                                console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
+
+                                const objectIds = data.object_ids;
+                                const nObjects = objectIds.length;
+                                const nFrames = data.frame_count;
+
+                                const metaByFrame = {};
+                                if (data.frames_meta) {
+                                    for (const meta of data.frames_meta) {
+                                        metaByFrame[meta.index] = meta;
+                                    }
+                                }
+
+                                const frames = [];
+                                for (let fi = 0; fi < nFrames; fi++) {
+                                    const frame = { time: data.frame_times[fi] };
+                                    const meta = metaByFrame[fi];
+                                    if (meta) {
+                                        if (meta.colors) frame.colors = meta.colors;
+                                        if (meta.visibility) frame.visibility = meta.visibility;
+                                        if (meta.opacity) frame.opacity = meta.opacity;
+                                        if (meta.clip_times) frame.clip_times = meta.clip_times;
+                                    }
+                                    frames.push(frame);
+                                }
+
+                                loadAnimation({
+                                    duration: data.duration,
+                                    fps: data.fps,
+                                    loop: data.loop,
+                                    frames: frames,
+                                    markers: data.markers || [],
+                                    binaryTransforms: floatData,
+                                    objectIds: objectIds,
+                                    nObjects: nObjects,
+                                });
+                                console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
+                            } catch (e) {
+                                console.error('Error loading animation via HTTP:', e);
+                            }
+                        })();
+                        break;
+                    case 'add_model_binary':
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const meshBytes = await resp.arrayBuffer();
+                                const blob = new Blob([meshBytes]);
+                                const blobUrl = URL.createObjectURL(blob);
+                                console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
+                                await addObject(data.id, {
+                                    model: blobUrl,
+                                    format: data.format || 'stl'
+                                });
+                                const obj = objects.get(data.id);
+                                if (obj) obj.userData.blobUrl = blobUrl;
+                            } catch (e) {
+                                console.error(`Error loading model via HTTP:`, e);
+                            }
+                        })();
+                        break;
+                    case 'add_polyline_binary':
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                const rawData = new Uint8Array(buffer);
+                                const numPoints = data.numPoints || (rawData.length / 12);
+                                const positionBytes = numPoints * 12;
+
+                                const posBuffer = new ArrayBuffer(positionBytes);
+                                new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
+                                const pointData = new Float32Array(posBuffer);
+
+                                console.log(`Creating polyline ${data.id} with ${numPoints} points via HTTP`);
+
+                                const geometry = new LineGeometry();
+                                geometry.setPositions(pointData);
+
+                                let material;
+                                if (data.hasVertexColors) {
+                                    const colorBytes = rawData.slice(positionBytes);
+                                    const colorData = new Float32Array(numPoints * 3);
+                                    for (let i = 0; i < numPoints; i++) {
+                                        colorData[i * 3] = colorBytes[i * 3] / 255;
+                                        colorData[i * 3 + 1] = colorBytes[i * 3 + 1] / 255;
+                                        colorData[i * 3 + 2] = colorBytes[i * 3 + 2] / 255;
+                                    }
+                                    geometry.setColors(colorData);
+
+                                    material = new LineMaterial({
+                                        color: 0xffffff,
+                                        vertexColors: true,
+                                        linewidth: data.lineWidth || 2,
+                                        resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
+                                    });
+                                } else {
+                                    material = new LineMaterial({
+                                        color: data.color || 0xffffff,
+                                        linewidth: data.lineWidth || 2,
+                                        resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
+                                    });
+                                }
+
+                                const line = new Line2(geometry, material);
+                                line.computeLineDistances();
+                                line.name = data.id;
+                                line.userData.id = data.id;
+                                line.userData.isPolyline = true;
+                                scene.add(line);
+                                objects.set(data.id, line);
+                            } catch (e) {
+                                console.error(`Error creating polyline via HTTP:`, e);
+                            }
+                        })();
+                        break;
                     case 'stop_animation':
                         stopAnimation();
                         break;
@@ -1023,6 +1296,7 @@
         });
 
         // Animation loop
+        let lastUIUpdate = 0;
         function animate() {
             requestAnimationFrame(animate);
 
@@ -1045,7 +1319,11 @@
 
                 const frameIndex = getFrameAtTime(animationTime);
                 applyFrame(frameIndex);
-                updateAnimationUI();
+                // Throttle UI updates to ~10fps (DOM updates are expensive)
+                if (now - lastUIUpdate > 100) {
+                    updateAnimationUI();
+                    lastUIUpdate = now;
+                }
             }
 
             controls.update();
