@@ -56,3 +56,6 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - `04_flying_teapots.py` - Flying Utah teapots (model loading + animation)
 - `05_lissajous_curves.py` - Mathematical curves with tracer animation
 - `06_realtime_streaming.py` - Real-time streaming mode (bouncing spheres)
+- `07_stress_test.py` - Torus knot tube with hundreds of followers (performance test)
+- `08_glb_models.py` - GLB models with PBR materials (DamagedHelmet, Avocado)
+- `09_animated_glb.py` - Embedded GLTF animation via clip_times (AnimatedMorphCube + orbiting Avocado)

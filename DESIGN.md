@@ -101,9 +101,20 @@ for t in times:
         transforms={"obj1": matrix1, "obj2": matrix2},
         colors={"obj1": 0xFF0000},
         visibility={"obj2": False},
+        clip_times={"glb_model": t},  # drive embedded GLTF animations
     )
 animation.add_marker(5.0, "Collision!")
 ```
+
+### Embedded GLTF Animations
+
+GLB/GLTF models can contain embedded animations (skeletal, morph targets, etc.).
+These are not auto-played — Python controls them deterministically via `clip_times`:
+
+- On load, the viewer extracts animation clips and creates an `AnimationMixer`
+- `set_clip_time(id, time)` seeks the mixer to a specific time
+- In pre-computed animations, the `clip_times` field on each frame drives embedded animations
+- This keeps all animation state controlled by Python, matching the design of transforms
 
 ### Viewer (Browser)
 
@@ -142,6 +153,15 @@ All messages are JSON (text) or binary with JSON header.
 {"type": "load_animation", "animation": {"duration": 10, "frames": [...], "markers": [...]}}
 {"type": "stop_animation"}
 ```
+
+### Embedded GLTF Animations
+
+```json
+{"type": "set_clip_time", "id": "model1", "time": 1.5}
+{"type": "batch_set_clip_time", "clip_times": {"model1": 1.5, "model2": 0.8}}
+```
+
+Animation frames can also include `clip_times` to drive embedded animations during playback.
 
 ### Binary Messages
 
