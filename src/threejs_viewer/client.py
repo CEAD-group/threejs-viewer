@@ -500,6 +500,10 @@ class ViewerClient:
         """Set object material color."""
         self._send({"type": "set_color", "id": id, "color": color})
 
+    def set_clip_time(self, id: str, time: float):
+        """Seek embedded GLTF/GLB animation clips to a specific time (seconds)."""
+        self._send({"type": "set_clip_time", "id": id, "time": time})
+
     def hide(self, id: str):
         """Hide an object."""
         self.set_visible(id, False)
