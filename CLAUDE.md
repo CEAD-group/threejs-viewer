@@ -36,7 +36,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 ### Communication Model
 - **Direct connection**: Python runs WebSocket server on port 5666, browser connects to it
 - **Browser survives restarts**: Viewer auto-reconnects when Python script restarts
-- **Binary transfer**: Large polylines and models use binary protocol for efficiency
+- **Binary transfer**: Large data (models, polylines, animations) served via HTTP sidecar on port 5667, browser fetches with native `fetch()`
 - **Batch updates**: `batch_update()` updates multiple objects in one message
 - **60fps capable**: Minimal JSON payloads with 4x4 matrices
 
@@ -59,3 +59,4 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - `07_stress_test.py` - Torus knot tube with hundreds of followers (performance test)
 - `08_glb_models.py` - GLB models with PBR materials (DamagedHelmet, Avocado)
 - `09_animated_glb.py` - Embedded GLTF animation via clip_times (AnimatedMorphCube + orbiting Avocado)
+- `10_animation_stress_test.py` - Animation stress test (520 objects × 2499 frames, vectorized numpy)
