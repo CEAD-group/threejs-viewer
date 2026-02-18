@@ -29,6 +29,9 @@ class Frame:
     colors: dict[str, int] | None = None  # object_id -> hex color (optional)
     visibility: dict[str, bool] | None = None  # object_id -> visible (optional)
     opacity: dict[str, float] | None = None  # object_id -> opacity 0-1 (optional)
+    clip_times: dict[str, float] | None = (
+        None  # object_id -> embedded animation time (optional)
+    )
 
 
 @dataclass
@@ -85,6 +88,7 @@ class Animation:
         colors: dict[str, int] | None = None,
         visibility: dict[str, bool] | None = None,
         opacity: dict[str, float] | None = None,
+        clip_times: dict[str, float] | None = None,
     ) -> None:
         """Add a frame to the animation."""
         self.frames.append(
@@ -94,6 +98,7 @@ class Animation:
                 colors=colors,
                 visibility=visibility,
                 opacity=opacity,
+                clip_times=clip_times,
             )
         )
 
@@ -114,6 +119,7 @@ class Animation:
                     **({"colors": f.colors} if f.colors else {}),
                     **({"visibility": f.visibility} if f.visibility else {}),
                     **({"opacity": f.opacity} if f.opacity else {}),
+                    **({"clip_times": f.clip_times} if f.clip_times else {}),
                 }
                 for f in self.frames
             ],
@@ -214,6 +220,7 @@ class AnimationRecorder:
         colors: dict[str, int] | None = None,
         visibility: dict[str, bool] | None = None,
         opacity: dict[str, float] | None = None,
+        clip_times: dict[str, float] | None = None,
     ) -> None:
         """Add a frame at the current time."""
         self._frames.append(
@@ -223,6 +230,7 @@ class AnimationRecorder:
                 colors=colors,
                 visibility=visibility,
                 opacity=opacity,
+                clip_times=clip_times,
             )
         )
         self._current_time += self._time_step

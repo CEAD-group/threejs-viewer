@@ -218,6 +218,7 @@
         import { Line2 } from 'three/addons/lines/Line2.js';
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
         // Scene setup
         const scene = new THREE.Scene();
@@ -231,26 +232,68 @@
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 0.8;
+        renderer.toneMapping = THREE.LinearToneMapping;
+        renderer.toneMappingExposure = 1.0;
         document.body.appendChild(renderer.domElement);
+
+        // Generate a bright studio environment map for PBR reflections
+        // Uses bright emissive panels to create visible reflections on dark/metallic surfaces
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        const envScene = new THREE.Scene();
+        envScene.background = new THREE.Color(0x888888);
+
+        // Bright studio panels - large emissive surfaces that create reflections
+        const panelGeo = new THREE.PlaneGeometry(20, 20);
+        const panelMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+
+        // Top panel (key light)
+        const topPanel = new THREE.Mesh(panelGeo, panelMat);
+        topPanel.position.set(0, 0, 8);
+        topPanel.lookAt(0, 0, 0);
+        envScene.add(topPanel);
+
+        // Front panel (fill)
+        const frontPanel = new THREE.Mesh(panelGeo, panelMat.clone());
+        frontPanel.position.set(0, -8, 3);
+        frontPanel.lookAt(0, 0, 0);
+        envScene.add(frontPanel);
+
+        // Side panels
+        const sidePanel1 = new THREE.Mesh(panelGeo, panelMat.clone());
+        sidePanel1.position.set(8, 0, 3);
+        sidePanel1.lookAt(0, 0, 0);
+        envScene.add(sidePanel1);
+
+        const sidePanel2 = new THREE.Mesh(panelGeo, panelMat.clone());
+        sidePanel2.position.set(-8, 0, 3);
+        sidePanel2.lookAt(0, 0, 0);
+        envScene.add(sidePanel2);
+
+        scene.environment = pmremGenerator.fromScene(envScene).texture;
+        scene.environmentIntensity = 2.0;
+        pmremGenerator.dispose();
 
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
 
-        // Lighting - reduced intensity
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        // Lighting - environment map handles PBR, keep scene lights moderate
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
         scene.add(ambientLight);
 
-        // Key light (main)
-        const keyLight = new THREE.DirectionalLight(0xffffff, 0.3);
+        // Key light (main) - soft
+        const keyLight = new THREE.DirectionalLight(0xffffff, 0.5);
         keyLight.position.set(5, -5, 10);
         scene.add(keyLight);
 
         // Fill light
-        const fillLight = new THREE.DirectionalLight(0xffffff, 0.15);
+        const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
         fillLight.position.set(-5, 5, 5);
         scene.add(fillLight);
+
+        // Back light for rim highlights
+        const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
+        backLight.position.set(0, 5, -5);
+        scene.add(backLight);
 
         // Grid helper on XY plane (Z-up)
         const gridHelper = new THREE.GridHelper(10, 10);
@@ -259,6 +302,8 @@
 
         // Object registry
         const objects = new Map();
+        const clips = new Map();    // GLTF animation clips keyed by object id
+        const mixers = new Map();   // AnimationMixers keyed by object id
 
         // ========== Animation State ==========
         let animation = null;
@@ -391,6 +436,13 @@
                             }
                         });
                     }
+                }
+            }
+
+            // Apply clip times (embedded GLTF animations)
+            if (frame.clip_times) {
+                for (const [id, time] of Object.entries(frame.clip_times)) {
+                    setClipTime(id, time);
                 }
             }
         }
@@ -598,7 +650,7 @@
                 case 'lambert':
                     return new THREE.MeshLambertMaterial({ color });
                 default:
-                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
+                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3, envMapIntensity: 0 });
             }
         }
 
@@ -620,12 +672,20 @@
                 }
 
                 try {
-                    if (objData.model.startsWith('data:') || objData.model.startsWith('blob:')) {
-                        // Base64 or blob URL
-                        obj = await loadModel(loader, objData.model, format);
-                    } else {
-                        // URL
-                        obj = await loadModel(loader, objData.model, format);
+                    const result = await loadModel(loader, objData.model, format);
+                    obj = result.obj;
+                    if (result.animations.length > 0) {
+                        clips.set(id, result.animations);
+                        // Create mixer with all clips ready for seeking via setTime()
+                        const mixer = new THREE.AnimationMixer(obj);
+                        for (const clip of result.animations) {
+                            const action = mixer.clipAction(clip);
+                            action.play();
+                        }
+                        // Seek to time 0 to apply initial pose
+                        mixer.setTime(0);
+                        mixers.set(id, mixer);
+                        console.log(`Model ${id}: ${result.animations.length} animation clip(s) available`);
                     }
                 } catch (e) {
                     console.error(`Failed to load model: ${e}`);
@@ -654,8 +714,10 @@
                     url,
                     (result) => {
                         let obj;
+                        let animations = [];
                         if (format === 'gltf' || format === 'glb') {
                             obj = result.scene;
+                            animations = result.animations || [];
                         } else if (format === 'dae') {
                             // Create a clean group with only meshes (no lights/cameras from DAE)
                             obj = new THREE.Group();
@@ -670,12 +732,19 @@
                         } else {
                             obj = result;
                         }
-                        resolve(obj);
+                        resolve({ obj, animations });
                     },
                     undefined,
                     reject
                 );
             });
+        }
+
+        // Seek a model's embedded animation clips to a specific time
+        function setClipTime(id, time) {
+            const mixer = mixers.get(id);
+            if (!mixer) return;
+            mixer.setTime(time);
         }
 
         // Update object transform
@@ -692,6 +761,13 @@
             if (obj) {
                 scene.remove(obj);
                 objects.delete(id);
+                // Clean up animation mixer/clips
+                const mixer = mixers.get(id);
+                if (mixer) {
+                    mixer.stopAllAction();
+                    mixers.delete(id);
+                }
+                clips.delete(id);
                 // Clean up blob URL if present
                 if (obj.userData.blobUrl) {
                     URL.revokeObjectURL(obj.userData.blobUrl);
@@ -918,6 +994,14 @@
                         break;
                     case 'stop_animation':
                         stopAnimation();
+                        break;
+                    case 'set_clip_time':
+                        setClipTime(data.id, data.time);
+                        break;
+                    case 'batch_set_clip_time':
+                        for (const [id, time] of Object.entries(data.clip_times)) {
+                            setClipTime(id, time);
+                        }
                         break;
                 }
             };
