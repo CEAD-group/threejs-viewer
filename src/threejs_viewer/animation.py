@@ -138,9 +138,7 @@ class Animation:
         """Set frame times from array, bypassing Frame object creation."""
         self._frame_times = np.asarray(times, dtype=np.float64)
 
-    def set_draw_range_data(
-        self, object_ids: list[str], data: np.ndarray
-    ) -> None:
+    def set_draw_range_data(self, object_ids: list[str], data: np.ndarray) -> None:
         """
         Set pre-built draw_range data for fast binary transfer.
 
@@ -179,4 +177,3 @@ class Animation:
                 for m in self.markers
             ],
         }
-
