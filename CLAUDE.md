@@ -47,11 +47,10 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 ### Supported Object Types
 - Primitives: box, sphere, cylinder, plane, cone, torus, capsule
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
-- Tubes: extruded along a path — circular (TubeGeometry) or pill/stadium cross-section (custom indexed geometry with Z-up fixed frames)
 - Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
 - Beads: toolpath extrusion via `add_bead()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
-- **draw_range**: polylines, tubes, and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
+- **draw_range**: polylines and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
 
 ### Binary Animation Channels
 For large animations (100k+ frames), use zero-loop binary APIs instead of Frame objects:

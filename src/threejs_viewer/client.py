@@ -378,61 +378,6 @@ class ViewerClient:
             raw_bytes,
         )
 
-    def add_tube(
-        self,
-        id: str,
-        points: np.ndarray,
-        radius: float = 0.05,
-        width: float = None,
-        height: float = None,
-        tubular_segments: int = 200,
-        radial_segments: int = 8,
-        closed: bool = False,
-        color: int = 0x4A90D9,
-        metalness: float = 0.3,
-        roughness: float = 0.7,
-    ) -> None:
-        """
-        Add a tube extruded along a path.
-
-        Args:
-            id: Unique identifier
-            points: numpy array of shape (N, 3) — control points for the path
-            radius: Tube radius (used when width/height not provided)
-            width: Stadium cross-section width (use with height for pill shape)
-            height: Stadium cross-section height (use with width for pill shape)
-            tubular_segments: Number of segments along the path
-            radial_segments: Number of segments around the tube (circular only)
-            closed: Whether the path is closed
-            color: Material color (hex)
-            metalness: PBR metalness (0-1)
-            roughness: PBR roughness (0-1)
-        """
-        points = np.asarray(points, dtype=np.float32)
-        if len(points.shape) == 2:
-            n_points = points.shape[0]
-            points = points.flatten()
-        else:
-            n_points = len(points) // 3
-
-        header = {
-            "type": "add_tube_binary",
-            "id": id,
-            "numPoints": n_points,
-            "radius": radius,
-            "tubularSegments": tubular_segments,
-            "radialSegments": radial_segments,
-            "closed": closed,
-            "color": color,
-            "metalness": metalness,
-            "roughness": roughness,
-        }
-        if width is not None and height is not None:
-            header["width"] = float(width)
-            header["height"] = float(height)
-
-        self._send_binary(header, points.tobytes())
-
     def add_mesh(
         self,
         id: str,
@@ -723,7 +668,7 @@ class ViewerClient:
         self._send({"type": "set_clip_time", "id": id, "time": time})
 
     def set_draw_range(self, id: str, value: float) -> None:
-        """Set how much of a polyline or tube is visible (0.0 = nothing, 1.0 = all)."""
+        """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
     def clear(self) -> None:
@@ -832,7 +777,7 @@ class ViewerClient:
             ).tobytes()
 
         # Serve binary via HTTP (fast native transfer) instead of WebSocket
-        # Clear old animation blobs in-place (keep object blobs like polylines/tubes)
+        # Clear old animation blobs in-place (keep object blobs like polylines/meshes)
         for k in [k for k in self._blob_store if k.startswith("/animation_")]:
             del self._blob_store[k]
         blob_key = f"/animation_{uuid.uuid4().hex}"
