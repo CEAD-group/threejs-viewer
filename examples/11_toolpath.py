@@ -1,9 +1,9 @@
 """
-Toolpath Visualization — draw_range + Tube demo
+Toolpath Visualization — draw_range + Bead demo
 
 Generates a spiral vase toolpath and shows it two ways side by side:
 - Left: polyline with animated draw_range (path grows over time)
-- Right: pill-shaped tube with animated draw_range + nozzle following the tip
+- Right: bead mesh with animated draw_range + nozzle following the tip
 
 Run: uv run python examples/11_toolpath.py
 """
