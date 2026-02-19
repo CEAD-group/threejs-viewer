@@ -432,7 +432,15 @@
                 const nObjects = animation.nObjects;
                 const baseOffset = frameIndex * nObjects * 16;
                 for (let oi = 0; oi < nObjects; oi++) {
-                    const obj = refs[oi];
+                    let obj = refs[oi];
+                    if (!obj) {
+                        // Lazily resolve objects that loaded after animation started
+                        obj = objects.get(animation.objectIds[oi]);
+                        if (obj) {
+                            refs[oi] = obj;
+                            obj.matrixAutoUpdate = false;
+                        }
+                    }
                     if (obj) {
                         obj.matrix.fromArray(floatData, baseOffset + oi * 16);
                         obj.matrixWorldNeedsUpdate = true;
