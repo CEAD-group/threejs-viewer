@@ -32,12 +32,6 @@ class _BlobHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET")
-        self.end_headers()
-
     def log_message(self, format, *args):
         pass  # Suppress HTTP request logging
 
@@ -136,6 +130,9 @@ class ViewerClient:
 
     def disconnect(self):
         """Disconnect and stop server."""
+        if self._http_server:
+            self._http_server.shutdown()
+            self._http_server = None
         if self._server:
             self._server.shutdown()
             self._server = None
