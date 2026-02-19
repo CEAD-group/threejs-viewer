@@ -6,6 +6,7 @@ Runs a WebSocket server that the browser connects to directly.
 """
 
 import json
+import logging
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -84,11 +85,14 @@ class ViewerClient:
 
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
+        ws_logger = logging.getLogger("websockets.server")
+        ws_logger.setLevel(logging.CRITICAL)
         with sync_serve(
             self._handle_connection,
             self.host,
             self.port,
             max_size=256 * 1024 * 1024,
+            logger=ws_logger,
         ) as server:
             self._server = server
             server.serve_forever()
