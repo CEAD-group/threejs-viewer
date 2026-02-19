@@ -528,9 +528,9 @@ class ViewerClient:
         if colors is not None:
             colors = np.asarray(colors, dtype=np.float32)
             if colors.ndim == 2 and colors.shape == (N, 3):
-                vertex_colors = np.broadcast_to(
-                    colors[:, None, :], (N, P, 3)
-                ).reshape(-1, 3)
+                vertex_colors = np.broadcast_to(colors[:, None, :], (N, P, 3)).reshape(
+                    -1, 3
+                )
 
         self.add_mesh(
             id,

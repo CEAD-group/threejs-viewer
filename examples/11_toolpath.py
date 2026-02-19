@@ -16,8 +16,14 @@ from threejs_viewer import Animation, viewer
 
 
 def spiral_vase(
-    n_points=800000, n_turns=80, radius=2.0, height=5.0,
-    lumps=18, bump=0.35, steep=3.5, twist=1.2,
+    n_points=800000,
+    n_turns=80,
+    radius=2.0,
+    height=5.0,
+    lumps=18,
+    bump=0.35,
+    steep=3.5,
+    twist=1.2,
 ):
     """Generate a lumpy asymmetric spiral vase toolpath.
 
@@ -82,7 +88,9 @@ n_turns = 80
 layer_index = (np.linspace(0, 1, n_points) * n_turns).astype(int)
 color_a = np.array([0.48, 0.72, 0.80])  # light blue
 color_b = np.array([0.85, 0.55, 0.25])  # warm orange
-bead_colors = np.where((layer_index % 2 == 0)[:, None], color_a, color_b).astype(np.float32)
+bead_colors = np.where((layer_index % 2 == 0)[:, None], color_a, color_b).astype(
+    np.float32
+)
 
 # Right: bead (extruded bevelled rectangle cross-section)
 v.add_bead(
@@ -136,9 +144,9 @@ nz_z_tube = tips_tube[:, 2] + nozzle_height / 2 + nozzle_gap
 
 for ni, (tips, nz_z) in enumerate([(tips_line, nz_z_line), (tips_tube, nz_z_tube)]):
     m = transforms[:, 2 + ni]
-    m[:, 0] = 1.0   # col0.x
-    m[:, 5] = 0.0   # col1.y (cos90=0)
-    m[:, 6] = 1.0   # col1.z (sin90=1)
+    m[:, 0] = 1.0  # col0.x
+    m[:, 5] = 0.0  # col1.y (cos90=0)
+    m[:, 6] = 1.0  # col1.z (sin90=1)
     m[:, 9] = -1.0  # col2.y (-sin90=-1)
     m[:, 10] = 0.0  # col2.z (cos90=0)
     m[:, 12] = tips[:, 0]
@@ -162,9 +170,7 @@ animation.add_marker(duration * 0.99, "Done", color=0xFF0000)
 v.load_animation(animation)
 
 print(f"Toolpath: {n_points} points, {animation.n_frames} frames at {fps} fps")
-print(
-    "Left: polyline | Right: bead + nozzle — both grow via draw_range animation."
-)
+print("Left: polyline | Right: bead + nozzle — both grow via draw_range animation.")
 print("Press Ctrl+C to exit.")
 
 try:

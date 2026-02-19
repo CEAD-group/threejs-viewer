@@ -92,7 +92,9 @@ def test_binary_animation_channels():
     transforms[:, :, [0, 5, 10, 15]] = 1.0  # identity matrices
     animation.set_transform_data(["obj_a", "obj_b"], transforms)
 
-    draw_ranges = np.linspace(0, 1, n_frames * 1).reshape(n_frames, 1).astype(np.float32)
+    draw_ranges = (
+        np.linspace(0, 1, n_frames * 1).reshape(n_frames, 1).astype(np.float32)
+    )
     draw_ranges = np.column_stack([draw_ranges, draw_ranges])
     animation.set_draw_range_data(["obj_a", "obj_b"], draw_ranges)
 
