@@ -6,8 +6,6 @@ for interactive playback with timeline scrubbing, speed control, and frame stepp
 """
 
 from dataclasses import dataclass, field
-from typing import Callable
-
 import numpy as np
 
 
@@ -65,14 +63,19 @@ class Animation:
     loop: bool = True
     markers: list[Marker] = field(default_factory=list)
 
-    # Optional pre-built binary transform data for fast transfer.
-    # Set via set_transform_data() — bypasses dict-to-numpy conversion in load_animation.
+    # Optional pre-built binary data for fast transfer.
+    # Set via set_transform_data() / set_draw_range_data() / set_frame_times().
     _transform_data: np.ndarray | None = field(default=None, repr=False)
     _object_ids: list[str] | None = field(default=None, repr=False)
+    _frame_times: np.ndarray | None = field(default=None, repr=False)
+    _draw_range_data: np.ndarray | None = field(default=None, repr=False)
+    _draw_range_ids: list[str] | None = field(default=None, repr=False)
 
     @property
     def duration(self) -> float:
         """Animation duration in seconds."""
+        if self._frame_times is not None and len(self._frame_times) > 0:
+            return float(self._frame_times[-1])
         if not self.frames:
             return 0.0
         return self.frames[-1].time
@@ -80,13 +83,17 @@ class Animation:
     @property
     def fps(self) -> float:
         """Approximate frames per second."""
-        if len(self.frames) < 2:
+        n = self.n_frames
+        d = self.duration
+        if n < 2 or d <= 0:
             return 0.0
-        return len(self.frames) / self.duration
+        return n / d
 
     @property
     def n_frames(self) -> int:
         """Number of frames."""
+        if self._frame_times is not None:
+            return len(self._frame_times)
         return len(self.frames)
 
     def add_frame(
@@ -127,6 +134,24 @@ class Animation:
         self._object_ids = object_ids
         self._transform_data = np.ascontiguousarray(data, dtype=np.float32)
 
+    def set_frame_times(self, times) -> None:
+        """Set frame times from array, bypassing Frame object creation."""
+        self._frame_times = np.asarray(times, dtype=np.float64)
+
+    def set_draw_range_data(
+        self, object_ids: list[str], data: np.ndarray
+    ) -> None:
+        """
+        Set pre-built draw_range data for fast binary transfer.
+
+        Args:
+            object_ids: Ordered list of object IDs matching axis 1 of data
+            data: numpy array of shape (n_frames, n_objects), dtype float32
+                  Values in 0.0-1.0 range.
+        """
+        self._draw_range_ids = list(object_ids)
+        self._draw_range_data = np.ascontiguousarray(data, dtype=np.float32)
+
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:
         """Add a labeled marker on the timeline."""
         self.markers.append(Marker(time=time, label=label, color=color))
@@ -155,116 +180,3 @@ class Animation:
             ],
         }
 
-    @classmethod
-    def from_function(
-        cls,
-        fn: Callable[[float], dict],
-        duration: float,
-        fps: float = 30.0,
-        loop: bool = True,
-    ) -> "Animation":
-        """
-        Create animation by sampling a function.
-
-        Args:
-            fn: Function that takes time (seconds) and returns
-                {"transforms": {...}, "colors": {...}}
-            duration: Total animation duration in seconds
-            fps: Frames per second
-            loop: Whether animation should loop
-
-        Example:
-            def simulate(t):
-                joints = compute_joints(t)
-                return {
-                    "transforms": model.get_transforms(joints),
-                    "colors": compute_colors(t),
-                }
-
-            animation = Animation.from_function(simulate, duration=10.0, fps=30)
-        """
-        n_frames = int(duration * fps)
-        frames = []
-
-        for i in range(n_frames):
-            t = i / fps
-            result = fn(t)
-            frames.append(
-                Frame(
-                    time=t,
-                    transforms=result.get("transforms", {}),
-                    colors=result.get("colors"),
-                )
-            )
-
-        return cls(frames=frames, loop=loop)
-
-    @classmethod
-    def record(
-        cls, duration: float, fps: float = 30.0, loop: bool = True
-    ) -> "AnimationRecorder":
-        """
-        Create a recorder context manager.
-
-        Example:
-            with Animation.record(duration=10.0, fps=30) as rec:
-                for t in rec.times:
-                    rec.add_frame(
-                        transforms=model.get_transforms(compute_joints(t)),
-                        colors=compute_colors(t),
-                    )
-            viewer.load_animation(rec.animation)
-        """
-        return AnimationRecorder(duration=duration, fps=fps, loop=loop)
-
-
-class AnimationRecorder:
-    """Context manager for recording animations."""
-
-    def __init__(self, duration: float, fps: float = 30.0, loop: bool = True):
-        self.duration = duration
-        self.fps = fps
-        self.loop = loop
-        self._frames: list[Frame] = []
-        self._current_time = 0.0
-        self._time_step = 1.0 / fps
-
-    @property
-    def times(self) -> np.ndarray:
-        """Array of frame times to iterate over."""
-        n_frames = int(self.duration * self.fps)
-        return np.linspace(0, self.duration, n_frames, endpoint=False)
-
-    @property
-    def animation(self) -> Animation:
-        """Get the recorded animation."""
-        return Animation(frames=self._frames, loop=self.loop)
-
-    def add_frame(
-        self,
-        transforms: dict[str, list[float]],
-        colors: dict[str, int] | None = None,
-        visibility: dict[str, bool] | None = None,
-        opacity: dict[str, float] | None = None,
-        clip_times: dict[str, float] | None = None,
-        draw_ranges: dict[str, float] | None = None,
-    ) -> None:
-        """Add a frame at the current time."""
-        self._frames.append(
-            Frame(
-                time=self._current_time,
-                transforms=transforms,
-                colors=colors,
-                visibility=visibility,
-                opacity=opacity,
-                clip_times=clip_times,
-                draw_ranges=draw_ranges,
-            )
-        )
-        self._current_time += self._time_step
-
-    def __enter__(self) -> "AnimationRecorder":
-        return self
-
-    def __exit__(self, *args) -> None:
-        pass

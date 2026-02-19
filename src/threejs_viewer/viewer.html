@@ -502,7 +502,18 @@
                 }
             }
 
-            // Apply draw ranges (polyline/tube visibility fraction)
+            // Apply binary draw ranges (bulk)
+            if (animation.binaryDrawRanges) {
+                const drData = animation.binaryDrawRanges;
+                const drIds = animation.drawRangeIds;
+                const nDR = drIds.length;
+                const base = frameIndex * nDR;
+                for (let i = 0; i < nDR; i++) {
+                    setDrawRange(drIds[i], drData[base + i]);
+                }
+            }
+
+            // Apply draw ranges (polyline/tube visibility fraction — sparse overrides)
             if (frame.draw_ranges) {
                 for (const [id, value] of Object.entries(frame.draw_ranges)) {
                     setDrawRange(id, value);
@@ -856,6 +867,8 @@
                 obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
             } else if (obj.userData.isTube) {
                 obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalVertexCount));
+            } else if (obj.userData.isMesh) {
+                obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
             }
         }
 
@@ -920,14 +933,6 @@
             }
         }
 
-        // Sync full scene
-        async function syncScene(sceneData) {
-            clearScene();
-            for (const [id, objData] of Object.entries(sceneData)) {
-                await addObject(id, objData);
-            }
-        }
-
         // WebSocket connection - connects directly to Python client
         const statusEl = document.getElementById('status');
         let ws = null;
@@ -958,159 +963,9 @@
             ws.onerror = () => {};
 
             ws.onmessage = async (event) => {
-                // Handle binary messages (for large polylines)
-                if (event.data instanceof Blob) {
-                    const buffer = await event.data.arrayBuffer();
-                    const view = new DataView(buffer);
-
-                    // First 4 bytes: header length (includes padding)
-                    const headerLen = view.getUint32(0, true);
-                    // Next headerLen bytes: JSON header (may have null padding at end)
-                    const headerBytes = new Uint8Array(buffer, 4, headerLen);
-                    const headerStr = new TextDecoder().decode(headerBytes).replace(/\0+$/, '');  // strip null padding
-                    const header = JSON.parse(headerStr);
-
-                    if (header.type === 'add_polyline_binary') {
-                        try {
-                            const dataOffset = 4 + headerLen;
-                            const rawData = new Uint8Array(buffer, dataOffset);
-                            const numPoints = header.numPoints || (rawData.length / 12);
-                            const positionBytes = numPoints * 12;
-
-                            // Extract position data
-                            const posBuffer = new ArrayBuffer(positionBytes);
-                            new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
-                            const pointData = new Float32Array(posBuffer);
-
-                            console.log(`Creating polyline ${header.id} with ${numPoints} points`);
-
-                            // Use Line2 for thick lines with vertex colors
-                            const geometry = new LineGeometry();
-                            geometry.setPositions(pointData);
-
-                            let material;
-                            if (header.hasVertexColors) {
-                                // Extract color data (uint8 RGB)
-                                const colorBytes = rawData.slice(positionBytes);
-                                const colorData = new Float32Array(numPoints * 3);
-                                for (let i = 0; i < numPoints; i++) {
-                                    colorData[i * 3] = colorBytes[i * 3] / 255;
-                                    colorData[i * 3 + 1] = colorBytes[i * 3 + 1] / 255;
-                                    colorData[i * 3 + 2] = colorBytes[i * 3 + 2] / 255;
-                                }
-                                geometry.setColors(colorData);
-
-                                material = new LineMaterial({
-                                    color: 0xffffff,
-                                    vertexColors: true,
-                                    linewidth: header.lineWidth || 2,
-                                    resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
-                                });
-                            } else {
-                                material = new LineMaterial({
-                                    color: header.color || 0xffffff,
-                                    linewidth: header.lineWidth || 2,
-                                    resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
-                                });
-                            }
-
-                            const line = new Line2(geometry, material);
-                            line.computeLineDistances();
-                            line.name = header.id;
-                            line.userData.id = header.id;
-                            line.userData.isPolyline = true;
-                            line.userData.maxInstanceCount = numPoints - 1;
-                            scene.add(line);
-                            objects.set(header.id, line);
-                        } catch (e) {
-                            console.error(`Error creating polyline:`, e);
-                        }
-                    } else if (header.type === 'add_model_binary') {
-                        try {
-                            const dataOffset = 4 + headerLen;
-                            const meshBytes = new Uint8Array(buffer, dataOffset);
-
-                            // Create blob URL from mesh bytes
-                            const blob = new Blob([meshBytes]);
-                            const blobUrl = URL.createObjectURL(blob);
-
-                            console.log(`Loading model ${header.id} (${header.format}) via blob URL`);
-
-                            // Use existing addObject with blob URL
-                            await addObject(header.id, {
-                                model: blobUrl,
-                                format: header.format || 'stl'
-                            });
-
-                            // Store blob URL for cleanup
-                            const obj = objects.get(header.id);
-                            if (obj) {
-                                obj.userData.blobUrl = blobUrl;
-                            }
-                        } catch (e) {
-                            console.error(`Error loading model:`, e);
-                        }
-                    } else if (header.type === 'load_animation_binary') {
-                        try {
-                            const t0 = performance.now();
-                            const dataOffset = 4 + headerLen;
-                            const floatData = new Float32Array(buffer, dataOffset);
-                            console.log(`Binary animation: ${((buffer.byteLength - dataOffset) / 1024 / 1024).toFixed(1)}MB received in ${(performance.now() - t0).toFixed(0)}ms`);
-                            const objectIds = header.object_ids;
-                            const nObjects = objectIds.length;
-                            const nFrames = header.frame_count;
-
-                            // Build sparse channel lookup from frames_meta
-                            const metaByFrame = {};
-                            if (header.frames_meta) {
-                                for (const meta of header.frames_meta) {
-                                    metaByFrame[meta.index] = meta;
-                                }
-                            }
-
-                            // Build lightweight frames (no transform dicts — read from buffer in applyFrame)
-                            const frames = [];
-                            for (let fi = 0; fi < nFrames; fi++) {
-                                const frame = { time: header.frame_times[fi] };
-                                const meta = metaByFrame[fi];
-                                if (meta) {
-                                    if (meta.colors) frame.colors = meta.colors;
-                                    if (meta.visibility) frame.visibility = meta.visibility;
-                                    if (meta.opacity) frame.opacity = meta.opacity;
-                                    if (meta.clip_times) frame.clip_times = meta.clip_times;
-                                    if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
-                                }
-                                frames.push(frame);
-                            }
-
-                            const t1 = performance.now();
-                            console.log(`  frame build: ${(t1 - t0).toFixed(0)}ms`);
-
-                            loadAnimation({
-                                duration: header.duration,
-                                fps: header.fps,
-                                loop: header.loop,
-                                frames: frames,
-                                markers: header.markers || [],
-                                binaryTransforms: floatData,
-                                objectIds: objectIds,
-                                nObjects: nObjects,
-                            });
-                            console.log(`  loadAnimation: ${(performance.now() - t1).toFixed(0)}ms`);
-                            console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
-                        } catch (e) {
-                            console.error('Error loading binary animation:', e);
-                        }
-                    }
-                    return;
-                }
-
                 const data = JSON.parse(event.data);
 
                 switch (data.type) {
-                    case 'scene_sync':
-                        await syncScene(data.objects);
-                        break;
                     case 'add_object':
                         await addObject(data.id, data.object);
                         break;
@@ -1139,18 +994,6 @@
                             });
                         }
                         break;
-                    case 'batch_set_color':
-                        for (const [id, color] of Object.entries(data.colors)) {
-                            const obj = objects.get(id);
-                            if (obj) {
-                                obj.traverse((child) => {
-                                    if (child.material) {
-                                        child.material.color.setHex(color);
-                                    }
-                                });
-                            }
-                        }
-                        break;
                     case 'list_objects':
                         ws.send(JSON.stringify({
                             type: 'list_objects_response',
@@ -1167,13 +1010,24 @@
                                 const t0 = performance.now();
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
-                                const floatData = new Float32Array(buffer);
                                 const t1 = performance.now();
                                 console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
 
                                 const objectIds = data.object_ids;
                                 const nObjects = objectIds.length;
                                 const nFrames = data.frame_count;
+
+                                // Split binary: transforms then optional draw_ranges
+                                const nTransformFloats = nFrames * nObjects * 16;
+                                const transformData = new Float32Array(buffer, 0, nTransformFloats);
+
+                                let drawRangeData = null;
+                                let drawRangeIds = null;
+                                if (data.draw_range_ids) {
+                                    drawRangeIds = data.draw_range_ids;
+                                    const drByteOffset = nTransformFloats * 4;
+                                    drawRangeData = new Float32Array(buffer, drByteOffset);
+                                }
 
                                 const metaByFrame = {};
                                 if (data.frames_meta) {
@@ -1202,9 +1056,11 @@
                                     loop: data.loop,
                                     frames: frames,
                                     markers: data.markers || [],
-                                    binaryTransforms: floatData,
+                                    binaryTransforms: transformData,
                                     objectIds: objectIds,
                                     nObjects: nObjects,
+                                    binaryDrawRanges: drawRangeData,
+                                    drawRangeIds: drawRangeIds,
                                 });
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
@@ -1404,6 +1260,64 @@
                             }
                         })();
                         break;
+                    case 'add_mesh_binary':
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                const nv = data.numVertices;
+                                const ni = data.numIndices;
+
+                                let offset = 0;
+                                const positions = new Float32Array(buffer, offset, nv * 3);
+                                offset += nv * 3 * 4;
+
+                                let normals = null;
+                                if (data.hasNormals) {
+                                    normals = new Float32Array(buffer, offset, nv * 3);
+                                    offset += nv * 3 * 4;
+                                }
+
+                                let colors = null;
+                                if (data.hasVertexColors) {
+                                    colors = new Float32Array(buffer, offset, nv * 3);
+                                    offset += nv * 3 * 4;
+                                }
+
+                                const indices = new Uint32Array(buffer, offset, ni);
+
+                                const geometry = new THREE.BufferGeometry();
+                                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                                geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+                                if (normals) {
+                                    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+                                } else {
+                                    geometry.computeVertexNormals();
+                                }
+                                if (colors) {
+                                    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                                }
+
+                                const material = new THREE.MeshLambertMaterial({
+                                    color: colors ? 0xffffff : (data.color || 0x7ab8cc),
+                                    emissive: 0x0d1f26,
+                                    side: THREE.DoubleSide,
+                                    vertexColors: !!colors,
+                                });
+
+                                const mesh = new THREE.Mesh(geometry, material);
+                                mesh.name = data.id;
+                                mesh.userData.id = data.id;
+                                mesh.userData.isMesh = true;
+                                mesh.userData.totalIndexCount = ni;
+                                scene.add(mesh);
+                                objects.set(data.id, mesh);
+                                console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
+                            } catch (e) {
+                                console.error(`Error creating mesh:`, e);
+                            }
+                        })();
+                        break;
                     case 'stop_animation':
                         stopAnimation();
                         break;
@@ -1412,11 +1326,6 @@
                         break;
                     case 'set_draw_range':
                         setDrawRange(data.id, data.value);
-                        break;
-                    case 'batch_set_clip_time':
-                        for (const [id, time] of Object.entries(data.clip_times)) {
-                            setClipTime(id, time);
-                        }
                         break;
                 }
             };
