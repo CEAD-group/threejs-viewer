@@ -45,9 +45,11 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - **Looping mode**: Pre-computed frames with interactive playback (`load_animation()`)
 
 ### Supported Object Types
-- Primitives: box, sphere, cylinder, plane, cone, torus
+- Primitives: box, sphere, cylinder, plane, cone, torus, capsule
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
+- Tubes: extruded along a path — circular (TubeGeometry) or pill/stadium cross-section (custom indexed geometry with Z-up fixed frames)
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
+- **draw_range**: polylines and tubes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
 
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
@@ -60,3 +62,4 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - `08_glb_models.py` - GLB models with PBR materials (DamagedHelmet, Avocado)
 - `09_animated_glb.py` - Embedded GLTF animation via clip_times (AnimatedMorphCube + orbiting Avocado)
 - `10_animation_stress_test.py` - Animation stress test (520 objects × 2499 frames, vectorized numpy)
+- `11_toolpath.py` - Spiral vase toolpath with draw_range animation (polyline + pill tube + nozzles)
