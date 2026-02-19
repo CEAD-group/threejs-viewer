@@ -32,6 +32,9 @@ class Frame:
     clip_times: dict[str, float] | None = (
         None  # object_id -> embedded animation time (optional)
     )
+    draw_ranges: dict[str, float] | None = (
+        None  # object_id -> 0.0-1.0 fraction visible (optional)
+    )
 
 
 @dataclass
@@ -94,6 +97,7 @@ class Animation:
         visibility: dict[str, bool] | None = None,
         opacity: dict[str, float] | None = None,
         clip_times: dict[str, float] | None = None,
+        draw_ranges: dict[str, float] | None = None,
     ) -> None:
         """Add a frame to the animation."""
         self.frames.append(
@@ -104,6 +108,7 @@ class Animation:
                 visibility=visibility,
                 opacity=opacity,
                 clip_times=clip_times,
+                draw_ranges=draw_ranges,
             )
         )
 
@@ -140,6 +145,7 @@ class Animation:
                     **({"visibility": f.visibility} if f.visibility else {}),
                     **({"opacity": f.opacity} if f.opacity else {}),
                     **({"clip_times": f.clip_times} if f.clip_times else {}),
+                    **({"draw_ranges": f.draw_ranges} if f.draw_ranges else {}),
                 }
                 for f in self.frames
             ],
@@ -241,6 +247,7 @@ class AnimationRecorder:
         visibility: dict[str, bool] | None = None,
         opacity: dict[str, float] | None = None,
         clip_times: dict[str, float] | None = None,
+        draw_ranges: dict[str, float] | None = None,
     ) -> None:
         """Add a frame at the current time."""
         self._frames.append(
@@ -251,6 +258,7 @@ class AnimationRecorder:
                 visibility=visibility,
                 opacity=opacity,
                 clip_times=clip_times,
+                draw_ranges=draw_ranges,
             )
         )
         self._current_time += self._time_step

@@ -501,6 +501,13 @@
                     setClipTime(id, time);
                 }
             }
+
+            // Apply draw ranges (polyline/tube visibility fraction)
+            if (frame.draw_ranges) {
+                for (const [id, value] of Object.entries(frame.draw_ranges)) {
+                    setDrawRange(id, value);
+                }
+            }
         }
 
         function getFrameAtTime(time) {
@@ -841,6 +848,17 @@
             mixer.setTime(time);
         }
 
+        // Set draw range (fraction visible) for polylines and tubes
+        function setDrawRange(id, value) {
+            const obj = objects.get(id);
+            if (!obj) return;
+            if (obj.userData.isPolyline) {
+                obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+            } else if (obj.userData.isTube) {
+                obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalVertexCount));
+            }
+        }
+
         // Update object transform
         function updateTransform(id, transform) {
             const obj = objects.get(id);
@@ -1001,6 +1019,7 @@
                             line.name = header.id;
                             line.userData.id = header.id;
                             line.userData.isPolyline = true;
+                            line.userData.maxInstanceCount = numPoints - 1;
                             scene.add(line);
                             objects.set(header.id, line);
                         } catch (e) {
@@ -1059,6 +1078,7 @@
                                     if (meta.visibility) frame.visibility = meta.visibility;
                                     if (meta.opacity) frame.opacity = meta.opacity;
                                     if (meta.clip_times) frame.clip_times = meta.clip_times;
+                                    if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
                                 }
                                 frames.push(frame);
                             }
@@ -1171,6 +1191,7 @@
                                         if (meta.visibility) frame.visibility = meta.visibility;
                                         if (meta.opacity) frame.opacity = meta.opacity;
                                         if (meta.clip_times) frame.clip_times = meta.clip_times;
+                                        if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
                                     }
                                     frames.push(frame);
                                 }
@@ -1258,10 +1279,128 @@
                                 line.name = data.id;
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
+                                line.userData.maxInstanceCount = numPoints - 1;
                                 scene.add(line);
                                 objects.set(data.id, line);
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
+                            }
+                        })();
+                        break;
+                    case 'add_tube_binary':
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                const pointData = new Float32Array(buffer);
+                                const numPts = data.numPoints;
+
+                                const curvePoints = [];
+                                for (let i = 0; i < numPts; i++) {
+                                    curvePoints.push(new THREE.Vector3(
+                                        pointData[i * 3], pointData[i * 3 + 1], pointData[i * 3 + 2]
+                                    ));
+                                }
+
+                                const curve = new THREE.CatmullRomCurve3(curvePoints, data.closed);
+                                const tubSegs = data.tubularSegments;
+                                let geometry;
+
+                                if (data.width !== undefined && data.height !== undefined) {
+                                    // Stadium (pill) cross-section — custom indexed geometry
+                                    // Indices are step-major so draw_range reveals along path.
+                                    // Uses fixed-up frames (Z-up) instead of Frenet frames
+                                    // so the pill stays flat relative to the print plane.
+                                    const hw = data.width / 2, hh = data.height / 2;
+                                    const r = hh;
+
+                                    // Build 2D cross-section profile (x=sideways, y=up)
+                                    const profile = [];
+                                    const arcSegs = 8;
+                                    profile.push(-hw + r, -hh);
+                                    profile.push( hw - r, -hh);
+                                    for (let k = 1; k <= arcSegs; k++) {
+                                        const a = -Math.PI/2 + Math.PI * k / arcSegs;
+                                        profile.push(hw - r + r * Math.cos(a), r * Math.sin(a));
+                                    }
+                                    profile.push(-hw + r, hh);
+                                    for (let k = 1; k <= arcSegs; k++) {
+                                        const a = Math.PI/2 + Math.PI * k / arcSegs;
+                                        profile.push(-hw + r + r * Math.cos(a), r * Math.sin(a));
+                                    }
+                                    const nRing = profile.length / 2;
+
+                                    // Generate vertices with fixed-up frames
+                                    const positions = [];
+                                    const norms = [];
+                                    const up = new THREE.Vector3(0, 0, 1);
+                                    const sideDir = new THREE.Vector3();
+                                    const upDir = new THREE.Vector3();
+                                    const tangent = new THREE.Vector3();
+                                    const tmpV = new THREE.Vector3();
+
+                                    for (let i = 0; i <= tubSegs; i++) {
+                                        const P = curve.getPointAt(i / tubSegs);
+                                        curve.getTangentAt(i / tubSegs, tangent);
+
+                                        // sideDir = normalize(tangent x Z) — horizontal, perpendicular to path
+                                        sideDir.crossVectors(tangent, up).normalize();
+                                        // upDir = normalize(sideDir x tangent) — roughly Z, perpendicular to both
+                                        upDir.crossVectors(sideDir, tangent).normalize();
+
+                                        for (let j = 0; j < nRing; j++) {
+                                            const cx = profile[j * 2];
+                                            const cy = profile[j * 2 + 1];
+                                            // vertex = P + cx*sideDir + cy*upDir
+                                            tmpV.copy(sideDir).multiplyScalar(cx);
+                                            tmpV.addScaledVector(upDir, cy);
+                                            positions.push(P.x + tmpV.x, P.y + tmpV.y, P.z + tmpV.z);
+                                            tmpV.normalize();
+                                            norms.push(tmpV.x, tmpV.y, tmpV.z);
+                                        }
+                                    }
+
+                                    // Indices: step-major so setDrawRange reveals along path
+                                    const indices = [];
+                                    for (let i = 0; i < tubSegs; i++) {
+                                        for (let j = 0; j < nRing; j++) {
+                                            const a = i * nRing + j;
+                                            const b = (i + 1) * nRing + j;
+                                            const c = (i + 1) * nRing + (j + 1) % nRing;
+                                            const d = i * nRing + (j + 1) % nRing;
+                                            indices.push(a, b, d, b, c, d);
+                                        }
+                                    }
+
+                                    geometry = new THREE.BufferGeometry();
+                                    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                                    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(norms, 3));
+                                    geometry.setIndex(indices);
+                                } else {
+                                    // Circular cross-section via TubeGeometry
+                                    geometry = new THREE.TubeGeometry(
+                                        curve, tubSegs, data.radius,
+                                        data.radialSegments, data.closed
+                                    );
+                                }
+
+                                const material = new THREE.MeshStandardMaterial({
+                                    color: data.color,
+                                    metalness: data.metalness !== undefined ? data.metalness : 0.3,
+                                    roughness: data.roughness !== undefined ? data.roughness : 0.7,
+                                    side: THREE.DoubleSide,
+                                });
+
+                                const tube = new THREE.Mesh(geometry, material);
+                                tube.name = data.id;
+                                tube.userData.id = data.id;
+                                tube.userData.isTube = true;
+                                tube.userData.totalVertexCount = geometry.index.count;
+                                scene.add(tube);
+                                objects.set(data.id, tube);
+                                console.log(`Created tube ${data.id} with ${numPts} control points`);
+                            } catch (e) {
+                                console.error(`Error creating tube:`, e);
                             }
                         })();
                         break;
@@ -1270,6 +1409,9 @@
                         break;
                     case 'set_clip_time':
                         setClipTime(data.id, data.time);
+                        break;
+                    case 'set_draw_range':
+                        setDrawRange(data.id, data.value);
                         break;
                     case 'batch_set_clip_time':
                         for (const [id, time] of Object.entries(data.clip_times)) {
