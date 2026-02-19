@@ -48,8 +48,16 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - Primitives: box, sphere, cylinder, plane, cone, torus, capsule
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
 - Tubes: extruded along a path — circular (TubeGeometry) or pill/stadium cross-section (custom indexed geometry with Z-up fixed frames)
+- Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
+- Beads: toolpath extrusion via `add_bead()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
-- **draw_range**: polylines and tubes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
+- **draw_range**: polylines, tubes, and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
+
+### Binary Animation Channels
+For large animations (100k+ frames), use zero-loop binary APIs instead of Frame objects:
+- `animation.set_frame_times(times)` — numpy array of frame times
+- `animation.set_transform_data(object_ids, data)` — (n_frames, n_objects, 16) float32
+- `animation.set_draw_range_data(object_ids, data)` — (n_frames, n_objects) float32
 
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
@@ -62,4 +70,4 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - `08_glb_models.py` - GLB models with PBR materials (DamagedHelmet, Avocado)
 - `09_animated_glb.py` - Embedded GLTF animation via clip_times (AnimatedMorphCube + orbiting Avocado)
 - `10_animation_stress_test.py` - Animation stress test (520 objects × 2499 frames, vectorized numpy)
-- `11_toolpath.py` - Spiral vase toolpath with draw_range animation (polyline + pill tube + nozzles)
+- `11_toolpath.py` - Spiral vase toolpath with draw_range animation (polyline + bead mesh + nozzles, 800k points, alternating layer colors, binary animation channels)

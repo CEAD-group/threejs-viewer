@@ -433,6 +433,169 @@ class ViewerClient:
 
         self._send_binary(header, points.tobytes())
 
+    def add_mesh(
+        self,
+        id: str,
+        positions: np.ndarray,
+        indices: np.ndarray,
+        normals: np.ndarray = None,
+        colors: np.ndarray = None,
+        color: int = 0x7AB8CC,
+        metalness: float = 0.1,
+        roughness: float = 0.8,
+    ) -> None:
+        """
+        Add a pre-built triangle mesh to the scene.
+
+        Args:
+            id: Unique identifier
+            positions: (N, 3) float32 vertex positions
+            indices: (M,) uint32 flat index array (3 per triangle)
+            normals: optional (N, 3) float32 vertex normals
+            colors: optional (N, 3) float32 per-vertex RGB colors (0-1)
+            color: Material color (hex), ignored when colors is provided
+            metalness: PBR metalness (0-1)
+            roughness: PBR roughness (0-1)
+        """
+        positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1)
+        indices = np.ascontiguousarray(indices, dtype=np.uint32).reshape(-1)
+        num_vertices = len(positions) // 3
+
+        has_normals = normals is not None
+        has_vertex_colors = colors is not None
+        parts = [positions.tobytes()]
+        if has_normals:
+            normals = np.ascontiguousarray(normals, dtype=np.float32).reshape(-1)
+            parts.append(normals.tobytes())
+        if has_vertex_colors:
+            colors = np.ascontiguousarray(colors, dtype=np.float32).reshape(-1)
+            parts.append(colors.tobytes())
+        parts.append(indices.tobytes())
+
+        self._send_binary(
+            {
+                "type": "add_mesh_binary",
+                "id": id,
+                "numVertices": num_vertices,
+                "numIndices": len(indices),
+                "hasNormals": has_normals,
+                "hasVertexColors": has_vertex_colors,
+                "color": color,
+                "metalness": metalness,
+                "roughness": roughness,
+            },
+            b"".join(parts),
+        )
+
+    def add_bead(
+        self,
+        id: str,
+        points: np.ndarray,
+        width: float,
+        height: float,
+        colors: np.ndarray = None,
+        color: int = 0x7AB8CC,
+        **kwargs,
+    ) -> None:
+        """
+        Add a bead (extruded toolpath) mesh to the scene.
+
+        Generates a 6-vertex bevelled rectangle cross-section extruded along
+        the path, with analytical normals. Supports draw_range for progressive
+        reveal animation.
+
+        Args:
+            id: Unique identifier
+            points: (N, 3) float32 path points
+            width: Bead width
+            height: Bead height
+            colors: optional (N, 3) float32 per-path-point RGB colors (0-1)
+            color: Material color (hex), ignored when colors is provided
+            **kwargs: Passed to add_mesh (metalness, roughness)
+        """
+        points = np.asarray(points, dtype=np.float32)
+        if points.ndim == 1:
+            points = points.reshape(-1, 3)
+        N = points.shape[0]
+        W, H = float(width), float(height)
+        hw, hh = W / 2, H / 2
+        ft = max(0, W - H) / 2  # half-width of flat segment
+        P = 6  # vertices per ring
+
+        # 6-vertex bevelled rectangle profile: (binormal_offset, z_offset)
+        profile = np.array(
+            [[ft, 0], [hw, hh], [ft, H], [-ft, H], [-hw, hh], [-ft, 0]],
+            dtype=np.float32,
+        )
+
+        # Profile vertex normals (average of adjacent edge outward normals)
+        edges = np.roll(profile, -1, axis=0) - profile
+        edge_n = np.column_stack([edges[:, 1], -edges[:, 0]])
+        edge_n /= np.maximum(np.linalg.norm(edge_n, axis=1, keepdims=True), 1e-10)
+        prof_n = np.zeros((P, 2), dtype=np.float32)
+        for j in range(P):
+            prof_n[j] = edge_n[(j - 1) % P] + edge_n[j]
+        prof_n /= np.maximum(np.linalg.norm(prof_n, axis=1, keepdims=True), 1e-10)
+
+        # Central-difference tangents (XY only, Z-up assumption)
+        tangents = np.empty((N, 2), dtype=np.float32)
+        tangents[0] = points[1, :2] - points[0, :2]
+        tangents[-1] = points[-1, :2] - points[-2, :2]
+        tangents[1:-1] = points[2:, :2] - points[:-2, :2]
+        t_len = np.linalg.norm(tangents, axis=1, keepdims=True)
+        tangents /= np.maximum(t_len, 1e-10)
+
+        # Binormals: tangent × Z = (ty, -tx)
+        binormals = np.column_stack([tangents[:, 1], -tangents[:, 0]])
+
+        # Positions: (N, P, 3) via broadcasting
+        pb = profile[:, 0]  # (P,) binormal offsets
+        pz = profile[:, 1]  # (P,) z offsets
+        positions = np.empty((N, P, 3), dtype=np.float32)
+        positions[:, :, 0] = points[:, 0:1] + pb[None, :] * binormals[:, 0:1]
+        positions[:, :, 1] = points[:, 1:2] + pb[None, :] * binormals[:, 1:2]
+        positions[:, :, 2] = points[:, 2:3] + pz[None, :]
+
+        # Normals: (N, P, 3) — profile normals rotated into world frame
+        nb = prof_n[:, 0]  # (P,) binormal component
+        nz = prof_n[:, 1]  # (P,) z component
+        normals = np.empty((N, P, 3), dtype=np.float32)
+        normals[:, :, 0] = nb[None, :] * binormals[:, 0:1]
+        normals[:, :, 1] = nb[None, :] * binormals[:, 1:2]
+        normals[:, :, 2] = nz[None, :]
+
+        # Step-major indices for draw_range reveal along path
+        i_range = np.arange(N - 1, dtype=np.uint32)
+        j_range = np.arange(P, dtype=np.uint32)
+        ig, jg = np.meshgrid(i_range, j_range, indexing="ij")
+        j1 = (jg + 1) % P
+        a = ig * P + jg
+        b = ig * P + j1
+        c = (ig + 1) * P + jg
+        d = (ig + 1) * P + j1
+        # Two tris per quad: (a,c,b) and (b,c,d)
+        tris = np.stack([a, c, b, b, c, d], axis=-1)  # (N-1, P, 6)
+        indices = tris.reshape(-1).astype(np.uint32)
+
+        # Broadcast per-path-point colors to per-vertex (N, P, 3)
+        vertex_colors = None
+        if colors is not None:
+            colors = np.asarray(colors, dtype=np.float32)
+            if colors.ndim == 2 and colors.shape == (N, 3):
+                vertex_colors = np.broadcast_to(
+                    colors[:, None, :], (N, P, 3)
+                ).reshape(-1, 3)
+
+        self.add_mesh(
+            id,
+            positions.reshape(-1, 3),
+            indices,
+            normals.reshape(-1, 3),
+            colors=vertex_colors,
+            color=color,
+            **kwargs,
+        )
+
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
     ) -> np.ndarray:
@@ -528,18 +691,6 @@ class ViewerClient:
 
     # === Transform Updates ===
 
-    def set_position(self, id: str, x: float, y: float, z: float):
-        """Set object position."""
-        self._send(
-            {"type": "update_transform", "id": id, "transform": {"position": [x, y, z]}}
-        )
-
-    def set_rotation(self, id: str, x: float, y: float, z: float):
-        """Set object rotation (Euler angles in radians)."""
-        self._send(
-            {"type": "update_transform", "id": id, "transform": {"rotation": [x, y, z]}}
-        )
-
     def set_matrix(self, id: str, matrix: List[float]):
         """Set object transform via 4x4 matrix (column-major order)."""
         self._send(
@@ -551,11 +702,6 @@ class ViewerClient:
         Update multiple object transforms in a single message.
         Optimized for high-frequency updates (60fps).
         """
-        self._send({"type": "batch_update", "transforms": transforms})
-
-    def set_transforms(self, matrices: Dict[str, List[float]]):
-        """Update multiple objects with 4x4 matrices in a single call."""
-        transforms = {id: {"matrix": matrix} for id, matrix in matrices.items()}
         self._send({"type": "batch_update", "transforms": transforms})
 
     # === Object Operations ===
@@ -580,64 +726,9 @@ class ViewerClient:
         """Set how much of a polyline or tube is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
-    def hide(self, id: str):
-        """Hide an object."""
-        self.set_visible(id, False)
-
-    def show(self, id: str):
-        """Show an object."""
-        self.set_visible(id, True)
-
     def clear(self) -> None:
         """Clear all objects from the scene."""
         self._send({"type": "clear_scene"})
-
-    def sync(self, objects: Dict[str, dict], timeout: float = 5.0) -> dict:
-        """
-        Sync scene to match the declared objects.
-
-        Adds missing objects, deletes objects not in the declaration.
-        Objects already present are left unchanged (not reloaded).
-
-        Args:
-            objects: Dict mapping object ID to object definition.
-                     Each definition should have either:
-                     - "primitive": "box"|"sphere"|"cylinder" with "params": {...}
-                     - "model": url with "format": "stl"|"gltf"|etc
-                     Both can have optional "transform": {"position", "rotation", "scale"}
-            timeout: Timeout for listing current objects
-
-        Returns:
-            Dict with "added" and "deleted" lists of object IDs
-
-        Example:
-            viewer.sync({
-                "ground": {"primitive": "box", "params": {"width": 6, "height": 6, "depth": 0.02}},
-                "robot_base": {"model": "http://localhost:8000/base.stl", "format": "stl",
-                               "transform": {"scale": [0.001, 0.001, 0.001]}},
-            })
-        """
-        existing = set(self.list_objects(timeout))
-        desired = set(objects.keys())
-
-        to_delete = existing - desired
-        to_add = desired - existing
-
-        # Delete extras
-        for obj_id in to_delete:
-            self.delete(obj_id)
-
-        # Add missing
-        for obj_id in to_add:
-            self._send(
-                {
-                    "type": "add_object",
-                    "id": obj_id,
-                    "object": objects[obj_id],
-                }
-            )
-
-        return {"added": list(to_add), "deleted": list(to_delete)}
 
     # === Animation ===
 
@@ -662,7 +753,13 @@ class ViewerClient:
             animation = Animation(frames=frames, loop=True)
             viewer.load_animation(animation)
         """
-        n_frames = len(animation.frames)
+        # Determine frame count and times
+        if animation._frame_times is not None:
+            n_frames = len(animation._frame_times)
+            frame_times = animation._frame_times.tolist()
+        else:
+            n_frames = len(animation.frames)
+            frame_times = [f.time for f in animation.frames]
 
         # Use pre-built binary data if available (fastest path)
         if animation._transform_data is not None and animation._object_ids is not None:
@@ -706,9 +803,9 @@ class ViewerClient:
                     for obj_id, matrix in frame.transforms.items():
                         transform_data[fi, id_to_idx[obj_id], :] = matrix
 
-        frame_times = [f.time for f in animation.frames]
+        # Build sparse channel metadata from Frame objects
+        has_binary_draw_ranges = animation._draw_range_data is not None
         frames_meta = []
-
         for fi, frame in enumerate(animation.frames):
             meta = {}
             if frame.colors:
@@ -719,46 +816,54 @@ class ViewerClient:
                 meta["opacity"] = frame.opacity
             if frame.clip_times:
                 meta["clip_times"] = frame.clip_times
-            if frame.draw_ranges:
+            if frame.draw_ranges and not has_binary_draw_ranges:
                 meta["draw_ranges"] = frame.draw_ranges
             if meta:
                 meta["index"] = fi
                 frames_meta.append(meta)
 
+        # Pack binary payload: transforms + optional draw_ranges
         binary_payload = np.ascontiguousarray(
             transform_data, dtype=np.float32
         ).tobytes()
+        if has_binary_draw_ranges:
+            binary_payload += np.ascontiguousarray(
+                animation._draw_range_data, dtype=np.float32
+            ).tobytes()
 
         # Serve binary via HTTP (fast native transfer) instead of WebSocket
-        # Only clear old animation blobs (keep object blobs like polylines/tubes)
-        self._blob_store = {
-            k: v for k, v in self._blob_store.items() if not k.startswith("/animation_")
-        }
+        # Clear old animation blobs in-place (keep object blobs like polylines/tubes)
+        for k in [k for k in self._blob_store if k.startswith("/animation_")]:
+            del self._blob_store[k]
         blob_key = f"/animation_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = binary_payload
         blob_url = f"http://{self.host}:{self._http_port}{blob_key}"
 
-        # Store JSON version for reconnect (browser refresh)
-        self._current_animation = animation.to_dict()
+        # Store JSON version for reconnect (skip for large binary-only animations)
+        if animation.frames:
+            self._current_animation = animation.to_dict()
+        else:
+            self._current_animation = None
 
         # Send small JSON message over WS telling browser to fetch binary via HTTP
-        self._send(
-            {
-                "type": "load_animation_http",
-                "blob_url": blob_url,
-                "object_ids": all_ids,
-                "frame_count": n_frames,
-                "frame_times": frame_times,
-                "duration": animation.duration,
-                "fps": animation.fps,
-                "loop": animation.loop,
-                "markers": [
-                    {"time": m.time, "label": m.label, "color": m.color}
-                    for m in animation.markers
-                ],
-                "frames_meta": frames_meta,
-            }
-        )
+        header = {
+            "type": "load_animation_http",
+            "blob_url": blob_url,
+            "object_ids": all_ids,
+            "frame_count": n_frames,
+            "frame_times": frame_times,
+            "duration": animation.duration,
+            "fps": animation.fps,
+            "loop": animation.loop,
+            "markers": [
+                {"time": m.time, "label": m.label, "color": m.color}
+                for m in animation.markers
+            ],
+            "frames_meta": frames_meta,
+        }
+        if has_binary_draw_ranges:
+            header["draw_range_ids"] = animation._draw_range_ids
+        self._send(header)
 
     def stop_animation(self) -> None:
         """Stop animation playback and return to real-time mode."""

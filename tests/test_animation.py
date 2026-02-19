@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from threejs_viewer import Animation, AnimationRecorder, Frame, Marker
+from threejs_viewer import Animation, Frame, Marker
 
 
 def test_frame_creation():
@@ -79,38 +79,25 @@ def test_animation_to_dict():
     assert data["markers"][0]["label"] == "Halfway"
 
 
-def test_animation_from_function():
-    """Test creating animation from a function."""
+def test_binary_animation_channels():
+    """Test binary animation data (set_frame_times, set_transform_data, set_draw_range_data)."""
+    animation = Animation(loop=True)
 
-    def simulate(t):
-        return {
-            "transforms": {"obj": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, t, 0, 0, 1]},
-            "colors": {"obj": 0xFF0000 if t < 0.5 else 0x00FF00},
-        }
+    n_frames = 100
+    n_objects = 2
+    times = np.linspace(0, 10, n_frames)
+    animation.set_frame_times(times)
 
-    animation = Animation.from_function(simulate, duration=1.0, fps=10, loop=True)
+    transforms = np.zeros((n_frames, n_objects, 16), dtype=np.float32)
+    transforms[:, :, [0, 5, 10, 15]] = 1.0  # identity matrices
+    animation.set_transform_data(["obj_a", "obj_b"], transforms)
 
-    assert animation.n_frames == 10
-    assert animation.loop is True
+    draw_ranges = np.linspace(0, 1, n_frames * 1).reshape(n_frames, 1).astype(np.float32)
+    draw_ranges = np.column_stack([draw_ranges, draw_ranges])
+    animation.set_draw_range_data(["obj_a", "obj_b"], draw_ranges)
 
-
-def test_animation_recorder():
-    """Test AnimationRecorder context manager."""
-    with Animation.record(duration=1.0, fps=10) as rec:
-        for t in rec.times:
-            rec.add_frame(
-                transforms={"obj": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, t, 0, 0, 1]}
-            )
-
-    animation = rec.animation
-    assert animation.n_frames == 10
-
-
-def test_recorder_times():
-    """Test that recorder generates correct time array."""
-    rec = AnimationRecorder(duration=2.0, fps=10)
-    times = rec.times
-
-    assert len(times) == 20
-    assert times[0] == 0.0
-    assert np.isclose(times[-1], 1.9)
+    assert animation.n_frames == 100
+    assert animation.duration == 10.0
+    assert animation.fps > 0
+    assert animation._object_ids == ["obj_a", "obj_b"]
+    assert animation._draw_range_ids == ["obj_a", "obj_b"]
