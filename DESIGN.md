@@ -89,7 +89,10 @@ client.load_animation(animation)
 
 ### Animation System
 
-Pre-computed animations for interactive playback:
+There are two ways to build animations, designed for different use cases:
+
+**Frame-based (simple, familiar)** — build frames as Python dicts. Good for small
+animations and prototyping:
 
 ```python
 from threejs_viewer import Animation, Frame
@@ -101,10 +104,29 @@ for t in times:
         transforms={"obj1": matrix1, "obj2": matrix2},
         colors={"obj1": 0xFF0000},
         visibility={"obj2": False},
-        clip_times={"glb_model": t},  # drive embedded GLTF animations
+        clip_times={"glb_model": t},
     )
 animation.add_marker(5.0, "Collision!")
 ```
+
+**Binary channels (fast)** — for large animations (100+ objects × 1000+ frames).
+Data is packed as typed arrays and transferred via HTTP:
+
+```python
+animation = Animation(loop=True)
+animation.set_frame_times(np.arange(n_frames) / 60.0)
+animation.set_transform_data(object_ids, transforms)       # (n_frames, n_objects, 16) float32
+animation.set_draw_range_data(draw_ids, draw_ranges)        # (n_frames, n_objects) float32
+animation.add_channel("colors", ids, data, dtype="uint8",   # indexed colormap
+                       metadata={"colormap": [0x44AA44, 0xFF3333]})
+animation.add_channel("visibility", ids, data, dtype="uint8")
+```
+
+The two approaches can be mixed: binary channels supersede Frame fields with the
+same name, while Frame-only fields (like `clip_times`) are sent as sparse JSON.
+
+Supported channel types: `transforms` (stride=16), `draw_ranges`, `colors`,
+`visibility`, `opacity`. Supported dtypes: `float32`, `uint32`, `uint8`.
 
 ### Embedded GLTF Animations
 
@@ -154,6 +176,32 @@ All messages are JSON (text) or binary with JSON header.
 {"type": "stop_animation"}
 ```
 
+For binary-channel animations, the message is `load_animation_http` with a channel manifest:
+
+```json
+{
+  "type": "load_animation_http",
+  "blob_url": "http://localhost:5667/animation_XXXX",
+  "frame_count": 2000,
+  "frame_times": [0.0, 0.0167, ...],
+  "duration": 33.3,
+  "fps": 60,
+  "loop": true,
+  "markers": [],
+  "channels": [
+    {"name": "transforms",  "ids": ["obj1", ...], "dtype": "float32", "stride": 16},
+    {"name": "colors",      "ids": ["s0", ...],   "dtype": "uint8",   "stride": 1, "colormap": [4489156, 16724787]},
+    {"name": "visibility",  "ids": ["s0", ...],   "dtype": "uint8",   "stride": 1},
+    {"name": "draw_ranges", "ids": ["obj1", ...], "dtype": "float32", "stride": 1}
+  ],
+  "frames_meta": [{"index": 42, "clip_times": {"model1": 1.5}}]
+}
+```
+
+The binary blob (served via HTTP) is the concatenation of all channel data in manifest order.
+Each channel's byte size = `n_frames × len(ids) × stride × sizeof(dtype)`.
+Channels are sorted by dtype size descending (float32 first, uint8 last) to avoid alignment issues.
+
 ### Embedded GLTF Animations
 
 ```json
@@ -165,10 +213,12 @@ Animation frames can also include `clip_times` to drive embedded animations duri
 
 ### Binary Messages
 
-For `add_model_binary` and `add_polyline_binary`:
-- First 4 bytes: header length (uint32 little-endian)
-- Next N bytes: JSON header (null-padded to 4-byte boundary)
-- Remaining bytes: raw binary data
+For large data (meshes, polylines, animations), the Python client serves binary
+payloads via an HTTP sidecar on port 5667. A JSON message over WebSocket carries
+metadata and a `blob_url`; the browser fetches the binary blob with native `fetch()`.
+
+For animation channels, the blob is a concatenation of all channel typed arrays
+(see the channel manifest in the `load_animation_http` message above).
 
 ## File Structure
 
@@ -178,7 +228,7 @@ threejs-viewer/
 │   ├── __init__.py      # Package exports
 │   ├── __main__.py      # CLI entry point
 │   ├── client.py        # ViewerClient class
-│   ├── animation.py     # Animation, Frame, Marker classes
+│   ├── animation.py     # Animation, AnimationChannel, Frame, Marker classes
 │   └── viewer.html      # Browser viewer (self-contained)
 ├── pyproject.toml
 ├── DESIGN.md
@@ -228,10 +278,11 @@ print(ViewerClient().viewer_path)
 
 ## Performance Considerations
 
-- **Batch updates**: Use `set_transforms()` for multiple objects instead of individual calls
+- **Batch updates**: Use `batch_update()` for multiple objects instead of individual calls
 - **Binary transfer**: Use `add_model_binary()` and `add_polyline()` for large data
+- **Binary animation channels**: Use `add_channel()` / `set_transform_data()` for large animations — avoids JSON serialization overhead on both Python and JS sides
 - **Animation pre-computation**: Build all frames upfront, let viewer handle playback
-- **Object reuse**: Use `sync()` to avoid reloading unchanged objects
+- **Performance warnings**: Both Python (logging) and JS (console.warn) emit hints when JSON animation data is large enough that binary channels would help
 
 ## Limitations
 

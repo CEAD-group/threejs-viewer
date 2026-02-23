@@ -29,7 +29,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 
 ### Core Files
 - `src/threejs_viewer/client.py` - Python client that runs WebSocket server
-- `src/threejs_viewer/animation.py` - Animation classes (Frame, Animation, Marker)
+- `src/threejs_viewer/animation.py` - Animation classes (Frame, Animation, AnimationChannel, Marker)
 - `src/threejs_viewer/viewer.html` - Three.js viewer (self-contained)
 - `examples/` - Demo scripts showcasing library capabilities
 
@@ -52,11 +52,21 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
 - **draw_range**: polylines and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
 
-### Binary Animation Channels
-For large animations (100k+ frames), use zero-loop binary APIs instead of Frame objects:
+### Animation: Two Approaches
+**Frame-based (simple, familiar):** Build frames as Python dicts — good for small animations and prototyping.
+**Binary channels (fast):** Use `add_channel()` / convenience wrappers for large animations (100+ objects × 1000+ frames). Data is packed as typed arrays, transferred via HTTP, and applied with zero-copy TypedArray views in JS.
+
+Binary channel API:
 - `animation.set_frame_times(times)` — numpy array of frame times
 - `animation.set_transform_data(object_ids, data)` — (n_frames, n_objects, 16) float32
 - `animation.set_draw_range_data(object_ids, data)` — (n_frames, n_objects) float32
+- `animation.add_channel(name, ids, data, dtype, stride, metadata)` — generic channel
+
+Supported channel types: `transforms` (stride=16), `draw_ranges`, `colors`, `visibility`, `opacity`
+Supported dtypes: `float32`, `uint32`, `uint8`
+Indexed colors: `dtype="uint8"` + `metadata={"colormap": [0x44AA44, 0xFF3333]}`
+
+Binary channels and Frame-based JSON can coexist (e.g. binary transforms + JSON clip_times). A binary channel supersedes the same-named Frame field.
 
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
