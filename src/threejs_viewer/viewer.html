@@ -800,17 +800,31 @@
         function createMaterial(params) {
             const color = params.color || 0x4a90d9;
             const materialType = params.materialType || 'standard';
+            const opacity = params.opacity != null ? params.opacity : 1;
+            const transparent = opacity < 1;
 
             switch (materialType) {
                 case 'basic':
-                    return new THREE.MeshBasicMaterial({ color });
+                    return new THREE.MeshBasicMaterial({ color, opacity, transparent });
                 case 'phong':
-                    return new THREE.MeshPhongMaterial({ color });
+                    return new THREE.MeshPhongMaterial({ color, opacity, transparent });
                 case 'lambert':
-                    return new THREE.MeshLambertMaterial({ color });
+                    return new THREE.MeshLambertMaterial({ color, opacity, transparent });
                 default:
-                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3, envMapIntensity: 0 });
+                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3, envMapIntensity: 0, opacity, transparent });
             }
+        }
+
+        // Set opacity on all materials of an object
+        function setOpacity(id, opacity) {
+            const obj = objects.get(id);
+            if (!obj) return;
+            obj.traverse(child => {
+                if (child.material) {
+                    child.material.transparent = opacity < 1;
+                    child.material.opacity = opacity;
+                }
+            });
         }
 
         // Add object to scene
@@ -969,10 +983,13 @@
             }
         }
 
-        // Batch update transforms (for 60fps updates)
+        // Batch update transforms + optional opacity (for 60fps updates)
         function batchUpdate(transforms) {
             for (const [id, transform] of Object.entries(transforms)) {
                 updateTransform(id, transform);
+                if (transform.opacity != null) {
+                    setOpacity(id, transform.opacity);
+                }
             }
         }
 
@@ -1041,9 +1058,16 @@
                             colorObj.traverse((child) => {
                                 if (child.material) {
                                     child.material.color.setHex(data.color);
+                                    if (data.opacity != null) {
+                                        child.material.transparent = data.opacity < 1;
+                                        child.material.opacity = data.opacity;
+                                    }
                                 }
                             });
                         }
+                        break;
+                    case 'set_opacity':
+                        setOpacity(data.id, data.opacity);
                         break;
                     case 'list_objects':
                         ws.send(JSON.stringify({
