@@ -3,12 +3,15 @@ Animation Stress Test
 
 Same torus knot tube and followers as 07_stress_test.py, but pre-computed
 as an Animation with timeline scrubbing. Tests how the viewer handles
-large animation payloads (500+ objects x 600 frames).
+large animation payloads (500+ objects x 2500 frames).
+
+Demonstrates binary animation channels:
+- transforms: position/rotation for all followers (float32, stride 16)
+- colors: dynamic color based on Z-height via indexed colormap (uint8)
 
 Run: uv run python examples/10_animation_stress_test.py
 """
 
-import colorsys
 import random
 import time
 from pathlib import Path
@@ -145,37 +148,35 @@ PRIMITIVES = ["sphere", "box", "cylinder", "capsule", "cone"]
 
 followers = []
 for i in range(NUM_FOLLOWERS):
-    hue = random.uniform(0, 1)
-    r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 0.9)
-    color = (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)
     size = random.uniform(0.1, 0.3)
 
     fid = f"f{i}"
     ptype = PRIMITIVES[i % len(PRIMITIVES)]
 
+    # Start grey — the binary color channel will override each frame
     if ptype == "sphere":
-        v.add_sphere(fid, radius=size, color=color)
+        v.add_sphere(fid, radius=size, color=0x888888)
     elif ptype == "box":
-        v.add_box(fid, width=size, height=size, depth=size * 2, color=color)
+        v.add_box(fid, width=size, height=size, depth=size * 2, color=0x888888)
     elif ptype == "cylinder":
         v.add_cylinder(
             fid,
             radius_top=size * 0.4,
             radius_bottom=size * 0.4,
             height=size * 2,
-            color=color,
+            color=0x888888,
         )
     elif ptype == "capsule":
-        v.add_capsule(fid, radius=size * 0.4, length=size, color=color)
+        v.add_capsule(fid, radius=size * 0.4, length=size, color=0x888888)
     elif ptype == "cone":
         v.add_cylinder(
-            fid, radius_top=0, radius_bottom=size * 0.5, height=size * 2, color=color
+            fid, radius_top=0, radius_bottom=size * 0.5, height=size * 2, color=0x888888
         )
 
     followers.append(
         {
             "id": fid,
-            "speed": random.uniform(5, 30),
+            "speed": random.expovariate(1 / 10) + 1,
             "offset": random.randint(0, NUM_POINTS - 1),
         }
     )
@@ -188,7 +189,7 @@ for i in range(NUM_TEAPOTS):
     followers.append(
         {
             "id": fid,
-            "speed": random.uniform(5, 20),
+            "speed": random.expovariate(1 / 8) + 1,
             "offset": random.randint(0, NUM_POINTS - 1),
             "scale": 0.2,
         }
@@ -208,6 +209,36 @@ f_scales = np.array([f.get("scale", 1.0) for f in followers])
 
 # Pre-allocate the full transform array: (n_frames, n_followers, 16)
 all_transforms = np.zeros((n_frames, n_followers, 16), dtype=np.float32)
+# Color index per follower per frame (uint8, indexes into a colormap)
+all_colors = np.zeros((n_frames, n_followers), dtype=np.uint8)
+
+# Ranges for normalizing position to colormap / scale
+z_min, z_max = points[:, 2].min(), points[:, 2].max()
+x_min, x_max = points[:, 0].min(), points[:, 0].max()
+
+# Build a smooth 256-entry colormap by linearly interpolating key stops
+COLOR_STOPS = np.array(
+    [
+        [0x33, 0x66, 0xCC],  # deep blue (bottom)
+        [0x33, 0xAA, 0xCC],  # teal
+        [0x33, 0xCC, 0x66],  # green
+        [0xAA, 0xCC, 0x33],  # lime
+        [0xFF, 0xCC, 0x00],  # yellow
+        [0xFF, 0x88, 0x00],  # orange
+        [0xFF, 0x33, 0x33],  # red (top)
+    ],
+    dtype=np.float32,
+)
+n_stops = len(COLOR_STOPS)
+t_palette = np.linspace(0, 1, 256)
+t_stops = np.linspace(0, 1, n_stops)
+# Interpolate each RGB component
+palette_rgb = np.column_stack(
+    [np.interp(t_palette, t_stops, COLOR_STOPS[:, c]) for c in range(3)]
+).astype(np.uint8)
+COLOR_PALETTE = [(int(r) << 16) | (int(g) << 8) | int(b) for r, g, b in palette_rgb]
+N_COLORS = 256
+
 frame_indices = np.arange(n_frames)
 
 for frame_idx in frame_indices:
@@ -219,28 +250,42 @@ for frame_idx in frame_indices:
     tan_all = points[indices_next] - pos_all  # (N, 3)
     quats = quaternions_from_directions(tan_all)  # (N, 4)
 
+    # Dynamic scale: 0.5x to 2x based on X position
+    x_norm = (pos_all[:, 0] - x_min) / (x_max - x_min + 1e-8)
+    scale = f_scales * (0.5 + 1.5 * x_norm)
+
     # Vectorized quaternion -> rotation matrix, written directly into array
     qx, qy, qz, qw = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
     m = all_transforms[frame_idx]
-    m[:, 0] = f_scales * (1 - 2 * (qy * qy + qz * qz))
-    m[:, 1] = f_scales * (2 * (qx * qy + qz * qw))
-    m[:, 2] = f_scales * (2 * (qx * qz - qy * qw))
-    m[:, 4] = f_scales * (2 * (qx * qy - qz * qw))
-    m[:, 5] = f_scales * (1 - 2 * (qx * qx + qz * qz))
-    m[:, 6] = f_scales * (2 * (qy * qz + qx * qw))
-    m[:, 8] = f_scales * (2 * (qx * qz + qy * qw))
-    m[:, 9] = f_scales * (2 * (qy * qz - qx * qw))
-    m[:, 10] = f_scales * (1 - 2 * (qx * qx + qy * qy))
+    m[:, 0] = scale * (1 - 2 * (qy * qy + qz * qz))
+    m[:, 1] = scale * (2 * (qx * qy + qz * qw))
+    m[:, 2] = scale * (2 * (qx * qz - qy * qw))
+    m[:, 4] = scale * (2 * (qx * qy - qz * qw))
+    m[:, 5] = scale * (1 - 2 * (qx * qx + qz * qz))
+    m[:, 6] = scale * (2 * (qy * qz + qx * qw))
+    m[:, 8] = scale * (2 * (qx * qz + qy * qw))
+    m[:, 9] = scale * (2 * (qy * qz - qx * qw))
+    m[:, 10] = scale * (1 - 2 * (qx * qx + qy * qy))
     m[:, 12] = pos_all[:, 0]
     m[:, 13] = pos_all[:, 1]
     m[:, 14] = pos_all[:, 2]
     m[:, 15] = 1.0
 
-# Build animation with pre-built binary data (skips dict-to-numpy in load_animation)
+    # Color index from Z-height: normalize to 0..255
+    z_norm = (pos_all[:, 2] - z_min) / (z_max - z_min + 1e-8)
+    all_colors[frame_idx] = (np.clip(z_norm, 0, 1) * 255).astype(np.uint8)
+
+# Build animation with binary channels (no Frame objects needed)
 animation = Animation(loop=True)
-for frame_idx in range(n_frames):
-    animation.add_frame(time=frame_idx / FPS, transforms={})
+animation.set_frame_times(np.arange(n_frames) / FPS)
 animation.set_transform_data(f_ids, all_transforms)
+animation.add_channel(
+    "colors",
+    f_ids,
+    all_colors,
+    dtype="uint8",
+    metadata={"colormap": COLOR_PALETTE},
+)
 
 compute_time = time.time() - start
 print(f"Computed in {compute_time:.1f}s")
