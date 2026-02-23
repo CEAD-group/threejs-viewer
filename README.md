@@ -97,6 +97,35 @@ client.load_animation(animation)
 
 Viewer controls: Space (play/pause), Arrow keys (step frames), 1-5 (speed), L (loop)
 
+### Binary Channels (Large Animations)
+
+For animations with many objects or frames, use binary channels instead of Frame dicts for much faster serialization and transfer:
+
+```python
+import numpy as np
+from threejs_viewer import Animation
+
+animation = Animation(loop=True)
+animation.set_frame_times(np.arange(n_frames) / 60.0)
+
+# Transforms: (n_frames, n_objects, 16) float32
+animation.set_transform_data(object_ids, transform_array)
+
+# Draw ranges: (n_frames, n_objects) float32
+animation.set_draw_range_data(object_ids, draw_range_array)
+
+# Colors with indexed colormap: (n_frames, n_objects) uint8
+animation.add_channel("colors", object_ids, color_indices, dtype="uint8",
+                       metadata={"colormap": [0x44AA44, 0xFF3333]})
+
+# Visibility: (n_frames, n_objects) uint8 (0=hidden, 1=visible)
+animation.add_channel("visibility", object_ids, vis_data, dtype="uint8")
+
+client.load_animation(animation)
+```
+
+Binary channels and Frame-based JSON can be mixed (e.g. binary transforms + JSON `clip_times`).
+
 ### GLB Models with Embedded Animations
 
 ```python

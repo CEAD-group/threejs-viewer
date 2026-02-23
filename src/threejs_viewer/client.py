@@ -682,8 +682,9 @@ class ViewerClient:
         """
         Load an animation for playback in the viewer.
 
-        Uses binary transfer for transform data (fast) with JSON for
-        sparse channels (colors, visibility, opacity, clip_times).
+        Uses binary transfer for bulk channels (transforms, draw_ranges,
+        colors, visibility, etc.) with JSON for sparse per-frame metadata
+        (clip_times, or any channel without a binary version).
 
         Args:
             animation: Animation object with pre-computed frames
@@ -707,13 +708,12 @@ class ViewerClient:
             n_frames = len(animation.frames)
             frame_times = [f.time for f in animation.frames]
 
-        # Use pre-built binary data if available (fastest path)
-        if animation._transform_data is not None and animation._object_ids is not None:
-            all_ids = animation._object_ids
-            n_objects = len(all_ids)
-            transform_data = animation._transform_data
-        else:
-            # Build from frame dicts
+        # Collect channels — copy list so we don't mutate the Animation object
+        channels = list(animation._channels)
+        binary_channel_names = {ch.name for ch in channels}
+
+        # If frames have transforms but no binary transforms channel, build one
+        if "transforms" not in binary_channel_names and animation.frames:
             all_ids = (
                 list(animation.frames[0].transforms.keys()) if n_frames > 0 else []
             )
@@ -749,33 +749,75 @@ class ViewerClient:
                     for obj_id, matrix in frame.transforms.items():
                         transform_data[fi, id_to_idx[obj_id], :] = matrix
 
-        # Build sparse channel metadata from Frame objects
-        has_binary_draw_ranges = animation._draw_range_data is not None
+            from .animation import AnimationChannel
+
+            channels.append(
+                AnimationChannel(
+                    name="transforms",
+                    ids=list(all_ids),
+                    data=transform_data,
+                    dtype="float32",
+                    stride=16,
+                    metadata=None,
+                )
+            )
+            binary_channel_names.add("transforms")
+
+        # Build sparse channel metadata from Frame objects (skip binary channels)
         frames_meta = []
         for fi, frame in enumerate(animation.frames):
             meta = {}
-            if frame.colors:
+            if frame.colors and "colors" not in binary_channel_names:
                 meta["colors"] = frame.colors
-            if frame.visibility:
+            if frame.visibility and "visibility" not in binary_channel_names:
                 meta["visibility"] = frame.visibility
-            if frame.opacity:
+            if frame.opacity and "opacity" not in binary_channel_names:
                 meta["opacity"] = frame.opacity
             if frame.clip_times:
                 meta["clip_times"] = frame.clip_times
-            if frame.draw_ranges and not has_binary_draw_ranges:
+            if frame.draw_ranges and "draw_ranges" not in binary_channel_names:
                 meta["draw_ranges"] = frame.draw_ranges
             if meta:
                 meta["index"] = fi
                 frames_meta.append(meta)
 
-        # Pack binary payload: transforms + optional draw_ranges
-        binary_payload = np.ascontiguousarray(
-            transform_data, dtype=np.float32
-        ).tobytes()
-        if has_binary_draw_ranges:
-            binary_payload += np.ascontiguousarray(
-                animation._draw_range_data, dtype=np.float32
-            ).tobytes()
+        # Warn if large JSON frames_meta could be replaced by binary channels
+        meta_entry_count = sum(
+            sum(len(v) for k, v in meta.items() if k != "index" and isinstance(v, dict))
+            for meta in frames_meta
+        )
+        if meta_entry_count > 10_000:
+            logger = logging.getLogger(__name__)
+            logger.info(
+                "Animation has %d JSON per-frame entries in frames_meta. "
+                "Consider using animation.add_channel() for colors/visibility/"
+                "opacity/draw_ranges for much faster serialization.",
+                meta_entry_count,
+            )
+
+        # Build binary payload from channels
+        # Sort by dtype byte size descending (float32/uint32 first, uint8 last)
+        # to avoid alignment padding between channels.
+        dtype_bytes = {"float32": 4, "uint32": 4, "uint8": 1}
+        sorted_channels = sorted(channels, key=lambda ch: -dtype_bytes[ch.dtype])
+        np_dtypes = {"float32": np.float32, "uint32": np.uint32, "uint8": np.uint8}
+
+        binary_parts = []
+        channel_manifest = []
+        for ch in sorted_channels:
+            packed = np.ascontiguousarray(ch.data, dtype=np_dtypes[ch.dtype]).tobytes()
+            binary_parts.append(packed)
+            entry = {
+                "name": ch.name,
+                "ids": ch.ids,
+                "dtype": ch.dtype,
+                "stride": ch.stride,
+            }
+            if ch.metadata:
+                entry.update(ch.metadata)
+            channel_manifest.append(entry)
+
+        binary_payload = b"".join(binary_parts)
 
         # Serve binary via HTTP (fast native transfer) instead of WebSocket
         # Clear old animation blobs in-place (keep object blobs like polylines/meshes)
@@ -785,8 +827,12 @@ class ViewerClient:
         self._blob_store[blob_key] = binary_payload
         blob_url = f"http://{self.host}:{self._http_port}{blob_key}"
 
-        # Store JSON version for reconnect (skip for large binary-only animations)
-        if animation.frames:
+        # Binary-channel animations skip reconnect replay — storing hundreds of MB
+        # of typed arrays for re-send isn't worthwhile; the user re-runs the script.
+        # Frame-based (JSON) animations are small enough to store and replay.
+        if channels:
+            self._current_animation = None
+        elif animation.frames:
             self._current_animation = animation.to_dict()
         else:
             self._current_animation = None
@@ -795,7 +841,6 @@ class ViewerClient:
         header = {
             "type": "load_animation_http",
             "blob_url": blob_url,
-            "object_ids": all_ids,
             "frame_count": n_frames,
             "frame_times": frame_times,
             "duration": animation.duration,
@@ -805,10 +850,9 @@ class ViewerClient:
                 {"time": m.time, "label": m.label, "color": m.color}
                 for m in animation.markers
             ],
+            "channels": channel_manifest,
             "frames_meta": frames_meta,
         }
-        if has_binary_draw_ranges:
-            header["draw_range_ids"] = animation._draw_range_ids
         self._send(header)
 
     def stop_animation(self) -> None:

@@ -6,7 +6,10 @@ for interactive playback with timeline scrubbing, speed control, and frame stepp
 """
 
 from dataclasses import dataclass, field
+
 import numpy as np
+
+ALLOWED_DTYPES = {"float32", "uint32", "uint8"}
 
 
 @dataclass
@@ -16,6 +19,18 @@ class Marker:
     time: float
     label: str
     color: int = 0xFF0000
+
+
+@dataclass
+class AnimationChannel:
+    """A named binary data channel for animation."""
+
+    name: str
+    ids: list[str]
+    data: np.ndarray  # (n_frames, n_ids, stride) or (n_frames, n_ids) for stride=1
+    dtype: str  # "float32", "uint32", "uint8"
+    stride: int  # elements per object per frame (16 for 4x4 matrices, 1 for scalars)
+    metadata: dict | None  # e.g. {"colormap": [0x44AA44, 0xFF3333]}
 
 
 @dataclass
@@ -63,13 +78,11 @@ class Animation:
     loop: bool = True
     markers: list[Marker] = field(default_factory=list)
 
-    # Optional pre-built binary data for fast transfer.
-    # Set via set_transform_data() / set_draw_range_data() / set_frame_times().
-    _transform_data: np.ndarray | None = field(default=None, repr=False)
-    _object_ids: list[str] | None = field(default=None, repr=False)
+    # Generic binary channels for fast transfer.
+    _channels: list[AnimationChannel] = field(default_factory=list, repr=False)
+
+    # Optional frame times (set via set_frame_times() for binary-only animations).
     _frame_times: np.ndarray | None = field(default=None, repr=False)
-    _draw_range_data: np.ndarray | None = field(default=None, repr=False)
-    _draw_range_ids: list[str] | None = field(default=None, repr=False)
 
     @property
     def duration(self) -> float:
@@ -119,36 +132,55 @@ class Animation:
             )
         )
 
-    def set_transform_data(self, object_ids: list[str], data: np.ndarray) -> None:
-        """
-        Set pre-built transform data for fast binary transfer.
+    def add_channel(
+        self,
+        name: str,
+        object_ids: list[str],
+        data: np.ndarray,
+        dtype: str = "float32",
+        stride: int = 1,
+        metadata: dict | None = None,
+    ) -> None:
+        """Add a binary data channel.
 
-        This bypasses the per-frame dict-to-numpy conversion in load_animation,
-        which is the main bottleneck for large animations.
+        Replaces any existing channel with the same name.
 
         Args:
-            object_ids: Ordered list of object IDs matching axis 1 of data
-            data: numpy array of shape (n_frames, n_objects, 16), dtype float32
-                  Column-major 4x4 matrices.
+            name: Channel name (e.g. "transforms", "colors", "visibility").
+            object_ids: Ordered list of object IDs matching axis 1 of data.
+            data: Array of shape (n_frames, n_objects * stride). Will be cast to dtype.
+            dtype: Element type — "float32", "uint32", or "uint8".
+            stride: Elements per object per frame (16 for 4x4 matrices, 1 for scalars).
+            metadata: Extra info sent in the header (e.g. colormap for indexed colors).
         """
-        self._object_ids = object_ids
-        self._transform_data = np.ascontiguousarray(data, dtype=np.float32)
+        if dtype not in ALLOWED_DTYPES:
+            raise ValueError(
+                f"Unsupported dtype {dtype!r}. Allowed: {sorted(ALLOWED_DTYPES)}"
+            )
+        # Replace existing channel with same name (prevents duplicates)
+        self._channels = [ch for ch in self._channels if ch.name != name]
+        self._channels.append(
+            AnimationChannel(
+                name=name,
+                ids=list(object_ids),
+                data=data,
+                dtype=dtype,
+                stride=stride,
+                metadata=metadata,
+            )
+        )
+
+    def set_transform_data(self, object_ids: list[str], data: np.ndarray) -> None:
+        """Convenience: add a 'transforms' channel with stride=16."""
+        self.add_channel("transforms", object_ids, data, dtype="float32", stride=16)
 
     def set_frame_times(self, times) -> None:
         """Set frame times from array, bypassing Frame object creation."""
         self._frame_times = np.asarray(times, dtype=np.float64)
 
     def set_draw_range_data(self, object_ids: list[str], data: np.ndarray) -> None:
-        """
-        Set pre-built draw_range data for fast binary transfer.
-
-        Args:
-            object_ids: Ordered list of object IDs matching axis 1 of data
-            data: numpy array of shape (n_frames, n_objects), dtype float32
-                  Values in 0.0-1.0 range.
-        """
-        self._draw_range_ids = list(object_ids)
-        self._draw_range_data = np.ascontiguousarray(data, dtype=np.float32)
+        """Convenience: add a 'draw_ranges' channel."""
+        self.add_channel("draw_ranges", object_ids, data, dtype="float32", stride=1)
 
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:
         """Add a labeled marker on the timeline."""
