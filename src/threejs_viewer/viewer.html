@@ -507,7 +507,9 @@
                 }
             }
 
-            // Apply JSON-based frame channels (sparse per-frame metadata)
+            // Apply JSON-based frame channels (sparse per-frame metadata).
+            // No overlap with binary channels: the Python side filters frames_meta
+            // to exclude fields that have a binary channel (see binary_channel_names).
             if (frame.transforms) {
                 for (const [id, matrix] of Object.entries(frame.transforms)) {
                     const obj = objects.get(id);
@@ -1076,6 +1078,7 @@
                                 if (data.channels) {
                                     for (const ch of data.channels) {
                                         const info = DTYPE_INFO[ch.dtype];
+                                        if (!info) { console.error(`Unknown channel dtype '${ch.dtype}' for '${ch.name}', skipping`); continue; }
                                         const count = nFrames * ch.ids.length * ch.stride;
                                         channels[ch.name] = {
                                             data: new info.ArrayType(buffer, byteOffset, count),

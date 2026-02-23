@@ -827,8 +827,9 @@ class ViewerClient:
         self._blob_store[blob_key] = binary_payload
         blob_url = f"http://{self.host}:{self._http_port}{blob_key}"
 
-        # Skip JSON reconvert for reconnect when binary channels are used
-        # (the JSON-based to_dict() path is exactly the bloat problem we're avoiding)
+        # Binary-channel animations skip reconnect replay — storing hundreds of MB
+        # of typed arrays for re-send isn't worthwhile; the user re-runs the script.
+        # Frame-based (JSON) animations are small enough to store and replay.
         if channels:
             self._current_animation = None
         elif animation.frames:

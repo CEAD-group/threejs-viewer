@@ -5,12 +5,11 @@ Allows pre-computing entire simulations and sending them to the viewer
 for interactive playback with timeline scrubbing, speed control, and frame stepping.
 """
 
-import logging
 from dataclasses import dataclass, field
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+ALLOWED_DTYPES = {"float32", "uint32", "uint8"}
 
 
 @dataclass
@@ -28,9 +27,9 @@ class AnimationChannel:
 
     name: str
     ids: list[str]
-    data: np.ndarray  # (n_frames, n_ids * stride)
+    data: np.ndarray  # (n_frames, n_ids, stride) or (n_frames, n_ids) for stride=1
     dtype: str  # "float32", "uint32", "uint8"
-    stride: int  # elements per object per frame (16 for transforms, 1 for scalars)
+    stride: int  # elements per object per frame (16 for 4x4 matrices, 1 for scalars)
     metadata: dict | None  # e.g. {"colormap": [0x44AA44, 0xFF3333]}
 
 
@@ -154,6 +153,10 @@ class Animation:
             stride: Elements per object per frame (16 for 4x4 matrices, 1 for scalars).
             metadata: Extra info sent in the header (e.g. colormap for indexed colors).
         """
+        if dtype not in ALLOWED_DTYPES:
+            raise ValueError(
+                f"Unsupported dtype {dtype!r}. Allowed: {sorted(ALLOWED_DTYPES)}"
+            )
         # Replace existing channel with same name (prevents duplicates)
         self._channels = [ch for ch in self._channels if ch.name != name]
         self._channels.append(
