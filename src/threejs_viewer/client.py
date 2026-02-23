@@ -311,6 +311,10 @@ class ViewerClient:
         id: str,
         path_or_bytes: Union[str, Path, bytes],
         format: str = "stl",
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
     ) -> None:
         """
         Add a 3D model to the scene by sending file bytes over WebSocket.
@@ -319,6 +323,10 @@ class ViewerClient:
             id: Unique identifier for the object
             path_or_bytes: Path to mesh file, or raw mesh bytes
             format: Model format (stl, gltf, glb, obj, fbx, dae, ply, 3ds)
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
         """
         if isinstance(path_or_bytes, bytes):
             mesh_bytes = path_or_bytes
@@ -328,10 +336,20 @@ class ViewerClient:
                 raise FileNotFoundError(f"Mesh file not found: {path}")
             mesh_bytes = path.read_bytes()
 
-        self._send_binary(
-            {"type": "add_model_binary", "id": id, "format": format},
-            mesh_bytes,
-        )
+        header = {"type": "add_model_binary", "id": id, "format": format}
+        if matrix:
+            header["transform"] = {"matrix": matrix}
+        elif position or rotation or scale:
+            transform = {}
+            if position:
+                transform["position"] = position
+            if rotation:
+                transform["rotation"] = rotation
+            if scale:
+                transform["scale"] = scale
+            header["transform"] = transform
+
+        self._send_binary(header, mesh_bytes)
 
     def add_polyline(
         self,
