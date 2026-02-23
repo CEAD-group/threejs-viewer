@@ -5,8 +5,8 @@ Loads a GLB model and pulses its opacity using the binary opacity animation
 channel. Also shows primitives with initial opacity.
 
 Demonstrates:
+- opacity parameter on primitives (add_sphere, add_box, add_cylinder)
 - set_opacity() for one-shot opacity changes
-- opacity parameter on primitives (add_sphere, add_box)
 - Binary opacity animation channel for smooth pulsing
 
 Run: uv run python examples/12_transparency.py
@@ -78,6 +78,9 @@ v.add_cylinder(
     opacity=0.4,
     position=[0, -2, 0.5],
 )
+
+# One-shot opacity change (before animation takes over)
+v.set_opacity("helmet", 0.5)
 
 # Animate: pulse helmet opacity + keep primitives at varying opacity
 duration = 6.0
