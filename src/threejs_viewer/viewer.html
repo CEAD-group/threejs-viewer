@@ -347,17 +347,15 @@
             animationPlaying = false;
             lastAnimationUpdate = performance.now();
 
-            // Pre-build object reference array for binary animations (avoids Map.get per object per frame)
-            if (animation.binaryTransforms && animation.objectIds) {
-                const refs = new Array(animation.nObjects);
-                for (let i = 0; i < animation.nObjects; i++) {
-                    const obj = objects.get(animation.objectIds[i]);
-                    refs[i] = obj || null;
-                    if (obj) {
-                        obj.matrixAutoUpdate = false;
-                    }
+            // Pre-build object reference arrays for each binary channel
+            if (animation.channels) {
+                for (const [name, ch] of Object.entries(animation.channels)) {
+                    ch.refs = ch.ids.map(id => {
+                        const obj = objects.get(id);
+                        if (obj && name === 'transforms') obj.matrixAutoUpdate = false;
+                        return obj || null;
+                    });
                 }
-                animation.objectRefs = refs;
             }
 
             // Pre-compute frame time step for O(1) frame lookup (assumes uniform FPS)
@@ -417,34 +415,100 @@
             animControlsEl.classList.remove('visible');
         }
 
+        // Channel apply functions — keyed by channel name
+        const CHANNEL_APPLY = {
+            transforms(ch, refs, base) {
+                const nObj = ch.ids.length;
+                for (let i = 0; i < nObj; i++) {
+                    let obj = refs[i];
+                    if (!obj) {
+                        obj = objects.get(ch.ids[i]);
+                        if (obj) { refs[i] = obj; obj.matrixAutoUpdate = false; }
+                    }
+                    if (obj) {
+                        obj.matrix.fromArray(ch.data, base + i * 16);
+                        obj.matrixWorldNeedsUpdate = true;
+                    }
+                }
+            },
+
+            colors(ch, refs, base) {
+                const nObj = ch.ids.length;
+                const colormap = ch.colormap;
+                for (let i = 0; i < nObj; i++) {
+                    const raw = ch.data[base + i];
+                    const color = colormap ? colormap[raw] : raw;
+                    let obj = refs[i];
+                    if (!obj) { obj = objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                    if (obj) {
+                        obj.traverse(child => {
+                            if (child.material) child.material.color.setHex(color);
+                        });
+                    }
+                }
+            },
+
+            visibility(ch, refs, base) {
+                const nObj = ch.ids.length;
+                for (let i = 0; i < nObj; i++) {
+                    let obj = refs[i];
+                    if (!obj) { obj = objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                    if (obj) obj.visible = (ch.data[base + i] === 1);
+                }
+            },
+
+            draw_ranges(ch, refs, base) {
+                const nObj = ch.ids.length;
+                for (let i = 0; i < nObj; i++) {
+                    setDrawRange(ch.ids[i], ch.data[base + i]);
+                }
+            },
+
+            opacity(ch, refs, base) {
+                const nObj = ch.ids.length;
+                for (let i = 0; i < nObj; i++) {
+                    const val = ch.data[base + i];
+                    let obj = refs[i];
+                    if (!obj) { obj = objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                    if (obj) {
+                        obj.traverse(child => {
+                            if (child.material) {
+                                child.material.transparent = val < 1;
+                                child.material.opacity = val;
+                            }
+                        });
+                    }
+                }
+            },
+        };
+
         function applyFrame(frameIndex) {
             if (!animation || frameIndex < 0 || frameIndex >= animation.frames.length) return;
 
             const frame = animation.frames[frameIndex];
 
-            // Apply transforms
-            if (animation.binaryTransforms) {
-                // Fast path: read directly from Float32Array with pre-built object refs
-                const floatData = animation.binaryTransforms;
-                const refs = animation.objectRefs;
-                const nObjects = animation.nObjects;
-                const baseOffset = frameIndex * nObjects * 16;
-                for (let oi = 0; oi < nObjects; oi++) {
-                    let obj = refs[oi];
-                    if (!obj) {
-                        // Lazily resolve objects that loaded after animation started
-                        obj = objects.get(animation.objectIds[oi]);
-                        if (obj) {
-                            refs[oi] = obj;
-                            obj.matrixAutoUpdate = false;
-                        }
-                    }
-                    if (obj) {
-                        obj.matrix.fromArray(floatData, baseOffset + oi * 16);
-                        obj.matrixWorldNeedsUpdate = true;
+            // Apply binary channels
+            if (animation.channels) {
+                // Restore baseline visibility before applying visibility channel
+                if (animation.channels.visibility) {
+                    for (const [id, baselineVisible] of baselineVisibility) {
+                        const obj = objects.get(id);
+                        if (obj) obj.visible = baselineVisible;
                     }
                 }
-            } else if (frame.transforms) {
+
+                for (const [name, ch] of Object.entries(animation.channels)) {
+                    const applyFn = CHANNEL_APPLY[name];
+                    if (applyFn) {
+                        const nObj = ch.ids.length;
+                        const base = frameIndex * nObj * ch.stride;
+                        applyFn(ch, ch.refs, base);
+                    }
+                }
+            }
+
+            // Apply JSON-based frame channels (sparse per-frame metadata)
+            if (frame.transforms) {
                 for (const [id, matrix] of Object.entries(frame.transforms)) {
                     const obj = objects.get(id);
                     if (obj) {
@@ -455,38 +519,31 @@
                 }
             }
 
-            // Apply colors
             if (frame.colors) {
                 for (const [id, color] of Object.entries(frame.colors)) {
                     const obj = objects.get(id);
                     if (obj) {
                         obj.traverse((child) => {
-                            if (child.material) {
-                                child.material.color.setHex(color);
-                            }
+                            if (child.material) child.material.color.setHex(color);
                         });
                     }
                 }
             }
 
-            // Apply visibility: first restore baseline, then apply frame-specific changes
-            // This ensures hidden objects reappear when scrubbing to frames that don't mention them
-            for (const [id, baselineVisible] of baselineVisibility) {
-                const obj = objects.get(id);
-                if (obj) {
-                    obj.visible = baselineVisible;
+            // Restore baseline visibility for JSON-based visibility (when no binary visibility channel)
+            if (!animation.channels || !animation.channels.visibility) {
+                for (const [id, baselineVisible] of baselineVisibility) {
+                    const obj = objects.get(id);
+                    if (obj) obj.visible = baselineVisible;
                 }
             }
             if (frame.visibility) {
                 for (const [id, visible] of Object.entries(frame.visibility)) {
                     const obj = objects.get(id);
-                    if (obj) {
-                        obj.visible = visible;
-                    }
+                    if (obj) obj.visible = visible;
                 }
             }
 
-            // Apply opacity
             if (frame.opacity) {
                 for (const [id, opacity] of Object.entries(frame.opacity)) {
                     const obj = objects.get(id);
@@ -501,25 +558,12 @@
                 }
             }
 
-            // Apply clip times (embedded GLTF animations)
             if (frame.clip_times) {
                 for (const [id, time] of Object.entries(frame.clip_times)) {
                     setClipTime(id, time);
                 }
             }
 
-            // Apply binary draw ranges (bulk)
-            if (animation.binaryDrawRanges) {
-                const drData = animation.binaryDrawRanges;
-                const drIds = animation.drawRangeIds;
-                const nDR = drIds.length;
-                const base = frameIndex * nDR;
-                for (let i = 0; i < nDR; i++) {
-                    setDrawRange(drIds[i], drData[base + i]);
-                }
-            }
-
-            // Apply draw ranges (visibility fraction — sparse overrides)
             if (frame.draw_ranges) {
                 for (const [id, value] of Object.entries(frame.draw_ranges)) {
                     setDrawRange(id, value);
@@ -960,7 +1004,15 @@
             ws.onerror = () => {};
 
             ws.onmessage = async (event) => {
+                const tParse = performance.now();
                 const data = JSON.parse(event.data);
+                const parseMs = performance.now() - tParse;
+                if (parseMs > 200) {
+                    console.warn(
+                        `JSON.parse took ${parseMs.toFixed(0)}ms (${(event.data.length / 1024 / 1024).toFixed(1)}MB). ` +
+                        `Consider using binary channels (animation.add_channel()) for large animation data.`
+                    );
+                }
 
                 switch (data.type) {
                     case 'add_object':
@@ -1010,22 +1062,34 @@
                                 const t1 = performance.now();
                                 console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
 
-                                const objectIds = data.object_ids;
-                                const nObjects = objectIds.length;
                                 const nFrames = data.frame_count;
 
-                                // Split binary: transforms then optional draw_ranges
-                                const nTransformFloats = nFrames * nObjects * 16;
-                                const transformData = new Float32Array(buffer, 0, nTransformFloats);
+                                // Parse generic binary channels from manifest
+                                const DTYPE_INFO = {
+                                    float32: { ArrayType: Float32Array, bytes: 4 },
+                                    uint32:  { ArrayType: Uint32Array,  bytes: 4 },
+                                    uint8:   { ArrayType: Uint8Array,   bytes: 1 },
+                                };
 
-                                let drawRangeData = null;
-                                let drawRangeIds = null;
-                                if (data.draw_range_ids) {
-                                    drawRangeIds = data.draw_range_ids;
-                                    const drByteOffset = nTransformFloats * 4;
-                                    drawRangeData = new Float32Array(buffer, drByteOffset);
+                                let byteOffset = 0;
+                                const channels = {};
+                                if (data.channels) {
+                                    for (const ch of data.channels) {
+                                        const info = DTYPE_INFO[ch.dtype];
+                                        const count = nFrames * ch.ids.length * ch.stride;
+                                        channels[ch.name] = {
+                                            data: new info.ArrayType(buffer, byteOffset, count),
+                                            ids: ch.ids,
+                                            stride: ch.stride,
+                                            refs: null,
+                                            colormap: ch.colormap || null,
+                                        };
+                                        byteOffset += count * info.bytes;
+                                    }
                                 }
 
+                                // Build sparse frames from frames_meta
+                                const tMeta = performance.now();
                                 const metaByFrame = {};
                                 if (data.frames_meta) {
                                     for (const meta of data.frames_meta) {
@@ -1047,17 +1111,22 @@
                                     frames.push(frame);
                                 }
 
+                                const metaMs = performance.now() - tMeta;
+                                if (metaMs > 500) {
+                                    console.warn(
+                                        `frames_meta processing took ${metaMs.toFixed(0)}ms. ` +
+                                        `Consider using animation.add_channel() on the Python side ` +
+                                        `for colors/visibility/opacity/draw_ranges for much faster transfer.`
+                                    );
+                                }
+
                                 loadAnimation({
                                     duration: data.duration,
                                     fps: data.fps,
                                     loop: data.loop,
                                     frames: frames,
                                     markers: data.markers || [],
-                                    binaryTransforms: transformData,
-                                    objectIds: objectIds,
-                                    nObjects: nObjects,
-                                    binaryDrawRanges: drawRangeData,
-                                    drawRangeIds: drawRangeIds,
+                                    channels: channels,
                                 });
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
