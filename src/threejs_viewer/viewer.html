@@ -1167,7 +1167,10 @@
                                     format: data.format || 'stl'
                                 });
                                 const obj = objects.get(data.id);
-                                if (obj) obj.userData.blobUrl = blobUrl;
+                                if (obj) {
+                                    obj.userData.blobUrl = blobUrl;
+                                    if (data.transform) updateTransform(data.id, data.transform);
+                                }
                             } catch (e) {
                                 console.error(`Error loading model via HTTP:`, e);
                             }
