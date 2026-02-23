@@ -470,14 +470,7 @@
                     const val = ch.data[base + i];
                     let obj = refs[i];
                     if (!obj) { obj = objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
-                    if (obj) {
-                        obj.traverse(child => {
-                            if (child.material) {
-                                child.material.transparent = val < 1;
-                                child.material.opacity = val;
-                            }
-                        });
-                    }
+                    if (obj) applyOpacity(obj, val);
                 }
             },
         };
@@ -549,14 +542,7 @@
             if (frame.opacity) {
                 for (const [id, opacity] of Object.entries(frame.opacity)) {
                     const obj = objects.get(id);
-                    if (obj) {
-                        obj.traverse((child) => {
-                            if (child.material) {
-                                child.material.transparent = opacity < 1;
-                                child.material.opacity = opacity;
-                            }
-                        });
-                    }
+                    if (obj) applyOpacity(obj, opacity);
                 }
             }
 
@@ -800,17 +786,41 @@
         function createMaterial(params) {
             const color = params.color || 0x4a90d9;
             const materialType = params.materialType || 'standard';
+            const opacity = params.opacity != null ? params.opacity : 1;
+            const transparent = opacity < 1;
 
             switch (materialType) {
                 case 'basic':
-                    return new THREE.MeshBasicMaterial({ color });
+                    return new THREE.MeshBasicMaterial({ color, opacity, transparent });
                 case 'phong':
-                    return new THREE.MeshPhongMaterial({ color });
+                    return new THREE.MeshPhongMaterial({ color, opacity, transparent });
                 case 'lambert':
-                    return new THREE.MeshLambertMaterial({ color });
+                    return new THREE.MeshLambertMaterial({ color, opacity, transparent });
                 default:
-                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3, envMapIntensity: 0 });
+                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3, envMapIntensity: 0, opacity, transparent });
             }
+        }
+
+        // Set opacity on all materials of an object (handles GLB PBR materials)
+        function setOpacity(id, opacity) {
+            const obj = objects.get(id);
+            if (!obj) return;
+            applyOpacity(obj, opacity);
+        }
+
+        function applyOpacity(obj, opacity) {
+            obj.traverse(child => {
+                if (!child.material) return;
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const mat of mats) {
+                    const wasTransparent = mat.transparent;
+                    mat.transparent = opacity < 1;
+                    mat.opacity = opacity;
+                    mat.depthWrite = opacity >= 1;
+                    // Three.js requires needsUpdate when transparent flag changes
+                    if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
+                }
+            });
         }
 
         // Add object to scene
@@ -969,10 +979,13 @@
             }
         }
 
-        // Batch update transforms (for 60fps updates)
+        // Batch update transforms + optional opacity (for 60fps updates)
         function batchUpdate(transforms) {
             for (const [id, transform] of Object.entries(transforms)) {
                 updateTransform(id, transform);
+                if (transform.opacity != null) {
+                    setOpacity(id, transform.opacity);
+                }
             }
         }
 
@@ -1043,7 +1056,11 @@
                                     child.material.color.setHex(data.color);
                                 }
                             });
+                            if (data.opacity != null) applyOpacity(colorObj, data.opacity);
                         }
+                        break;
+                    case 'set_opacity':
+                        setOpacity(data.id, data.opacity);
                         break;
                     case 'list_objects':
                         ws.send(JSON.stringify({
@@ -1150,7 +1167,10 @@
                                     format: data.format || 'stl'
                                 });
                                 const obj = objects.get(data.id);
-                                if (obj) obj.userData.blobUrl = blobUrl;
+                                if (obj) {
+                                    obj.userData.blobUrl = blobUrl;
+                                    if (data.transform) updateTransform(data.id, data.transform);
+                                }
                             } catch (e) {
                                 console.error(`Error loading model via HTTP:`, e);
                             }
