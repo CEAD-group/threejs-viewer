@@ -169,6 +169,7 @@ class ViewerClient:
         height: float = 1,
         depth: float = 1,
         color: int = 0x4A90D9,
+        opacity: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
@@ -177,7 +178,13 @@ class ViewerClient:
         self._add_primitive(
             id,
             "box",
-            {"width": width, "height": height, "depth": depth, "color": color},
+            {
+                "width": width,
+                "height": height,
+                "depth": depth,
+                "color": color,
+                "opacity": opacity,
+            },
             position,
             rotation,
             scale,
@@ -188,13 +195,19 @@ class ViewerClient:
         id: str,
         radius: float = 0.5,
         color: int = 0x4A90D9,
+        opacity: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a sphere primitive to the scene."""
         self._add_primitive(
-            id, "sphere", {"radius": radius, "color": color}, position, rotation, scale
+            id,
+            "sphere",
+            {"radius": radius, "color": color, "opacity": opacity},
+            position,
+            rotation,
+            scale,
         )
 
     def add_cylinder(
@@ -204,6 +217,7 @@ class ViewerClient:
         radius_bottom: float = 0.5,
         height: float = 1,
         color: int = 0x4A90D9,
+        opacity: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
@@ -217,6 +231,7 @@ class ViewerClient:
                 "radiusBottom": radius_bottom,
                 "height": height,
                 "color": color,
+                "opacity": opacity,
             },
             position,
             rotation,
@@ -229,6 +244,7 @@ class ViewerClient:
         radius: float = 0.25,
         length: float = 0.5,
         color: int = 0x4A90D9,
+        opacity: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
@@ -237,7 +253,7 @@ class ViewerClient:
         self._add_primitive(
             id,
             "capsule",
-            {"radius": radius, "length": length, "color": color},
+            {"radius": radius, "length": length, "color": color, "opacity": opacity},
             position,
             rotation,
             scale,
@@ -660,9 +676,16 @@ class ViewerClient:
         """Set object visibility."""
         self._send({"type": "set_visibility", "id": id, "visible": visible})
 
-    def set_color(self, id: str, color: int):
-        """Set object material color."""
-        self._send({"type": "set_color", "id": id, "color": color})
+    def set_color(self, id: str, color: int, opacity: float | None = None):
+        """Set object material color, and optionally opacity (0.0-1.0)."""
+        msg = {"type": "set_color", "id": id, "color": color}
+        if opacity is not None:
+            msg["opacity"] = float(opacity)
+        self._send(msg)
+
+    def set_opacity(self, id: str, opacity: float):
+        """Set object material opacity (0.0 = invisible, 1.0 = fully opaque)."""
+        self._send({"type": "set_opacity", "id": id, "opacity": float(opacity)})
 
     def set_clip_time(self, id: str, time: float):
         """Seek embedded GLTF/GLB animation clips to a specific time (seconds)."""
