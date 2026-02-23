@@ -100,24 +100,9 @@ all_opacity = np.column_stack(
     ]
 ).astype(np.float32)
 
-# Identity transforms (objects stay in place)
-transforms = np.zeros((n_frames, len(object_ids), 16), dtype=np.float32)
-transforms[:, :, [0, 5, 10, 15]] = 1.0
-# Helmet at z=1
-transforms[:, 0, 14] = 1.0
-# Sphere at (-2, 0, 0.5)
-transforms[:, 1, 12] = -2.0
-transforms[:, 1, 14] = 0.5
-# Box at (2, 0, 0.5)
-transforms[:, 2, 12] = 2.0
-transforms[:, 2, 14] = 0.5
-# Cylinder at (0, -2, 0.5)
-transforms[:, 3, 13] = -2.0
-transforms[:, 3, 14] = 0.5
-
+# Opacity-only animation — no transforms needed, objects stay where they were placed
 animation = Animation(loop=True)
 animation.set_frame_times(frame_times)
-animation.set_transform_data(object_ids, transforms)
 animation.add_channel("opacity", object_ids, all_opacity, dtype="float32")
 
 animation.add_marker(0.0, "Opaque", color=0x00FF00)

@@ -470,14 +470,7 @@
                     const val = ch.data[base + i];
                     let obj = refs[i];
                     if (!obj) { obj = objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
-                    if (obj) {
-                        obj.traverse(child => {
-                            if (child.material) {
-                                child.material.transparent = val < 1;
-                                child.material.opacity = val;
-                            }
-                        });
-                    }
+                    if (obj) applyOpacity(obj, val);
                 }
             },
         };
@@ -549,14 +542,7 @@
             if (frame.opacity) {
                 for (const [id, opacity] of Object.entries(frame.opacity)) {
                     const obj = objects.get(id);
-                    if (obj) {
-                        obj.traverse((child) => {
-                            if (child.material) {
-                                child.material.transparent = opacity < 1;
-                                child.material.opacity = opacity;
-                            }
-                        });
-                    }
+                    if (obj) applyOpacity(obj, opacity);
                 }
             }
 
@@ -815,14 +801,24 @@
             }
         }
 
-        // Set opacity on all materials of an object
+        // Set opacity on all materials of an object (handles GLB PBR materials)
         function setOpacity(id, opacity) {
             const obj = objects.get(id);
             if (!obj) return;
+            applyOpacity(obj, opacity);
+        }
+
+        function applyOpacity(obj, opacity) {
             obj.traverse(child => {
-                if (child.material) {
-                    child.material.transparent = opacity < 1;
-                    child.material.opacity = opacity;
+                if (!child.material) return;
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const mat of mats) {
+                    const wasTransparent = mat.transparent;
+                    mat.transparent = opacity < 1;
+                    mat.opacity = opacity;
+                    mat.depthWrite = opacity >= 1;
+                    // Three.js requires needsUpdate when transparent flag changes
+                    if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
                 }
             });
         }
@@ -1058,12 +1054,9 @@
                             colorObj.traverse((child) => {
                                 if (child.material) {
                                     child.material.color.setHex(data.color);
-                                    if (data.opacity != null) {
-                                        child.material.transparent = data.opacity < 1;
-                                        child.material.opacity = data.opacity;
-                                    }
                                 }
                             });
+                            if (data.opacity != null) applyOpacity(colorObj, data.opacity);
                         }
                         break;
                     case 'set_opacity':
