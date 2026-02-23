@@ -694,7 +694,7 @@ class ViewerClient:
         """Set object visibility."""
         self._send({"type": "set_visibility", "id": id, "visible": visible})
 
-    def set_color(self, id: str, color: int, opacity: float | None = None):
+    def set_color(self, id: str, color: int, opacity: Optional[float] = None):
         """Set object material color, and optionally opacity (0.0-1.0)."""
         msg = {"type": "set_color", "id": id, "color": color}
         if opacity is not None:
