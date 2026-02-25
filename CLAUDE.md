@@ -45,7 +45,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - **Looping mode**: Pre-computed frames with interactive playback (`load_animation()`)
 
 ### Supported Object Types
-- Primitives: box, sphere, cylinder, plane, cone, torus, capsule
+- Primitives: box, sphere, cylinder, plane, cone, torus, capsule (with optional roughness/metalness)
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
 - Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
 - Beads: toolpath extrusion via `add_bead()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
@@ -80,3 +80,5 @@ Binary channels and Frame-based JSON can coexist (e.g. binary transforms + JSON 
 - `09_animated_glb.py` - Embedded GLTF animation via clip_times (AnimatedMorphCube + orbiting Avocado)
 - `10_animation_stress_test.py` - Animation stress test (520 objects × 2499 frames, vectorized numpy)
 - `11_toolpath.py` - Spiral vase toolpath with draw_range animation (polyline + bead mesh + nozzles, 800k points, alternating layer colors, binary animation channels)
+- `12_transparency.py` - Transparency and opacity control (set_opacity, set_color with opacity)
+- `13_material_properties.py` - PBR material properties (roughness/metalness grid on primitives)
