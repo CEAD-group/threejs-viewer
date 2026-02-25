@@ -170,25 +170,25 @@ class ViewerClient:
         depth: float = 1,
         color: int = 0x4A90D9,
         opacity: float = 1.0,
+        roughness: Optional[float] = None,
+        metalness: Optional[float] = None,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a box primitive to the scene."""
-        self._add_primitive(
-            id,
-            "box",
-            {
-                "width": width,
-                "height": height,
-                "depth": depth,
-                "color": color,
-                "opacity": opacity,
-            },
-            position,
-            rotation,
-            scale,
-        )
+        params = {
+            "width": width,
+            "height": height,
+            "depth": depth,
+            "color": color,
+            "opacity": opacity,
+        }
+        if roughness is not None:
+            params["roughness"] = roughness
+        if metalness is not None:
+            params["metalness"] = metalness
+        self._add_primitive(id, "box", params, position, rotation, scale)
 
     def add_sphere(
         self,
@@ -196,19 +196,19 @@ class ViewerClient:
         radius: float = 0.5,
         color: int = 0x4A90D9,
         opacity: float = 1.0,
+        roughness: Optional[float] = None,
+        metalness: Optional[float] = None,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a sphere primitive to the scene."""
-        self._add_primitive(
-            id,
-            "sphere",
-            {"radius": radius, "color": color, "opacity": opacity},
-            position,
-            rotation,
-            scale,
-        )
+        params = {"radius": radius, "color": color, "opacity": opacity}
+        if roughness is not None:
+            params["roughness"] = roughness
+        if metalness is not None:
+            params["metalness"] = metalness
+        self._add_primitive(id, "sphere", params, position, rotation, scale)
 
     def add_cylinder(
         self,
@@ -218,25 +218,25 @@ class ViewerClient:
         height: float = 1,
         color: int = 0x4A90D9,
         opacity: float = 1.0,
+        roughness: Optional[float] = None,
+        metalness: Optional[float] = None,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a cylinder primitive to the scene."""
-        self._add_primitive(
-            id,
-            "cylinder",
-            {
-                "radiusTop": radius_top,
-                "radiusBottom": radius_bottom,
-                "height": height,
-                "color": color,
-                "opacity": opacity,
-            },
-            position,
-            rotation,
-            scale,
-        )
+        params = {
+            "radiusTop": radius_top,
+            "radiusBottom": radius_bottom,
+            "height": height,
+            "color": color,
+            "opacity": opacity,
+        }
+        if roughness is not None:
+            params["roughness"] = roughness
+        if metalness is not None:
+            params["metalness"] = metalness
+        self._add_primitive(id, "cylinder", params, position, rotation, scale)
 
     def add_capsule(
         self,
@@ -245,19 +245,24 @@ class ViewerClient:
         length: float = 0.5,
         color: int = 0x4A90D9,
         opacity: float = 1.0,
+        roughness: Optional[float] = None,
+        metalness: Optional[float] = None,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene."""
-        self._add_primitive(
-            id,
-            "capsule",
-            {"radius": radius, "length": length, "color": color, "opacity": opacity},
-            position,
-            rotation,
-            scale,
-        )
+        params = {
+            "radius": radius,
+            "length": length,
+            "color": color,
+            "opacity": opacity,
+        }
+        if roughness is not None:
+            params["roughness"] = roughness
+        if metalness is not None:
+            params["metalness"] = metalness
+        self._add_primitive(id, "capsule", params, position, rotation, scale)
 
     def add_model(
         self,
