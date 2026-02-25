@@ -252,7 +252,12 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene."""
-        params = {"radius": radius, "length": length, "color": color, "opacity": opacity}
+        params = {
+            "radius": radius,
+            "length": length,
+            "color": color,
+            "opacity": opacity,
+        }
         if roughness is not None:
             params["roughness"] = roughness
         if metalness is not None:
