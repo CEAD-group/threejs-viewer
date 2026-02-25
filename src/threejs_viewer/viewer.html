@@ -288,7 +288,7 @@
         envScene.add(sidePanel2);
 
         scene.environment = pmremGenerator.fromScene(envScene).texture;
-        scene.environmentIntensity = 2.0;
+        scene.environmentIntensity = 1.0;
         pmremGenerator.dispose();
 
         const controls = new OrbitControls(camera, renderer.domElement);
@@ -799,7 +799,7 @@
                 default:
                     const roughness = params.roughness != null ? params.roughness : 0.7;
                     const metalness = params.metalness != null ? params.metalness : 0.3;
-                    return new THREE.MeshStandardMaterial({ color, roughness, metalness, envMapIntensity: 0, opacity, transparent });
+                    return new THREE.MeshStandardMaterial({ color, roughness, metalness, opacity, transparent });
             }
         }
 
