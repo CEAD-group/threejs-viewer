@@ -19,7 +19,14 @@ v.stop_animation()  # Clear any previous animation UI
 
 # Ground
 v.add_box(
-    "ground", width=15, height=15, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+    "ground",
+    width=15,
+    height=15,
+    depth=0.02,
+    color=0x333333,
+    position=[0, 0, -0.01],
+    roughness=0.9,
+    metalness=0.0,
 )
 
 # Create a grid of bouncing spheres
@@ -39,7 +46,14 @@ for i in range(GRID_SIZE):
         b = 128
         color = (r << 16) | (g << 8) | b
 
-        v.add_sphere(sphere_id, radius=0.3, color=color, position=[x, y, 0.3])
+        v.add_sphere(
+            sphere_id,
+            radius=0.3,
+            color=color,
+            position=[x, y, 0.3],
+            roughness=0.35,
+            metalness=0.5,
+        )
         spheres.append(
             {
                 "id": sphere_id,
@@ -51,7 +65,16 @@ for i in range(GRID_SIZE):
         )
 
 # Also add a rotating box in the center
-v.add_box("center_box", width=1, height=1, depth=1, color=0xFFAA00, position=[0, 0, 2])
+v.add_box(
+    "center_box",
+    width=1,
+    height=1,
+    depth=1,
+    color=0xFFAA00,
+    position=[0, 0, 2],
+    roughness=0.15,
+    metalness=0.9,
+)
 
 print(f"Streaming {len(spheres)} spheres at ~60 fps. Press Ctrl+C to exit.")
 

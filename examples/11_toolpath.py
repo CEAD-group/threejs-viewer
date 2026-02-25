@@ -1,9 +1,8 @@
 """
 Toolpath Visualization — draw_range + Bead demo
 
-Generates a spiral vase toolpath and shows it two ways side by side:
-- Left: polyline with animated draw_range (path grows over time)
-- Right: bead mesh with animated draw_range + nozzle following the tip
+Generates a spiral vase toolpath with animated draw_range and a nozzle
+following the tip.
 
 Run: uv run python examples/11_toolpath.py
 """
@@ -60,28 +59,12 @@ v.clear()
 
 # Ground plane
 v.add_box(
-    "ground", width=16, height=8, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+    "ground", width=8, height=8, depth=0.02, color=0x333333, position=[0, 0, -0.01]
 )
 
-# Generate one set of points, offset for each display
-spacing = 5.0
+# Generate toolpath
 points = spiral_vase()
 n_points = len(points)
-
-points_line = points.copy()
-points_line[:, 0] -= spacing / 2
-
-points_tube = points.copy()
-points_tube[:, 0] += spacing / 2
-
-# Left: polyline (N points → N-1 segments)
-v.add_polyline(
-    "path_line",
-    points_line,
-    colors=np.linspace(0, 1, n_points),
-    colormap="turbo",
-    line_width=2,
-)
 
 # Per-point layer colors: alternating every turn
 n_turns = 80
@@ -92,26 +75,29 @@ bead_colors = np.where((layer_index % 2 == 0)[:, None], color_a, color_b).astype
     np.float32
 )
 
-# Right: bead (extruded bevelled rectangle cross-section)
+# Bead (extruded bevelled rectangle cross-section)
 v.add_bead(
     "path_tube",
-    points_tube,
+    points,
     width=0.3,
     height=0.08,
     colors=bead_colors,
+    roughness=0.4,
+    metalness=0.15,
 )
 
-# Nozzles: tapered cylinders hovering above each path tip
+# Nozzle: tapered cylinder hovering above the path tip
 nozzle_height = 0.8
 nozzle_gap = 0.05  # gap between nozzle bottom and print surface
-for nozzle_id in ("nozzle_line", "nozzle_tube"):
-    v.add_cylinder(
-        nozzle_id,
-        radius_top=0.25,
-        radius_bottom=0.08,
-        height=nozzle_height,
-        color=0xAAAAAA,
-    )
+v.add_cylinder(
+    "nozzle",
+    radius_top=0.25,
+    radius_bottom=0.08,
+    height=nozzle_height,
+    color=0xCD7F32,
+    roughness=0.3,
+    metalness=0.8,
+)
 
 # Animate draw_range + nozzle position (vectorized)
 duration = 3600.0
@@ -122,45 +108,40 @@ print(f"Pre-computing {n_frames} frames...")
 
 # Frame times and draw_range fractions
 frame_times = np.arange(n_frames) / fps
-fracs = np.clip(frame_times / duration, 0.005, 1.0)
+fracs = np.clip(frame_times / duration, 0.0, 1.0)
 
 # Path indices for each frame's nozzle position
 pt_indices = np.clip((fracs * (n_points - 1)).astype(int), 0, n_points - 1)
-tips_line = points_line[pt_indices]  # (n_frames, 3)
-tips_tube = points_tube[pt_indices]  # (n_frames, 3)
+tips = points[pt_indices]  # (n_frames, 3)
 
-# Object order: path_line, path_tube, nozzle_line, nozzle_tube
-object_ids = ["path_line", "path_tube", "nozzle_line", "nozzle_tube"]
-transforms = np.zeros((n_frames, 4, 16), dtype=np.float32)
+# Object order: path_tube, nozzle
+object_ids = ["path_tube", "nozzle"]
+transforms = np.zeros((n_frames, 2, 16), dtype=np.float32)
 
-# path_line and path_tube: identity matrices
+# path_tube: identity matrix
 transforms[:, 0, [0, 5, 10, 15]] = 1.0
-transforms[:, 1, [0, 5, 10, 15]] = 1.0
 
 # Nozzle rotation matrix (constant): Rot(+90° about X) in column-major
 # col0=[1,0,0,0], col1=[0,0,1,0], col2=[0,-1,0,0], col3=[x,y,z,1]
-nz_z_line = tips_line[:, 2] + nozzle_height / 2 + nozzle_gap
-nz_z_tube = tips_tube[:, 2] + nozzle_height / 2 + nozzle_gap
-
-for ni, (tips, nz_z) in enumerate([(tips_line, nz_z_line), (tips_tube, nz_z_tube)]):
-    m = transforms[:, 2 + ni]
-    m[:, 0] = 1.0  # col0.x
-    m[:, 5] = 0.0  # col1.y (cos90=0)
-    m[:, 6] = 1.0  # col1.z (sin90=1)
-    m[:, 9] = -1.0  # col2.y (-sin90=-1)
-    m[:, 10] = 0.0  # col2.z (cos90=0)
-    m[:, 12] = tips[:, 0]
-    m[:, 13] = tips[:, 1]
-    m[:, 14] = nz_z
-    m[:, 15] = 1.0
+nz_z = tips[:, 2] + nozzle_height / 2 + nozzle_gap
+m = transforms[:, 1]
+m[:, 0] = 1.0  # col0.x
+m[:, 5] = 0.0  # col1.y (cos90=0)
+m[:, 6] = 1.0  # col1.z (sin90=1)
+m[:, 9] = -1.0  # col2.y (-sin90=-1)
+m[:, 10] = 0.0  # col2.z (cos90=0)
+m[:, 12] = tips[:, 0]
+m[:, 13] = tips[:, 1]
+m[:, 14] = nz_z
+m[:, 15] = 1.0
 
 # Build animation — fully binary, no Python loop
 animation = Animation(loop=True)
 animation.set_frame_times(frame_times)
 animation.set_transform_data(object_ids, transforms)
 animation.set_draw_range_data(
-    ["path_line", "path_tube"],
-    np.column_stack([fracs, fracs]),
+    ["path_tube"],
+    fracs[:, None],
 )
 
 animation.add_marker(0.0, "Start", color=0x00FF00)
@@ -170,7 +151,7 @@ animation.add_marker(duration * 0.99, "Done", color=0xFF0000)
 v.load_animation(animation)
 
 print(f"Toolpath: {n_points} points, {animation.n_frames} frames at {fps} fps")
-print("Left: polyline | Right: bead + nozzle — both grow via draw_range animation.")
+print("Bead + nozzle — grows via draw_range animation.")
 print("Press Ctrl+C to exit.")
 
 try:
