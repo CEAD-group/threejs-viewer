@@ -31,7 +31,14 @@ v.clear()
 
 # Ground plane
 v.add_box(
-    "ground", width=10, height=10, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+    "ground",
+    width=10,
+    height=10,
+    depth=0.02,
+    color=0x333333,
+    position=[0, 0, -0.01],
+    roughness=0.9,
+    metalness=0.0,
 )
 
 # Curve parameters (interesting ratios create beautiful patterns)
@@ -55,9 +62,11 @@ v.add_polyline(
 
 # Add tracer + trail spheres (all same size — opacity does the fading)
 N_TRAIL = 8
-v.add_sphere("tracer", radius=0.15, color=0xFF4444)
+v.add_sphere("tracer", radius=0.15, color=0xFF4444, roughness=0.15, metalness=0.7)
 for i in range(N_TRAIL):
-    v.add_sphere(f"trail_{i}", radius=0.12, color=0xFF8888)
+    v.add_sphere(
+        f"trail_{i}", radius=0.12, color=0xFF8888, roughness=0.15, metalness=0.7
+    )
 
 # Pre-compute animation with binary channels
 duration = 10.0
