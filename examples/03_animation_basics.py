@@ -42,7 +42,9 @@ v = viewer()
 v.clear()
 
 # Create the sun (stationary)
-v.add_sphere("sun", radius=1.0, color=0xFFDD00, position=[0, 0, 0])
+v.add_sphere(
+    "sun", radius=1.0, color=0xFFDD00, position=[0, 0, 0], roughness=0.3, metalness=0.8
+)
 
 # Create planets
 planets = [
@@ -52,6 +54,8 @@ planets = [
         "color": 0x888888,
         "orbit_radius": 2.0,
         "period": 2.0,
+        "roughness": 0.6,
+        "metalness": 0.4,
     },
     {
         "id": "venus",
@@ -59,6 +63,8 @@ planets = [
         "color": 0xFFAA55,
         "orbit_radius": 3.0,
         "period": 3.5,
+        "roughness": 0.8,
+        "metalness": 0.1,
     },
     {
         "id": "earth",
@@ -66,6 +72,8 @@ planets = [
         "color": 0x4488FF,
         "orbit_radius": 4.5,
         "period": 5.0,
+        "roughness": 0.5,
+        "metalness": 0.2,
     },
     {
         "id": "mars",
@@ -73,14 +81,22 @@ planets = [
         "color": 0xFF4422,
         "orbit_radius": 6.0,
         "period": 7.0,
+        "roughness": 0.9,
+        "metalness": 0.05,
     },
 ]
 
 for planet in planets:
-    v.add_sphere(planet["id"], radius=planet["radius"], color=planet["color"])
+    v.add_sphere(
+        planet["id"],
+        radius=planet["radius"],
+        color=planet["color"],
+        roughness=planet["roughness"],
+        metalness=planet["metalness"],
+    )
 
 # Also add a moon orbiting Earth
-v.add_sphere("moon", radius=0.08, color=0xCCCCCC)
+v.add_sphere("moon", radius=0.08, color=0xCCCCCC, roughness=0.9, metalness=0.0)
 
 # Create animation frames
 duration = 10.0  # seconds

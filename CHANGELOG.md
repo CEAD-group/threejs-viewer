@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.6
+
+Enables environment map reflections on primitives and meshes, rebalances scene lighting.
+
+### Changes
+
+- **Environment map on all objects** — removed `envMapIntensity: 0` from `createMaterial()`, so primitives and meshes now receive the same environment reflections as GLB models
+- **Rebalanced environment intensity** — `scene.environmentIntensity` reduced from 2.0 to 1.0 to compensate
+- Examples updated to use `roughness`/`metalness` material properties
+- Fixed incorrect API references in README (`set_position` → `set_matrix`, `set_transforms` → `batch_update`)
+
 ## 0.0.5
 
 Adds PBR material control (`roughness`/`metalness`) to primitive methods, matching the existing `add_mesh()` API.
