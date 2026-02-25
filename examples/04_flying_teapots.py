@@ -67,7 +67,14 @@ TEAPOT_SCALE = 0.4  # Scale for the Three.js teapot model
 
 # Add ground plane
 v.add_box(
-    "ground", width=20, height=20, depth=0.05, color=0x2A2A2A, position=[0, 0, -0.025]
+    "ground",
+    width=20,
+    height=20,
+    depth=0.05,
+    color=0x2A2A2A,
+    position=[0, 0, -0.025],
+    roughness=0.9,
+    metalness=0.0,
 )
 
 # Add some reference pillars
@@ -81,6 +88,8 @@ for i in range(4):
         height=6,
         color=0x666666,
         position=[x, y, 3],
+        roughness=0.7,
+        metalness=0.1,
     )
 
 # Load teapots via websocket

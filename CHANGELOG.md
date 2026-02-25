@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.0.6
+
+Enables environment map reflections on primitives/meshes, rebalances scene lighting, and updates examples to use PBR material properties.
+
+### Viewer changes
+
+- **Environment map on all objects** — removed `envMapIntensity: 0` from `createMaterial()`, so primitives and meshes now receive the same environment reflections as GLB models
+- **Rebalanced environment intensity** — `scene.environmentIntensity` reduced from 2.0 to 1.0, since all objects now receive it (was doubled previously to compensate for primitives being excluded)
+
+### Updated examples
+
+- `01_primitives.py` — copper pillars (metalness=0.7), glossy spheres, matte ground
+- `03_animation_basics.py` — each planet has distinct material: metallic sun, dusty Mars, rocky Moon
+- `04_flying_teapots.py` — matte ground, concrete pillars
+- `05_lissajous_curves.py` — chrome ball-bearing tracer and trail spheres
+- `06_realtime_streaming.py` — metallic bouncing spheres, polished chrome center box
+- `11_toolpath.py` — simplified to bead mesh only (removed polyline side-by-side), bronze nozzle, glossy bead material
+
+### README
+
+- Fixed incorrect API references (`set_position` → `set_matrix`, `set_transforms` → `batch_update`)
+- Added `add_bead`, `set_opacity`, PBR material parameters, and transparency to usage examples
+- Updated feature list to reflect current capabilities
+- Added toolpath demo gif
+
 ## 0.0.5
 
 Adds PBR material control (`roughness`/`metalness`) to primitive methods, matching the existing `add_mesh()` API.
