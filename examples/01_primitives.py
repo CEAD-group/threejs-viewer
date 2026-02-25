@@ -17,14 +17,28 @@ v.stop_animation()
 
 # Add a ground plane (flat box)
 v.add_box(
-    "ground", width=10, height=10, depth=0.05, color=0x444444, position=[0, 0, -0.025]
+    "ground",
+    width=10,
+    height=10,
+    depth=0.05,
+    color=0x444444,
+    position=[0, 0, -0.025],
+    roughness=0.9,
+    metalness=0.0,
 )
 
 # Add colored spheres in a row
 colors = [0xFF0000, 0xFF7F00, 0xFFFF00, 0x00FF00, 0x0000FF, 0x8B00FF]
 for i, color in enumerate(colors):
     x = (i - 2.5) * 1.5
-    v.add_sphere(f"sphere_{i}", radius=0.4, color=color, position=[x, 0, 0.4])
+    v.add_sphere(
+        f"sphere_{i}",
+        radius=0.4,
+        color=color,
+        position=[x, 0, 0.4],
+        roughness=0.3,
+        metalness=0.2,
+    )
 
 for i in range(4):
     angle = i * math.pi / 4
@@ -38,6 +52,8 @@ for i in range(4):
         color=0x4A90D9,
         position=[x, y, 0.6],
         rotation=[0, 0, angle],
+        roughness=0.5,
+        metalness=0.1,
     )
 
 # Add cylinders as "pillars"
@@ -50,6 +66,8 @@ for i, (x, y) in enumerate(pillar_positions):
         height=2.0,
         color=0xB87333,  # Copper color
         position=[x, y, 1.0],
+        roughness=0.3,
+        metalness=0.7,
     )
 
 print("Scene created! Press Ctrl+C to exit.")

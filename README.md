@@ -2,17 +2,20 @@
 
 Lightweight Three.js viewer controlled from Python via WebSocket.
 
-![Demo](docs/demo.gif)
+![Toolpath demo](docs/toolpath_demo.gif)
 
 A Python client runs a WebSocket server that a browser-based Three.js viewer connects to. Designed for robotics visualization, scientific computing, and interactive 3D exploration.
+
+![VS Code integration](docs/demo.gif)
 
 ## Features
 
 - **Simple API**: Add primitives, load models, update transforms
-- **GLB/PBR support**: Load GLB models with PBR materials, studio environment lighting
-- **Embedded animations**: Drive GLTF skeletal/morph animations from Python via `clip_times`
+- **PBR materials**: Roughness, metalness, transparency and environment reflections on all objects
+- **GLB/PBR support**: Load GLB models with PBR materials, embedded skeletal/morph animations
 - **Animation support**: Pre-compute animations, scrub timeline, adjust playback speed
-- **Binary transfer**: Efficient loading of large meshes and polylines
+- **Binary channels**: Efficient transfer of large animations (100k+ objects × frames)
+- **Bead meshes**: Extruded toolpath visualization with per-layer colors and draw_range animation
 - **Auto-reconnect**: Browser reconnects automatically, animations persist
 - **Z-up coordinates**: Robotics convention (matches ROS, URDF)
 - **No build step**: Self-contained HTML viewer, just open in browser
@@ -51,29 +54,35 @@ threejs-viewer open
 ### Objects
 
 ```python
-# Primitives
-client.add_box("box1", width=1, height=2, depth=0.5, color=0x4A90D9)
-client.add_sphere("sphere1", radius=0.5, position=[2, 0, 0])
-client.add_cylinder("cyl1", radius_top=0.3, radius_bottom=0.5, height=1)
+# Primitives with PBR materials
+v.add_box("box1", width=1, height=2, depth=0.5, color=0x4A90D9, roughness=0.5, metalness=0.1)
+v.add_sphere("ball", radius=0.5, position=[2, 0, 0], roughness=0.3, metalness=0.7)
+v.add_cylinder("cyl1", radius_top=0.3, radius_bottom=0.5, height=1)
 
 # 3D models (binary transfer)
-client.add_model_binary("robot", "robot.stl", format="stl")
+v.add_model_binary("robot", "robot.stl", format="stl")
 
 # Polylines with colormaps
-client.add_polyline("path", points, colors=z_values, colormap="viridis", line_width=3)
+v.add_polyline("path", points, colors=z_values, colormap="viridis", line_width=3)
+
+# Bead mesh (extruded toolpath)
+v.add_bead("bead", points, width=0.3, height=0.08, colors=per_point_rgb)
+
+# Transparency
+v.set_opacity("box1", 0.5)
+v.set_color("ball", 0xFF0000, opacity=0.3)
 ```
 
 ### Transforms
 
 ```python
 # Single object
-client.set_position("box1", 1.0, 2.0, 0.5)
-client.set_matrix("box1", matrix_4x4.flatten().tolist())
+v.set_matrix("box1", matrix_4x4.flatten().tolist())
 
 # Batch update (efficient for 60fps)
-client.set_transforms({
-    "link1": matrix1.flatten().tolist(),
-    "link2": matrix2.flatten().tolist(),
+v.batch_update({
+    "link1": {"position": [1, 2, 0.5]},
+    "link2": {"position": [3, 0, 1], "rotation": [0, 0, 1.57]},
 })
 ```
 
