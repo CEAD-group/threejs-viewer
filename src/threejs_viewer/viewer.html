@@ -797,7 +797,9 @@
                 case 'lambert':
                     return new THREE.MeshLambertMaterial({ color, opacity, transparent });
                 default:
-                    return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3, envMapIntensity: 0, opacity, transparent });
+                    const roughness = params.roughness != null ? params.roughness : 0.7;
+                    const metalness = params.metalness != null ? params.metalness : 0.3;
+                    return new THREE.MeshStandardMaterial({ color, roughness, metalness, envMapIntensity: 0, opacity, transparent });
             }
         }
 
