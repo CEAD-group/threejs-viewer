@@ -56,7 +56,7 @@ v.add_cylinder(
 )
 
 print("Material properties demo loaded.")
-print(f"Sphere grid: roughness 0→1 (left→right), metalness 0→1 (bottom→top)")
+print("Sphere grid: roughness 0→1 (left→right), metalness 0→1 (bottom→top)")
 print("Left column: metallic box (shiny) and rough cylinder (matte)")
 
 time.sleep(0.5)
