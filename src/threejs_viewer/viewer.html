@@ -238,6 +238,9 @@
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
+        const VIEWER_VERSION = '0.0.7';
+        console.log(`threejs-viewer v${VIEWER_VERSION}`);
+
         // Scene setup
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x222222);
@@ -825,8 +828,23 @@
             });
         }
 
+        // Add object to parent or scene
+        function addToParentOrScene(obj, parentId) {
+            if (parentId) {
+                const parent = objects.get(parentId);
+                if (parent) {
+                    parent.add(obj);
+                } else {
+                    console.warn(`Parent '${parentId}' not found, adding to scene`);
+                    scene.add(obj);
+                }
+            } else {
+                scene.add(obj);
+            }
+        }
+
         // Add object to scene
-        async function addObject(id, objData) {
+        async function addObject(id, objData, parentId) {
             let obj;
 
             if (objData.primitive) {
@@ -872,7 +890,7 @@
                     obj.visible = false;
                 }
 
-                scene.add(obj);
+                addToParentOrScene(obj, parentId);
                 objects.set(id, obj);
             }
         }
@@ -936,11 +954,30 @@
             }
         }
 
-        // Delete object
+        // Delete object (and recursively remove children from registry)
         function deleteObject(id) {
             const obj = objects.get(id);
             if (obj) {
-                scene.remove(obj);
+                // Collect all registered child IDs before removal
+                const childIds = [];
+                obj.traverse((child) => {
+                    if (child !== obj && child.userData.id) {
+                        childIds.push(child.userData.id);
+                    }
+                });
+                // Remove children from registry and clean up their mixers
+                for (const childId of childIds) {
+                    objects.delete(childId);
+                    const childMixer = mixers.get(childId);
+                    if (childMixer) {
+                        childMixer.stopAllAction();
+                        mixers.delete(childId);
+                    }
+                }
+                // Remove from parent (scene or group)
+                if (obj.parent) {
+                    obj.parent.remove(obj);
+                }
                 objects.delete(id);
                 // Clean up animation mixer/clips
                 const mixer = mixers.get(id);
@@ -948,12 +985,11 @@
                     mixer.stopAllAction();
                     mixers.delete(id);
                 }
-                // Clean up blob URL if present
-                if (obj.userData.blobUrl) {
-                    URL.revokeObjectURL(obj.userData.blobUrl);
-                }
-                // Dispose geometry and materials
+                // Clean up blob URLs and dispose geometry/materials
                 obj.traverse((child) => {
+                    if (child.userData.blobUrl) {
+                        URL.revokeObjectURL(child.userData.blobUrl);
+                    }
                     if (child.geometry) child.geometry.dispose();
                     if (child.material) {
                         if (Array.isArray(child.material)) {
@@ -1010,6 +1046,7 @@
             ws.onopen = () => {
                 statusEl.textContent = 'Connected';
                 statusEl.className = 'connected';
+                ws.send(JSON.stringify({ type: 'hello', viewer_version: VIEWER_VERSION }));
             };
 
             ws.onclose = () => {
@@ -1032,8 +1069,27 @@
                 }
 
                 switch (data.type) {
+                    case 'hello':
+                        console.log(`Python client v${data.client_version}`);
+                        if (data.client_version !== VIEWER_VERSION) {
+                            console.warn(
+                                `Version mismatch: viewer v${VIEWER_VERSION}, client v${data.client_version}. ` +
+                                `Close this tab and re-open viewer.html to pick up the latest version.`
+                            );
+                        }
+                        break;
+                    case 'add_group': {
+                        const group = new THREE.Group();
+                        group.name = data.id;
+                        group.userData.id = data.id;
+                        if (data.transform) applyTransform(group, data.transform);
+                        if (data.visible === false) group.visible = false;
+                        addToParentOrScene(group, data.parent);
+                        objects.set(data.id, group);
+                        break;
+                    }
                     case 'add_object':
-                        await addObject(data.id, data.object);
+                        await addObject(data.id, data.object, data.parent);
                         break;
                     case 'update_transform':
                         updateTransform(data.id, data.transform);
@@ -1167,7 +1223,7 @@
                                 await addObject(data.id, {
                                     model: blobUrl,
                                     format: data.format || 'stl'
-                                });
+                                }, data.parent);
                                 const obj = objects.get(data.id);
                                 if (obj) {
                                     obj.userData.blobUrl = blobUrl;
@@ -1227,7 +1283,7 @@
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
                                 line.userData.maxInstanceCount = numPoints - 1;
-                                scene.add(line);
+                                addToParentOrScene(line, data.parent);
                                 objects.set(data.id, line);
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
@@ -1285,7 +1341,7 @@
                                 mesh.userData.id = data.id;
                                 mesh.userData.isMesh = true;
                                 mesh.userData.totalIndexCount = ni;
-                                scene.add(mesh);
+                                addToParentOrScene(mesh, data.parent);
                                 objects.set(data.id, mesh);
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                             } catch (e) {

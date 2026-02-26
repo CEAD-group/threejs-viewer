@@ -77,7 +77,8 @@ v.add_box(
     metalness=0.0,
 )
 
-# Add some reference pillars
+# Group reference pillars together
+v.add_group("pillars")
 for i in range(4):
     angle = i * math.pi / 2 + math.pi / 4
     x, y = 8 * math.cos(angle), 8 * math.sin(angle)
@@ -90,6 +91,7 @@ for i in range(4):
         position=[x, y, 3],
         roughness=0.7,
         metalness=0.1,
+        parent="pillars",
     )
 
 # Load teapots via websocket
