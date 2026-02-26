@@ -67,15 +67,6 @@ planets = [
         "metalness": 0.1,
     },
     {
-        "id": "earth",
-        "radius": 0.3,
-        "color": 0x4488FF,
-        "orbit_radius": 4.5,
-        "period": 5.0,
-        "roughness": 0.5,
-        "metalness": 0.2,
-    },
-    {
         "id": "mars",
         "radius": 0.2,
         "color": 0xFF4422,
@@ -95,9 +86,17 @@ for planet in planets:
         metalness=planet["metalness"],
     )
 
-# Use a group for Earth so the moon inherits Earth's orbit automatically
+# Earth system group — earth and moon are both children.
+# Animating the group moves both; moon only needs its local orbit offset.
 v.add_group("earth_system")
-# Moon as child of earth_system — only needs its local orbit offset
+v.add_sphere(
+    "earth",
+    radius=0.3,
+    color=0x4488FF,
+    roughness=0.5,
+    metalness=0.2,
+    parent="earth_system",
+)
 v.add_sphere(
     "moon",
     radius=0.08,
@@ -128,11 +127,12 @@ for i in range(n_frames):
         y = planet["orbit_radius"] * math.sin(angle)
         transforms[planet["id"]] = make_transform_matrix([x, y, 0])
 
-    # Earth system group follows Earth's orbit
+    # Earth system group — moves earth + moon together
     earth_angle = 2 * math.pi * t / 5.0
     earth_x = 4.5 * math.cos(earth_angle)
     earth_y = 4.5 * math.sin(earth_angle)
     transforms["earth_system"] = make_transform_matrix([earth_x, earth_y, 0])
+    # (earth sphere has no separate transform — it sits at origin within the group)
 
     # Moon only needs its LOCAL orbit offset — the group handles the rest
     moon_angle = 2 * math.pi * t / 0.8  # Fast orbit around earth
