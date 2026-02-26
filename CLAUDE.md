@@ -45,6 +45,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - **Looping mode**: Pre-computed frames with interactive playback (`load_animation()`)
 
 ### Supported Object Types
+- **Groups**: `add_group(id, parent=...)` — empty transform nodes for parent-child hierarchies. Children inherit parent transforms. All `add_*` methods accept an optional `parent` parameter.
 - Primitives: box, sphere, cylinder, plane, cone, torus, capsule (with optional roughness/metalness)
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
 - Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
@@ -82,3 +83,4 @@ Binary channels and Frame-based JSON can coexist (e.g. binary transforms + JSON 
 - `11_toolpath.py` - Spiral vase toolpath with draw_range animation (polyline + bead mesh + nozzles, 800k points, alternating layer colors, binary animation channels)
 - `12_transparency.py` - Transparency and opacity control (set_opacity, set_color with opacity)
 - `13_material_properties.py` - PBR material properties (roughness/metalness grid on primitives)
+- `14_grouping.py` - Object grouping with animated robot arm (nested parent-child hierarchy, local joint transforms)
