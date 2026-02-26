@@ -1127,6 +1127,25 @@
                             objects: Array.from(objects.keys())
                         }));
                         break;
+                    case 'query_scene': {
+                        const tree = {};
+                        for (const [id, obj] of objects) {
+                            tree[id] = {
+                                type: obj.type,
+                                parent: obj.parent?.userData?.id || null,
+                                children: obj.children
+                                    .filter(c => c.userData?.id)
+                                    .map(c => c.userData.id),
+                                visible: obj.visible,
+                            };
+                        }
+                        ws.send(JSON.stringify({
+                            type: 'query_scene_response',
+                            requestId: data.requestId,
+                            tree: tree,
+                        }));
+                        break;
+                    }
                     case 'load_animation':
                         loadAnimation(data.animation);
                         break;
