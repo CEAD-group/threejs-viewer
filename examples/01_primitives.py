@@ -56,7 +56,8 @@ for i in range(4):
         metalness=0.1,
     )
 
-# Add cylinders as "pillars"
+# Group cylinders as "pillars" — deleting "pillars" removes them all
+v.add_group("pillars")
 pillar_positions = [(-4, -4), (-4, 4), (4, -4), (4, 4)]
 for i, (x, y) in enumerate(pillar_positions):
     v.add_cylinder(
@@ -68,6 +69,7 @@ for i, (x, y) in enumerate(pillar_positions):
         position=[x, y, 1.0],
         roughness=0.3,
         metalness=0.7,
+        parent="pillars",
     )
 
 print("Scene created! Press Ctrl+C to exit.")
