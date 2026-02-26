@@ -120,10 +120,14 @@ class ViewerClient:
             for message in websocket:
                 try:
                     data = json.loads(message)
-                    request_id = data.get("requestId")
-                    if request_id and request_id in self._pending_responses:
-                        self._responses[request_id] = data
-                        self._pending_responses[request_id].set()
+                    msg_type = data.get("type")
+                    if msg_type == "hello":
+                        self._handle_hello(websocket, data)
+                    else:
+                        request_id = data.get("requestId")
+                        if request_id and request_id in self._pending_responses:
+                            self._responses[request_id] = data
+                            self._pending_responses[request_id].set()
                 except json.JSONDecodeError:
                     pass
         except Exception:
@@ -131,6 +135,25 @@ class ViewerClient:
         finally:
             self._ws = None
             self._connected_event.clear()
+
+    def _handle_hello(self, websocket, data):
+        """Handle version handshake from viewer."""
+        from . import __version__
+
+        viewer_version = data.get("viewer_version", "unknown")
+        logger = logging.getLogger(__name__)
+        logger.info("Viewer v%s connected", viewer_version)
+        if viewer_version != __version__:
+            print(
+                f"WARNING: Version mismatch — client v{__version__}, "
+                f"viewer v{viewer_version}. "
+                f"Close the browser tab and re-open viewer.html."
+            )
+        # Send our version back so the viewer can also check
+        try:
+            websocket.send(json.dumps({"type": "hello", "client_version": __version__}))
+        except Exception:
+            pass
 
     def disconnect(self):
         """Disconnect and stop server."""
@@ -162,6 +185,43 @@ class ViewerClient:
 
     # === Object Management ===
 
+    def add_group(
+        self,
+        id: str,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        visible: bool = True,
+    ) -> None:
+        """
+        Add an empty group to the scene. Objects added with parent=id
+        will inherit this group's transform.
+
+        Args:
+            id: Unique identifier for the group
+            parent: Optional parent group id
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            visible: Initial visibility
+        """
+        msg: dict = {"type": "add_group", "id": id}
+        if parent:
+            msg["parent"] = parent
+        transform = {}
+        if position:
+            transform["position"] = position
+        if rotation:
+            transform["rotation"] = rotation
+        if scale:
+            transform["scale"] = scale
+        if transform:
+            msg["transform"] = transform
+        if not visible:
+            msg["visible"] = False
+        self._send(msg)
+
     def add_box(
         self,
         id: str,
@@ -175,6 +235,7 @@ class ViewerClient:
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """Add a box primitive to the scene."""
         params = {
@@ -188,7 +249,7 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "box", params, position, rotation, scale)
+        self._add_primitive(id, "box", params, position, rotation, scale, parent)
 
     def add_sphere(
         self,
@@ -201,6 +262,7 @@ class ViewerClient:
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """Add a sphere primitive to the scene."""
         params = {"radius": radius, "color": color, "opacity": opacity}
@@ -208,7 +270,7 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "sphere", params, position, rotation, scale)
+        self._add_primitive(id, "sphere", params, position, rotation, scale, parent)
 
     def add_cylinder(
         self,
@@ -223,6 +285,7 @@ class ViewerClient:
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """Add a cylinder primitive to the scene."""
         params = {
@@ -236,7 +299,7 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "cylinder", params, position, rotation, scale)
+        self._add_primitive(id, "cylinder", params, position, rotation, scale, parent)
 
     def add_capsule(
         self,
@@ -250,6 +313,7 @@ class ViewerClient:
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene."""
         params = {
@@ -262,7 +326,7 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "capsule", params, position, rotation, scale)
+        self._add_primitive(id, "capsule", params, position, rotation, scale, parent)
 
     def add_model(
         self,
@@ -272,6 +336,7 @@ class ViewerClient:
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """
         Add a 3D model to the scene.
@@ -283,6 +348,7 @@ class ViewerClient:
             position: [x, y, z] position
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
+            parent: Optional parent group id
         """
         transform = {}
         if position:
@@ -292,17 +358,18 @@ class ViewerClient:
         if scale:
             transform["scale"] = scale
 
-        self._send(
-            {
-                "type": "add_object",
-                "id": id,
-                "object": {
-                    "model": url,
-                    "format": format,
-                    "transform": transform if transform else None,
-                },
-            }
-        )
+        msg = {
+            "type": "add_object",
+            "id": id,
+            "object": {
+                "model": url,
+                "format": format,
+                "transform": transform if transform else None,
+            },
+        }
+        if parent:
+            msg["parent"] = parent
+        self._send(msg)
 
     def _send_binary(self, header_dict: dict, payload: bytes) -> None:
         """Send binary data via HTTP blob + JSON notification over WebSocket."""
@@ -320,6 +387,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         matrix: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """
         Add a 3D model to the scene by sending file bytes over WebSocket.
@@ -332,6 +400,7 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
+            parent: Optional parent group id
         """
         if isinstance(path_or_bytes, bytes):
             mesh_bytes = path_or_bytes
@@ -342,6 +411,8 @@ class ViewerClient:
             mesh_bytes = path.read_bytes()
 
         header = {"type": "add_model_binary", "id": id, "format": format}
+        if parent:
+            header["parent"] = parent
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -366,6 +437,7 @@ class ViewerClient:
         cmin: float = None,
         cmax: float = None,
         line_width: int = 2,
+        parent: Optional[str] = None,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -406,17 +478,17 @@ class ViewerClient:
 
         raw_bytes = points.tobytes() + color_bytes
 
-        self._send_binary(
-            {
-                "type": "add_polyline_binary",
-                "id": id,
-                "color": color,
-                "lineWidth": line_width,
-                "hasVertexColors": has_vertex_colors,
-                "numPoints": n_points,
-            },
-            raw_bytes,
-        )
+        header = {
+            "type": "add_polyline_binary",
+            "id": id,
+            "color": color,
+            "lineWidth": line_width,
+            "hasVertexColors": has_vertex_colors,
+            "numPoints": n_points,
+        }
+        if parent:
+            header["parent"] = parent
+        self._send_binary(header, raw_bytes)
 
     def add_mesh(
         self,
@@ -428,6 +500,7 @@ class ViewerClient:
         color: int = 0x7AB8CC,
         metalness: float = 0.1,
         roughness: float = 0.8,
+        parent: Optional[str] = None,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -457,20 +530,20 @@ class ViewerClient:
             parts.append(colors.tobytes())
         parts.append(indices.tobytes())
 
-        self._send_binary(
-            {
-                "type": "add_mesh_binary",
-                "id": id,
-                "numVertices": num_vertices,
-                "numIndices": len(indices),
-                "hasNormals": has_normals,
-                "hasVertexColors": has_vertex_colors,
-                "color": color,
-                "metalness": metalness,
-                "roughness": roughness,
-            },
-            b"".join(parts),
-        )
+        header = {
+            "type": "add_mesh_binary",
+            "id": id,
+            "numVertices": num_vertices,
+            "numIndices": len(indices),
+            "hasNormals": has_normals,
+            "hasVertexColors": has_vertex_colors,
+            "color": color,
+            "metalness": metalness,
+            "roughness": roughness,
+        }
+        if parent:
+            header["parent"] = parent
+        self._send_binary(header, b"".join(parts))
 
     def add_bead(
         self,
@@ -480,6 +553,7 @@ class ViewerClient:
         height: float,
         colors: np.ndarray = None,
         color: int = 0x7AB8CC,
+        parent: Optional[str] = None,
         **kwargs,
     ) -> None:
         """
@@ -578,6 +652,7 @@ class ViewerClient:
             normals.reshape(-1, 3),
             colors=vertex_colors,
             color=color,
+            parent=parent,
             **kwargs,
         )
 
@@ -652,6 +727,7 @@ class ViewerClient:
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
     ) -> None:
         """Internal method to add a primitive."""
         transform = {}
@@ -662,17 +738,18 @@ class ViewerClient:
         if scale:
             transform["scale"] = scale
 
-        self._send(
-            {
-                "type": "add_object",
-                "id": id,
-                "object": {
-                    "primitive": primitive,
-                    "params": params,
-                    "transform": transform if transform else None,
-                },
-            }
-        )
+        msg = {
+            "type": "add_object",
+            "id": id,
+            "object": {
+                "primitive": primitive,
+                "params": params,
+                "transform": transform if transform else None,
+            },
+        }
+        if parent:
+            msg["parent"] = parent
+        self._send(msg)
 
     # === Transform Updates ===
 

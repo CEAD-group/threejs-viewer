@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.7
+
+Adds object grouping (parent-child hierarchies) and version negotiation between Python client and browser viewer.
+
+### New features
+
+- **Object grouping** — `add_group(id, parent=...)` creates empty transform nodes; all `add_*` methods accept an optional `parent` parameter. Children inherit parent transforms automatically via Three.js scene graph. Deleting a group removes all children.
+- **Version handshake** — viewer and Python client exchange versions on connect. Mismatches print a warning on both sides, catching stale browser cache issues immediately.
+
+### New example
+
+- `14_grouping.py` — animated robot arm with nested groups (base → shoulder → elbow → wrist), demonstrating how only joint transforms need animation while visual meshes follow automatically
+
+### Updated examples
+
+- `01_primitives.py` — pillars grouped under a common parent
+- `03_animation_basics.py` — moon parented to earth_system group, uses local orbit offset instead of recomputing world position
+- `04_flying_teapots.py` — reference pillars grouped
+
 ## 0.0.6
 
 Enables environment map reflections on primitives and meshes, rebalances scene lighting.
