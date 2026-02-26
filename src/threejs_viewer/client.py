@@ -999,6 +999,25 @@ class ViewerClient:
         self._pending_responses.pop(request_id, None)
         return response.get("objects", [])
 
+    def query_scene(self, timeout: float = 5.0) -> dict:
+        """Query the viewer's scene graph.
+
+        Returns dict of {id: {type, parent, children, visible}}.
+        """
+        request_id = str(uuid.uuid4())
+        event = threading.Event()
+        self._pending_responses[request_id] = event
+
+        self._send({"type": "query_scene", "requestId": request_id})
+
+        if not event.wait(timeout=timeout):
+            self._pending_responses.pop(request_id, None)
+            raise TimeoutError("No response from viewer")
+
+        response = self._responses.pop(request_id, {})
+        self._pending_responses.pop(request_id, None)
+        return response.get("tree", {})
+
 
 def viewer(host: str = "localhost", port: int = 5666) -> ViewerClient:
     """Create and connect a viewer client (starts WebSocket server)."""
