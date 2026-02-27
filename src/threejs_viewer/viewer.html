@@ -1031,7 +1031,8 @@
         const statusEl = document.getElementById('status');
         let ws = null;
         let reconnectTimeout = null;
-        const WS_PORT = 5666;  // Must match Python client port
+        const urlParams = new URLSearchParams(window.location.search);
+        const WS_PORT = parseInt(urlParams.get('ws_port')) || 5666;
 
         async function connect() {
             // Probe with fetch first to avoid browser-level WebSocket error spam
