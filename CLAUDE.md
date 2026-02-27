@@ -96,3 +96,4 @@ Binary channels and Frame-based JSON can coexist (e.g. binary transforms + JSON 
 - `12_transparency.py` - Transparency and opacity control (set_opacity, set_color with opacity)
 - `13_material_properties.py` - PBR material properties (roughness/metalness grid on primitives)
 - `14_grouping.py` - Object grouping with animated robot arm (nested parent-child hierarchy, local joint transforms)
+- `15_toolpath_interrupted.py` - Interrupted extrusion with travel moves: per-point width array (0=travel), pill/racetrack path with varying point density, merge_animation_points for segment-aligned animation (frame times merged into mesh geometry → no partial triangle rings)

@@ -1,8 +1,10 @@
 """Tests for Animation classes."""
 
 import numpy as np
+import pytest
 
 from threejs_viewer import Animation, AnimationChannel, Frame, Marker
+from threejs_viewer.animation import merge_animation_points, toolpath_frame_times
 
 
 def test_frame_creation():
@@ -229,3 +231,136 @@ def test_binary_channels_with_frame_objects():
     assert animation.n_frames == 5
     assert len(animation._channels) == 1
     assert animation.frames[0].clip_times == {"model1": 0.0}
+
+
+# --- merge_animation_points tests ---
+
+
+def test_merge_animation_points_basic():
+    """User's example: times [0,3,5,7,12,20], frames [0,10,20] → 7 pts, fracs [0, 4/6, 1]."""
+    # toolpath with 6 points: (N, 2) — column 0 is time, column 1 is dummy value
+    tp = np.array([[0, 0], [3, 1], [5, 2], [7, 3], [12, 4], [20, 5]], dtype=np.float32)
+    frame_times = np.array([0.0, 10.0, 20.0])
+
+    combined, frame_indices = merge_animation_points(tp, frame_times)
+
+    # Combined should have 7 points: original 6 + inserted t=10
+    assert len(combined) == 7
+    np.testing.assert_allclose(combined[:, 0], [0, 3, 5, 7, 10, 12, 20], atol=1e-6)
+
+    # frame_indices: 0→0, 10→4, 20→6
+    assert frame_indices[0] == 0
+    assert frame_indices[1] == 4
+    assert frame_indices[2] == 6
+
+    # draw_fracs: [0/6, 4/6, 6/6]
+    draw_fracs = frame_indices / (len(combined) - 1)
+    np.testing.assert_allclose(draw_fracs, [0.0, 4 / 6, 1.0], atol=1e-6)
+
+
+def test_merge_animation_points_no_duplicates():
+    """Frame time coinciding with existing point should not create a duplicate."""
+    tp = np.array([[0, 0], [5, 1], [10, 2]], dtype=np.float32)
+    frame_times = np.array([0.0, 5.0, 10.0])
+
+    combined, frame_indices = merge_animation_points(tp, frame_times)
+
+    # All frame_times already in toolpath — no new points
+    assert len(combined) == 3
+    assert frame_indices[0] == 0
+    assert frame_indices[1] == 1
+    assert frame_indices[2] == 2
+
+
+def test_merge_animation_points_interpolation():
+    """Inserted point should be linearly interpolated across all columns."""
+    # 2-segment toolpath: t=[0,10], x=[0,10], y=[0,20]
+    tp = np.array([[0, 0, 0], [10, 10, 20]], dtype=np.float32)
+    frame_times = np.array([4.0])
+
+    combined, frame_indices = merge_animation_points(tp, frame_times)
+
+    assert len(combined) == 3
+    # t=4 → frac=0.4 → x=4, y=8
+    np.testing.assert_allclose(combined[1, 0], 4.0, atol=1e-5)
+    np.testing.assert_allclose(combined[1, 1], 4.0, atol=1e-5)
+    np.testing.assert_allclose(combined[1, 2], 8.0, atol=1e-5)
+    assert frame_indices[0] == 1
+
+
+def test_merge_animation_points_output_dtype():
+    """Output combined array should be float32, frame_indices should be int64."""
+    tp = np.array([[0, 0], [1, 1], [2, 2]], dtype=np.float32)
+    frame_times = np.array([0.0, 0.5, 1.0, 2.0])
+
+    combined, frame_indices = merge_animation_points(tp, frame_times)
+
+    assert combined.dtype == np.float32
+    assert frame_indices.dtype == np.int64
+
+
+# --- toolpath_frame_times tests ---
+
+
+def test_toolpath_frame_times_uniform_timing():
+    """Uniform point spacing → draw_fracs should be linear (matching frame_times)."""
+    N = 100
+    point_times = np.linspace(0.0, 10.0, N)
+    frame_times, draw_fracs = toolpath_frame_times(point_times, n_frames=50)
+
+    assert len(frame_times) == 50
+    assert len(draw_fracs) == 50
+    assert frame_times[0] == pytest.approx(0.0)
+    assert frame_times[-1] == pytest.approx(10.0)
+    assert draw_fracs[0] == pytest.approx(0.0)
+    assert draw_fracs[-1] == pytest.approx(1.0)
+    # With uniform spacing, draw_fracs should be linear
+    expected = np.linspace(0.0, 1.0, 50)
+    np.testing.assert_allclose(draw_fracs, expected, atol=1e-6)
+
+
+def test_toolpath_frame_times_nonuniform_timing():
+    """Non-uniform timing: dense slow region → draw_fracs should advance slowly there."""
+    # First half of path takes 9/10 of the time (slow extrusion)
+    # Second half takes 1/10 of the time (fast travel)
+    N = 100
+    path_fracs = np.arange(N) / (N - 1)  # 0..1
+    # Extrusion (first half of path): t goes 0..9, Travel (second half): t goes 9..10
+    extrusion_mask = path_fracs <= 0.5
+    point_times = np.where(
+        extrusion_mask, path_fracs * 18.0, 9.0 + (path_fracs - 0.5) * 2.0
+    )
+
+    frame_times, draw_fracs = toolpath_frame_times(point_times, n_frames=100)
+
+    # At t=5 (halfway through time), draw_frac should be well below 0.5
+    # because the slow extrusion region covers most of the time
+    midpoint_frac = np.interp(5.0, frame_times, draw_fracs)
+    assert midpoint_frac < 0.35, (
+        f"At t=5, draw_frac={midpoint_frac:.3f} should be < 0.35 (slow extrusion dominates)"
+    )
+
+    # draw_fracs should be monotonically non-decreasing
+    assert np.all(np.diff(draw_fracs) >= -1e-10)
+    assert draw_fracs[0] == pytest.approx(0.0)
+    assert draw_fracs[-1] == pytest.approx(1.0)
+
+
+def test_toolpath_frame_times_two_points():
+    """Minimum path length (2 points) should work without errors."""
+    point_times = np.array([0.0, 5.0])
+    frame_times, draw_fracs = toolpath_frame_times(point_times, n_frames=10)
+
+    assert len(frame_times) == 10
+    assert len(draw_fracs) == 10
+    assert draw_fracs[0] == pytest.approx(0.0)
+    assert draw_fracs[-1] == pytest.approx(1.0)
+
+
+def test_toolpath_frame_times_output_shape():
+    """Output arrays have length n_frames."""
+    point_times = np.linspace(0.0, 3.0, 50)
+    for n in [1, 5, 100]:
+        ft, df = toolpath_frame_times(point_times, n_frames=n)
+        assert len(ft) == n
+        assert len(df) == n
