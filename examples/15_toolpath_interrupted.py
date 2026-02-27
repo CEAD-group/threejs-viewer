@@ -17,7 +17,7 @@ from threejs_viewer import Animation, merge_animation_points, viewer
 
 
 def make_pill_toolpath(
-    n_arc: int = 4,
+    n_arc: int = 32,
     n_layers: int = 4,
     radius: float = 1.2,
     half_length: float = 1.5,
