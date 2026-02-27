@@ -2,8 +2,11 @@
 Toolpath with interrupted extrusion — variable width + travel moves
 
 Demonstrates:
-- make_pill_toolpath: builds [t, x, y, z, width, height] directly (time + width/height
-  assignment + zero-width endcap rows, all vectorized numpy)
+- make_pill_toolpath: G-code-style [x_mm, y_mm, z_mm, E_cc, F_mm_per_min]
+  (cumulative extrusion in cc, feedrate in mm/min)
+- toolpath_to_bead: detects extruding segments from dE > 0, computes time
+  from F, returns [t_s, x, y, z, width, height] — transition points naturally
+  become zero-width rings (caps) without explicit insertion
 - add_bead with per-point width/height (travel=W0H0, extrude=WfullHfull)
 - merge_animation_points: inserts frame times into mesh geometry so each frame shows
   only complete segments (no partial triangle rings)
@@ -15,25 +18,29 @@ import numpy as np
 
 from threejs_viewer import Animation, merge_animation_points, viewer
 
+BEAD_WIDTH = 2.0  # mm
+BEAD_HEIGHT = 0.9  # mm
+
 
 def make_pill_toolpath(
     n_arc: int = 32,
     n_layers: int = 4,
-    radius: float = 1.2,
-    half_length: float = 1.5,
-    layer_dz: float = 0.09,
-    print_speed: float = 2.0,
-    travel_factor: float = 8.0,
-    bead_width: float = 0.20,
-    bead_height: float = 0.09,
+    radius: float = 12.0,  # mm
+    half_length: float = 15.0,  # mm
+    layer_dz: float = 0.9,  # mm
+    print_speed: float = 3000.0,  # mm/min
+    travel_factor: float = 3.0,
+    bead_width: float = BEAD_WIDTH,
+    bead_height: float = BEAD_HEIGHT,
 ) -> np.ndarray:
-    """Pill/racetrack toolpath ready for add_bead.
+    """Pill/racetrack toolpath in G-code-style columns.
 
     Path per layer: right_arc → top_straight → left_arc → bottom_straight(travel)
 
     Returns:
-        (N, 6) float32: [t, x, y, z, width, height].
-        width/height = 0 on travel segments and at the zero-width endcap rows.
+        (N, 5) float32: [x_mm, y_mm, z_mm, E_cc, F_mm_per_min].
+        E_cc: cumulative extrusion volume in cc (constant on travel moves).
+        F_mm_per_min: feedrate for the move arriving at this point.
     """
     z_layers = (np.arange(n_layers, dtype=np.float32) + 1) * layer_dz
     right_angles = np.linspace(-np.pi / 2, np.pi / 2, n_arc)
@@ -57,7 +64,7 @@ def make_pill_toolpath(
     la[:, :, 1] = radius * np.sin(left_angles)
     la[:, :, 2] = z_layers[:, None]
 
-    # Bottom straight — travel (no extrusion, 4× faster)
+    # Bottom straight — travel (no extrusion, travel_factor× faster)
     bs = np.empty((n_layers, 2, 3), dtype=np.float32)
     bs[:, 0, :2] = [-half_length, -radius]
     bs[:, 1, :2] = [half_length, -radius]
@@ -65,31 +72,63 @@ def make_pill_toolpath(
 
     xyz = np.concatenate([ra, ts, la, bs], axis=1).reshape(-1, 3)
 
+    # is_ext_next[i]: is the segment from point i to point i+1 extruding?
     n_ext = 2 * n_arc + 2  # ra + ts + la points per layer
-    ext = np.tile([True] * n_ext + [False] * 2, n_layers)
-    velocity = np.tile(
-        [print_speed] * n_ext + [print_speed * travel_factor] * 2, n_layers
-    ).astype(np.float32)
+    is_ext_next = np.tile([True] * n_ext + [False] * 2, n_layers)
 
+    # F arriving at each point (feedrate of the move from previous point)
+    speed_next = np.where(is_ext_next, print_speed, print_speed * travel_factor)
+    F = np.concatenate([[print_speed], speed_next[:-1]]).astype(np.float32)
+
+    # Cumulative extrusion E (cc): cross_section * seg_length / 1000 per extruding segment
+    seg_len_next = np.linalg.norm(np.diff(xyz, axis=0, append=xyz[-1:]), axis=1)
+    dE_next = np.where(
+        is_ext_next, bead_width * bead_height * seg_len_next / 1000.0, 0.0
+    )
+    E_cc = np.concatenate([[0.0], np.cumsum(dE_next[:-1])]).astype(np.float32)
+
+    return np.column_stack([xyz, E_cc, F]).astype(np.float32)
+
+
+def toolpath_to_bead(
+    raw: np.ndarray,
+    bead_width: float,
+    bead_height: float,
+) -> np.ndarray:
+    """Convert G-code-style toolpath to bead geometry array for add_bead.
+
+    Detects extruding segments from dE > 0 and computes time from feedrate.
+    Transition points (extrusion start/end) naturally become zero-width rings,
+    which add_bead renders as tapered caps.
+
+    Args:
+        raw: (N, 5) float32 [x_mm, y_mm, z_mm, E_cc, F_mm_per_min]
+        bead_width: bead cross-section width (mm)
+        bead_height: bead cross-section height (mm)
+
+    Returns:
+        (N, 6) float32: [t_s, x_mm, y_mm, z_mm, width_mm, height_mm].
+    """
+    xyz, E_cc, F = raw[:, :3], raw[:, 3], raw[:, 4]
+
+    # dE > 0 at point i means the move arriving at i was extruding
+    ext = np.diff(E_cc, prepend=E_cc[0]) > 1e-10
+
+    # dt = 60 * seg_len / F  (mm / (mm/min) × 60 = s)
     seg_len = np.linalg.norm(np.diff(xyz, axis=0, prepend=xyz[0:1]), axis=1)
-    t = np.cumsum(seg_len / np.maximum(velocity, 1e-10)).astype(np.float32)
+    t = np.cumsum(60.0 * seg_len / np.maximum(F, 1e-10)).astype(np.float32)
 
     widths = np.where(ext, bead_width, 0.0).astype(np.float32)
     heights = np.where(ext, bead_height, 0.0).astype(np.float32)
 
-    out = np.column_stack([t, xyz, widths, heights])
-    # Zero-width endcap rows prepended/appended
-    start_cap = out[0:1].copy()
-    start_cap[0, 4:] = 0.0
-    end_cap = out[-1:].copy()
-    end_cap[0, 4:] = 0.0
-    return np.vstack([start_cap, out, end_cap])
+    return np.column_stack([t, xyz, widths, heights]).astype(np.float32)
 
 
-# --- Generate toolpath ---
+# --- Generate and process toolpath ---
 N_FRAMES = 1000
 
-toolpath = make_pill_toolpath()
+raw = make_pill_toolpath()
+toolpath = toolpath_to_bead(raw, BEAD_WIDTH, BEAD_HEIGHT)
 
 # Merge N_FRAMES evenly-spaced animation times into the toolpath geometry.
 # This inserts new interpolated mesh points at each frame time so that every
@@ -105,7 +144,7 @@ widths = combined[:, 4]
 heights = combined[:, 5]
 
 # Per-layer alternating colors
-LAYER_DZ = 0.09
+LAYER_DZ = 0.9  # mm
 LAYER_COLORS = np.array(
     [
         [0.30, 0.65, 0.80],  # steel blue
@@ -118,16 +157,17 @@ LAYER_COLORS = np.array(
 layer_idx = np.clip(np.round(points[:, 2] / LAYER_DZ).astype(int), 0, 99)
 bead_colors = LAYER_COLORS[layer_idx % len(LAYER_COLORS)]
 
-print(f"Toolpath:  {len(toolpath)} points")
-print(f"Combined:  {len(combined)} points (after merging {N_FRAMES} frame times)")
-print(f"Duration:  {frame_times[-1]:.1f}s")
+print(f"Raw toolpath: {len(raw)} points, {raw[-1, 3]:.4f} cc total extrusion")
+print(f"Toolpath:     {len(toolpath)} points")
+print(f"Combined:     {len(combined)} points (after merging {N_FRAMES} frame times)")
+print(f"Duration:     {frame_times[-1]:.1f} s")
 
 # --- Scene ---
 v = viewer()
 v.clear()
 
 v.add_box(
-    "ground", width=8, height=6, depth=0.02, color=0x222222, position=[0, 0, -0.01]
+    "ground", width=80, height=50, depth=0.2, color=0x222222, position=[0, 0, -0.1]
 )
 
 v.add_bead(
@@ -140,11 +180,11 @@ v.add_bead(
     metalness=0.1,
 )
 
-nozzle_h = 0.5
+nozzle_h = 5.0  # mm
 v.add_cylinder(
     "nozzle",
-    radius_top=0.12,
-    radius_bottom=0.04,
+    radius_top=1.2,
+    radius_bottom=0.4,
     height=nozzle_h,
     color=0xCC8844,
     roughness=0.3,
@@ -173,7 +213,7 @@ animation.add_marker(float(frame_times[-1]) / 2, "50%", color=0xFFFF00)
 
 v.load_animation(animation)
 
-print(f"Animation: {N_FRAMES} frames, {animation.duration:.1f}s")
+print(f"Animation: {N_FRAMES} frames, {animation.duration:.1f} s")
 print("Each frame = one complete ring of triangles (no partial rings).")
 print("Bottom straight is travel (no bead); all other segments extrude.")
 print("Press Ctrl+C to exit.")
