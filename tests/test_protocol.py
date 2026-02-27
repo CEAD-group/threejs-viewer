@@ -1,7 +1,5 @@
 """Tests for the wire protocol — verifies JSON payloads sent by ViewerClient."""
 
-import uuid
-
 import numpy as np
 import pytest
 
@@ -43,7 +41,9 @@ def test_add_group_with_parent(client):
 
 
 def test_add_group_with_transform(client):
-    client.add_group("g1", position=[1, 2, 3], rotation=[0.1, 0.2, 0.3], scale=[2, 2, 2])
+    client.add_group(
+        "g1", position=[1, 2, 3], rotation=[0.1, 0.2, 0.3], scale=[2, 2, 2]
+    )
     msg = client._messages[0]
     assert msg["transform"]["position"] == [1, 2, 3]
     assert msg["transform"]["rotation"] == [0.1, 0.2, 0.3]
@@ -225,7 +225,6 @@ def test_add_bead_no_parent(client):
 def test_query_scene_sends_correct_message(client):
     """Verify query_scene sends the right request type with a requestId."""
     # Patch _send to also simulate an immediate response so query_scene doesn't block
-    original_send = client._send
     sent = []
 
     def mock_send(data):
