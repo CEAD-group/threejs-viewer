@@ -136,32 +136,37 @@ def process_toolpath(
     # --- Step 4: offset Z (raw = top of bead → bead path = bottom) ---
     out[ext_exp, 3] -= bead_height
 
-    # Flat caps with ε spacing for deterministic triangle winding.
-    # Zero-width ring placed ε along the path tangent away from the full-width ring,
-    # giving a non-degenerate "disc" face at each extrusion start and end.
+    # Tapered caps: a near-point ring placed half a bead-width along the path tangent
+    # beyond each extrusion start/end. add_bead zeros out any segment where an endpoint
+    # has w=0, so cap rings get a tiny but non-zero cross-section (cap_tip) instead.
     if n_ins > 0:
-        EPS = 1e-4
+        cap_offset = bead_width / 2
+        cap_tip = 1e-4
         is_to_ext = ~ext[trans_idx - 1] & ext[trans_idx]
         is_to_travel = ext[trans_idx - 1] & ~ext[trans_idx]
 
-        # Start caps (travel→ext): zero-width ring placed ε before the extrusion start
-        sc = ins_pos[is_to_ext]  # zero-width duplicate indices
+        # Start caps (travel→ext): tip ring placed cap_offset before the extrusion start
+        sc = ins_pos[is_to_ext]
         if len(sc) > 0:
             nxt = np.minimum(sc + 2, len(out) - 1)
             d = out[nxt, 1:4] - out[sc + 1, 1:4]
             dlen = np.linalg.norm(d, axis=1, keepdims=True)
             d /= np.where(dlen > 1e-10, dlen, 1.0)
-            out[sc, 1:4] = out[sc + 1, 1:4] - EPS * d
+            out[sc, 1:4] = out[sc + 1, 1:4] - cap_offset * d
+            out[sc, 4] = cap_tip
+            out[sc, 5] = cap_tip
 
-        # End caps (ext→travel): zero-width ring placed ε past the extrusion end
-        ec = ins_pos[is_to_travel]  # full-width duplicate indices
+        # End caps (ext→travel): tip ring placed cap_offset past the extrusion end
+        ec = ins_pos[is_to_travel]
         if len(ec) > 0:
             prv = np.maximum(ec - 1, 0)
             d = out[ec, 1:4] - out[prv, 1:4]
             dlen = np.linalg.norm(d, axis=1, keepdims=True)
             d /= np.where(dlen > 1e-10, dlen, 1.0)
             ec_orig = orig_pos[trans_idx[is_to_travel]]
-            out[ec_orig, 1:4] = out[ec, 1:4] + EPS * d
+            out[ec_orig, 1:4] = out[ec, 1:4] + cap_offset * d
+            out[ec_orig, 4] = cap_tip
+            out[ec_orig, 5] = cap_tip
 
     return out
 
