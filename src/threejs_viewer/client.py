@@ -566,14 +566,16 @@ class ViewerClient:
         Args:
             id: Unique identifier
             points: (N, 3) float32 path points
-            width: Bead width — scalar or (N,) per-point array. Use 0 for travel/cap.
-            height: Bead height — scalar or (N,) per-point array. Use 0 for travel/cap.
+            width: Bead width — scalar or (N,) per-point array. Use width=0 together
+                with height=0 for travel/cap segments.
+            height: Bead height — scalar or (N,) per-point array. Use height=0 together
+                with width=0 for travel/cap segments.
             colors: optional (N, 3) float32 per-path-point RGB colors (0-1)
             color: Material color (hex), ignored when colors is provided
             **kwargs: Passed to add_mesh (metalness, roughness)
 
         Travel moves and tapered caps:
-            Points where width=0 or height=0 collapse all 6 ring vertices to the path
+            Points where width=0 and height=0 collapse all 6 ring vertices to the path
             point, producing zero-area triangles that GPUs discard before rasterization.
             Segments between two collapsed rings are invisible (travel moves); segments
             from a full ring to a collapsed ring produce a 6-triangle fan cap. The index
