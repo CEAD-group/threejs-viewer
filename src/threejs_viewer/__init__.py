@@ -15,6 +15,7 @@ from .animation import (
     toolpath_frame_times,
 )
 from .client import ViewerClient, viewer
+from .toolpath import Toolpath
 
 __all__ = [
     "ViewerClient",
@@ -25,6 +26,7 @@ __all__ = [
     "Marker",
     "merge_animation_points",
     "toolpath_frame_times",
+    "Toolpath",
 ]
 
 __version__ = "0.0.7"

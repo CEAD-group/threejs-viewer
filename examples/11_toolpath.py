@@ -11,7 +11,7 @@ import math
 
 import numpy as np
 
-from threejs_viewer import Animation, viewer
+from threejs_viewer import Animation, Toolpath, viewer
 
 
 def spiral_vase(
@@ -62,26 +62,22 @@ v.add_box(
     "ground", width=8, height=8, depth=0.02, color=0x333333, position=[0, 0, -0.01]
 )
 
-# Generate toolpath
-points = spiral_vase()
-n_points = len(points)
+# Generate toolpath and wrap in Toolpath for animation + coloring
+duration = 3600.0
+fps = 60
+n_frames = int(duration * fps)
 
-# Per-point layer colors: alternating every turn
-n_turns = 80
-layer_index = (np.linspace(0, 1, n_points) * n_turns).astype(int)
-color_a = np.array([0.48, 0.72, 0.80])  # light blue
-color_b = np.array([0.85, 0.55, 0.25])  # warm orange
-bead_colors = np.where((layer_index % 2 == 0)[:, None], color_a, color_b).astype(
-    np.float32
+tp = Toolpath.from_points(
+    spiral_vase(), bead_width=0.3, bead_height=0.08, duration=duration
 )
 
 # Bead (extruded bevelled rectangle cross-section)
 v.add_bead(
     "path_tube",
-    points,
-    width=0.3,
-    height=0.08,
-    colors=bead_colors,
+    tp.points,
+    width=tp.widths,
+    height=tp.heights,
+    colors=tp.gradient_colors("viridis"),
     roughness=0.4,
     metalness=0.15,
 )
@@ -100,22 +96,15 @@ v.add_cylinder(
 )
 
 # Animate draw_range + nozzle position (vectorized)
-duration = 3600.0
-fps = 60
-n_frames = int(duration * fps)
-
 print(f"Pre-computing {n_frames} frames...")
 
-# Frame times and draw_range fractions
-frame_times = np.arange(n_frames) / fps
-fracs = np.clip(frame_times / duration, 0.0, 1.0)
+frame_times, draw_fracs = tp.frame_times(n_frames)
 
 # Path indices for each frame's nozzle position
-pt_indices = np.clip((fracs * (n_points - 1)).astype(int), 0, n_points - 1)
-tips = points[pt_indices]  # (n_frames, 3)
+pt_indices = np.clip((draw_fracs * (len(tp) - 1)).astype(int), 0, len(tp) - 1)
+tips = tp.points[pt_indices]  # (n_frames, 3)
 
 # Object order: path_tube, nozzle
-object_ids = ["path_tube", "nozzle"]
 transforms = np.zeros((n_frames, 2, 16), dtype=np.float32)
 
 # path_tube: identity matrix
@@ -138,11 +127,8 @@ m[:, 15] = 1.0
 # Build animation — fully binary, no Python loop
 animation = Animation(loop=True)
 animation.set_frame_times(frame_times)
-animation.set_transform_data(object_ids, transforms)
-animation.set_draw_range_data(
-    ["path_tube"],
-    fracs[:, None],
-)
+animation.set_transform_data(["path_tube", "nozzle"], transforms)
+animation.set_draw_range_data(["path_tube"], draw_fracs[:, None])
 
 animation.add_marker(0.0, "Start", color=0x00FF00)
 animation.add_marker(duration / 2, "50%", color=0xFFFF00)
@@ -150,7 +136,7 @@ animation.add_marker(duration * 0.99, "Done", color=0xFF0000)
 
 v.load_animation(animation)
 
-print(f"Toolpath: {n_points} points, {animation.n_frames} frames at {fps} fps")
+print(f"Toolpath: {len(tp)} points, {animation.n_frames} frames at {fps} fps")
 print("Bead + nozzle — grows via draw_range animation.")
 print("Press Ctrl+C to exit.")
 

@@ -4,19 +4,17 @@ Toolpath with interrupted extrusion — variable width + travel moves
 Demonstrates:
 - make_pill_toolpath: G-code-style [x_mm, y_mm, z_mm, E_cc, F_mm_per_min]
   (cumulative extrusion in cc, feedrate in mm/min)
-- toolpath_to_bead: detects extruding segments from dE > 0, computes time
-  from F, returns [t_s, x, y, z, width, height] — transition points naturally
-  become zero-width rings (caps) without explicit insertion
-- add_bead with per-point width/height (travel=W0H0, extrude=WfullHfull)
-- merge_animation_points: inserts frame times into mesh geometry so each frame shows
-  only complete segments (no partial triangle rings)
+- Toolpath.from_gcode: detects extrusion from dE > 0, computes time from F
+- Toolpath.gradient_colors: perceptual colormap along arc-length (plasma)
+- Toolpath.frame_times + Toolpath.merge: segment-aligned animation so each
+  frame corresponds exactly to a mesh vertex (no partial triangle rings)
 
 Run: uv run python examples/15_toolpath_interrupted.py
 """
 
 import numpy as np
 
-from threejs_viewer import Animation, merge_animation_points, viewer
+from threejs_viewer import Animation, Toolpath, viewer
 
 BEAD_WIDTH = 2.0  # mm
 BEAD_HEIGHT = 0.9  # mm
@@ -90,77 +88,22 @@ def make_pill_toolpath(
     return np.column_stack([xyz, E_cc, F]).astype(np.float32)
 
 
-def toolpath_to_bead(
-    raw: np.ndarray,
-    bead_width: float,
-    bead_height: float,
-) -> np.ndarray:
-    """Convert G-code-style toolpath to bead geometry array for add_bead.
-
-    Detects extruding segments from dE > 0 and computes time from feedrate.
-    Transition points (extrusion start/end) naturally become zero-width rings,
-    which add_bead renders as tapered caps.
-
-    Args:
-        raw: (N, 5) float32 [x_mm, y_mm, z_mm, E_cc, F_mm_per_min]
-        bead_width: bead cross-section width (mm)
-        bead_height: bead cross-section height (mm)
-
-    Returns:
-        (N, 6) float32: [t_s, x_mm, y_mm, z_mm, width_mm, height_mm].
-    """
-    xyz, E_cc, F = raw[:, :3], raw[:, 3], raw[:, 4]
-
-    # dE > 0 at point i means the move arriving at i was extruding
-    ext = np.diff(E_cc, prepend=E_cc[0]) > 1e-10
-
-    # dt = 60 * seg_len / F  (mm / (mm/min) × 60 = s)
-    seg_len = np.linalg.norm(np.diff(xyz, axis=0, prepend=xyz[0:1]), axis=1)
-    t = np.cumsum(60.0 * seg_len / np.maximum(F, 1e-10)).astype(np.float32)
-
-    widths = np.where(ext, bead_width, 0.0).astype(np.float32)
-    heights = np.where(ext, bead_height, 0.0).astype(np.float32)
-
-    return np.column_stack([t, xyz, widths, heights]).astype(np.float32)
-
-
 # --- Generate and process toolpath ---
 N_FRAMES = 1000
 
 raw = make_pill_toolpath()
-toolpath = toolpath_to_bead(raw, BEAD_WIDTH, BEAD_HEIGHT)
+tp = Toolpath.from_gcode(raw, BEAD_WIDTH, BEAD_HEIGHT)
 
-# Merge N_FRAMES evenly-spaced animation times into the toolpath geometry.
-# This inserts new interpolated mesh points at each frame time so that every
-# animation frame corresponds exactly to a mesh vertex — no partial rings.
-frame_times = np.linspace(toolpath[0, 0], toolpath[-1, 0], N_FRAMES)
-combined, frame_indices = merge_animation_points(toolpath, frame_times)
-draw_fracs = (
-    (frame_indices / max(len(combined) - 1, 1)).reshape(-1, 1).astype(np.float32)
-)
+frame_times, _ = tp.frame_times(N_FRAMES)
+merged, frame_indices = tp.merge(frame_times)
+draw_fracs = (frame_indices / max(len(merged) - 1, 1)).reshape(-1, 1).astype(np.float32)
 
-points = combined[:, 1:4]
-widths = combined[:, 4]
-heights = combined[:, 5]
-
-# Per-layer alternating colors
-LAYER_DZ = 0.9  # mm
-LAYER_COLORS = np.array(
-    [
-        [0.30, 0.65, 0.80],  # steel blue
-        [0.85, 0.55, 0.25],  # orange
-        [0.40, 0.78, 0.45],  # green
-        [0.75, 0.40, 0.80],  # purple
-    ],
-    dtype=np.float32,
-)
-layer_idx = np.clip(np.round(points[:, 2] / LAYER_DZ).astype(int), 0, 99)
-bead_colors = LAYER_COLORS[layer_idx % len(LAYER_COLORS)]
+colors = merged.gradient_colors("plasma")
 
 print(f"Raw toolpath: {len(raw)} points, {raw[-1, 3]:.4f} cc total extrusion")
-print(f"Toolpath:     {len(toolpath)} points")
-print(f"Combined:     {len(combined)} points (after merging {N_FRAMES} frame times)")
-print(f"Duration:     {frame_times[-1]:.1f} s")
+print(f"Toolpath:     {len(tp)} points")
+print(f"Merged:       {len(merged)} points (after merging {N_FRAMES} frame times)")
+print(f"Duration:     {tp.duration:.1f} s")
 
 # --- Scene ---
 v = viewer()
@@ -172,10 +115,10 @@ v.add_box(
 
 v.add_bead(
     "bead",
-    points,
-    width=widths,
-    height=heights,
-    colors=bead_colors,
+    merged.points,
+    width=merged.widths,
+    height=merged.heights,
+    colors=colors,
     roughness=0.4,
     metalness=0.1,
 )
@@ -191,7 +134,7 @@ v.add_cylinder(
     metalness=0.8,
 )
 
-frame_nozzle_xyz = points[frame_indices]
+frame_nozzle_xyz = merged.points[frame_indices]
 
 transforms = np.zeros((N_FRAMES, 2, 16), dtype=np.float32)
 transforms[:, 0, [0, 5, 10, 15]] = 1.0  # bead: identity
