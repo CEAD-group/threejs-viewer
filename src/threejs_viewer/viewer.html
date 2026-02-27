@@ -1031,7 +1031,8 @@
         const statusEl = document.getElementById('status');
         let ws = null;
         let reconnectTimeout = null;
-        const WS_PORT = 5666;  // Must match Python client port
+        const urlParams = new URLSearchParams(window.location.search);
+        const WS_PORT = parseInt(urlParams.get('ws_port')) || 5666;
 
         async function connect() {
             // Probe with fetch first to avoid browser-level WebSocket error spam
@@ -1127,6 +1128,25 @@
                             objects: Array.from(objects.keys())
                         }));
                         break;
+                    case 'query_scene': {
+                        const tree = {};
+                        for (const [id, obj] of objects) {
+                            tree[id] = {
+                                type: obj.type,
+                                parent: obj.parent?.userData?.id || null,
+                                children: obj.children
+                                    .filter(c => c.userData?.id)
+                                    .map(c => c.userData.id),
+                                visible: obj.visible,
+                            };
+                        }
+                        ws.send(JSON.stringify({
+                            type: 'query_scene_response',
+                            requestId: data.requestId,
+                            tree: tree,
+                        }));
+                        break;
+                    }
                     case 'load_animation':
                         loadAnimation(data.animation);
                         break;
