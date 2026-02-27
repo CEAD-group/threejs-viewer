@@ -8,6 +8,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install dependencies
 uv sync
 
+# Run tests (unit only, no browser needed)
+uv run pytest
+
+# Run tests including Playwright browser integration tests
+uv sync --group browser-test
+uv run playwright install chromium
+uv run pytest -v
+
+# Run linting
+uv run ruff check . && uv run ruff format --check .
+
 # Open viewer in browser (get path with)
 uv run python -m threejs_viewer path
 
@@ -32,21 +43,22 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - `src/threejs_viewer/animation.py` - Animation classes (Frame, Animation, AnimationChannel, Marker)
 - `src/threejs_viewer/viewer.html` - Three.js viewer (self-contained)
 - `examples/` - Demo scripts showcasing library capabilities
+- `tests/` - Unit tests + Playwright browser integration tests (browser tests auto-skip without pytest-playwright)
 
 ### Communication Model
-- **Direct connection**: Python runs WebSocket server on port 5666, browser connects to it
+- **Direct connection**: Python runs WebSocket server on port 5666 (default), browser connects to it. Port is overridable via `?ws_port=` query param in viewer URL.
 - **Browser survives restarts**: Viewer auto-reconnects when Python script restarts
 - **Binary transfer**: Large data (models, polylines, animations) served via HTTP sidecar on port 5667, browser fetches with native `fetch()`
 - **Batch updates**: `batch_update()` updates multiple objects in one message
 - **60fps capable**: Minimal JSON payloads with 4x4 matrices
 
 ### Animation Modes
-- **Streaming mode**: Real-time updates from Python (`batch_update()`, `set_position()`)
+- **Streaming mode**: Real-time updates from Python (`batch_update()`, `set_matrix()`)
 - **Looping mode**: Pre-computed frames with interactive playback (`load_animation()`)
 
 ### Supported Object Types
 - **Groups**: `add_group(id, parent=...)` — empty transform nodes for parent-child hierarchies. Children inherit parent transforms. All `add_*` methods accept an optional `parent` parameter.
-- Primitives: box, sphere, cylinder, plane, cone, torus, capsule (with optional roughness/metalness)
+- Primitives: box, sphere, cylinder, capsule (with optional roughness/metalness)
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
 - Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
 - Beads: toolpath extrusion via `add_bead()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors

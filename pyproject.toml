@@ -60,6 +60,12 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",
 ]
+browser-test = [
+    "pytest-playwright>=0.6.2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "browser: integration tests requiring Playwright (headless Chromium)",
+]
