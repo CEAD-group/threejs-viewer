@@ -364,3 +364,44 @@ def test_toolpath_frame_times_output_shape():
         ft, df = toolpath_frame_times(point_times, n_frames=n)
         assert len(ft) == n
         assert len(df) == n
+
+
+def test_merge_animation_points_duplicate_timestamps():
+    """Co-located transition points (same t, width bw then 0) must stay ordered.
+
+    Regression: a frame_time just after a duplicate timestamp used to get
+    width=bw via np.interp (leftmost duplicate), creating a spurious full-width
+    ring in the travel gap.  With the right-anchored interpolation it gets
+    width=0 (the LAST value at that timestamp).
+    """
+    bw = 2.0
+    # Toolpath with an extrusion→travel transition at t=5:
+    #   t=0  w=bw  (extruding)
+    #   t=5  w=bw  (last extrusion point, co-located with cap)
+    #   t=5  w=0   (zero-width cap / travel start, same location)
+    #   t=10 w=0   (travel continues)
+    tp = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, bw],
+            [5.0, 1.0, 0.0, 0.0, bw],
+            [5.0, 1.0, 0.0, 0.0, 0.0],
+            [10.0, 2.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    # Frame just after the transition should get width=0, not width=bw
+    frame_times = np.array([5.5])
+    combined, frame_indices = merge_animation_points(tp, frame_times)
+
+    # The new point at t=5.5 should have width ≈ 0 (travel), not bw
+    new_pt = combined[frame_indices[0]]
+    assert new_pt[4] == pytest.approx(0.0, abs=1e-5), (
+        f"Width at t=5.5 should be 0 (travel), got {new_pt[4]:.4f}"
+    )
+
+    # The zero-width cap (t=5, w=0) must come AFTER the full-width ring (t=5, w=bw)
+    t5_indices = np.where(np.abs(combined[:, 0] - 5.0) < 1e-5)[0]
+    assert len(t5_indices) == 2
+    assert combined[t5_indices[0], 4] == pytest.approx(bw)  # full-width first
+    assert combined[t5_indices[1], 4] == pytest.approx(0.0)  # cap second
