@@ -137,9 +137,19 @@ class Toolpath:
             bead_height: cross-section height (mm).
         """
         xyz, E_cc, F = raw[:, :3], raw[:, 3], raw[:, 4]
-        ext = np.diff(E_cc, prepend=E_cc[0]) > 1e-10
         seg_len = np.linalg.norm(np.diff(xyz, axis=0, prepend=xyz[0:1]), axis=1)
         t = np.cumsum(60.0 * seg_len / np.maximum(F, 1e-10)).astype(np.float32)
+        # A point is extruding when its arriving segment deposits material.
+        # Exception: zero-length connector segments (e.g. arc→straight join
+        # points) have dE=0 by construction even when extrusion is continuous.
+        # For those, look at the *departing* segment instead.
+        # Index 0 is always zero-length by the prepend convention — keep it as
+        # a start cap (w=0) regardless of what follows.
+        ext = np.diff(E_cc, prepend=E_cc[0]) > 1e-10
+        zero_len = seg_len < 1e-10
+        zero_len[0] = False  # preserve start cap
+        dE_depart = np.diff(E_cc, append=E_cc[-1]) > 1e-10
+        ext = ext | (zero_len & dE_depart)
         widths = np.where(ext, bead_width, 0.0).astype(np.float32)
         heights = np.where(ext, bead_height, 0.0).astype(np.float32)
         return cls(np.column_stack([t, xyz, widths, heights]))
