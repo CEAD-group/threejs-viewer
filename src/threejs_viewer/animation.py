@@ -252,18 +252,31 @@ def merge_animation_points(
 
     new_times = frame_times[~skip]
     if len(new_times) > 0:
-        # Interpolate all columns for new_times
-        new_rows = np.empty((len(new_times), toolpath.shape[1]), dtype=np.float64)
-        new_rows[:, 0] = new_times
-        for col in range(1, toolpath.shape[1]):
-            new_rows[:, col] = np.interp(new_times, t, toolpath[:, col])
+        # Interpolate all columns for new_times.
+        # Use right-side anchoring (searchsorted side='right' - 1) so that a
+        # new point just after a duplicate timestamp (e.g. an extrusion→travel
+        # transition where two co-located points share the same t) inherits the
+        # LAST value at that timestamp rather than the first.  With plain
+        # np.interp the leftmost duplicate is used, which can spuriously assign
+        # full bead width to a new frame point that should be in the travel gap.
+        lo = np.searchsorted(t, new_times, side="right") - 1
+        lo = np.clip(lo, 0, len(t) - 2)
+        hi = lo + 1
+        dt = t[hi] - t[lo]
+        alpha = np.where(dt > 0, (new_times - t[lo]) / dt, 0.0)[:, None]
+        new_rows = toolpath[lo] * (1.0 - alpha) + toolpath[hi] * alpha
+        new_rows[:, 0] = new_times  # keep exact frame time in column 0
         combined = np.concatenate([toolpath, new_rows], axis=0)
         order = np.argsort(combined[:, 0], kind="stable")
         combined = combined[order]
     else:
         combined = toolpath
 
-    frame_indices = np.searchsorted(combined[:, 0], frame_times)
+    # side='right' - 1 returns the index of the LAST duplicate at each
+    # frame_time, so a frame that lands exactly on a transition timestamp
+    # points to the zero-width cap row rather than the preceding full-width row.
+    frame_indices = np.searchsorted(combined[:, 0], frame_times, side="right") - 1
+    frame_indices = np.clip(frame_indices, 0, len(combined) - 1)
     return combined.astype(np.float32), frame_indices.astype(np.int64)
 
 
