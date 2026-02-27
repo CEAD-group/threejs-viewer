@@ -6,7 +6,14 @@ Three.js viewer connects to. Designed for robotics visualization,
 scientific computing, and interactive 3D exploration.
 """
 
-from .animation import Animation, AnimationChannel, Frame, Marker
+from .animation import (
+    Animation,
+    AnimationChannel,
+    Frame,
+    Marker,
+    merge_animation_points,
+    toolpath_frame_times,
+)
 from .client import ViewerClient, viewer
 
 __all__ = [
@@ -16,6 +23,8 @@ __all__ = [
     "AnimationChannel",
     "Frame",
     "Marker",
+    "merge_animation_points",
+    "toolpath_frame_times",
 ]
 
 __version__ = "0.0.7"
