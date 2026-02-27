@@ -549,8 +549,8 @@ class ViewerClient:
         self,
         id: str,
         points: np.ndarray,
-        width: float,
-        height: float,
+        width: float | np.ndarray,
+        height: float | np.ndarray,
         colors: np.ndarray = None,
         color: int = 0x7AB8CC,
         parent: Optional[str] = None,
@@ -566,35 +566,45 @@ class ViewerClient:
         Args:
             id: Unique identifier
             points: (N, 3) float32 path points
-            width: Bead width
-            height: Bead height
+            width: Bead width — scalar or (N,) per-point array. Use 0 for travel/cap.
+            height: Bead height — scalar or (N,) per-point array. Use 0 for travel/cap.
             colors: optional (N, 3) float32 per-path-point RGB colors (0-1)
             color: Material color (hex), ignored when colors is provided
             **kwargs: Passed to add_mesh (metalness, roughness)
+
+        Travel moves and tapered caps:
+            Points where width=0 or height=0 collapse all 6 ring vertices to the path
+            point, producing zero-area triangles that GPUs discard before rasterization.
+            Segments between two collapsed rings are invisible (travel moves); segments
+            from a full ring to a collapsed ring produce a 6-triangle fan cap. The index
+            buffer stays the same length (36 indices per segment), keeping draw_range
+            mapping linear regardless of travel.
         """
         points = np.asarray(points, dtype=np.float32)
         if points.ndim == 1:
             points = points.reshape(-1, 3)
         N = points.shape[0]
-        W, H = float(width), float(height)
-        hw, hh = W / 2, H / 2
-        ft = max(0, W - H) / 2  # half-width of flat segment
         P = 6  # vertices per ring
 
-        # 6-vertex bevelled rectangle profile: (binormal_offset, z_offset)
-        profile = np.array(
-            [[ft, 0], [hw, hh], [ft, H], [-ft, H], [-hw, hh], [-ft, 0]],
-            dtype=np.float32,
-        )
+        # Normalize width/height to (N,) arrays
+        W = np.broadcast_to(np.asarray(width, dtype=np.float32), (N,)).copy()
+        H = np.broadcast_to(np.asarray(height, dtype=np.float32), (N,)).copy()
+        hw = W / 2
+        hh = H / 2
+        ft = np.maximum(0.0, W - H) / 2
 
-        # Profile vertex normals (average of adjacent edge outward normals)
-        edges = np.roll(profile, -1, axis=0) - profile
-        edge_n = np.column_stack([edges[:, 1], -edges[:, 0]])
-        edge_n /= np.maximum(np.linalg.norm(edge_n, axis=1, keepdims=True), 1e-10)
-        prof_n = np.zeros((P, 2), dtype=np.float32)
-        for j in range(P):
-            prof_n[j] = edge_n[(j - 1) % P] + edge_n[j]
-        prof_n /= np.maximum(np.linalg.norm(prof_n, axis=1, keepdims=True), 1e-10)
+        # Per-point profiles: (N, P, 2) — [binormal_offset, z_offset]
+        zeros = np.zeros(N, dtype=np.float32)
+        pb = np.column_stack([ft, hw, ft, -ft, -hw, -ft])  # (N, P) binormal offsets
+        pz = -np.column_stack([zeros, hh, H, H, hh, zeros])  # (N, P) z offsets
+
+        # Profile vertex normals (vectorized, average of adjacent edge outward normals)
+        profile = np.stack([pb, pz], axis=-1)  # (N, P, 2)
+        edges = np.roll(profile, -1, axis=1) - profile  # (N, P, 2)
+        edge_n = np.stack([edges[:, :, 1], -edges[:, :, 0]], axis=-1)  # (N, P, 2)
+        edge_n /= np.maximum(np.linalg.norm(edge_n, axis=-1, keepdims=True), 1e-10)
+        prof_n = edge_n + np.roll(edge_n, 1, axis=1)  # (N, P, 2)
+        prof_n /= np.maximum(np.linalg.norm(prof_n, axis=-1, keepdims=True), 1e-10)
 
         # Central-difference tangents (XY only, Z-up assumption)
         tangents = np.empty((N, 2), dtype=np.float32)
@@ -607,21 +617,19 @@ class ViewerClient:
         # Binormals: tangent × Z = (ty, -tx)
         binormals = np.column_stack([tangents[:, 1], -tangents[:, 0]])
 
-        # Positions: (N, P, 3) via broadcasting
-        pb = profile[:, 0]  # (P,) binormal offsets
-        pz = profile[:, 1]  # (P,) z offsets
+        # Positions: (N, P, 3)
         positions = np.empty((N, P, 3), dtype=np.float32)
-        positions[:, :, 0] = points[:, 0:1] + pb[None, :] * binormals[:, 0:1]
-        positions[:, :, 1] = points[:, 1:2] + pb[None, :] * binormals[:, 1:2]
-        positions[:, :, 2] = points[:, 2:3] + pz[None, :]
+        positions[:, :, 0] = points[:, 0:1] + pb * binormals[:, 0:1]
+        positions[:, :, 1] = points[:, 1:2] + pb * binormals[:, 1:2]
+        positions[:, :, 2] = points[:, 2:3] + pz
 
         # Normals: (N, P, 3) — profile normals rotated into world frame
-        nb = prof_n[:, 0]  # (P,) binormal component
-        nz = prof_n[:, 1]  # (P,) z component
+        nb = prof_n[:, :, 0]  # (N, P) binormal component
+        nz = prof_n[:, :, 1]  # (N, P) z component
         normals = np.empty((N, P, 3), dtype=np.float32)
-        normals[:, :, 0] = nb[None, :] * binormals[:, 0:1]
-        normals[:, :, 1] = nb[None, :] * binormals[:, 1:2]
-        normals[:, :, 2] = nz[None, :]
+        normals[:, :, 0] = nb * binormals[:, 0:1]
+        normals[:, :, 1] = nb * binormals[:, 1:2]
+        normals[:, :, 2] = nz
 
         # Step-major indices for draw_range reveal along path
         i_range = np.arange(N - 1, dtype=np.uint32)
