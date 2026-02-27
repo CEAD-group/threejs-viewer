@@ -2,12 +2,11 @@
 Toolpath with interrupted extrusion — variable width + travel moves
 
 Demonstrates:
-- Raw toolpath as [x, y, z, extruding, speed] (extruding describes segment to next point)
-- process_toolpath: transition duplicates, time computation, Z offset
-- add_bead with per-point width/height (0 = travel = degenerate triangles)
+- make_pill_toolpath: builds [t, x, y, z, width, height] directly (time + width/height
+  assignment + zero-width endcap rows, all vectorized numpy)
+- add_bead with per-point width/height (travel=W0H0, extrude=WfullHfull)
 - merge_animation_points: inserts frame times into mesh geometry so each frame shows
   only complete segments (no partial triangle rings)
-- All operations vectorized numpy — no Python hot loops
 
 Run: uv run python examples/15_toolpath_interrupted.py
 """
@@ -18,164 +17,79 @@ from threejs_viewer import Animation, merge_animation_points, viewer
 
 
 def make_pill_toolpath(
-    n_arc: int = 50,
+    n_arc: int = 4,
     n_layers: int = 4,
     radius: float = 1.2,
     half_length: float = 1.5,
     layer_dz: float = 0.09,
-    print_speed: float = 0.06,
-    travel_factor: float = 4.0,
+    print_speed: float = 2.0,
+    travel_factor: float = 8.0,
+    bead_width: float = 0.20,
+    bead_height: float = 0.09,
 ) -> np.ndarray:
-    """Raw pill/racetrack toolpath.
+    """Pill/racetrack toolpath ready for add_bead.
 
     Path per layer: right_arc → top_straight → left_arc → bottom_straight(travel)
-    XYZ is the top of the bead when extruding.
 
     Returns:
-        (N, 5) float32: [x, y, z, extruding, speed].
-        extruding: 1.0 if depositing towards next point, 0.0 if travel.
-        speed: m/s for the segment towards next point.
+        (N, 6) float32: [t, x, y, z, width, height].
+        width/height = 0 on travel segments and at the zero-width endcap rows.
     """
-    cx = half_length
-    spd_ext = print_speed
-    spd_trv = print_speed * travel_factor
     z_layers = (np.arange(n_layers, dtype=np.float32) + 1) * layer_dz
-
     right_angles = np.linspace(-np.pi / 2, np.pi / 2, n_arc)
     left_angles = np.linspace(np.pi / 2, 3 * np.pi / 2, n_arc)
 
     # Right arc — extrusion
-    ra = np.empty((n_layers, n_arc, 5), dtype=np.float32)
-    ra[:, :, 0] = cx + radius * np.cos(right_angles)
+    ra = np.empty((n_layers, n_arc, 3), dtype=np.float32)
+    ra[:, :, 0] = half_length + radius * np.cos(right_angles)
     ra[:, :, 1] = radius * np.sin(right_angles)
     ra[:, :, 2] = z_layers[:, None]
-    ra[:, :, 3] = 1.0
-    ra[:, :, 4] = spd_ext
 
     # Top straight — extrusion
-    ts = np.empty((n_layers, 2, 5), dtype=np.float32)
-    ts[:, 0, :3] = [cx, radius, 0.0]
-    ts[:, 1, :3] = [-cx, radius, 0.0]
+    ts = np.empty((n_layers, 2, 3), dtype=np.float32)
+    ts[:, 0, :2] = [half_length, radius]
+    ts[:, 1, :2] = [-half_length, radius]
     ts[:, :, 2] = z_layers[:, None]
-    ts[:, :, 3] = 1.0
-    ts[:, :, 4] = spd_ext
 
     # Left arc — extrusion
-    la = np.empty((n_layers, n_arc, 5), dtype=np.float32)
-    la[:, :, 0] = -cx + radius * np.cos(left_angles)
+    la = np.empty((n_layers, n_arc, 3), dtype=np.float32)
+    la[:, :, 0] = -half_length + radius * np.cos(left_angles)
     la[:, :, 1] = radius * np.sin(left_angles)
     la[:, :, 2] = z_layers[:, None]
-    la[:, :, 3] = 1.0
-    la[:, :, 4] = spd_ext
 
     # Bottom straight — travel (no extrusion, 4× faster)
-    bs = np.empty((n_layers, 2, 5), dtype=np.float32)
-    bs[:, 0, :3] = [-cx, -radius, 0.0]
-    bs[:, 1, :3] = [cx, -radius, 0.0]
+    bs = np.empty((n_layers, 2, 3), dtype=np.float32)
+    bs[:, 0, :2] = [-half_length, -radius]
+    bs[:, 1, :2] = [half_length, -radius]
     bs[:, :, 2] = z_layers[:, None]
-    bs[:, :, 3] = 0.0
-    bs[:, :, 4] = spd_trv
 
-    return np.concatenate([ra, ts, la, bs], axis=1).reshape(-1, 5)
+    xyz = np.concatenate([ra, ts, la, bs], axis=1).reshape(-1, 3)
 
+    n_ext = 2 * n_arc + 2  # ra + ts + la points per layer
+    ext = np.tile([True] * n_ext + [False] * 2, n_layers)
+    velocity = np.tile(
+        [print_speed] * n_ext + [print_speed * travel_factor] * 2, n_layers
+    ).astype(np.float32)
 
-def process_toolpath(
-    raw: np.ndarray,
-    bead_width: float = 0.20,
-    bead_height: float = 0.09,
-) -> np.ndarray:
-    """Process raw toolpath into bead-ready array.
+    seg_len = np.linalg.norm(np.diff(xyz, axis=0, prepend=xyz[0:1]), axis=1)
+    t = np.cumsum(seg_len / np.maximum(velocity, 1e-10)).astype(np.float32)
 
-    Steps:
-      1. Insert duplicate points at extrusion on/off transitions
-         (half-point offset: extruding[i] describes segment i → i+1).
-      2. Compute cumulative time from arc-length and speed.
-      3. Set bead width/height from extrusion flag.
-      4. Offset Z: raw xyz = top of bead → bead path z = raw_z − bead_height.
+    widths = np.where(ext, bead_width, 0.0).astype(np.float32)
+    heights = np.where(ext, bead_height, 0.0).astype(np.float32)
 
-    Returns:
-        (M, 6) float32: [t, x, y, z, bead_width, bead_height].
-    """
-    # --- Step 1: transition duplicates ---
-    ext = raw[:, 3] > 0.5
-    trans_idx = np.where(ext[:-1] != ext[1:])[0] + 1  # points where state changes
-
-    n_ins = len(trans_idx)
-    expanded = np.empty((len(raw) + n_ins, 5), dtype=np.float32)
-
-    # Output positions for original points (shifted right by prior insertions)
-    bump = np.zeros(len(raw) + 1, dtype=np.int64)
-    np.add.at(bump, trans_idx, 1)
-    offsets = np.cumsum(bump[: len(raw)])
-    orig_pos = np.arange(len(raw)) + offsets
-
-    expanded[orig_pos] = raw
-
-    # Duplicate: same xyz as transition point, ext/speed from previous segment
-    ins_pos = orig_pos[trans_idx] - 1
-    expanded[ins_pos] = raw[trans_idx]
-    expanded[ins_pos, 3] = raw[trans_idx - 1, 3]
-    expanded[ins_pos, 4] = raw[trans_idx - 1, 4]
-
-    # --- Step 2: cumulative time ---
-    xyz = expanded[:, :3]
-    seg_len = np.linalg.norm(np.diff(xyz, axis=0), axis=1)
-    dt_seg = seg_len / np.maximum(expanded[:-1, 4], 1e-10)
-    times = np.empty(len(expanded), dtype=np.float32)
-    times[0] = 0.0
-    times[1:] = np.cumsum(dt_seg)
-
-    # --- Step 3: build output with bead width/height ---
-    ext_exp = expanded[:, 3] > 0.5
-    out = np.empty((len(expanded), 6), dtype=np.float32)
-    out[:, 0] = times
-    out[:, 1:4] = xyz
-    out[:, 4] = np.where(ext_exp, bead_width, 0.0)
-    out[:, 5] = np.where(ext_exp, bead_height, 0.0)
-
-    # --- Step 4: offset Z (raw = top of bead → bead path = bottom) ---
-    out[ext_exp, 3] -= bead_height
-
-    # Tapered caps: a near-point ring placed half a bead-width along the path tangent
-    # beyond each extrusion start/end. add_bead zeros out any segment where an endpoint
-    # has w=0, so cap rings get a tiny but non-zero cross-section (cap_tip) instead.
-    if n_ins > 0:
-        cap_offset = bead_width / 2
-        cap_tip = 1e-4
-        is_to_ext = ~ext[trans_idx - 1] & ext[trans_idx]
-        is_to_travel = ext[trans_idx - 1] & ~ext[trans_idx]
-
-        # Start caps (travel→ext): tip ring placed cap_offset before the extrusion start
-        sc = ins_pos[is_to_ext]
-        if len(sc) > 0:
-            nxt = np.minimum(sc + 2, len(out) - 1)
-            d = out[nxt, 1:4] - out[sc + 1, 1:4]
-            dlen = np.linalg.norm(d, axis=1, keepdims=True)
-            d /= np.where(dlen > 1e-10, dlen, 1.0)
-            out[sc, 1:4] = out[sc + 1, 1:4] - cap_offset * d
-            out[sc, 4] = cap_tip
-            out[sc, 5] = cap_tip
-
-        # End caps (ext→travel): tip ring placed cap_offset past the extrusion end
-        ec = ins_pos[is_to_travel]
-        if len(ec) > 0:
-            prv = np.maximum(ec - 1, 0)
-            d = out[ec, 1:4] - out[prv, 1:4]
-            dlen = np.linalg.norm(d, axis=1, keepdims=True)
-            d /= np.where(dlen > 1e-10, dlen, 1.0)
-            ec_orig = orig_pos[trans_idx[is_to_travel]]
-            out[ec_orig, 1:4] = out[ec, 1:4] + cap_offset * d
-            out[ec_orig, 4] = cap_tip
-            out[ec_orig, 5] = cap_tip
-
-    return out
+    out = np.column_stack([t, xyz, widths, heights])
+    # Zero-width endcap rows prepended/appended
+    start_cap = out[0:1].copy()
+    start_cap[0, 4:] = 0.0
+    end_cap = out[-1:].copy()
+    end_cap[0, 4:] = 0.0
+    return np.vstack([start_cap, out, end_cap])
 
 
-# --- Generate and process toolpath ---
-N_FRAMES = 30
+# --- Generate toolpath ---
+N_FRAMES = 1000
 
-raw = make_pill_toolpath()
-toolpath = process_toolpath(raw)
+toolpath = make_pill_toolpath()
 
 # Merge N_FRAMES evenly-spaced animation times into the toolpath geometry.
 # This inserts new interpolated mesh points at each frame time so that every
@@ -189,13 +103,8 @@ draw_fracs = (
 points = combined[:, 1:4]
 widths = combined[:, 4]
 heights = combined[:, 5]
-K = len(combined)
 
-# Nozzle XYZ = top of bead = processed_z + bead_height (undoes the Z offset)
-nozzle_xyz = points.copy()
-nozzle_xyz[:, 2] += heights
-
-# Per-layer alternating colors (based on original Z = nozzle Z)
+# Per-layer alternating colors
 LAYER_DZ = 0.09
 LAYER_COLORS = np.array(
     [
@@ -206,13 +115,12 @@ LAYER_COLORS = np.array(
     ],
     dtype=np.float32,
 )
-layer_idx = np.clip(np.round(nozzle_xyz[:, 2] / LAYER_DZ).astype(int), 0, 99)
+layer_idx = np.clip(np.round(points[:, 2] / LAYER_DZ).astype(int), 0, 99)
 bead_colors = LAYER_COLORS[layer_idx % len(LAYER_COLORS)]
 
-print(f"Raw toolpath: {len(raw)} points")
-print(f"Processed:    {len(toolpath)} points (transition duplicates)")
-print(f"Combined:     {K} points (after merging {N_FRAMES} frame times)")
-print(f"Duration:     {frame_times[-1]:.1f}s")
+print(f"Toolpath:  {len(toolpath)} points")
+print(f"Combined:  {len(combined)} points (after merging {N_FRAMES} frame times)")
+print(f"Duration:  {frame_times[-1]:.1f}s")
 
 # --- Scene ---
 v = viewer()
@@ -243,9 +151,7 @@ v.add_cylinder(
     metalness=0.8,
 )
 
-# --- Animation: N_FRAMES frames, each aligned to an exact mesh vertex ---
-# frame_nozzle_xyz: nozzle position at each animation frame
-frame_nozzle_xyz = nozzle_xyz[frame_indices]
+frame_nozzle_xyz = points[frame_indices]
 
 transforms = np.zeros((N_FRAMES, 2, 16), dtype=np.float32)
 transforms[:, 0, [0, 5, 10, 15]] = 1.0  # bead: identity
