@@ -253,7 +253,8 @@ class Toolpath:
         Args:
             colormap: ``"viridis"``, ``"plasma"``, or ``"turbo"``.
             travel_color: RGB for zero-width (travel/cap) points, or ``None``
-                          to use the same gradient colour as adjacent extrusion.
+                          to leave travel/cap points with their normal
+                          colormap-derived gradient colour (no override).
 
         Returns:
             (N, 3) float32 RGB in [0, 1].
