@@ -136,11 +136,32 @@ def process_toolpath(
     # --- Step 4: offset Z (raw = top of bead → bead path = bottom) ---
     out[ext_exp, 3] -= bead_height
 
-    # Flat start caps: at travel→ext transitions the zero-width duplicate must sit
-    # at the same Z as the extruding ring so the cap triangles are planar.
+    # Flat caps with ε spacing for deterministic triangle winding.
+    # Zero-width ring placed ε along the path tangent away from the full-width ring,
+    # giving a non-degenerate "disc" face at each extrusion start and end.
     if n_ins > 0:
+        EPS = 1e-4
         is_to_ext = ~ext[trans_idx - 1] & ext[trans_idx]
-        out[ins_pos[is_to_ext], 3] -= bead_height
+        is_to_travel = ext[trans_idx - 1] & ~ext[trans_idx]
+
+        # Start caps (travel→ext): zero-width ring placed ε before the extrusion start
+        sc = ins_pos[is_to_ext]  # zero-width duplicate indices
+        if len(sc) > 0:
+            nxt = np.minimum(sc + 2, len(out) - 1)
+            d = out[nxt, 1:4] - out[sc + 1, 1:4]
+            dlen = np.linalg.norm(d, axis=1, keepdims=True)
+            d /= np.where(dlen > 1e-10, dlen, 1.0)
+            out[sc, 1:4] = out[sc + 1, 1:4] - EPS * d
+
+        # End caps (ext→travel): zero-width ring placed ε past the extrusion end
+        ec = ins_pos[is_to_travel]  # full-width duplicate indices
+        if len(ec) > 0:
+            prv = np.maximum(ec - 1, 0)
+            d = out[ec, 1:4] - out[prv, 1:4]
+            dlen = np.linalg.norm(d, axis=1, keepdims=True)
+            d /= np.where(dlen > 1e-10, dlen, 1.0)
+            ec_orig = orig_pos[trans_idx[is_to_travel]]
+            out[ec_orig, 1:4] = out[ec, 1:4] + EPS * d
 
     return out
 
