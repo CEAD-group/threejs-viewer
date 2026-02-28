@@ -272,7 +272,7 @@ class Toolpath:
         self,
         color_or_values,
         colormap: str = "viridis",
-        travel_color: tuple[float, float, float] = (0.25, 0.25, 0.25),
+        travel_color: tuple[float, float, float] | None = (0.25, 0.25, 0.25),
     ) -> "Toolpath":
         """Set per-point colors and return self for chaining.
 
@@ -321,12 +321,21 @@ class Toolpath:
             # Solid RGB float triple
             result = np.tile(np.asarray(v, dtype=np.float32).reshape(1, 3), (N, 1))
         else:
-            # (N,) per-point scalar values
             arr = np.asarray(v, dtype=np.float32)
-            vmin, vmax = float(arr.min()), float(arr.max())
-            span = vmax - vmin if vmax != vmin else 1.0
-            frac = ((arr - vmin) / span).astype(np.float32)
-            result = _apply_colormap(frac, colormap)
+            if arr.ndim == 2 and arr.shape == (N, 3):
+                # (N, 3) per-point RGB passed directly
+                result = arr
+            elif arr.ndim == 1 and len(arr) == N:
+                # (N,) per-point scalar values mapped through colormap
+                vmin, vmax = float(arr.min()), float(arr.max())
+                span = vmax - vmin if vmax != vmin else 1.0
+                frac = ((arr - vmin) / span).astype(np.float32)
+                result = _apply_colormap(frac, colormap)
+            else:
+                raise ValueError(
+                    f"color_or_values array has shape {arr.shape}; "
+                    f"expected ({N},) scalars or ({N}, 3) RGB"
+                )
 
         self._colors = result
         return self
@@ -346,6 +355,8 @@ class Toolpath:
         """
         points = self.points  # (N, 3)
         N = len(points)
+        if N < 2:
+            raise ValueError("to_mesh() requires at least 2 path points")
         P = 6  # vertices per ring
 
         W = self.widths.copy()
