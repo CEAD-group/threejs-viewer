@@ -72,15 +72,8 @@ tp = Toolpath.from_points(
 )
 
 # Bead (extruded bevelled rectangle cross-section)
-v.add_bead(
-    "path_tube",
-    tp.points,
-    width=tp.widths,
-    height=tp.heights,
-    colors=tp.gradient_colors("viridis"),
-    roughness=0.4,
-    metalness=0.15,
-)
+tp.colorize("viridis")
+v.add_mesh("path_tube", **tp.to_mesh(), roughness=0.4, metalness=0.15)
 
 # Nozzle: tapered cylinder hovering above the path tip
 nozzle_height = 0.8
