@@ -54,6 +54,8 @@ threejs-viewer open
 ### Objects
 
 ```python
+from threejs_viewer import Toolpath, viewer
+
 # Primitives with PBR materials
 v.add_box("box1", width=1, height=2, depth=0.5, color=0x4A90D9, roughness=0.5, metalness=0.1)
 v.add_sphere("ball", radius=0.5, position=[2, 0, 0], roughness=0.3, metalness=0.7)
