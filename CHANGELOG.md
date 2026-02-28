@@ -21,6 +21,10 @@ Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_f
 - `_apply_colormap`: `frac==1.0` now maps exactly to the last colormap entry (was slightly short due to float clipping)
 - `Toolpath.colors` setter: validates array shape `(N, 3)` matching `len(self)`, raises `ValueError` on mismatch
 - `wait_for_assets()`: fixed race where early fetches could fire `assets_loaded` before later asset messages arrived; Python now sends an explicit `mark_assets_complete` message that the browser uses to gate its reply
+- `wait_for_assets(disconnect=False)`: new parameter keeps the server alive after assets load, allowing subsequent streaming updates (`batch_update`) — fixes crash in example 07
+- Cylinder, cone, and capsule geometry now baked with `rotateX(90°)` so they stand upright in the Z-up viewer without manual rotation workarounds
+- GLTF/GLB models wrapped in a `+90° X` correction group on load, converting Y-up (glTF standard) to Z-up; set_matrix/animation targets the outer wrapper and the correction is permanent
+- `14_grouping.py` robot arm: fixed joints to bend around Y-axis and arm segments to extend upward in Z
 
 ### New example
 
@@ -30,10 +34,12 @@ Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_f
 
 - `11_toolpath.py` — uses `tp.colorize("viridis")` + `v.add_mesh("path_tube", **tp.to_mesh())`; point count halved for faster loading
 - All animation examples now call `v.wait_for_assets()` instead of blocking indefinitely
+- `04_flying_teapots.py` — replaced with a teapot carousel: synchronized ring orbiting a golden sphere, ring breathes and tilts over time
+- `07_stress_test.py` — calls `wait_for_assets(disconnect=False)` before streaming loop so assets finish loading before animation starts
 
 ### Other
 
-- `run_examples.sh` — shell script that runs all examples sequentially with a 5-second timeout each
+- `run_examples.sh` — shell script that runs all examples sequentially
 
 ## 0.0.7
 
