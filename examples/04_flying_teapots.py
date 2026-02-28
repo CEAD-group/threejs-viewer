@@ -1,10 +1,10 @@
 """
-Flying Utah Teapots Demo
+Model Loading Demo — Teapot Carousel
 
-A flock of iconic Utah teapots flying through the scene in graceful patterns.
-Demonstrates loading 3D models and animating multiple objects.
+A synchronized ring of teapots orbiting a golden sphere.
+The ring breathes (expands/contracts), bobs, and tilts as it rotates.
 
-The Utah teapot is a classic 3D test model created by Martin Newell in 1975.
+Demonstrates loading OBJ models and pre-computed animation.
 
 Run: uv run python examples/04_flying_teapots.py
 """
@@ -15,18 +15,15 @@ from pathlib import Path
 from threejs_viewer import Animation, viewer
 
 TEAPOT_PATH = Path(__file__).parent / "teapot.obj"
+N_TEAPOTS = 8
+SCALE = 0.35
 
 
-def make_transform_matrix(position, rotation=(0, 0, 0), scale=1.0):
-    """Create a 4x4 transform matrix (column-major) with full rotation."""
-    rx, ry, rz = rotation
-
-    # Rotation matrices
+def make_matrix(pos, rx, ry, rz, scale=1.0):
+    """Column-major 4x4 transform: Euler XYZ rotation + translation + scale."""
     cx, sx = math.cos(rx), math.sin(rx)
     cy, sy = math.cos(ry), math.sin(ry)
     cz, sz = math.cos(rz), math.sin(rz)
-
-    # Combined rotation matrix R = Rz * Ry * Rx (in column-major order)
     r00 = cy * cz
     r01 = cy * sz
     r02 = -sy
@@ -36,119 +33,73 @@ def make_transform_matrix(position, rotation=(0, 0, 0), scale=1.0):
     r20 = cx * sy * cz + sx * sz
     r21 = cx * sy * sz - sx * cz
     r22 = cx * cy
-
-    # Column-major 4x4 matrix
+    s = scale
     return [
-        scale * r00,
-        scale * r01,
-        scale * r02,
-        0,
-        scale * r10,
-        scale * r11,
-        scale * r12,
-        0,
-        scale * r20,
-        scale * r21,
-        scale * r22,
-        0,
-        position[0],
-        position[1],
-        position[2],
-        1,
+        s*r00, s*r01, s*r02, 0,
+        s*r10, s*r11, s*r12, 0,
+        s*r20, s*r21, s*r22, 0,
+        pos[0], pos[1], pos[2], 1,
     ]
 
 
 v = viewer()
 v.clear()
 
-# Configuration
-N_TEAPOTS = 12
-TEAPOT_SCALE = 0.4  # Scale for the Three.js teapot model
-
-# Add ground plane
 v.add_box(
     "ground",
-    width=20,
-    height=20,
+    width=24,
+    height=24,
     depth=0.05,
-    color=0x2A2A2A,
+    color=0x1A1A2E,
     position=[0, 0, -0.025],
     roughness=0.9,
     metalness=0.0,
 )
+v.add_sphere(
+    "orb",
+    radius=0.8,
+    color=0xFFCC22,
+    roughness=0.2,
+    metalness=0.9,
+    position=[0, 0, 2.0],
+)
 
-# Group reference pillars together
-v.add_group("pillars")
-for i in range(4):
-    angle = i * math.pi / 2
-    x, y = 8 * math.cos(angle), 8 * math.sin(angle)
-    v.add_cylinder(
-        f"pillar_{i}",
-        radius_top=0.3,
-        radius_bottom=0.4,
-        height=6,
-        color=0x666666,
-        position=[x, y, 3],
-        roughness=0.7,
-        metalness=0.1,
-        parent="pillars",
-    )
-
-# Load teapots via websocket
 print(f"Loading {N_TEAPOTS} teapots...")
 for i in range(N_TEAPOTS):
-    v.add_model_binary(f"teapot_{i}", TEAPOT_PATH, format="obj")
+    v.add_model_binary(f"t{i}", TEAPOT_PATH, format="obj")
 
-
-# Define flight paths - each teapot follows a unique path
-def flight_path(t, teapot_idx):
-    """Compute position and rotation for a teapot at time t."""
-    freq_x = 1 + (teapot_idx % 3) * 0.3
-    freq_y = 1.5 + (teapot_idx % 4) * 0.2
-    freq_z = 0.5 + (teapot_idx % 5) * 0.15
-
-    phase = teapot_idx * 2 * math.pi / N_TEAPOTS
-
-    # Position on a 3D curve
-    x = 5.5 * math.sin(freq_x * t + phase)
-    y = 5.5 * math.cos(freq_y * t + phase * 1.3)
-    z = 3 + 2 * math.sin(freq_z * t + phase * 0.7)
-
-    # Rotation - teapots tumble as they fly
-    rx = t * 0.5 + phase
-    ry = t * 0.3 + teapot_idx * 0.5
-    rz = math.sin(t * 0.8 + phase) * 0.5
-
-    return (x, y, z), (rx, ry, rz)
-
-
-# Create animation
-duration = 20.0
+duration = 16.0
 fps = 30
 n_frames = int(duration * fps)
-
-print("Computing flight paths...")
 animation = Animation(loop=True)
 
-for i in range(n_frames):
-    t = i / fps
+print(f"Computing {n_frames} frames...")
+for fi in range(n_frames):
+    t = fi / fps
     transforms = {}
 
-    for teapot_idx in range(N_TEAPOTS):
-        pos, rot = flight_path(t, teapot_idx)
-        transforms[f"teapot_{teapot_idx}"] = make_transform_matrix(
-            pos, rot, TEAPOT_SCALE
-        )
+    # Animate ring as a whole
+    spin = t * 0.4
+    radius = 4.5 + 1.5 * math.sin(t * 0.5)
+    height = 2.0 + 1.2 * math.sin(t * 0.35)
+    tilt = 0.25 * math.sin(t * 0.28)
+
+    for i in range(N_TEAPOTS):
+        phase = i * 2 * math.pi / N_TEAPOTS
+        angle = spin + phase
+        x = radius * math.cos(angle)
+        y = radius * math.sin(angle)
+        z = height + tilt * radius * math.sin(angle)
+        rx = t * 0.8 + phase
+        ry = t * 0.5 + i * 0.4
+        rz = t * 0.3
+        transforms[f"t{i}"] = make_matrix([x, y, z], rx, ry, rz, SCALE)
 
     animation.add_frame(time=t, transforms=transforms)
 
-# Add some markers
-animation.add_marker(0.0, "Teapots take flight!", color=0x00FF00)
-animation.add_marker(5.0, "Graceful dance", color=0x00FFFF)
-animation.add_marker(10.0, "Mid-flight", color=0xFFFF00)
-animation.add_marker(15.0, "Coming around", color=0xFF00FF)
+animation.add_marker(0.0, "Start", color=0x00FF00)
+animation.add_marker(duration * 0.5, "Half-cycle", color=0xFFFF00)
 
 v.load_animation(animation)
-
-print(f"Animation loaded: {N_TEAPOTS} teapots, {animation.n_frames} frames")
+print(f"Carousel: {N_TEAPOTS} teapots, {animation.n_frames} frames")
 v.wait_for_assets()
