@@ -174,8 +174,17 @@ class ViewerClient:
 
         Args:
             timeout: Maximum seconds to wait.  ``None`` waits indefinitely.
+
+        Raises:
+            TimeoutError: If the browser does not confirm asset loading within
+                *timeout* seconds.
         """
-        self._assets_loaded_event.wait(timeout=timeout)
+        self._send({"type": "mark_assets_complete"})
+        loaded = self._assets_loaded_event.wait(timeout=timeout)
+        if not loaded:
+            raise TimeoutError(
+                "Timed out waiting for browser to finish loading assets."
+            )
         self.disconnect()
 
     def disconnect(self):

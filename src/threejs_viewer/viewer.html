@@ -326,15 +326,23 @@
         const mixers = new Map();   // AnimationMixers keyed by object id
 
         // ========== Asset Loading Tracking ==========
-        // Counts in-flight HTTP blob fetches. When it returns to zero after at
-        // least one fetch the server is notified so it can shut down cleanly.
+        // Counts in-flight HTTP blob fetches. The server sends
+        // mark_assets_complete once all asset messages have been dispatched;
+        // the browser replies with assets_loaded only after both that flag is
+        // set AND all pending fetches have finished.
         let pendingFetches = 0;
+        let assetsComplete = false;
+
+        function maybeNotifyAssetsLoaded() {
+            if (pendingFetches === 0 && assetsComplete && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'assets_loaded' }));
+            }
+        }
+
         function onFetchStart() { pendingFetches++; }
         function onFetchEnd() {
             pendingFetches--;
-            if (pendingFetches === 0 && ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'assets_loaded' }));
-            }
+            maybeNotifyAssetsLoaded();
         }
 
         // ========== Animation State ==========
@@ -1061,6 +1069,9 @@
             ws.onopen = () => {
                 statusEl.textContent = 'Connected';
                 statusEl.className = 'connected';
+                // Reset asset-tracking state for this connection
+                pendingFetches = 0;
+                assetsComplete = false;
                 ws.send(JSON.stringify({ type: 'hello', viewer_version: VIEWER_VERSION }));
             };
 
@@ -1403,6 +1414,10 @@
                         break;
                     case 'set_draw_range':
                         setDrawRange(data.id, data.value);
+                        break;
+                    case 'mark_assets_complete':
+                        assetsComplete = true;
+                        maybeNotifyAssetsLoaded();
                         break;
                 }
             };
