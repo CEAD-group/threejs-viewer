@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from threejs_viewer import ViewerClient
+from threejs_viewer import Toolpath, ViewerClient
 
 
 @pytest.fixture
@@ -200,23 +200,126 @@ def test_add_mesh_no_parent(client):
     assert "parent" not in header
 
 
-# === add_bead ===
+# === Toolpath.to_mesh + add_mesh ===
 
 
-def test_add_bead_with_parent(client):
+def test_to_mesh_add_mesh_with_parent(client):
     pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
-    client.add_bead("bd", pts, width=1.0, height=0.5, parent="g")
-    # add_bead delegates to add_mesh, which calls _send_binary
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_mesh("bd", parent="g", **tp.to_mesh())
     header, _ = client._binary_messages[0]
     assert header["type"] == "add_mesh_binary"
     assert header["parent"] == "g"
 
 
-def test_add_bead_no_parent(client):
+def test_to_mesh_add_mesh_no_parent(client):
     pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
-    client.add_bead("bd", pts, width=1.0, height=0.5)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_mesh("bd", **tp.to_mesh())
     header, _ = client._binary_messages[0]
     assert "parent" not in header
+
+
+def test_to_mesh_colorize_sets_vertex_colors(client):
+    """colorize() → to_mesh() → add_mesh sends hasVertexColors=True."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    tp.colorize("plasma")
+    client.add_mesh("bd", **tp.to_mesh())
+    header, _ = client._binary_messages[0]
+    assert header["hasVertexColors"] is True
+
+
+def test_to_mesh_no_colorize_no_vertex_colors(client):
+    """Without colorize(), to_mesh() → add_mesh sends hasVertexColors=False."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_mesh("bd", **tp.to_mesh())
+    header, _ = client._binary_messages[0]
+    assert header["hasVertexColors"] is False
+
+
+def _extract_bead_indices(header, payload):
+    """Extract the index buffer from an add_mesh_binary binary message."""
+    nv = header["numVertices"]
+    ni = header["numIndices"]
+    offset = nv * 3 * 4  # positions
+    if header["hasNormals"]:
+        offset += nv * 3 * 4
+    if header["hasVertexColors"]:
+        offset += nv * 3 * 4
+    return np.frombuffer(payload[offset : offset + ni * 4], dtype=np.uint32).copy()
+
+
+def test_to_mesh_scalar_width_all_segments_active(client):
+    """Scalar width/height: every segment should have non-zero triangle indices."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+    client.add_mesh("b", **tp.to_mesh())
+    header, payload = client._binary_messages[0]
+    indices = _extract_bead_indices(header, payload)
+
+    P = 6  # vertices per ring
+    n_segs = len(pts) - 1  # 3 segments
+    # Each segment contributes P * 6 indices; none should be all-zero for a real mesh
+    for seg in range(n_segs):
+        seg_indices = indices[seg * P * 6 : (seg + 1) * P * 6]
+        assert np.any(seg_indices != 0), f"Segment {seg} should have active geometry"
+
+
+def test_to_mesh_array_width_travel_degenerate(client):
+    """Array width with zeros for travel: zero-width rings collapse to a point.
+
+    Travel move geometry is handled purely by vertex positions — W=H=0 collapses
+    all 6 ring vertices to the same point, producing zero-area triangles that GPUs
+    discard. No explicit index zeroing is needed or done.
+    """
+    # 6 points: [ext, ext, travel, travel, ext, ext]
+    pts = np.zeros((6, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(6, dtype=np.float32)
+    widths = np.array([0.2, 0.2, 0.0, 0.0, 0.2, 0.2], dtype=np.float32)
+    heights = np.array([0.1, 0.1, 0.0, 0.0, 0.1, 0.1], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_mesh("b", **tp.to_mesh())
+
+    header, payload = client._binary_messages[0]
+
+    # Extract vertex positions to verify collapsed rings (positions are first in payload)
+    nv = header["numVertices"]
+    positions = np.frombuffer(payload[: nv * 3 * 4], dtype=np.float32).reshape(-1, 3)
+
+    P = 6
+    # Travel rings (points 2 and 3): all 6 vertices must collapse to the path point
+    for ring_idx in [2, 3]:
+        ring_verts = positions[ring_idx * P : (ring_idx + 1) * P]
+        assert np.allclose(ring_verts, ring_verts[0], atol=1e-6), (
+            f"Ring {ring_idx} (travel, W=H=0) should have all vertices at same point"
+        )
+    # Extruding rings (points 0, 1, 4, 5): vertices must be spread (non-collapsed)
+    for ring_idx in [0, 1, 4, 5]:
+        ring_verts = positions[ring_idx * P : (ring_idx + 1) * P]
+        assert not np.allclose(ring_verts, ring_verts[0], atol=1e-6), (
+            f"Ring {ring_idx} (extruding) should have spread vertices"
+        )
+
+
+def test_to_mesh_array_width_index_count_unchanged(client):
+    """Array vs scalar width: same number of indices (draw_range mapping preserved)."""
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(5, dtype=np.float32)
+
+    tp_scalar = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+    client.add_mesh("scalar", **tp_scalar.to_mesh())
+    h_scalar, _ = client._binary_messages[0]
+
+    widths = np.array([0.2, 0.0, 0.0, 0.2, 0.2], dtype=np.float32)
+    tp_array = Toolpath.from_points(pts, bead_width=widths, bead_height=0.1)
+    client.add_mesh("array", **tp_array.to_mesh())
+    h_array, _ = client._binary_messages[1]
+
+    assert h_scalar["numIndices"] == h_array["numIndices"], (
+        "Index count must be identical so draw_range fractions map the same way"
+    )
 
 
 # === query_scene ===

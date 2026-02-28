@@ -209,3 +209,120 @@ class Animation:
                 for m in self.markers
             ],
         }
+
+
+def merge_animation_points(
+    toolpath: np.ndarray,
+    frame_times: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Merge animation frame times into a toolpath for segment-aligned draw_ranges.
+
+    Inserts new interpolated points into the toolpath at each frame_time not
+    already present. The returned combined array guarantees that each animation
+    frame maps exactly to a toolpath point, so draw_range always shows only
+    complete mesh segments (no partial triangle rings).
+
+    Args:
+        toolpath: (M, C) array with timestamps in column 0, monotonically
+                  non-decreasing. Typically the output of process_toolpath:
+                  columns [t, x, y, z, width, height].
+        frame_times: (F,) array of desired animation frame times.
+
+    Returns:
+        combined: (K, C) float32 array — original toolpath with new points
+                  interpolated and inserted at each new frame_time. Sorted by time.
+        frame_indices: (F,) int64 array — index in combined for each frame_time.
+
+    Example:
+        combined, frame_indices = merge_animation_points(toolpath, frame_times)
+        draw_fracs = frame_indices / (len(combined) - 1)
+    """
+    toolpath = np.asarray(toolpath, dtype=np.float64)
+    frame_times = np.asarray(frame_times, dtype=np.float64)
+    t = toolpath[:, 0]
+
+    if len(t) < 2:
+        raise ValueError("toolpath must have at least 2 points")
+
+    # Clip frame_times to the toolpath domain up-front so that all downstream
+    # operations (skip detection, interpolation, frame_indices) are consistent.
+    # Out-of-range frames map to the first/last point rather than extrapolating.
+    frame_times = np.clip(frame_times, t[0], t[-1])
+
+    # Find which frame_times are not already present in t (within tolerance)
+    ins_pos = np.searchsorted(t, frame_times)
+    right_pos = np.minimum(ins_pos, len(t) - 1)
+    left_pos = np.maximum(ins_pos - 1, 0)
+
+    at_right = (ins_pos < len(t)) & (np.abs(t[right_pos] - frame_times) < 1e-9)
+    at_left = (ins_pos > 0) & (np.abs(t[left_pos] - frame_times) < 1e-9)
+    skip = at_right | at_left
+
+    new_times = frame_times[~skip]
+    if len(new_times) > 0:
+        # Interpolate all columns for new_times.
+        # Use right-side anchoring (searchsorted side='right' - 1) so that a
+        # new point just after a duplicate timestamp (e.g. an extrusion→travel
+        # transition where two co-located points share the same t) inherits the
+        # LAST value at that timestamp rather than the first.  With plain
+        # np.interp the leftmost duplicate is used, which can spuriously assign
+        # full bead width to a new frame point that should be in the travel gap.
+        lo = np.searchsorted(t, new_times, side="right") - 1
+        lo = np.clip(lo, 0, len(t) - 2)
+        hi = lo + 1
+        dt = t[hi] - t[lo]
+        alpha = np.where(dt > 0, (new_times - t[lo]) / dt, 0.0)[:, None]
+        new_rows = toolpath[lo] * (1.0 - alpha) + toolpath[hi] * alpha
+        new_rows[:, 0] = new_times  # keep exact frame time in column 0
+        combined = np.concatenate([toolpath, new_rows], axis=0)
+        order = np.argsort(combined[:, 0], kind="stable")
+        combined = combined[order]
+    else:
+        combined = toolpath
+
+    # side='right' - 1 returns the index of the LAST duplicate at each
+    # frame_time, so a frame that lands exactly on a transition timestamp
+    # points to the zero-width cap row rather than the preceding full-width row.
+    frame_indices = np.searchsorted(combined[:, 0], frame_times, side="right") - 1
+    frame_indices = np.clip(frame_indices, 0, len(combined) - 1)
+    return combined.astype(np.float32), frame_indices.astype(np.int64)
+
+
+def toolpath_frame_times(
+    point_times: np.ndarray,
+    n_frames: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (frame_times, draw_fracs) for equi-time-distant sampling of a toolpath.
+
+    Produces animation frames that are evenly spaced in *time* rather than in
+    path points. This ensures smooth playback even when point density varies
+    (e.g. dense arcs vs. sparse straight segments).
+
+    During fast travel moves (few seconds, many path points) the draw_range
+    fraction advances quickly, revealing no geometry. During slow extrusion
+    (many seconds, few points) it advances slowly, growing the bead gradually.
+
+    Args:
+        point_times: (N,) per-point timestamps, monotonically non-decreasing.
+        n_frames: Desired number of animation frames.
+
+    Returns:
+        frame_times: (n_frames,) array, evenly spaced from t0 to t_end.
+        draw_fracs: (n_frames,) array of draw_range fractions in [0, 1].
+    """
+    point_times = np.asarray(point_times, dtype=np.float64)
+    N = len(point_times)
+    if N == 0:
+        raise ValueError("point_times must not be empty")
+    if n_frames < 1:
+        raise ValueError("n_frames must be >= 1")
+    t0, t_end = float(point_times[0]), float(point_times[-1])
+    frame_times = np.linspace(t0, t_end, n_frames)
+    path_fracs = np.arange(N) / max(N - 1, 1)
+    # np.interp requires strictly increasing xp.  point_times may contain
+    # duplicate timestamps (zero-length segments), so deduplicate by keeping
+    # the last (highest) path_frac at each timestamp before interpolating.
+    _, last_idx = np.unique(point_times[::-1], return_index=True)
+    last_idx = np.sort(N - 1 - last_idx)
+    draw_fracs = np.interp(frame_times, point_times[last_idx], path_fracs[last_idx])
+    return frame_times, draw_fracs

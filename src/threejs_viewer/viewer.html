@@ -238,7 +238,7 @@
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
-        const VIEWER_VERSION = '0.0.7';
+        const VIEWER_VERSION = '0.0.8';
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
 
         // Scene setup
@@ -325,6 +325,26 @@
         const objects = new Map();
         const mixers = new Map();   // AnimationMixers keyed by object id
 
+        // ========== Asset Loading Tracking ==========
+        // Counts in-flight HTTP blob fetches. The server sends
+        // mark_assets_complete once all asset messages have been dispatched;
+        // the browser replies with assets_loaded only after both that flag is
+        // set AND all pending fetches have finished.
+        let pendingFetches = 0;
+        let assetsComplete = false;
+
+        function maybeNotifyAssetsLoaded() {
+            if (pendingFetches === 0 && assetsComplete && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'assets_loaded' }));
+            }
+        }
+
+        function onFetchStart() { pendingFetches++; }
+        function onFetchEnd() {
+            pendingFetches--;
+            maybeNotifyAssetsLoaded();
+        }
+
         // ========== Animation State ==========
         let animation = null;
         let animationPlaying = false;
@@ -397,8 +417,10 @@
                 }
             }
 
-            // Apply first frame
+            // Apply first frame and start playing
             applyFrame(0);
+            animationPlaying = true;
+            lastAnimationUpdate = performance.now();
             console.log(`Animation loaded: ${animation.frames.length} frames, ${animation.duration.toFixed(2)}s`);
         }
 
@@ -740,24 +762,36 @@
             sphere: (params) => new THREE.SphereGeometry(
                 params.radius || 0.5, params.widthSegments || 32, params.heightSegments || 16
             ),
-            cylinder: (params) => new THREE.CylinderGeometry(
-                params.radiusTop || 0.5, params.radiusBottom || 0.5,
-                params.height || 1, params.radialSegments || 32
-            ),
+            cylinder: (params) => {
+                const geo = new THREE.CylinderGeometry(
+                    params.radiusTop || 0.5, params.radiusBottom || 0.5,
+                    params.height || 1, params.radialSegments || 32
+                );
+                geo.rotateX(Math.PI / 2);
+                return geo;
+            },
             plane: (params) => new THREE.PlaneGeometry(
                 params.width || 1, params.height || 1
             ),
-            cone: (params) => new THREE.ConeGeometry(
-                params.radius || 0.5, params.height || 1, params.radialSegments || 32
-            ),
+            cone: (params) => {
+                const geo = new THREE.ConeGeometry(
+                    params.radius || 0.5, params.height || 1, params.radialSegments || 32
+                );
+                geo.rotateX(Math.PI / 2);
+                return geo;
+            },
             torus: (params) => new THREE.TorusGeometry(
                 params.radius || 0.5, params.tube || 0.2,
                 params.radialSegments || 16, params.tubularSegments || 48
             ),
-            capsule: (params) => new THREE.CapsuleGeometry(
-                params.radius || 0.25, params.length || 0.5,
-                params.capSegments || 8, params.radialSegments || 16
-            )
+            capsule: (params) => {
+                const geo = new THREE.CapsuleGeometry(
+                    params.radius || 0.25, params.length || 0.5,
+                    params.capSegments || 8, params.radialSegments || 16
+                );
+                geo.rotateX(Math.PI / 2);
+                return geo;
+            }
         };
 
         // Apply transform to object
@@ -864,8 +898,11 @@
                     const result = await loadModel(loader, objData.model, format);
                     obj = result.obj;
                     if (result.animations.length > 0) {
-                        // Create mixer with all clips ready for seeking via setTime()
-                        const mixer = new THREE.AnimationMixer(obj);
+                        // Root the mixer at the GLTF scene so animation tracks
+                        // can resolve their target nodes by name within the
+                        // Y-up→Z-up correction wrapper.
+                        const mixerRoot = obj.userData.gltfScene || obj;
+                        const mixer = new THREE.AnimationMixer(mixerRoot);
                         for (const clip of result.animations) {
                             const action = mixer.clipAction(clip);
                             action.play();
@@ -904,7 +941,18 @@
                         let obj;
                         let animations = [];
                         if (format === 'gltf' || format === 'glb') {
-                            obj = result.scene;
+                            // GLTF/GLB uses Y-up; wrap in a correction group so
+                            // the model stands upright in the Z-up viewer scene.
+                            // The outer container is user-controlled (set_matrix
+                            // targets it); the inner correction is permanent.
+                            const correction = new THREE.Group();
+                            correction.rotation.x = Math.PI / 2;
+                            correction.add(result.scene);
+                            obj = new THREE.Group();
+                            obj.add(correction);
+                            // Store the GLTF scene root so the AnimationMixer can
+                            // resolve track targets by name inside the hierarchy.
+                            obj.userData.gltfScene = result.scene;
                             animations = result.animations || [];
                         } else if (format === 'dae') {
                             // Create a clean group with only meshes (no lights/cameras from DAE)
@@ -1047,6 +1095,9 @@
             ws.onopen = () => {
                 statusEl.textContent = 'Connected';
                 statusEl.className = 'connected';
+                // Reset asset-tracking state for this connection
+                pendingFetches = 0;
+                assetsComplete = false;
                 ws.send(JSON.stringify({ type: 'hello', viewer_version: VIEWER_VERSION }));
             };
 
@@ -1151,6 +1202,7 @@
                         loadAnimation(data.animation);
                         break;
                     case 'load_animation_http':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const t0 = performance.now();
@@ -1229,10 +1281,13 @@
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
                                 console.error('Error loading animation via HTTP:', e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
                     case 'add_model_binary':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
@@ -1251,10 +1306,13 @@
                                 }
                             } catch (e) {
                                 console.error(`Error loading model via HTTP:`, e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
                     case 'add_polyline_binary':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
@@ -1307,10 +1365,13 @@
                                 objects.set(data.id, line);
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
                     case 'add_mesh_binary':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
@@ -1366,6 +1427,8 @@
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                             } catch (e) {
                                 console.error(`Error creating mesh:`, e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
@@ -1377,6 +1440,10 @@
                         break;
                     case 'set_draw_range':
                         setDrawRange(data.id, data.value);
+                        break;
+                    case 'mark_assets_complete':
+                        assetsComplete = true;
+                        maybeNotifyAssetsLoaded();
                         break;
                 }
             };

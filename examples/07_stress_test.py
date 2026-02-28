@@ -164,17 +164,17 @@ for i in range(NUM_TEAPOTS):
 
 
 def quaternion_from_direction(direction):
-    """Compute quaternion to rotate Y-axis to given direction."""
+    """Compute quaternion to rotate Z-axis to given direction."""
     d = direction / (np.linalg.norm(direction) + 1e-8)
-    y_axis = np.array([0, 1, 0])
-    dot = np.dot(y_axis, d)
+    z_axis = np.array([0, 0, 1])
+    dot = np.dot(z_axis, d)
 
     if dot > 0.9999:
         return [0, 0, 0, 1]
     if dot < -0.9999:
-        return [1, 0, 0, 0]
+        return [1, 0, 0, 0]  # 180° around X
 
-    axis = np.cross(y_axis, d)
+    axis = np.cross(z_axis, d)
     axis = axis / (np.linalg.norm(axis) + 1e-8)
     angle = np.arccos(np.clip(dot, -1, 1))
     half = angle / 2
@@ -182,6 +182,8 @@ def quaternion_from_direction(direction):
     return [axis[0] * s, axis[1] * s, axis[2] * s, np.cos(half)]
 
 
+print("Waiting for browser to finish loading assets...")
+v.wait_for_assets(disconnect=False)
 print(f"Animating {len(followers)} objects. Press Ctrl+C to stop.")
 
 frame = 0

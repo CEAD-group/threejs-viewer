@@ -14,27 +14,16 @@ import math
 from threejs_viewer import Animation, viewer
 
 
-def make_transform_matrix(position, rotation_z=0, scale=1.0):
-    """Create a 4x4 transform matrix (column-major for Three.js)."""
-    c, s = math.cos(rotation_z), math.sin(rotation_z)
-    return [
-        scale * c,
-        scale * s,
-        0,
-        0,
-        -scale * s,
-        scale * c,
-        0,
-        0,
-        0,
-        0,
-        scale,
-        0,
-        position[0],
-        position[1],
-        position[2],
-        1,
-    ]
+def mat_rz(tx, ty, tz, angle):
+    """4x4 column-major matrix: translate to (tx,ty,tz) + rotate around Z."""
+    c, s = math.cos(angle), math.sin(angle)
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, tx, ty, tz, 1]
+
+
+def mat_ry(tx, ty, tz, angle):
+    """4x4 column-major matrix: translate to (tx,ty,tz) + rotate around Y."""
+    c, s = math.cos(angle), math.sin(angle)
+    return [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, tx, ty, tz, 1]
 
 
 v = viewer()
@@ -56,16 +45,18 @@ v.add_box(
 # === Build robot arm using nested groups ===
 #
 # Hierarchy:
-#   base (group at origin)
+#   base (group at origin, yaw around Z)
 #     base_mesh (cylinder)
-#     shoulder (group, offset Z up)
-#       upper_arm (box)
-#       elbow (group, offset along arm)
-#         lower_arm (box)
-#         wrist (group, offset along arm)
+#     shoulder (group at top of base, pitch around Y)
+#       upper_arm (box, extends upward in Z)
+#       shoulder_joint (sphere)
+#       elbow (group at top of upper arm, pitch around Y)
+#         lower_arm (box, extends upward in Z)
+#         elbow_joint (sphere)
+#         wrist (group at top of lower arm, pitch around Y)
 #           hand (sphere)
 
-# Base — rotates around Z
+# Base — rotates around Z (turntable yaw)
 v.add_group("base")
 v.add_cylinder(
     "base_mesh",
@@ -79,15 +70,15 @@ v.add_cylinder(
     metalness=0.3,
 )
 
-# Shoulder joint — positioned on top of base, rotates around Z in XY plane
+# Shoulder — at top of base, bends around Y
 v.add_group("shoulder", parent="base", position=[0, 0, 0.4])
 v.add_box(
     "upper_arm",
     width=0.3,
-    height=2.0,
-    depth=0.3,
+    height=0.3,
+    depth=2.0,
     color=0xDD6633,
-    position=[0, 1.0, 0],
+    position=[0, 0, 1.0],
     parent="shoulder",
     roughness=0.4,
     metalness=0.2,
@@ -101,15 +92,15 @@ v.add_sphere(
     metalness=0.5,
 )
 
-# Elbow joint — at the end of upper arm
-v.add_group("elbow", parent="shoulder", position=[0, 2.0, 0])
+# Elbow — at top of upper arm, bends around Y
+v.add_group("elbow", parent="shoulder", position=[0, 0, 2.0])
 v.add_box(
     "lower_arm",
     width=0.25,
-    height=1.5,
-    depth=0.25,
+    height=0.25,
+    depth=1.5,
     color=0x3366DD,
-    position=[0, 0.75, 0],
+    position=[0, 0, 0.75],
     parent="elbow",
     roughness=0.4,
     metalness=0.2,
@@ -123,8 +114,8 @@ v.add_sphere(
     metalness=0.5,
 )
 
-# Wrist joint — at the end of lower arm
-v.add_group("wrist", parent="elbow", position=[0, 1.5, 0])
+# Wrist — at top of lower arm, bends around Y
+v.add_group("wrist", parent="elbow", position=[0, 0, 1.5])
 v.add_sphere(
     "hand",
     radius=0.2,
@@ -134,7 +125,7 @@ v.add_sphere(
     metalness=0.3,
 )
 
-# === Animate: only set local joint rotations ===
+# === Animate: only set local joint transforms ===
 duration = 8.0
 fps = 30
 n_frames = int(duration * fps)
@@ -144,23 +135,21 @@ for i in range(n_frames):
     t = i / fps
     transforms = {}
 
-    # Base rotates slowly around Z
+    # Base: slow yaw around Z
     base_angle = math.sin(t * 0.8) * math.pi / 3
-    transforms["base"] = make_transform_matrix([0, 0, 0], rotation_z=base_angle)
+    transforms["base"] = mat_rz(0, 0, 0, base_angle)
 
-    # Shoulder oscillates
+    # Shoulder: pitch around Y — arm swings forward/back
     shoulder_angle = math.sin(t * 1.2) * math.pi / 4 + math.pi / 6
-    transforms["shoulder"] = make_transform_matrix(
-        [0, 0, 0.4], rotation_z=shoulder_angle
-    )
+    transforms["shoulder"] = mat_ry(0, 0, 0.4, shoulder_angle)
 
-    # Elbow oscillates opposite to shoulder
+    # Elbow: pitch around Y — lower arm bends
     elbow_angle = math.sin(t * 1.8 + 1.0) * math.pi / 3
-    transforms["elbow"] = make_transform_matrix([0, 2.0, 0], rotation_z=elbow_angle)
+    transforms["elbow"] = mat_ry(0, 0, 2.0, elbow_angle)
 
-    # Wrist wiggles fast
+    # Wrist: fast wiggle around Y
     wrist_angle = math.sin(t * 3.0) * math.pi / 6
-    transforms["wrist"] = make_transform_matrix([0, 1.5, 0], rotation_z=wrist_angle)
+    transforms["wrist"] = mat_ry(0, 0, 1.5, wrist_angle)
 
     animation.add_frame(time=t, transforms=transforms)
 
@@ -171,10 +160,4 @@ v.load_animation(animation)
 
 print(f"Robot arm demo: {animation.n_frames} frames, {animation.duration:.1f}s")
 print("Only 4 joints are animated — 5 visual meshes follow automatically via grouping.")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

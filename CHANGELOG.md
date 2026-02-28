@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.0.8
+
+Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_for_assets()` for clean script exit, auto-starts animation playback, and fixes Z-up orientation for all built-in primitives and GLTF models.
+
+### Breaking changes
+
+- **`add_bead()` removed** — use `v.add_mesh("id", **tp.to_mesh())` instead (build the mesh via `Toolpath.to_mesh()`)
+- **Cylinder, cone, capsule are now Z-aligned** — previously these primitives used Three.js defaults (Y-up), so they appeared on their sides in the Z-up viewer. They are now upright. Any code that manually rotated these primitives to compensate must remove that rotation.
+- **GLTF/GLB models are now auto-corrected to Z-up** — a `+90° X` rotation is baked in on load. Any code that manually applied a rotation matrix to a GLTF model to make it upright (e.g. a custom `matrix=` on `add_model_binary`) must remove that correction.
+- **`wait_for_assets()` now raises `TimeoutError`** on timeout instead of silently disconnecting.
+- **Animation auto-starts on `load_animation()`** — previously the animation started paused; it now begins playing immediately. Call `v.stop_animation()` before `v.load_animation()` if you want it to start paused.
+
+### New features
+
+- **`Toolpath.colorize()`** — colors stored on the toolpath directly; accepts a colormap name (`"viridis"`), hex int, RGB tuple, per-point scalar array (mapped through a colormap), or `(N,3)` RGB array; `travel_color` parameter grays out zero-width travel moves
+- **`Toolpath.to_mesh()`** — builds bead mesh geometry (`positions`, `indices`, `normals`, `colors`) as a dict, usable with `v.add_mesh("id", **tp.to_mesh())`; supersedes `add_bead()` which has been removed from `ViewerClient`
+- **`Toolpath.colors` property** — get/set vertex colors on a toolpath directly
+- **`wait_for_assets()`** — blocks until the browser signals all HTTP binary assets have loaded, then disconnects; lets scripts exit cleanly instead of `while True: pass`
+- **Auto-start animation** — `load_animation()` now starts playback immediately in the browser without a separate play call
+
+### Bug fixes
+
+- `from_gcode`: zero-length connectors within an extrusion segment no longer get `w=0` (were incorrectly treated as travel)
+- `from_gcode` / `from_points`: raise `ValueError` with a clear message for bad input shape or fewer than 2 points
+- `merge_animation_points`: fixed right-anchored interpolation at duplicate timestamps
+- `Toolpath.merge()`: color interpolation now deduplicates timestamps before `np.interp`, matching geometry behavior at extrusion→travel transitions
+- `_apply_colormap`: `frac==1.0` now maps exactly to the last colormap entry (was slightly short due to float clipping)
+- `Toolpath.colors` setter: validates array shape `(N, 3)` matching `len(self)`, raises `ValueError` on mismatch
+- `wait_for_assets()`: fixed race where early fetches could fire `assets_loaded` before later asset messages arrived; Python now sends an explicit `mark_assets_complete` message that the browser uses to gate its reply
+- `wait_for_assets(disconnect=False)`: new parameter keeps the server alive after assets load, allowing subsequent streaming updates (`batch_update`) — fixes crash in example 07
+- Cylinder, cone, and capsule geometry now baked with `rotateX(90°)` so they stand upright in the Z-up viewer without manual rotation workarounds
+- GLTF/GLB models wrapped in a `+90° X` correction group on load, converting Y-up (glTF standard) to Z-up; set_matrix/animation targets the outer wrapper and the correction is permanent
+- `14_grouping.py` robot arm: fixed joints to bend around Y-axis and arm segments to extend upward in Z
+
+### New example
+
+- `15_toolpath_interrupted.py` — G-code-derived pill/racetrack path with travel moves, per-point width array (`0` = travel), `merge_animation_points` for segment-aligned `draw_range` animation, and plasma colormap
+
+### Updated examples
+
+- `11_toolpath.py` — uses `tp.colorize("viridis")` + `v.add_mesh("path_tube", **tp.to_mesh())`; point count halved for faster loading
+- All animation examples now call `v.wait_for_assets()` instead of blocking indefinitely
+- `04_flying_teapots.py` — replaced with a teapot carousel: synchronized ring orbiting a golden sphere, ring breathes and tilts over time
+- `07_stress_test.py` — calls `wait_for_assets(disconnect=False)` before streaming loop so assets finish loading before animation starts
+
+### Other
+
+- `run_examples.sh` — shell script that runs all examples sequentially
+
 ## 0.0.7
 
 Adds object grouping (parent-child hierarchies) and version negotiation between Python client and browser viewer.
