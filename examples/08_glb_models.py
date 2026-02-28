@@ -74,10 +74,5 @@ for name, info in MODELS.items():
         ],
     )
 
-print("Models loaded. Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+print("Models loaded.")
+v.wait_for_assets()

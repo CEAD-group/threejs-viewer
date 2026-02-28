@@ -300,10 +300,4 @@ start = time.time()
 v.load_animation(animation)
 send_time = time.time() - start
 print(f"Sent in {send_time:.1f}s ({len(followers)} objects x {n_frames} frames)")
-
-print("Press Ctrl+C to exit.")
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

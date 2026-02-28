@@ -151,10 +151,4 @@ animation.add_marker(15.0, "Coming around", color=0xFF00FF)
 v.load_animation(animation)
 
 print(f"Animation loaded: {N_TEAPOTS} teapots, {animation.n_frames} frames")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

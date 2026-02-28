@@ -119,10 +119,4 @@ animation.add_marker(3 * duration / 4, "3/4 cycle", color=0xFF8800)
 v.load_animation(animation)
 
 print(f"Lissajous curve ({A}:{B}:{C}), {animation.n_frames} frames at {fps} fps")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()
