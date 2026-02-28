@@ -242,6 +242,27 @@ def test_colorize_per_point_array():
     assert tp.colors.shape == (8, 3)
 
 
+def test_colorize_rgb_array():
+    tp = _simple_tp(5)
+    rgb = np.random.rand(5, 3).astype(np.float32)
+    tp.colorize(rgb)
+    assert tp.colors is not None
+    assert np.allclose(tp.colors, rgb)
+
+
+def test_colorize_bad_array_shape_raises():
+    tp = _simple_tp(5)
+    with pytest.raises(ValueError, match="shape"):
+        tp.colorize(np.ones((3, 3), dtype=np.float32))  # wrong N
+
+
+def test_to_mesh_single_point_raises():
+    pts = np.zeros((1, 3), dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+    with pytest.raises(ValueError, match="at least 2"):
+        tp.to_mesh()
+
+
 def test_colors_setter():
     tp = _simple_tp(4)
     assert tp.colors is None
