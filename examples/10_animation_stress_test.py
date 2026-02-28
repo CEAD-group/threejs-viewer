@@ -82,13 +82,13 @@ def create_tube(t, pos, tangent, tube_radius=0.3, windings=500, z_offset=5.0):
 
 
 def quaternions_from_directions(directions):
-    """Compute quaternions to rotate Y-axis to given directions. Vectorized (N, 3) -> (N, 4)."""
+    """Compute quaternions to rotate Z-axis to given directions. Vectorized (N, 3) -> (N, 4)."""
     norms = np.linalg.norm(directions, axis=1, keepdims=True) + 1e-8
     d = directions / norms
-    y_axis = np.array([0, 1, 0])
-    dots = d @ y_axis  # (N,)
+    z_axis = np.array([0, 0, 1])
+    dots = d @ z_axis  # (N,)
 
-    axes = np.cross(y_axis, d)  # (N, 3)
+    axes = np.cross(z_axis, d)  # (N, 3)
     axis_norms = np.linalg.norm(axes, axis=1, keepdims=True) + 1e-8
     axes = axes / axis_norms
 
