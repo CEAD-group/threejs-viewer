@@ -5,7 +5,7 @@ Demonstrates:
 - make_pill_toolpath: G-code-style [x_mm, y_mm, z_mm, E_cc, F_mm_per_min]
   (cumulative extrusion in cc, feedrate in mm/min)
 - Toolpath.from_gcode: detects extrusion from dE > 0, computes time from F
-- Toolpath.gradient_colors: perceptual colormap along arc-length (plasma)
+- Toolpath.colorize: perceptual colormap along arc-length (plasma)
 - Toolpath.frame_times + Toolpath.merge: segment-aligned animation so each
   frame corresponds exactly to a mesh vertex (no partial triangle rings)
 
@@ -98,7 +98,7 @@ frame_times, _ = tp.frame_times(N_FRAMES)
 merged, frame_indices = tp.merge(frame_times)
 draw_fracs = (frame_indices / max(len(merged) - 1, 1)).reshape(-1, 1).astype(np.float32)
 
-colors = merged.gradient_colors("plasma")
+merged.colorize("plasma")
 
 print(f"Raw toolpath: {len(raw)} points, {raw[-1, 3]:.4f} cc total extrusion")
 print(f"Toolpath:     {len(tp)} points")
@@ -113,15 +113,7 @@ v.add_box(
     "ground", width=80, height=50, depth=0.2, color=0x222222, position=[0, 0, -0.1]
 )
 
-v.add_bead(
-    "bead",
-    merged.points,
-    width=merged.widths,
-    height=merged.heights,
-    colors=colors,
-    roughness=0.4,
-    metalness=0.1,
-)
+v.add_mesh("bead", **merged.to_mesh(), roughness=0.4, metalness=0.1)
 
 nozzle_h = 5.0  # mm
 v.add_cylinder(

@@ -158,3 +158,176 @@ def test_from_gcode_pill_no_spurious_zero_width():
         f"Spurious zero-width rings found at indices {spurious} "
         f"(surrounded by full-width extrusion on both sides)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Toolpath.colorize
+# ---------------------------------------------------------------------------
+
+
+def _simple_tp(n=10):
+    pts = np.zeros((n, 3), dtype=np.float32)
+    pts[:, 0] = np.linspace(0, 1, n)
+    return Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+
+
+def test_colorize_string_returns_self():
+    tp = _simple_tp()
+    result = tp.colorize("viridis")
+    assert result is tp
+
+
+def test_colorize_string_shape():
+    tp = _simple_tp(10)
+    tp.colorize("viridis")
+    assert tp.colors is not None
+    assert tp.colors.shape == (10, 3)
+    assert tp.colors.dtype == np.float32
+
+
+def test_colorize_string_all_colormaps():
+    tp = _simple_tp()
+    for name in ("viridis", "plasma", "turbo"):
+        tp.colorize(name)
+        assert tp.colors is not None
+
+
+def test_colorize_string_unknown_raises():
+    tp = _simple_tp()
+    with pytest.raises(ValueError, match="Unknown colormap"):
+        tp.colorize("rainbow")
+
+
+def test_colorize_string_travel_color_applied():
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(5, dtype=np.float32)
+    widths = np.array([0.2, 0.2, 0.0, 0.0, 0.2], dtype=np.float32)
+    heights = np.array([0.1, 0.1, 0.0, 0.0, 0.1], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    tp.colorize("viridis", travel_color=(0.25, 0.25, 0.25))
+    # points 2 and 3 are travel (w=h=0) → must get travel color
+    assert np.allclose(tp.colors[2], [0.25, 0.25, 0.25], atol=1e-6)
+    assert np.allclose(tp.colors[3], [0.25, 0.25, 0.25], atol=1e-6)
+
+
+def test_colorize_hex_int():
+    tp = _simple_tp(5)
+    tp.colorize(0xFF0000)
+    assert tp.colors.shape == (5, 3)
+    assert np.allclose(tp.colors[:, 0], 1.0, atol=1e-3)
+    assert np.allclose(tp.colors[:, 1], 0.0, atol=1e-3)
+    assert np.allclose(tp.colors[:, 2], 0.0, atol=1e-3)
+
+
+def test_colorize_tuple_rgb():
+    tp = _simple_tp(5)
+    tp.colorize((0.1, 0.5, 0.9))
+    assert tp.colors.shape == (5, 3)
+    assert np.allclose(tp.colors[0], [0.1, 0.5, 0.9], atol=1e-6)
+    assert np.allclose(tp.colors[-1], [0.1, 0.5, 0.9], atol=1e-6)
+
+
+def test_colorize_ndarray_3_is_solid():
+    tp = _simple_tp(5)
+    tp.colorize(np.array([0.2, 0.4, 0.6], dtype=np.float32))
+    assert tp.colors.shape == (5, 3)
+    assert np.allclose(tp.colors[2], [0.2, 0.4, 0.6], atol=1e-6)
+
+
+def test_colorize_per_point_array():
+    tp = _simple_tp(8)
+    values = np.linspace(0, 1, 8, dtype=np.float32)
+    tp.colorize(values, colormap="plasma")
+    assert tp.colors is not None
+    assert tp.colors.shape == (8, 3)
+
+
+def test_colors_setter():
+    tp = _simple_tp(4)
+    assert tp.colors is None
+    arr = np.ones((4, 3), dtype=np.float32)
+    tp.colors = arr
+    assert tp.colors is not None
+    tp.colors = None
+    assert tp.colors is None
+
+
+# ---------------------------------------------------------------------------
+# Toolpath.to_mesh
+# ---------------------------------------------------------------------------
+
+
+def test_to_mesh_output_keys():
+    tp = _simple_tp(5)
+    mesh = tp.to_mesh()
+    assert set(mesh.keys()) == {"positions", "indices", "normals", "colors"}
+
+
+def test_to_mesh_shapes():
+    N = 6
+    tp = _simple_tp(N)
+    mesh = tp.to_mesh()
+    P = 6
+    assert mesh["positions"].shape == (N * P, 3)
+    assert mesh["normals"].shape == (N * P, 3)
+    assert mesh["indices"].shape == ((N - 1) * P * 6,)
+    assert mesh["colors"] is None
+
+
+def test_to_mesh_with_colors():
+    N = 5
+    tp = _simple_tp(N)
+    tp.colorize("viridis")
+    mesh = tp.to_mesh()
+    P = 6
+    assert mesh["colors"] is not None
+    assert mesh["colors"].shape == (N * P, 3)
+
+
+def test_to_mesh_no_colors_is_none():
+    tp = _simple_tp(4)
+    mesh = tp.to_mesh()
+    assert mesh["colors"] is None
+
+
+def test_to_mesh_zero_width_ring_collapsed():
+    """W=H=0 ring: all 6 vertices collapse to the path point."""
+    pts = np.zeros((4, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(4, dtype=np.float32)
+    widths = np.array([0.2, 0.0, 0.2, 0.2], dtype=np.float32)
+    heights = np.array([0.1, 0.0, 0.1, 0.1], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    mesh = tp.to_mesh()
+    P = 6
+    ring1_verts = mesh["positions"][1 * P : 2 * P]
+    assert np.allclose(ring1_verts, ring1_verts[0], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Toolpath.merge — color interpolation
+# ---------------------------------------------------------------------------
+
+
+def test_merge_preserves_colors():
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.linspace(0, 4, 5)
+    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1, duration=4.0)
+    tp.colorize("viridis")
+
+    frame_times = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    merged, _ = tp.merge(frame_times)
+
+    assert merged.colors is not None
+    assert merged.colors.shape == (len(merged), 3)
+    assert merged.colors.dtype == np.float32
+
+
+def test_merge_no_colors_stays_none():
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.linspace(0, 4, 5)
+    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1, duration=4.0)
+
+    frame_times = np.array([1.0, 2.0], dtype=np.float32)
+    merged, _ = tp.merge(frame_times)
+
+    assert merged.colors is None
