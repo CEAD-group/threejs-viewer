@@ -574,6 +574,11 @@ class ViewerClient:
             color: Material color (hex), ignored when colors is provided
             **kwargs: Passed to add_mesh (metalness, roughness)
 
+        Coordinate convention:
+            Each path point is the **top** of the bead (nozzle/tip position). The
+            cross-section extends *downward* in Z by ``height``, matching the 3D-printing
+            convention where the nozzle traces the top surface of the deposited material.
+
         Travel moves and tapered caps:
             Points where width=0 and height=0 collapse all 6 ring vertices to the path
             point, producing zero-area triangles that GPUs discard before rasterization.
