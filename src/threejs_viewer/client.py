@@ -159,21 +159,21 @@ class ViewerClient:
         except Exception:
             pass
 
-    def wait_for_assets(self, timeout: float | None = None) -> None:
-        """Block until the browser has fetched all binary assets, then disconnect.
+    def wait_for_assets(
+        self, timeout: float | None = None, disconnect: bool = True
+    ) -> None:
+        """Block until the browser has fetched all binary assets.
 
         The browser sends an ``assets_loaded`` message over WebSocket once all
         pending HTTP fetches (animation, meshes, polylines, models) have
-        completed.  This method waits for that signal and then shuts the server
-        down, so the Python script can exit cleanly without a manual
-        ``Ctrl+C``.
-
-        This is intended for scripts that pre-compute everything and hand it
-        off to the browser — once the browser is self-sufficient the server is
-        no longer needed.
+        completed.
 
         Args:
             timeout: Maximum seconds to wait.  ``None`` waits indefinitely.
+            disconnect: If ``True`` (default), shut the server down after
+                assets load so the script can exit cleanly.  Pass ``False``
+                to keep the connection alive for subsequent streaming updates
+                (e.g. ``batch_update``).
 
         Raises:
             TimeoutError: If the browser does not confirm asset loading within
@@ -186,7 +186,8 @@ class ViewerClient:
             raise TimeoutError(
                 "Timed out waiting for browser to finish loading assets."
             )
-        self.disconnect()
+        if disconnect:
+            self.disconnect()
 
     def disconnect(self):
         """Disconnect and stop server."""

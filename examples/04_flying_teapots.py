@@ -110,8 +110,8 @@ def flight_path(t, teapot_idx):
     phase = teapot_idx * 2 * math.pi / N_TEAPOTS
 
     # Position on a 3D curve
-    x = 6 * math.sin(freq_x * t + phase)
-    y = 6 * math.cos(freq_y * t + phase * 1.3)
+    x = 5.5 * math.sin(freq_x * t + phase)
+    y = 5.5 * math.cos(freq_y * t + phase * 1.3)
     z = 3 + 2 * math.sin(freq_z * t + phase * 0.7)
 
     # Rotation - teapots tumble as they fly
