@@ -103,19 +103,12 @@ transforms = np.zeros((n_frames, 2, 16), dtype=np.float32)
 # path_tube: identity matrix
 transforms[:, 0, [0, 5, 10, 15]] = 1.0
 
-# Nozzle rotation matrix (constant): Rot(+90° about X) in column-major
-# col0=[1,0,0,0], col1=[0,0,1,0], col2=[0,-1,0,0], col3=[x,y,z,1]
+# Nozzle: identity rotation + translation (cylinder geometry is already Z-aligned)
 nz_z = tips[:, 2] + nozzle_height / 2 + nozzle_gap
-m = transforms[:, 1]
-m[:, 0] = 1.0  # col0.x
-m[:, 5] = 0.0  # col1.y (cos90=0)
-m[:, 6] = 1.0  # col1.z (sin90=1)
-m[:, 9] = -1.0  # col2.y (-sin90=-1)
-m[:, 10] = 0.0  # col2.z (cos90=0)
-m[:, 12] = tips[:, 0]
-m[:, 13] = tips[:, 1]
-m[:, 14] = nz_z
-m[:, 15] = 1.0
+transforms[:, 1, [0, 5, 10, 15]] = 1.0
+transforms[:, 1, 12] = tips[:, 0]
+transforms[:, 1, 13] = tips[:, 1]
+transforms[:, 1, 14] = nz_z
 
 # Build animation — fully binary, no Python loop
 animation = Animation(loop=True)
