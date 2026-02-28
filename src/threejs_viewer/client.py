@@ -179,6 +179,7 @@ class ViewerClient:
             TimeoutError: If the browser does not confirm asset loading within
                 *timeout* seconds.
         """
+        self._assets_loaded_event.clear()
         self._send({"type": "mark_assets_complete"})
         loaded = self._assets_loaded_event.wait(timeout=timeout)
         if not loaded:

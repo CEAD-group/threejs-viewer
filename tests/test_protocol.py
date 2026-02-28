@@ -251,7 +251,7 @@ def _extract_bead_indices(header, payload):
     return np.frombuffer(payload[offset : offset + ni * 4], dtype=np.uint32).copy()
 
 
-def test_add_bead_scalar_all_segments_active(client):
+def test_to_mesh_scalar_width_all_segments_active(client):
     """Scalar width/height: every segment should have non-zero triangle indices."""
     pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], dtype=np.float32)
     tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
@@ -267,7 +267,7 @@ def test_add_bead_scalar_all_segments_active(client):
         assert np.any(seg_indices != 0), f"Segment {seg} should have active geometry"
 
 
-def test_add_bead_array_width_travel_degenerate(client):
+def test_to_mesh_array_width_travel_degenerate(client):
     """Array width with zeros for travel: zero-width rings collapse to a point.
 
     Travel move geometry is handled purely by vertex positions — W=H=0 collapses
@@ -303,7 +303,7 @@ def test_add_bead_array_width_travel_degenerate(client):
         )
 
 
-def test_add_bead_array_width_index_count_unchanged(client):
+def test_to_mesh_array_width_index_count_unchanged(client):
     """Array vs scalar width: same number of indices (draw_range mapping preserved)."""
     pts = np.zeros((5, 3), dtype=np.float32)
     pts[:, 0] = np.arange(5, dtype=np.float32)

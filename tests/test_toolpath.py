@@ -257,10 +257,35 @@ def test_colorize_bad_array_shape_raises():
 
 
 def test_to_mesh_single_point_raises():
-    pts = np.zeros((1, 3), dtype=np.float32)
-    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+    # Bypass constructor validation to test to_mesh() guard directly
+    tp = Toolpath(np.zeros((1, 6), dtype=np.float32))
     with pytest.raises(ValueError, match="at least 2"):
         tp.to_mesh()
+
+
+def test_from_points_single_point_raises():
+    pts = np.zeros((1, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="at least 2"):
+        Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+
+
+def test_from_points_bad_shape_raises():
+    pts = np.zeros((4, 2), dtype=np.float32)
+    with pytest.raises(ValueError, match=r"\(N, 3\)"):
+        Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+
+
+def test_from_gcode_bad_shape_raises():
+    raw = np.zeros((4, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match=r"\(N, 5\)"):
+        Toolpath.from_gcode(raw, bead_width=0.2, bead_height=0.1)
+
+
+def test_from_gcode_too_few_points_raises():
+    raw = np.zeros((1, 5), dtype=np.float32)
+    raw[0, 4] = 1000.0  # feedrate
+    with pytest.raises(ValueError, match="at least 2"):
+        Toolpath.from_gcode(raw, bead_width=0.2, bead_height=0.1)
 
 
 def test_colors_setter():
