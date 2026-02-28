@@ -81,7 +81,7 @@ v.add_box(
 v.add_group("pillars")
 for i in range(4):
     angle = i * math.pi / 2 + math.pi / 4
-    x, y = 8 * math.cos(angle), 8 * math.sin(angle)
+    x, y = 10 * math.cos(angle), 10 * math.sin(angle)
     v.add_cylinder(
         f"pillar_{i}",
         radius_top=0.3,

@@ -130,14 +130,10 @@ frame_nozzle_xyz = merged.points[frame_indices]
 
 transforms = np.zeros((N_FRAMES, 2, 16), dtype=np.float32)
 transforms[:, 0, [0, 5, 10, 15]] = 1.0  # bead: identity
-m = transforms[:, 1]  # nozzle: Rot(+90° about X) + translation
-m[:, 0] = 1.0
-m[:, 6] = 1.0
-m[:, 9] = -1.0
-m[:, 15] = 1.0
-m[:, 12] = frame_nozzle_xyz[:, 0]
-m[:, 13] = frame_nozzle_xyz[:, 1]
-m[:, 14] = frame_nozzle_xyz[:, 2] + nozzle_h / 2
+transforms[:, 1, [0, 5, 10, 15]] = 1.0  # nozzle: identity rotation
+transforms[:, 1, 12] = frame_nozzle_xyz[:, 0]
+transforms[:, 1, 13] = frame_nozzle_xyz[:, 1]
+transforms[:, 1, 14] = frame_nozzle_xyz[:, 2] + nozzle_h / 2
 
 animation = Animation(loop=True)
 animation.set_frame_times(frame_times)

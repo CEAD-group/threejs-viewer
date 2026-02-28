@@ -898,8 +898,11 @@
                     const result = await loadModel(loader, objData.model, format);
                     obj = result.obj;
                     if (result.animations.length > 0) {
-                        // Create mixer with all clips ready for seeking via setTime()
-                        const mixer = new THREE.AnimationMixer(obj);
+                        // Root the mixer at the GLTF scene so animation tracks
+                        // can resolve their target nodes by name within the
+                        // Y-up→Z-up correction wrapper.
+                        const mixerRoot = obj.userData.gltfScene || obj;
+                        const mixer = new THREE.AnimationMixer(mixerRoot);
                         for (const clip of result.animations) {
                             const action = mixer.clipAction(clip);
                             action.play();
@@ -938,7 +941,18 @@
                         let obj;
                         let animations = [];
                         if (format === 'gltf' || format === 'glb') {
-                            obj = result.scene;
+                            // GLTF/GLB uses Y-up; wrap in a correction group so
+                            // the model stands upright in the Z-up viewer scene.
+                            // The outer container is user-controlled (set_matrix
+                            // targets it); the inner correction is permanent.
+                            const correction = new THREE.Group();
+                            correction.rotation.x = -Math.PI / 2;
+                            correction.add(result.scene);
+                            obj = new THREE.Group();
+                            obj.add(correction);
+                            // Store the GLTF scene root so the AnimationMixer can
+                            // resolve track targets by name inside the hierarchy.
+                            obj.userData.gltfScene = result.scene;
                             animations = result.animations || [];
                         } else if (format === 'dae') {
                             // Create a clean group with only meshes (no lights/cameras from DAE)
