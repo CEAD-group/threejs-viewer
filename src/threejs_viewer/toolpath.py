@@ -247,9 +247,17 @@ class Toolpath:
         if self._colors is not None:
             merged_times = combined[:, 0]
             orig_times = self.times
+            # np.interp requires strictly increasing xp; deduplicate by keeping
+            # the last occurrence at each duplicate timestamp (matches geometry
+            # behavior where the last point at a duplicate time wins).
+            N_orig = len(orig_times)
+            _, last_idx = np.unique(orig_times[::-1], return_index=True)
+            last_idx = np.sort(N_orig - 1 - last_idx)
             merged_colors = np.stack(
                 [
-                    np.interp(merged_times, orig_times, self._colors[:, c])
+                    np.interp(
+                        merged_times, orig_times[last_idx], self._colors[last_idx, c]
+                    )
                     for c in range(3)
                 ],
                 axis=1,
