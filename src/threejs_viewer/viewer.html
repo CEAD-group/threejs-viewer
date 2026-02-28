@@ -409,8 +409,10 @@
                 }
             }
 
-            // Apply first frame
+            // Apply first frame and start playing
             applyFrame(0);
+            animationPlaying = true;
+            lastAnimationUpdate = performance.now();
             console.log(`Animation loaded: ${animation.frames.length} frames, ${animation.duration.toFixed(2)}s`);
         }
 
