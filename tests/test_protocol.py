@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from threejs_viewer import ViewerClient
+from threejs_viewer import Toolpath, ViewerClient
 
 
 @pytest.fixture
@@ -200,23 +200,43 @@ def test_add_mesh_no_parent(client):
     assert "parent" not in header
 
 
-# === add_bead ===
+# === Toolpath.to_mesh + add_mesh ===
 
 
-def test_add_bead_with_parent(client):
+def test_to_mesh_add_mesh_with_parent(client):
     pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
-    client.add_bead("bd", pts, width=1.0, height=0.5, parent="g")
-    # add_bead delegates to add_mesh, which calls _send_binary
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_mesh("bd", parent="g", **tp.to_mesh())
     header, _ = client._binary_messages[0]
     assert header["type"] == "add_mesh_binary"
     assert header["parent"] == "g"
 
 
-def test_add_bead_no_parent(client):
+def test_to_mesh_add_mesh_no_parent(client):
     pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
-    client.add_bead("bd", pts, width=1.0, height=0.5)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_mesh("bd", **tp.to_mesh())
     header, _ = client._binary_messages[0]
     assert "parent" not in header
+
+
+def test_to_mesh_colorize_sets_vertex_colors(client):
+    """colorize() → to_mesh() → add_mesh sends hasVertexColors=True."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    tp.colorize("plasma")
+    client.add_mesh("bd", **tp.to_mesh())
+    header, _ = client._binary_messages[0]
+    assert header["hasVertexColors"] is True
+
+
+def test_to_mesh_no_colorize_no_vertex_colors(client):
+    """Without colorize(), to_mesh() → add_mesh sends hasVertexColors=False."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_mesh("bd", **tp.to_mesh())
+    header, _ = client._binary_messages[0]
+    assert header["hasVertexColors"] is False
 
 
 def _extract_bead_indices(header, payload):
@@ -234,7 +254,8 @@ def _extract_bead_indices(header, payload):
 def test_add_bead_scalar_all_segments_active(client):
     """Scalar width/height: every segment should have non-zero triangle indices."""
     pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], dtype=np.float32)
-    client.add_bead("b", pts, width=0.2, height=0.1)
+    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+    client.add_mesh("b", **tp.to_mesh())
     header, payload = client._binary_messages[0]
     indices = _extract_bead_indices(header, payload)
 
@@ -258,7 +279,8 @@ def test_add_bead_array_width_travel_degenerate(client):
     pts[:, 0] = np.arange(6, dtype=np.float32)
     widths = np.array([0.2, 0.2, 0.0, 0.0, 0.2, 0.2], dtype=np.float32)
     heights = np.array([0.1, 0.1, 0.0, 0.0, 0.1, 0.1], dtype=np.float32)
-    client.add_bead("b", pts, width=widths, height=heights)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_mesh("b", **tp.to_mesh())
 
     header, payload = client._binary_messages[0]
 
@@ -286,12 +308,14 @@ def test_add_bead_array_width_index_count_unchanged(client):
     pts = np.zeros((5, 3), dtype=np.float32)
     pts[:, 0] = np.arange(5, dtype=np.float32)
 
-    client.add_bead("scalar", pts, width=0.2, height=0.1)
-    h_scalar, p_scalar = client._binary_messages[0]
+    tp_scalar = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+    client.add_mesh("scalar", **tp_scalar.to_mesh())
+    h_scalar, _ = client._binary_messages[0]
 
     widths = np.array([0.2, 0.0, 0.0, 0.2, 0.2], dtype=np.float32)
-    client.add_bead("array", pts, width=widths, height=0.1)
-    h_array, p_array = client._binary_messages[1]
+    tp_array = Toolpath.from_points(pts, bead_width=widths, bead_height=0.1)
+    client.add_mesh("array", **tp_array.to_mesh())
+    h_array, _ = client._binary_messages[1]
 
     assert h_scalar["numIndices"] == h_array["numIndices"], (
         "Index count must be identical so draw_range fractions map the same way"

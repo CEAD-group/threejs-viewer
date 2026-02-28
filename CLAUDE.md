@@ -61,7 +61,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - Primitives: box, sphere, cylinder, capsule (with optional roughness/metalness)
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
 - Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
-- Beads: toolpath extrusion via `add_bead()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
+- Beads: toolpath extrusion via `Toolpath.to_mesh()` + `add_mesh()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
 - **draw_range**: polylines and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
 
