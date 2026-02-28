@@ -54,6 +54,8 @@ threejs-viewer open
 ### Objects
 
 ```python
+from threejs_viewer import Toolpath, viewer
+
 # Primitives with PBR materials
 v.add_box("box1", width=1, height=2, depth=0.5, color=0x4A90D9, roughness=0.5, metalness=0.1)
 v.add_sphere("ball", radius=0.5, position=[2, 0, 0], roughness=0.3, metalness=0.7)
@@ -66,7 +68,9 @@ v.add_model_binary("robot", "robot.stl", format="stl")
 v.add_polyline("path", points, colors=z_values, colormap="viridis", line_width=3)
 
 # Bead mesh (extruded toolpath)
-v.add_bead("bead", points, width=0.3, height=0.08, colors=per_point_rgb)
+tp = Toolpath.from_points(points, bead_width=0.3, bead_height=0.08)
+tp.colorize(per_point_rgb)
+v.add_mesh("bead", **tp.to_mesh())
 
 # Transparency
 v.set_opacity("box1", 0.5)

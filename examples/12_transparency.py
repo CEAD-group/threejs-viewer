@@ -48,13 +48,8 @@ v.add_box(
     "ground", width=10, height=10, depth=0.02, color=0x333333, position=[0, 0, -0.01]
 )
 
-# Load GLB model — rotate 90° about X so it faces up (Z-up convention)
-v.add_model_binary(
-    "helmet",
-    helmet_path,
-    format="glb",
-    matrix=[-1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1.5, 1],
-)
+# Load GLB model — viewer automatically corrects GLTF Y-up to Z-up
+v.add_model_binary("helmet", helmet_path, format="glb", position=[0, 0, 1])
 
 # Primitives with initial opacity
 v.add_sphere(
@@ -118,10 +113,4 @@ animation.add_marker(duration / 2, "Translucent", color=0x0088FF)
 v.load_animation(animation)
 
 print(f"Pulsing opacity: {n_frames} frames at {fps} fps")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

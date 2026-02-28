@@ -50,6 +50,7 @@ class ViewerClient:
         self._server = None
         self._server_thread = None
         self._connected_event = threading.Event()
+        self._assets_loaded_event = threading.Event()
         self._pending_responses: Dict[str, threading.Event] = {}
         self._responses: Dict[str, dict] = {}
         self._send_lock = threading.Lock()
@@ -100,6 +101,7 @@ class ViewerClient:
     def _handle_connection(self, websocket):
         """Handle incoming WebSocket connection from browser."""
         self._ws = websocket
+        self._assets_loaded_event.clear()
         self._connected_event.set()
 
         # Re-send animation if one was loaded (browser may have refreshed)
@@ -123,6 +125,8 @@ class ViewerClient:
                     msg_type = data.get("type")
                     if msg_type == "hello":
                         self._handle_hello(websocket, data)
+                    elif msg_type == "assets_loaded":
+                        self._assets_loaded_event.set()
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -154,6 +158,36 @@ class ViewerClient:
             websocket.send(json.dumps({"type": "hello", "client_version": __version__}))
         except Exception:
             pass
+
+    def wait_for_assets(
+        self, timeout: float | None = None, disconnect: bool = True
+    ) -> None:
+        """Block until the browser has fetched all binary assets.
+
+        The browser sends an ``assets_loaded`` message over WebSocket once all
+        pending HTTP fetches (animation, meshes, polylines, models) have
+        completed.
+
+        Args:
+            timeout: Maximum seconds to wait.  ``None`` waits indefinitely.
+            disconnect: If ``True`` (default), shut the server down after
+                assets load so the script can exit cleanly.  Pass ``False``
+                to keep the connection alive for subsequent streaming updates
+                (e.g. ``batch_update``).
+
+        Raises:
+            TimeoutError: If the browser does not confirm asset loading within
+                *timeout* seconds.
+        """
+        self._assets_loaded_event.clear()
+        self._send({"type": "mark_assets_complete"})
+        loaded = self._assets_loaded_event.wait(timeout=timeout)
+        if not loaded:
+            raise TimeoutError(
+                "Timed out waiting for browser to finish loading assets."
+            )
+        if disconnect:
+            self.disconnect()
 
     def disconnect(self):
         """Disconnect and stop server."""
@@ -544,117 +578,6 @@ class ViewerClient:
         if parent:
             header["parent"] = parent
         self._send_binary(header, b"".join(parts))
-
-    def add_bead(
-        self,
-        id: str,
-        points: np.ndarray,
-        width: float,
-        height: float,
-        colors: np.ndarray = None,
-        color: int = 0x7AB8CC,
-        parent: Optional[str] = None,
-        **kwargs,
-    ) -> None:
-        """
-        Add a bead (extruded toolpath) mesh to the scene.
-
-        Generates a 6-vertex bevelled rectangle cross-section extruded along
-        the path, with analytical normals. Supports draw_range for progressive
-        reveal animation.
-
-        Args:
-            id: Unique identifier
-            points: (N, 3) float32 path points
-            width: Bead width
-            height: Bead height
-            colors: optional (N, 3) float32 per-path-point RGB colors (0-1)
-            color: Material color (hex), ignored when colors is provided
-            **kwargs: Passed to add_mesh (metalness, roughness)
-        """
-        points = np.asarray(points, dtype=np.float32)
-        if points.ndim == 1:
-            points = points.reshape(-1, 3)
-        N = points.shape[0]
-        W, H = float(width), float(height)
-        hw, hh = W / 2, H / 2
-        ft = max(0, W - H) / 2  # half-width of flat segment
-        P = 6  # vertices per ring
-
-        # 6-vertex bevelled rectangle profile: (binormal_offset, z_offset)
-        profile = np.array(
-            [[ft, 0], [hw, hh], [ft, H], [-ft, H], [-hw, hh], [-ft, 0]],
-            dtype=np.float32,
-        )
-
-        # Profile vertex normals (average of adjacent edge outward normals)
-        edges = np.roll(profile, -1, axis=0) - profile
-        edge_n = np.column_stack([edges[:, 1], -edges[:, 0]])
-        edge_n /= np.maximum(np.linalg.norm(edge_n, axis=1, keepdims=True), 1e-10)
-        prof_n = np.zeros((P, 2), dtype=np.float32)
-        for j in range(P):
-            prof_n[j] = edge_n[(j - 1) % P] + edge_n[j]
-        prof_n /= np.maximum(np.linalg.norm(prof_n, axis=1, keepdims=True), 1e-10)
-
-        # Central-difference tangents (XY only, Z-up assumption)
-        tangents = np.empty((N, 2), dtype=np.float32)
-        tangents[0] = points[1, :2] - points[0, :2]
-        tangents[-1] = points[-1, :2] - points[-2, :2]
-        tangents[1:-1] = points[2:, :2] - points[:-2, :2]
-        t_len = np.linalg.norm(tangents, axis=1, keepdims=True)
-        tangents /= np.maximum(t_len, 1e-10)
-
-        # Binormals: tangent × Z = (ty, -tx)
-        binormals = np.column_stack([tangents[:, 1], -tangents[:, 0]])
-
-        # Positions: (N, P, 3) via broadcasting
-        pb = profile[:, 0]  # (P,) binormal offsets
-        pz = profile[:, 1]  # (P,) z offsets
-        positions = np.empty((N, P, 3), dtype=np.float32)
-        positions[:, :, 0] = points[:, 0:1] + pb[None, :] * binormals[:, 0:1]
-        positions[:, :, 1] = points[:, 1:2] + pb[None, :] * binormals[:, 1:2]
-        positions[:, :, 2] = points[:, 2:3] + pz[None, :]
-
-        # Normals: (N, P, 3) — profile normals rotated into world frame
-        nb = prof_n[:, 0]  # (P,) binormal component
-        nz = prof_n[:, 1]  # (P,) z component
-        normals = np.empty((N, P, 3), dtype=np.float32)
-        normals[:, :, 0] = nb[None, :] * binormals[:, 0:1]
-        normals[:, :, 1] = nb[None, :] * binormals[:, 1:2]
-        normals[:, :, 2] = nz[None, :]
-
-        # Step-major indices for draw_range reveal along path
-        i_range = np.arange(N - 1, dtype=np.uint32)
-        j_range = np.arange(P, dtype=np.uint32)
-        ig, jg = np.meshgrid(i_range, j_range, indexing="ij")
-        j1 = (jg + 1) % P
-        a = ig * P + jg
-        b = ig * P + j1
-        c = (ig + 1) * P + jg
-        d = (ig + 1) * P + j1
-        # Two tris per quad: (a,c,b) and (b,c,d)
-        tris = np.stack([a, c, b, b, c, d], axis=-1)  # (N-1, P, 6)
-        indices = tris.reshape(-1).astype(np.uint32)
-
-        # Broadcast per-path-point colors to per-vertex (N, P, 3)
-        vertex_colors = None
-        if colors is not None:
-            colors = np.asarray(colors, dtype=np.float32)
-            if colors.ndim == 2 and colors.shape == (N, 3):
-                vertex_colors = np.broadcast_to(colors[:, None, :], (N, P, 3)).reshape(
-                    -1, 3
-                )
-
-        self.add_mesh(
-            id,
-            positions.reshape(-1, 3),
-            indices,
-            normals.reshape(-1, 3),
-            colors=vertex_colors,
-            color=color,
-            parent=parent,
-            **kwargs,
-        )
 
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
