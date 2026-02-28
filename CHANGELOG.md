@@ -2,7 +2,15 @@
 
 ## 0.0.8
 
-Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_for_assets()` for clean script exit, auto-starts animation playback, and introduces an interrupted-toolpath example with travel moves.
+Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_for_assets()` for clean script exit, auto-starts animation playback, and fixes Z-up orientation for all built-in primitives and GLTF models.
+
+### Breaking changes
+
+- **`add_bead()` removed** — use `v.add_mesh("id", **tp.to_mesh())` instead (build the mesh via `Toolpath.to_mesh()`)
+- **Cylinder, cone, capsule are now Z-aligned** — previously these primitives used Three.js defaults (Y-up), so they appeared on their sides in the Z-up viewer. They are now upright. Any code that manually rotated these primitives to compensate must remove that rotation.
+- **GLTF/GLB models are now auto-corrected to Z-up** — a `+90° X` rotation is baked in on load. Any code that manually applied a rotation matrix to a GLTF model to make it upright (e.g. a custom `matrix=` on `add_model_binary`) must remove that correction.
+- **`wait_for_assets()` now raises `TimeoutError`** on timeout instead of silently disconnecting.
+- **Animation auto-starts on `load_animation()`** — previously the animation started paused; it now begins playing immediately. Call `v.stop_animation()` before `v.load_animation()` if you want it to start paused.
 
 ### New features
 
