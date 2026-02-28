@@ -15,7 +15,7 @@ from threejs_viewer import Animation, Toolpath, viewer
 
 
 def spiral_vase(
-    n_points=800000,
+    n_points=400000,
     n_turns=80,
     radius=2.0,
     height=5.0,
