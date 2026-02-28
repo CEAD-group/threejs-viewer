@@ -131,10 +131,6 @@ v.load_animation(animation)
 
 print(f"Toolpath: {len(tp)} points, {animation.n_frames} frames at {fps} fps")
 print("Bead + nozzle — grows via draw_range animation.")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+print("Waiting for browser to finish loading assets...")
+v.wait_for_assets()
+print("Assets loaded — server closed.")

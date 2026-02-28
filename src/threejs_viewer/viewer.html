@@ -325,6 +325,18 @@
         const objects = new Map();
         const mixers = new Map();   // AnimationMixers keyed by object id
 
+        // ========== Asset Loading Tracking ==========
+        // Counts in-flight HTTP blob fetches. When it returns to zero after at
+        // least one fetch the server is notified so it can shut down cleanly.
+        let pendingFetches = 0;
+        function onFetchStart() { pendingFetches++; }
+        function onFetchEnd() {
+            pendingFetches--;
+            if (pendingFetches === 0 && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'assets_loaded' }));
+            }
+        }
+
         // ========== Animation State ==========
         let animation = null;
         let animationPlaying = false;
@@ -1151,6 +1163,7 @@
                         loadAnimation(data.animation);
                         break;
                     case 'load_animation_http':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const t0 = performance.now();
@@ -1229,10 +1242,13 @@
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
                                 console.error('Error loading animation via HTTP:', e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
                     case 'add_model_binary':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
@@ -1251,10 +1267,13 @@
                                 }
                             } catch (e) {
                                 console.error(`Error loading model via HTTP:`, e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
                     case 'add_polyline_binary':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
@@ -1307,10 +1326,13 @@
                                 objects.set(data.id, line);
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;
                     case 'add_mesh_binary':
+                        onFetchStart();
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
@@ -1366,6 +1388,8 @@
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                             } catch (e) {
                                 console.error(`Error creating mesh:`, e);
+                            } finally {
+                                onFetchEnd();
                             }
                         })();
                         break;

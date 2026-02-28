@@ -151,10 +151,6 @@ v.load_animation(animation)
 print(f"Animation: {N_FRAMES} frames, {animation.duration:.1f} s")
 print("Each frame = one complete ring of triangles (no partial rings).")
 print("Bottom straight is travel (no bead); all other segments extrude.")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+print("Waiting for browser to finish loading assets...")
+v.wait_for_assets()
+print("Assets loaded — server closed.")
