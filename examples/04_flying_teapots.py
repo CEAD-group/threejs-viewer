@@ -35,10 +35,22 @@ def make_matrix(pos, rx, ry, rz, scale=1.0):
     r22 = cx * cy
     s = scale
     return [
-        s*r00, s*r01, s*r02, 0,
-        s*r10, s*r11, s*r12, 0,
-        s*r20, s*r21, s*r22, 0,
-        pos[0], pos[1], pos[2], 1,
+        s * r00,
+        s * r01,
+        s * r02,
+        0,
+        s * r10,
+        s * r11,
+        s * r12,
+        0,
+        s * r20,
+        s * r21,
+        s * r22,
+        0,
+        pos[0],
+        pos[1],
+        pos[2],
+        1,
     ]
 
 
