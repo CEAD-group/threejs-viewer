@@ -149,10 +149,4 @@ v.load_animation(animation)
 
 print(f"Animation: {n_frames} frames, {duration:.1f}s (loop).")
 print("Morphcube plays its embedded morph animation while avocado orbits.")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

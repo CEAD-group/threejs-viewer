@@ -90,10 +90,4 @@ circle[:, 2] = 5  # At the top
 v.add_polyline("circle_white", circle, color=0xFFFFFF, line_width=2)
 
 print("Polylines with colormaps: viridis (helix), plasma (spiral), turbo (lissajous)")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

@@ -150,10 +150,4 @@ animation.add_marker(5.0, "Halfway point", color=0xFFFF00)
 v.load_animation(animation)
 
 print(f"Animation loaded: {animation.n_frames} frames, {animation.duration:.1f}s")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()

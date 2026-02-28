@@ -118,10 +118,4 @@ animation.add_marker(duration / 2, "Translucent", color=0x0088FF)
 v.load_animation(animation)
 
 print(f"Pulsing opacity: {n_frames} frames at {fps} fps")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()
