@@ -244,6 +244,11 @@ def merge_animation_points(
     if len(t) < 2:
         raise ValueError("toolpath must have at least 2 points")
 
+    # Clip frame_times to the toolpath domain up-front so that all downstream
+    # operations (skip detection, interpolation, frame_indices) are consistent.
+    # Out-of-range frames map to the first/last point rather than extrapolating.
+    frame_times = np.clip(frame_times, t[0], t[-1])
+
     # Find which frame_times are not already present in t (within tolerance)
     ins_pos = np.searchsorted(t, frame_times)
     right_pos = np.minimum(ins_pos, len(t) - 1)
@@ -255,9 +260,6 @@ def merge_animation_points(
 
     new_times = frame_times[~skip]
     if len(new_times) > 0:
-        # Clamp to the toolpath domain so out-of-range frame_times don't
-        # extrapolate geometry beyond the path endpoints.
-        new_times = np.clip(new_times, t[0], t[-1])
         # Interpolate all columns for new_times.
         # Use right-side anchoring (searchsorted side='right' - 1) so that a
         # new point just after a duplicate timestamp (e.g. an extrusion→travel
@@ -310,6 +312,10 @@ def toolpath_frame_times(
     """
     point_times = np.asarray(point_times, dtype=np.float64)
     N = len(point_times)
+    if N == 0:
+        raise ValueError("point_times must not be empty")
+    if n_frames < 1:
+        raise ValueError("n_frames must be >= 1")
     t0, t_end = float(point_times[0]), float(point_times[-1])
     frame_times = np.linspace(t0, t_end, n_frames)
     path_fracs = np.arange(N) / max(N - 1, 1)
