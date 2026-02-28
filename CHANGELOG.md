@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.0.8
+
+Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_for_assets()` for clean script exit, auto-starts animation playback, and introduces an interrupted-toolpath example with travel moves.
+
+### New features
+
+- **`Toolpath.colorize()`** — colors stored on the toolpath directly; accepts a colormap name (`"viridis"`), hex int, RGB tuple, per-point scalar array (mapped through a colormap), or `(N,3)` RGB array; `travel_color` parameter grays out zero-width travel moves
+- **`Toolpath.to_mesh()`** — builds bead mesh geometry (`positions`, `indices`, `normals`, `colors`) as a dict, usable with `v.add_mesh("id", **tp.to_mesh())`; supersedes `add_bead()` which has been removed from `ViewerClient`
+- **`Toolpath.colors` property** — get/set vertex colors on a toolpath directly
+- **`wait_for_assets()`** — blocks until the browser signals all HTTP binary assets have loaded, then disconnects; lets scripts exit cleanly instead of `while True: pass`
+- **Auto-start animation** — `load_animation()` now starts playback immediately in the browser without a separate play call
+
+### Bug fixes
+
+- `from_gcode`: zero-length connectors within an extrusion segment no longer get `w=0` (were incorrectly treated as travel)
+- `merge_animation_points`: fixed right-anchored interpolation at duplicate timestamps
+
+### New example
+
+- `15_toolpath_interrupted.py` — G-code-derived pill/racetrack path with travel moves, per-point width array (`0` = travel), `merge_animation_points` for segment-aligned `draw_range` animation, and plasma colormap
+
+### Updated examples
+
+- `11_toolpath.py` — uses `tp.colorize("viridis")` + `v.add_mesh("path_tube", **tp.to_mesh())`; point count halved for faster loading
+- All animation examples now call `v.wait_for_assets()` instead of blocking indefinitely
+
+### Other
+
+- `run_examples.sh` — shell script that runs all examples sequentially with a 5-second timeout each
+
 ## 0.0.7
 
 Adds object grouping (parent-child hierarchies) and version negotiation between Python client and browser viewer.
