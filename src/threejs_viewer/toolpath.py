@@ -81,8 +81,8 @@ def _apply_colormap(frac: np.ndarray, name: str) -> np.ndarray:
     if table is None:
         raise ValueError(f"Unknown colormap {name!r}. Choose: {list(_COLORMAPS)}")
     n = len(table) - 1
-    idx = np.clip(frac * n, 0, n - 1e-9)
-    lo = idx.astype(int)
+    idx = np.clip(frac * n, 0, n)
+    lo = np.minimum(idx.astype(int), n - 1)
     hi = np.minimum(lo + 1, n)
     t = (idx - lo).astype(np.float32)[:, None]
     return table[lo] * (1.0 - t) + table[hi] * t
@@ -138,6 +138,15 @@ class Toolpath:
             bead_width: cross-section width (mm).
             bead_height: cross-section height (mm).
         """
+        raw = np.asarray(raw)
+        if raw.ndim != 2 or raw.shape[1] != 5:
+            raise ValueError(
+                f"from_gcode expected a (N, 5) array [x,y,z,E,F], got shape {raw.shape!r}"
+            )
+        if raw.shape[0] < 2:
+            raise ValueError(
+                f"from_gcode requires at least 2 points, got {raw.shape[0]}"
+            )
         xyz, E_cc, F = raw[:, :3], raw[:, 3], raw[:, 4]
         seg_len = np.linalg.norm(np.diff(xyz, axis=0, prepend=xyz[0:1]), axis=1)
         t = np.cumsum(60.0 * seg_len / np.maximum(F, 1e-10)).astype(np.float32)
@@ -177,6 +186,14 @@ class Toolpath:
             duration: total animation duration in seconds.
         """
         points = np.asarray(points, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError(
+                f"from_points expected a (N, 3) array of xyz points, got shape {points.shape!r}"
+            )
+        if len(points) < 2:
+            raise ValueError(
+                f"from_points requires at least 2 points, got {len(points)}"
+            )
         N = len(points)
         t = np.linspace(0.0, duration, N, dtype=np.float32)
         W = np.broadcast_to(np.asarray(bead_width, dtype=np.float32), (N,)).copy()
@@ -274,7 +291,15 @@ class Toolpath:
 
     @colors.setter
     def colors(self, value: np.ndarray | None) -> None:
-        self._colors = None if value is None else np.asarray(value, dtype=np.float32)
+        if value is None:
+            self._colors = None
+            return
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] != len(self) or arr.shape[1] != 3:
+            raise ValueError(
+                f"colors must have shape ({len(self)}, 3), got {arr.shape!r}"
+            )
+        self._colors = arr
 
     def colorize(
         self,
