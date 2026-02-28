@@ -50,6 +50,7 @@ class ViewerClient:
         self._server = None
         self._server_thread = None
         self._connected_event = threading.Event()
+        self._assets_loaded_event = threading.Event()
         self._pending_responses: Dict[str, threading.Event] = {}
         self._responses: Dict[str, dict] = {}
         self._send_lock = threading.Lock()
@@ -100,6 +101,7 @@ class ViewerClient:
     def _handle_connection(self, websocket):
         """Handle incoming WebSocket connection from browser."""
         self._ws = websocket
+        self._assets_loaded_event.clear()
         self._connected_event.set()
 
         # Re-send animation if one was loaded (browser may have refreshed)
@@ -123,6 +125,8 @@ class ViewerClient:
                     msg_type = data.get("type")
                     if msg_type == "hello":
                         self._handle_hello(websocket, data)
+                    elif msg_type == "assets_loaded":
+                        self._assets_loaded_event.set()
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -154,6 +158,25 @@ class ViewerClient:
             websocket.send(json.dumps({"type": "hello", "client_version": __version__}))
         except Exception:
             pass
+
+    def wait_for_assets(self, timeout: float | None = None) -> None:
+        """Block until the browser has fetched all binary assets, then disconnect.
+
+        The browser sends an ``assets_loaded`` message over WebSocket once all
+        pending HTTP fetches (animation, meshes, polylines, models) have
+        completed.  This method waits for that signal and then shuts the server
+        down, so the Python script can exit cleanly without a manual
+        ``Ctrl+C``.
+
+        This is intended for scripts that pre-compute everything and hand it
+        off to the browser — once the browser is self-sufficient the server is
+        no longer needed.
+
+        Args:
+            timeout: Maximum seconds to wait.  ``None`` waits indefinitely.
+        """
+        self._assets_loaded_event.wait(timeout=timeout)
+        self.disconnect()
 
     def disconnect(self):
         """Disconnect and stop server."""
