@@ -182,6 +182,8 @@ def quaternion_from_direction(direction):
     return [axis[0] * s, axis[1] * s, axis[2] * s, np.cos(half)]
 
 
+print("Waiting for browser to finish loading assets...")
+v.wait_for_assets(disconnect=False)
 print(f"Animating {len(followers)} objects. Press Ctrl+C to stop.")
 
 frame = 0
