@@ -15,7 +15,12 @@ Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_f
 ### Bug fixes
 
 - `from_gcode`: zero-length connectors within an extrusion segment no longer get `w=0` (were incorrectly treated as travel)
+- `from_gcode` / `from_points`: raise `ValueError` with a clear message for bad input shape or fewer than 2 points
 - `merge_animation_points`: fixed right-anchored interpolation at duplicate timestamps
+- `Toolpath.merge()`: color interpolation now deduplicates timestamps before `np.interp`, matching geometry behavior at extrusion→travel transitions
+- `_apply_colormap`: `frac==1.0` now maps exactly to the last colormap entry (was slightly short due to float clipping)
+- `Toolpath.colors` setter: validates array shape `(N, 3)` matching `len(self)`, raises `ValueError` on mismatch
+- `wait_for_assets()`: fixed race where early fetches could fire `assets_loaded` before later asset messages arrived; Python now sends an explicit `mark_assets_complete` message that the browser uses to gate its reply
 
 ### New example
 
