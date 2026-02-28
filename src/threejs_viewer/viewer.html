@@ -762,24 +762,36 @@
             sphere: (params) => new THREE.SphereGeometry(
                 params.radius || 0.5, params.widthSegments || 32, params.heightSegments || 16
             ),
-            cylinder: (params) => new THREE.CylinderGeometry(
-                params.radiusTop || 0.5, params.radiusBottom || 0.5,
-                params.height || 1, params.radialSegments || 32
-            ),
+            cylinder: (params) => {
+                const geo = new THREE.CylinderGeometry(
+                    params.radiusTop || 0.5, params.radiusBottom || 0.5,
+                    params.height || 1, params.radialSegments || 32
+                );
+                geo.rotateX(Math.PI / 2);
+                return geo;
+            },
             plane: (params) => new THREE.PlaneGeometry(
                 params.width || 1, params.height || 1
             ),
-            cone: (params) => new THREE.ConeGeometry(
-                params.radius || 0.5, params.height || 1, params.radialSegments || 32
-            ),
+            cone: (params) => {
+                const geo = new THREE.ConeGeometry(
+                    params.radius || 0.5, params.height || 1, params.radialSegments || 32
+                );
+                geo.rotateX(Math.PI / 2);
+                return geo;
+            },
             torus: (params) => new THREE.TorusGeometry(
                 params.radius || 0.5, params.tube || 0.2,
                 params.radialSegments || 16, params.tubularSegments || 48
             ),
-            capsule: (params) => new THREE.CapsuleGeometry(
-                params.radius || 0.25, params.length || 0.5,
-                params.capSegments || 8, params.radialSegments || 16
-            )
+            capsule: (params) => {
+                const geo = new THREE.CapsuleGeometry(
+                    params.radius || 0.25, params.length || 0.5,
+                    params.capSegments || 8, params.radialSegments || 16
+                );
+                geo.rotateX(Math.PI / 2);
+                return geo;
+            }
         };
 
         // Apply transform to object
