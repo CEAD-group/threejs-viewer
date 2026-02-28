@@ -946,7 +946,7 @@
                             // The outer container is user-controlled (set_matrix
                             // targets it); the inner correction is permanent.
                             const correction = new THREE.Group();
-                            correction.rotation.x = -Math.PI / 2;
+                            correction.rotation.x = Math.PI / 2;
                             correction.add(result.scene);
                             obj = new THREE.Group();
                             obj.add(correction);
