@@ -171,10 +171,4 @@ v.load_animation(animation)
 
 print(f"Robot arm demo: {animation.n_frames} frames, {animation.duration:.1f}s")
 print("Only 4 joints are animated — 5 visual meshes follow automatically via grouping.")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        pass
-except KeyboardInterrupt:
-    v.disconnect()
+v.wait_for_assets()
