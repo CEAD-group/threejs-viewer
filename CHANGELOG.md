@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.9
+
+Reverts the 0.0.8 Z-up primitive orientation change and makes GLB/GLTF Y-up correction opt-in.
+
+### Breaking changes
+
+- **Cylinder, cone, capsule are Y-aligned again** — the 0.0.8 change that baked `rotateX(90°)` into these geometries has been reverted. They now use the Three.js default (Y-axis aligned). Any code that added a rotation to compensate for the 0.0.8 Z-up change must remove that compensation. Code that relied on the old Y-up convention (pre-0.0.8) needs no changes.
+- **GLB/GLTF Y-up correction is now opt-in** — `add_model()` and `add_model_binary()` no longer auto-apply `Rx(+90°)` to GLB/GLTF models. Pass `y_up=True` to enable correction for standard Blender/Sketchfab exports. Z-up CAD exports load correctly without this flag.
+
+### New features
+
+- **`y_up=True` on `add_model()` / `add_model_binary()`** — opt-in Y-up→Z-up correction for GLB/GLTF models that follow the glTF spec (Blender, Sketchfab). Default is `False`.
+
 ## 0.0.8
 
 Refactors toolpath coloring and geometry into the `Toolpath` class, adds `wait_for_assets()` for clean script exit, auto-starts animation playback, and fixes Z-up orientation for all built-in primitives and GLTF models.

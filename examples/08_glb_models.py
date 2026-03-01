@@ -50,7 +50,7 @@ v.clear()
 for name, info in MODELS.items():
     s = info["scale"]
     x, y, z = info["position"]
-    v.add_model_binary(name, model_paths[name], format="glb")
+    v.add_model_binary(name, model_paths[name], format="glb", y_up=True)
     # Column-major 4x4 identity with scale and translation
     v.set_matrix(
         name,
