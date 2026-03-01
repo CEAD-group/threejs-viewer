@@ -6,6 +6,7 @@ to demonstrate PBR material control on primitives. Also includes
 a metallic box and a rough cylinder.
 """
 
+import math
 import time
 
 from threejs_viewer import viewer
@@ -53,6 +54,7 @@ v.add_cylinder(
     roughness=1.0,
     metalness=0.0,
     position=[-2.5, 4.5, 0],
+    rotation=[math.pi / 2, 0, 0],
 )
 
 print("Material properties demo loaded.")

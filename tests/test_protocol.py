@@ -145,6 +145,16 @@ def test_add_model_no_parent(client):
     assert "parent" not in client._messages[0]
 
 
+def test_add_model_y_up_true(client):
+    client.add_model("m", "http://example.com/model.glb", y_up=True)
+    assert client._messages[0]["object"]["yUp"] is True
+
+
+def test_add_model_y_up_default_omitted(client):
+    client.add_model("m", "http://example.com/model.glb")
+    assert "yUp" not in client._messages[0]["object"]
+
+
 # === add_model_binary ===
 
 
@@ -160,6 +170,18 @@ def test_add_model_binary_no_parent(client):
     client.add_model_binary("m", b"\x00" * 10)
     header, _ = client._binary_messages[0]
     assert "parent" not in header
+
+
+def test_add_model_binary_y_up_true(client):
+    client.add_model_binary("m", b"\x00" * 10, y_up=True)
+    header, _ = client._binary_messages[0]
+    assert header["yUp"] is True
+
+
+def test_add_model_binary_y_up_default_omitted(client):
+    client.add_model_binary("m", b"\x00" * 10)
+    header, _ = client._binary_messages[0]
+    assert "yUp" not in header
 
 
 # === add_polyline ===
