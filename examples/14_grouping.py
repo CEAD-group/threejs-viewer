@@ -65,6 +65,7 @@ v.add_cylinder(
     height=0.4,
     color=0x555555,
     position=[0, 0, 0.2],
+    rotation=[math.pi / 2, 0, 0],
     parent="base",
     roughness=0.6,
     metalness=0.3,

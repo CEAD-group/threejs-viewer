@@ -371,6 +371,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        y_up: bool = False,
     ) -> None:
         """
         Add a 3D model to the scene.
@@ -383,6 +384,10 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             parent: Optional parent group id
+            y_up: If True, apply Rx(+90°) correction to convert Y-up GLB/GLTF
+                  models to the Z-up viewer convention. Default False (no correction).
+                  Use True for standard Blender/Sketchfab exports; leave False for
+                  Z-up CAD exports.
         """
         transform = {}
         if position:
@@ -392,14 +397,18 @@ class ViewerClient:
         if scale:
             transform["scale"] = scale
 
+        obj_data: dict = {
+            "model": url,
+            "format": format,
+            "transform": transform if transform else None,
+        }
+        if y_up:
+            obj_data["yUp"] = True
+
         msg = {
             "type": "add_object",
             "id": id,
-            "object": {
-                "model": url,
-                "format": format,
-                "transform": transform if transform else None,
-            },
+            "object": obj_data,
         }
         if parent:
             msg["parent"] = parent
@@ -422,6 +431,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         matrix: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        y_up: bool = False,
     ) -> None:
         """
         Add a 3D model to the scene by sending file bytes over WebSocket.
@@ -435,6 +445,10 @@ class ViewerClient:
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
             parent: Optional parent group id
+            y_up: If True, apply Rx(+90°) correction to convert Y-up GLB/GLTF
+                  models to the Z-up viewer convention. Default False (no correction).
+                  Use True for standard Blender/Sketchfab exports; leave False for
+                  Z-up CAD exports.
         """
         if isinstance(path_or_bytes, bytes):
             mesh_bytes = path_or_bytes
@@ -447,6 +461,8 @@ class ViewerClient:
         header = {"type": "add_model_binary", "id": id, "format": format}
         if parent:
             header["parent"] = parent
+        if y_up:
+            header["yUp"] = True
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
