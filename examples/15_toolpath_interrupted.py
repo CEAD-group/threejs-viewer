@@ -130,7 +130,10 @@ frame_nozzle_xyz = merged.points[frame_indices]
 
 transforms = np.zeros((N_FRAMES, 2, 16), dtype=np.float32)
 transforms[:, 0, [0, 5, 10, 15]] = 1.0  # bead: identity
-transforms[:, 1, [0, 5, 10, 15]] = 1.0  # nozzle: identity rotation
+# Nozzle: Rot(+90° about X) so Y-up cylinder stands vertically, + per-frame translation
+# Rx(+90°) column-major: [1,0,0,0, 0,0,1,0, 0,-1,0,0, x,y,z,1]
+rx90 = np.array([1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1], dtype=np.float32)
+transforms[:, 1] = rx90
 transforms[:, 1, 12] = frame_nozzle_xyz[:, 0]
 transforms[:, 1, 13] = frame_nozzle_xyz[:, 1]
 transforms[:, 1, 14] = frame_nozzle_xyz[:, 2] + nozzle_h / 2

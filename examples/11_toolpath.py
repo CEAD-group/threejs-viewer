@@ -103,9 +103,11 @@ transforms = np.zeros((n_frames, 2, 16), dtype=np.float32)
 # path_tube: identity matrix
 transforms[:, 0, [0, 5, 10, 15]] = 1.0
 
-# Nozzle: identity rotation + translation (cylinder geometry is already Z-aligned)
+# Nozzle: Rot(+90° about X) so Y-up cylinder stands vertically, + per-frame translation
+# Rx(+90°) column-major: [1,0,0,0, 0,0,1,0, 0,-1,0,0, x,y,z,1]
 nz_z = tips[:, 2] + nozzle_height / 2 + nozzle_gap
-transforms[:, 1, [0, 5, 10, 15]] = 1.0
+rx90 = np.array([1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1], dtype=np.float32)
+transforms[:, 1] = rx90
 transforms[:, 1, 12] = tips[:, 0]
 transforms[:, 1, 13] = tips[:, 1]
 transforms[:, 1, 14] = nz_z

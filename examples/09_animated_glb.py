@@ -46,8 +46,8 @@ v.clear()
 
 # Load models
 print("Loading models...")
-v.add_model_binary("morphcube", model_paths["morphcube"], format="glb")
-v.add_model_binary("avocado", model_paths["avocado"], format="glb")
+v.add_model_binary("morphcube", model_paths["morphcube"], format="glb", y_up=True)
+v.add_model_binary("avocado", model_paths["avocado"], format="glb", y_up=True)
 
 # Place morphcube at origin, raised slightly
 CUBE_SCALE = 0.5

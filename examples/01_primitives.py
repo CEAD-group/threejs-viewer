@@ -67,6 +67,7 @@ for i, (x, y) in enumerate(pillar_positions):
         height=2.0,
         color=0xB87333,  # Copper color
         position=[x, y, 1.0],
+        rotation=[math.pi / 2, 0, 0],
         roughness=0.3,
         metalness=0.7,
         parent="pillars",

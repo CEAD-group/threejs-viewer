@@ -48,8 +48,8 @@ v.add_box(
     "ground", width=10, height=10, depth=0.02, color=0x333333, position=[0, 0, -0.01]
 )
 
-# Load GLB model — viewer automatically corrects GLTF Y-up to Z-up
-v.add_model_binary("helmet", helmet_path, format="glb", position=[0, 0, 1])
+# Load GLB model — y_up=True corrects glTF Y-up to Z-up viewer convention
+v.add_model_binary("helmet", helmet_path, format="glb", position=[0, 0, 1], y_up=True)
 
 # Primitives with initial opacity
 v.add_sphere(
@@ -72,6 +72,7 @@ v.add_cylinder(
     color=0x44FF44,
     opacity=0.4,
     position=[0, -2, 0.5],
+    rotation=[math.pi / 2, 0, 0],
 )
 
 # One-shot opacity change (before animation takes over)

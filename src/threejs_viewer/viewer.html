@@ -238,7 +238,7 @@
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
-        const VIEWER_VERSION = '0.0.8';
+        const VIEWER_VERSION = '0.0.9';
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
 
         // Scene setup
@@ -762,36 +762,24 @@
             sphere: (params) => new THREE.SphereGeometry(
                 params.radius || 0.5, params.widthSegments || 32, params.heightSegments || 16
             ),
-            cylinder: (params) => {
-                const geo = new THREE.CylinderGeometry(
-                    params.radiusTop || 0.5, params.radiusBottom || 0.5,
-                    params.height || 1, params.radialSegments || 32
-                );
-                geo.rotateX(Math.PI / 2);
-                return geo;
-            },
+            cylinder: (params) => new THREE.CylinderGeometry(
+                params.radiusTop || 0.5, params.radiusBottom || 0.5,
+                params.height || 1, params.radialSegments || 32
+            ),
             plane: (params) => new THREE.PlaneGeometry(
                 params.width || 1, params.height || 1
             ),
-            cone: (params) => {
-                const geo = new THREE.ConeGeometry(
-                    params.radius || 0.5, params.height || 1, params.radialSegments || 32
-                );
-                geo.rotateX(Math.PI / 2);
-                return geo;
-            },
+            cone: (params) => new THREE.ConeGeometry(
+                params.radius || 0.5, params.height || 1, params.radialSegments || 32
+            ),
             torus: (params) => new THREE.TorusGeometry(
                 params.radius || 0.5, params.tube || 0.2,
                 params.radialSegments || 16, params.tubularSegments || 48
             ),
-            capsule: (params) => {
-                const geo = new THREE.CapsuleGeometry(
-                    params.radius || 0.25, params.length || 0.5,
-                    params.capSegments || 8, params.radialSegments || 16
-                );
-                geo.rotateX(Math.PI / 2);
-                return geo;
-            }
+            capsule: (params) => new THREE.CapsuleGeometry(
+                params.radius || 0.25, params.length || 0.5,
+                params.capSegments || 8, params.radialSegments || 16
+            )
         };
 
         // Apply transform to object
@@ -895,7 +883,7 @@
                 }
 
                 try {
-                    const result = await loadModel(loader, objData.model, format);
+                    const result = await loadModel(loader, objData.model, format, objData.yUp === true);
                     obj = result.obj;
                     if (result.animations.length > 0) {
                         // Root the mixer at the GLTF scene so animation tracks
@@ -933,7 +921,7 @@
         }
 
         // Load model helper
-        function loadModel(loader, url, format) {
+        function loadModel(loader, url, format, yUp) {
             return new Promise((resolve, reject) => {
                 loader.load(
                     url,
@@ -941,18 +929,25 @@
                         let obj;
                         let animations = [];
                         if (format === 'gltf' || format === 'glb') {
-                            // GLTF/GLB uses Y-up; wrap in a correction group so
-                            // the model stands upright in the Z-up viewer scene.
-                            // The outer container is user-controlled (set_matrix
-                            // targets it); the inner correction is permanent.
-                            const correction = new THREE.Group();
-                            correction.rotation.x = Math.PI / 2;
-                            correction.add(result.scene);
-                            obj = new THREE.Group();
-                            obj.add(correction);
-                            // Store the GLTF scene root so the AnimationMixer can
-                            // resolve track targets by name inside the hierarchy.
-                            obj.userData.gltfScene = result.scene;
+                            if (yUp) {
+                                // Model uses Y-up (glTF spec default); wrap in a
+                                // correction group to stand it upright in Z-up viewer.
+                                // The outer container is user-controlled (set_matrix
+                                // targets it); the inner correction is permanent.
+                                const correction = new THREE.Group();
+                                correction.rotation.x = Math.PI / 2;
+                                correction.add(result.scene);
+                                obj = new THREE.Group();
+                                obj.add(correction);
+                                // Store the GLTF scene root so the AnimationMixer can
+                                // resolve track targets by name inside the hierarchy.
+                                obj.userData.gltfScene = result.scene;
+                            } else {
+                                // Model is already Z-up (e.g. CAD export); no correction.
+                                obj = new THREE.Group();
+                                obj.add(result.scene);
+                                obj.userData.gltfScene = result.scene;
+                            }
                             animations = result.animations || [];
                         } else if (format === 'dae') {
                             // Create a clean group with only meshes (no lights/cameras from DAE)
@@ -1297,7 +1292,8 @@
                                 console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
                                 await addObject(data.id, {
                                     model: blobUrl,
-                                    format: data.format || 'stl'
+                                    format: data.format || 'stl',
+                                    yUp: data.yUp === true,
                                 }, data.parent);
                                 const obj = objects.get(data.id);
                                 if (obj) {
