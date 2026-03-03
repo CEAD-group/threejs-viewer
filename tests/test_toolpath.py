@@ -336,6 +336,40 @@ def test_to_mesh_no_colors_is_none():
     assert mesh["colors"] is None
 
 
+def test_to_mesh_plane_normal_default_matches_z_up():
+    """plane_normal=None (default) produces same result as passing [0,0,1]."""
+    N = 5
+    tp = _simple_tp(N)
+    mesh_default = tp.to_mesh()
+    mesh_explicit = tp.to_mesh(plane_normal=np.array([0.0, 0.0, 1.0]))
+    assert np.allclose(mesh_default["positions"], mesh_explicit["positions"], atol=1e-6)
+    assert np.allclose(mesh_default["normals"], mesh_explicit["normals"], atol=1e-6)
+
+
+def test_to_mesh_plane_normal_y_up():
+    """plane_normal=[0,1,0] produces different geometry than the default Z-up.
+
+    Path along X, plane_normal=Y:
+      Z-up: binormal=[0,-1,0], height along Z → Z spread = bead_height
+      Y-up: binormal=[0,0,1], height along Y → Z spread = bead_width
+
+    So Z spread should be larger with Y-up (bead_width=0.2) than with Z-up
+    (bead_height=0.1).
+    """
+    pts = np.zeros((3, 3), dtype=np.float32)
+    pts[:, 0] = [0.0, 1.0, 2.0]  # path along X, all at Y=Z=0
+    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
+
+    mesh_zup = tp.to_mesh()
+    mesh_yup = tp.to_mesh(plane_normal=np.array([0.0, 1.0, 0.0]))
+
+    # Z-up: height (bead_height=0.1) goes along Z
+    assert abs(np.ptp(mesh_zup["positions"][:, 2]) - 0.1) < 0.01, "Z-up: Z spread ≈ bead_height"
+    # Y-up: width (bead_width=0.2) goes along Z (binormal), height along Y
+    assert abs(np.ptp(mesh_yup["positions"][:, 2]) - 0.2) < 0.01, "Y-up: Z spread ≈ bead_width"
+    assert abs(np.ptp(mesh_yup["positions"][:, 1]) - 0.1) < 0.01, "Y-up: Y spread ≈ bead_height"
+
+
 def test_to_mesh_zero_width_ring_collapsed():
     """W=H=0 ring: all 6 vertices collapse to the path point."""
     pts = np.zeros((4, 3), dtype=np.float32)

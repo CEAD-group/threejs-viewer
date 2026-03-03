@@ -375,12 +375,19 @@ class Toolpath:
 
     # ── geometry ──────────────────────────────────────────────────────────────
 
-    def to_mesh(self) -> dict:
+    def to_mesh(self, plane_normal: "np.ndarray | None" = None) -> dict:
         """Build bead mesh geometry.
 
         Generates a 6-vertex bevelled rectangle cross-section extruded along
         the path with analytical normals.  Supports ``draw_range`` for
         progressive reveal animation.
+
+        Args:
+            plane_normal: The "up" direction for the bead cross-section, i.e.
+                the slice-plane normal in viewer space.  Defaults to
+                ``[0, 0, 1]`` (world Z-up).  Pass the transformed plane normal
+                when slicing on a tilted plane so the bead height is
+                perpendicular to the layer surface rather than world-vertical.
 
         Returns:
             Dict with keys ``positions``, ``indices``, ``normals``, ``colors``.
@@ -411,30 +418,41 @@ class Toolpath:
         prof_n = edge_n + np.roll(edge_n, 1, axis=1)  # (N, P, 2)
         prof_n /= np.maximum(np.linalg.norm(prof_n, axis=-1, keepdims=True), 1e-10)
 
-        # Central-difference tangents (XY only, Z-up assumption)
-        tangents = np.empty((N, 2), dtype=np.float32)
-        tangents[0] = points[1, :2] - points[0, :2]
-        tangents[-1] = points[-1, :2] - points[-2, :2]
-        tangents[1:-1] = points[2:, :2] - points[:-2, :2]
+        # Plane normal ("up" direction for cross-section height)
+        if plane_normal is None:
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        else:
+            up = np.asarray(plane_normal, dtype=np.float32)
+            up = up / np.maximum(float(np.linalg.norm(up)), 1e-10)
+
+        # Central-difference tangents (3D), projected perpendicular to plane normal
+        tangents = np.empty((N, 3), dtype=np.float32)
+        tangents[0] = points[1] - points[0]
+        tangents[-1] = points[-1] - points[-2]
+        tangents[1:-1] = points[2:] - points[:-2]
+        tangents -= (tangents * up).sum(axis=1, keepdims=True) * up
         t_len = np.linalg.norm(tangents, axis=1, keepdims=True)
         tangents /= np.maximum(t_len, 1e-10)
 
-        # Binormals: tangent × Z = (ty, -tx)
-        binormals = np.column_stack([tangents[:, 1], -tangents[:, 0]])
+        # Binormals: tangent × up  (perpendicular to both, lies in the layer plane)
+        binormals = np.cross(tangents, up).astype(np.float32)  # (N, 3)
+        b_len = np.linalg.norm(binormals, axis=1, keepdims=True)
+        binormals /= np.maximum(b_len, 1e-10)
 
         # Positions: (N, P, 3)
-        positions = np.empty((N, P, 3), dtype=np.float32)
-        positions[:, :, 0] = points[:, 0:1] + pb * binormals[:, 0:1]
-        positions[:, :, 1] = points[:, 1:2] + pb * binormals[:, 1:2]
-        positions[:, :, 2] = points[:, 2:3] + pz
+        positions = (
+            points[:, np.newaxis, :]  # (N, 1, 3)
+            + pb[:, :, np.newaxis] * binormals[:, np.newaxis, :]  # (N, P, 3)
+            + pz[:, :, np.newaxis] * up  # (N, P, 3)
+        )
 
         # Normals: (N, P, 3) — profile normals rotated into world frame
         nb = prof_n[:, :, 0]  # (N, P) binormal component
-        nz = prof_n[:, :, 1]  # (N, P) z component
-        normals = np.empty((N, P, 3), dtype=np.float32)
-        normals[:, :, 0] = nb * binormals[:, 0:1]
-        normals[:, :, 1] = nb * binormals[:, 1:2]
-        normals[:, :, 2] = nz
+        nz = prof_n[:, :, 1]  # (N, P) z (plane-normal) component
+        normals = (
+            nb[:, :, np.newaxis] * binormals[:, np.newaxis, :]  # (N, P, 3)
+            + nz[:, :, np.newaxis] * up  # (N, P, 3)
+        )
 
         # Step-major indices for draw_range reveal along path
         i_range = np.arange(N - 1, dtype=np.uint32)
