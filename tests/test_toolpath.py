@@ -364,10 +364,16 @@ def test_to_mesh_plane_normal_y_up():
     mesh_yup = tp.to_mesh(plane_normal=np.array([0.0, 1.0, 0.0]))
 
     # Z-up: height (bead_height=0.1) goes along Z
-    assert abs(np.ptp(mesh_zup["positions"][:, 2]) - 0.1) < 0.01, "Z-up: Z spread ≈ bead_height"
+    assert abs(np.ptp(mesh_zup["positions"][:, 2]) - 0.1) < 0.01, (
+        "Z-up: Z spread ≈ bead_height"
+    )
     # Y-up: width (bead_width=0.2) goes along Z (binormal), height along Y
-    assert abs(np.ptp(mesh_yup["positions"][:, 2]) - 0.2) < 0.01, "Y-up: Z spread ≈ bead_width"
-    assert abs(np.ptp(mesh_yup["positions"][:, 1]) - 0.1) < 0.01, "Y-up: Y spread ≈ bead_height"
+    assert abs(np.ptp(mesh_yup["positions"][:, 2]) - 0.2) < 0.01, (
+        "Y-up: Z spread ≈ bead_width"
+    )
+    assert abs(np.ptp(mesh_yup["positions"][:, 1]) - 0.1) < 0.01, (
+        "Y-up: Y spread ≈ bead_height"
+    )
 
 
 def test_to_mesh_zero_width_ring_collapsed():
