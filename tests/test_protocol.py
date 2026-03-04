@@ -222,6 +222,22 @@ def test_add_mesh_no_parent(client):
     assert "parent" not in header
 
 
+def test_add_mesh_opacity_forwarded(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx, opacity=0.5)
+    header, _ = client._binary_messages[0]
+    assert header["opacity"] == 0.5
+
+
+def test_add_mesh_opacity_default_is_one(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx)
+    header, _ = client._binary_messages[0]
+    assert header["opacity"] == 1.0
+
+
 # === Toolpath.to_mesh + add_mesh ===
 
 

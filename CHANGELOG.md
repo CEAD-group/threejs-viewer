@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.10
+
+Adds opacity support to `add_mesh()` and a `plane_normal` parameter to `Toolpath.to_mesh()` for non-horizontal layer planes.
+
+### New features
+
+- **`opacity` parameter on `add_mesh()`** — set initial material opacity (0.0–1.0) at mesh creation time, consistent with `add_primitive()` and `set_opacity()`
+- **`plane_normal` parameter on `Toolpath.to_mesh()`** — the "up" direction for the bead cross-section. Defaults to `[0, 0, 1]` (world Z-up). Pass a transformed normal when slicing on a tilted plane so bead height is perpendicular to the layer surface rather than world-vertical.
+
 ## 0.0.9
 
 Reverts the 0.0.8 Z-up primitive orientation change and makes GLB/GLTF Y-up correction opt-in.

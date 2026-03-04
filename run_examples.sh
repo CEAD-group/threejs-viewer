@@ -7,7 +7,7 @@ for f in examples/0{1..9}_*.py examples/1[0-9]_*.py; do
     uv run "$f" &
     pid=$!
     echo "[$i/$total] PID $pid — waiting 5s (press any key to skip)..."
-    read -t 10 -n 1 -s key
+    read -t 20 -n 1 -s key
     if kill -0 $pid 2>/dev/null; then
         echo "[$i/$total] Killing $pid (still running)"
         kill $pid 2>/dev/null

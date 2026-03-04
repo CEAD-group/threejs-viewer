@@ -548,6 +548,7 @@ class ViewerClient:
         normals: np.ndarray = None,
         colors: np.ndarray = None,
         color: int = 0x7AB8CC,
+        opacity: float = 1.0,
         metalness: float = 0.1,
         roughness: float = 0.8,
         parent: Optional[str] = None,
@@ -562,6 +563,7 @@ class ViewerClient:
             normals: optional (N, 3) float32 vertex normals
             colors: optional (N, 3) float32 per-vertex RGB colors (0-1)
             color: Material color (hex), ignored when colors is provided
+            opacity: Material opacity (0.0 = invisible, 1.0 = fully opaque)
             metalness: PBR metalness (0-1)
             roughness: PBR roughness (0-1)
         """
@@ -588,6 +590,7 @@ class ViewerClient:
             "hasNormals": has_normals,
             "hasVertexColors": has_vertex_colors,
             "color": color,
+            "opacity": opacity,
             "metalness": metalness,
             "roughness": roughness,
         }

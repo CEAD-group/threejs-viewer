@@ -238,7 +238,7 @@
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
-        const VIEWER_VERSION = '0.0.9';
+        const VIEWER_VERSION = '0.0.10';
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
 
         // Scene setup
@@ -1405,10 +1405,14 @@
                                     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
                                 }
 
+                                const opacity = data.opacity !== undefined ? data.opacity : 1;
                                 const material = new THREE.MeshStandardMaterial({
                                     color: colors ? 0xffffff : (data.color || 0x7ab8cc),
                                     metalness: data.metalness !== undefined ? data.metalness : 0.1,
                                     roughness: data.roughness !== undefined ? data.roughness : 0.8,
+                                    opacity: opacity,
+                                    transparent: opacity < 1,
+                                    depthWrite: opacity >= 1,
                                     side: THREE.DoubleSide,
                                     vertexColors: !!colors,
                                 });
