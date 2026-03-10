@@ -838,7 +838,7 @@ class ViewerClient:
                 meta["visibility"] = frame.visibility
             if frame.opacity and "opacity" not in binary_channel_names:
                 meta["opacity"] = frame.opacity
-            if frame.clip_times:
+            if frame.clip_times and "clip_times" not in binary_channel_names:
                 meta["clip_times"] = frame.clip_times
             if frame.draw_ranges and "draw_ranges" not in binary_channel_names:
                 meta["draw_ranges"] = frame.draw_ranges
@@ -856,7 +856,7 @@ class ViewerClient:
             logger.info(
                 "Animation has %d JSON per-frame entries in frames_meta. "
                 "Consider using animation.add_channel() for colors/visibility/"
-                "opacity/draw_ranges for much faster serialization.",
+                "opacity/draw_ranges/clip_times for much faster serialization.",
                 meta_entry_count,
             )
 

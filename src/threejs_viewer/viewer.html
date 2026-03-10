@@ -498,6 +498,13 @@
                     if (obj) applyOpacity(obj, val);
                 }
             },
+
+            clip_times(ch, refs, base) {
+                const nObj = ch.ids.length;
+                for (let i = 0; i < nObj; i++) {
+                    setClipTime(ch.ids[i], ch.data[base + i]);
+                }
+            },
         };
 
         function applyFrame(frameIndex) {
