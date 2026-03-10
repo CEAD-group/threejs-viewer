@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.11
+
+Adds binary channel support for `clip_times`, enabling efficient transfer of embedded GLTF animation times alongside other binary channels.
+
+### New features
+
+- **`clip_times` binary channel** — `clip_times` can now be sent as a binary channel via `set_clip_time_data()` or `add_channel("clip_times", ...)`, avoiding per-frame JSON metadata for animations with many frames
+- **`Animation.set_clip_time_data()`** — convenience method for creating a `clip_times` binary channel, matching `set_draw_range_data()` and `set_transform_data()`
+
 ## 0.0.10
 
 Adds opacity support to `add_mesh()` and a `plane_normal` parameter to `Toolpath.to_mesh()` for non-horizontal layer planes.
