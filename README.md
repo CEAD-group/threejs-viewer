@@ -127,6 +127,9 @@ animation.set_transform_data(object_ids, transform_array)
 # Draw ranges: (n_frames, n_objects) float32
 animation.set_draw_range_data(object_ids, draw_range_array)
 
+# Clip times for embedded GLTF animations: (n_frames, n_objects) float32
+animation.set_clip_time_data(object_ids, clip_time_array)
+
 # Colors with indexed colormap: (n_frames, n_objects) uint8
 animation.add_channel("colors", object_ids, color_indices, dtype="uint8",
                        metadata={"colormap": [0x44AA44, 0xFF3333]})
@@ -137,7 +140,7 @@ animation.add_channel("visibility", object_ids, vis_data, dtype="uint8")
 client.load_animation(animation)
 ```
 
-Binary channels and Frame-based JSON can be mixed (e.g. binary transforms + JSON `clip_times`).
+Binary channels and Frame-based JSON can be mixed. A binary channel supersedes the same-named Frame field.
 
 ### GLB Models with Embedded Animations
 

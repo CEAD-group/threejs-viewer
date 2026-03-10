@@ -117,6 +117,21 @@ def test_set_draw_range_data():
     assert animation._channels[0].stride == 1
 
 
+def test_set_clip_time_data():
+    """Test set_clip_time_data convenience wrapper creates a clip_times channel."""
+    animation = Animation(loop=True)
+    animation.set_frame_times(np.linspace(0, 5, 50))
+
+    clip_times = np.linspace(0, 2, 50).reshape(50, 1).astype(np.float32)
+    clip_times = np.column_stack([clip_times, clip_times * 0.5])
+    animation.set_clip_time_data(["model_a", "model_b"], clip_times)
+
+    assert len(animation._channels) == 1
+    assert animation._channels[0].name == "clip_times"
+    assert animation._channels[0].dtype == "float32"
+    assert animation._channels[0].stride == 1
+
+
 def test_add_channel_generic():
     """Test add_channel with custom channel types."""
     animation = Animation(loop=True)
@@ -211,7 +226,7 @@ def test_binary_channels_with_frame_objects():
     """Test that binary channels and Frame objects can coexist (mixed mode)."""
     animation = Animation(loop=True)
 
-    # Frames with clip_times (no binary channel for this)
+    # Frames with clip_times as JSON
     for i in range(5):
         animation.add_frame(
             time=i / 30.0,

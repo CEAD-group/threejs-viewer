@@ -182,6 +182,10 @@ class Animation:
         """Convenience: add a 'draw_ranges' channel."""
         self.add_channel("draw_ranges", object_ids, data, dtype="float32", stride=1)
 
+    def set_clip_time_data(self, object_ids: list[str], data: np.ndarray) -> None:
+        """Convenience: add a 'clip_times' channel."""
+        self.add_channel("clip_times", object_ids, data, dtype="float32", stride=1)
+
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:
         """Add a labeled marker on the timeline."""
         self.markers.append(Marker(time=time, label=label, color=color))
