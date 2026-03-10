@@ -73,13 +73,14 @@ Binary channel API:
 - `animation.set_frame_times(times)` — numpy array of frame times
 - `animation.set_transform_data(object_ids, data)` — (n_frames, n_objects, 16) float32
 - `animation.set_draw_range_data(object_ids, data)` — (n_frames, n_objects) float32
+- `animation.set_clip_time_data(object_ids, data)` — (n_frames, n_objects) float32
 - `animation.add_channel(name, ids, data, dtype, stride, metadata)` — generic channel
 
-Supported channel types: `transforms` (stride=16), `draw_ranges`, `colors`, `visibility`, `opacity`
+Supported channel types: `transforms` (stride=16), `draw_ranges`, `colors`, `visibility`, `opacity`, `clip_times`
 Supported dtypes: `float32`, `uint32`, `uint8`
 Indexed colors: `dtype="uint8"` + `metadata={"colormap": [0x44AA44, 0xFF3333]}`
 
-Binary channels and Frame-based JSON can coexist (e.g. binary transforms + JSON clip_times). A binary channel supersedes the same-named Frame field.
+Binary channels and Frame-based JSON can coexist. A binary channel supersedes the same-named Frame field.
 
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
