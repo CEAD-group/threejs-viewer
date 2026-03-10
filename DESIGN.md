@@ -123,10 +123,10 @@ animation.add_channel("visibility", ids, data, dtype="uint8")
 ```
 
 The two approaches can be mixed: binary channels supersede Frame fields with the
-same name, while Frame-only fields (like `clip_times`) are sent as sparse JSON.
+same name.
 
 Supported channel types: `transforms` (stride=16), `draw_ranges`, `colors`,
-`visibility`, `opacity`. Supported dtypes: `float32`, `uint32`, `uint8`.
+`visibility`, `opacity`, `clip_times`. Supported dtypes: `float32`, `uint32`, `uint8`.
 
 ### Embedded GLTF Animations
 
