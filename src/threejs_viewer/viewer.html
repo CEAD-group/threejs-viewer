@@ -8,19 +8,60 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
         canvas { display: block; }
-        #status {
+
+        /* Top toolbar */
+        #toolbar {
             position: absolute;
             top: 10px;
             left: 10px;
-            padding: 8px 12px;
-            background: rgba(0, 0, 0, 0.7);
-            color: white;
-            font-family: monospace;
-            font-size: 12px;
-            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: rgba(30, 30, 30, 0.85);
+            padding: 4px 6px;
+            border-radius: 6px;
+            user-select: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         }
-        #status.connected { background: rgba(0, 128, 0, 0.7); }
-        #status.disconnected { background: rgba(128, 0, 0, 0.7); }
+        #status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #cc3333;
+            margin: 0 4px;
+            flex-shrink: 0;
+            transition: background 0.3s;
+        }
+        #status-dot.connected { background: #33cc33; }
+        #status-dot.disconnected { background: #cc3333; }
+        #status-text {
+            color: #999;
+            font-family: monospace;
+            font-size: 11px;
+            margin-right: 4px;
+        }
+        .toolbar-sep {
+            width: 1px;
+            height: 20px;
+            background: #555;
+            margin: 0 2px;
+        }
+        .toolbar-btn {
+            background: none;
+            border: none;
+            color: #aaa;
+            width: 28px;
+            height: 28px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s, color 0.15s;
+        }
+        .toolbar-btn:hover { background: rgba(255,255,255,0.1); color: white; }
+        .toolbar-btn.active { background: #0066cc; color: white; }
 
         /* Animation Controls */
         #animation-controls {
@@ -182,10 +223,176 @@
             color: #666;
             text-align: center;
         }
+
+        /* Clipping Plane Controls */
+        #clipping-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(30, 30, 30, 0.95);
+            color: white;
+            padding: 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 220px;
+            user-select: none;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+        #clipping-panel.visible { display: flex; }
+        #clipping-panel h3 {
+            margin: 0;
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        #clipping-panel h3 button {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 0 2px;
+            line-height: 1;
+        }
+        #clipping-panel h3 button:hover { color: white; }
+        .clip-section {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .clip-section label {
+            font-size: 11px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .clip-axis-buttons {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 4px;
+        }
+        .clip-axis-buttons button {
+            background: #444;
+            border: none;
+            color: white;
+            padding: 6px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .clip-axis-buttons button:hover { background: #555; }
+        .clip-axis-buttons button.active { background: #0066cc; }
+        .clip-slider-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .clip-slider-row input[type="range"] {
+            flex: 1;
+            accent-color: #0066cc;
+        }
+        .clip-slider-row .clip-value {
+            font-family: monospace;
+            font-size: 12px;
+            min-width: 52px;
+            text-align: right;
+        }
+        .clip-toggle-row {
+            display: flex;
+            gap: 4px;
+        }
+        .clip-toggle-row button {
+            flex: 1;
+            background: #444;
+            border: none;
+            color: white;
+            padding: 6px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .clip-toggle-row button:hover { background: #555; }
+        .clip-toggle-row button.active { background: #0066cc; }
+        .clip-hint {
+            font-size: 10px;
+            color: #666;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
-    <div id="status" class="disconnected">Disconnected</div>
+    <div id="toolbar">
+        <div id="status-dot" class="disconnected" title="Disconnected"></div>
+        <span id="status-text">Disconnected</span>
+        <div class="toolbar-sep"></div>
+        <button class="toolbar-btn" id="btn-clip" title="Clipping Plane (C)">✂</button>
+        <button class="toolbar-btn" id="btn-ortho" title="Orthographic / Perspective (O)">P</button>
+    </div>
+
+    <div id="clipping-panel">
+        <h3>Clipping Plane <button id="clip-close" title="Close (C)">×</button></h3>
+        <div class="clip-section">
+            <label>Orientation</label>
+            <div class="clip-toggle-row">
+                <button id="clip-orient-fixed" class="active">Fixed</button>
+                <button id="clip-orient-camera">Camera</button>
+            </div>
+        </div>
+        <div class="clip-section" id="clip-axis-section">
+            <label>Axis</label>
+            <div class="clip-axis-buttons">
+                <button data-axis="x+" class="active">X+</button>
+                <button data-axis="y+">Y+</button>
+                <button data-axis="z+">Z+</button>
+                <button data-axis="x-">X−</button>
+                <button data-axis="y-">Y−</button>
+                <button data-axis="z-">Z−</button>
+            </div>
+        </div>
+        <div class="clip-section">
+            <label>Mode</label>
+            <div class="clip-toggle-row">
+                <button id="clip-mode-single" class="active">Single</button>
+                <button id="clip-mode-slab">Slab</button>
+            </div>
+        </div>
+        <div class="clip-section">
+            <label>Position</label>
+            <div class="clip-slider-row">
+                <input type="range" id="clip-distance" min="-20" max="20" step="0.01" value="0">
+                <span class="clip-value" id="clip-distance-value">0.00</span>
+            </div>
+        </div>
+        <div class="clip-section" id="clip-thickness-section" style="display: none;">
+            <label>Thickness</label>
+            <div class="clip-slider-row">
+                <input type="range" id="clip-thickness" min="0.01" max="20" step="0.01" value="2">
+                <span class="clip-value" id="clip-thickness-value">2.00</span>
+            </div>
+        </div>
+        <div class="clip-section" id="clip-gizmo-section">
+            <label>Gizmo</label>
+            <div class="clip-toggle-row">
+                <button id="clip-mode-translate" class="active" title="Move plane (T)">Move</button>
+                <button id="clip-mode-rotate" title="Rotate plane (R)">Rotate</button>
+            </div>
+        </div>
+        <div class="clip-section">
+            <label>Options</label>
+            <div class="clip-toggle-row">
+                <button id="clip-flip" title="Flip normal direction (F)">Flip</button>
+                <button id="clip-helper-toggle" class="active" title="Show/hide plane helper (H)">Helper</button>
+                <button id="clip-negate-render" title="Show clipped side instead">Invert</button>
+            </div>
+        </div>
+        <div class="clip-hint">C: toggle | O: ortho | ←→: nudge | ↑↓: thickness (slab) | T/R: gizmo mode</div>
+    </div>
 
     <div id="animation-controls">
         <div class="timeline-row">
@@ -237,6 +444,8 @@
         import { Line2 } from 'three/addons/lines/Line2.js';
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+        import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+        import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
         const VIEWER_VERSION = '0.0.11';
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
@@ -246,15 +455,28 @@
         scene.background = new THREE.Color(0x222222);
 
         // Z-up coordinate system (robotics convention)
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.up.set(0, 0, 1);  // Z is up
-        camera.position.set(5, -5, 3);
+        const perspCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        perspCamera.up.set(0, 0, 1);  // Z is up
+        perspCamera.position.set(5, -5, 3);
+
+        const ORTHO_FRUSTUM = 10;
+        const initAspect = window.innerWidth / window.innerHeight;
+        const orthoCamera = new THREE.OrthographicCamera(
+            -ORTHO_FRUSTUM * initAspect, ORTHO_FRUSTUM * initAspect,
+            ORTHO_FRUSTUM, -ORTHO_FRUSTUM, 0.1, 1000
+        );
+        orthoCamera.up.set(0, 0, 1);
+        orthoCamera.position.set(5, -5, 3);
+
+        let camera = perspCamera;
+        let isOrtho = false;
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.toneMapping = THREE.LinearToneMapping;
         renderer.toneMappingExposure = 1.0;
+        renderer.localClippingEnabled = true;
         document.body.appendChild(renderer.domElement);
 
         // Generate a bright studio environment map for PBR reflections
@@ -297,6 +519,61 @@
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
 
+        // Axis triad (interactive ViewHelper in bottom-left corner)
+        let viewHelper = new ViewHelper(camera, renderer.domElement);
+        viewHelper.center = controls.target;
+        renderer.domElement.addEventListener('click', (e) => {
+            if (viewHelper.handleClick(e)) {
+                controls.target.copy(viewHelper.center);
+                // Auto-switch to ortho when snapping to a standard view
+                if (!isOrtho) switchCamera(true);
+            }
+        });
+
+        const btnOrtho = document.getElementById('btn-ortho');
+
+        function switchCamera(toOrtho) {
+            if (toOrtho === isOrtho) return;
+            const aspect = window.innerWidth / window.innerHeight;
+
+            if (toOrtho) {
+                // Compute zoom to match perspective view size
+                const dist = perspCamera.position.distanceTo(controls.target);
+                const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(perspCamera.fov / 2));
+                orthoCamera.zoom = ORTHO_FRUSTUM / halfHeight;
+                orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+                orthoCamera.right = ORTHO_FRUSTUM * aspect;
+                orthoCamera.top = ORTHO_FRUSTUM;
+                orthoCamera.bottom = -ORTHO_FRUSTUM;
+                orthoCamera.position.copy(perspCamera.position);
+                orthoCamera.quaternion.copy(perspCamera.quaternion);
+                orthoCamera.updateProjectionMatrix();
+                camera = orthoCamera;
+            } else {
+                // Compute distance to match ortho view size
+                const halfHeight = ORTHO_FRUSTUM / orthoCamera.zoom;
+                const dist = halfHeight / Math.tan(THREE.MathUtils.degToRad(perspCamera.fov / 2));
+                const dir = orthoCamera.position.clone().sub(controls.target).normalize();
+                perspCamera.position.copy(controls.target).addScaledVector(dir, dist);
+                perspCamera.quaternion.copy(orthoCamera.quaternion);
+                perspCamera.aspect = aspect;
+                perspCamera.updateProjectionMatrix();
+                camera = perspCamera;
+            }
+
+            isOrtho = toOrtho;
+            controls.object = camera;
+            clipGizmo.camera = camera;
+            // Recreate ViewHelper with new camera
+            viewHelper = new ViewHelper(camera, renderer.domElement);
+            viewHelper.center = controls.target;
+            // Update button
+            btnOrtho.textContent = isOrtho ? 'O' : 'P';
+            btnOrtho.classList.toggle('active', isOrtho);
+        }
+
+        btnOrtho.addEventListener('click', () => switchCamera(!isOrtho));
+
         // Lighting - environment map handles PBR, keep scene lights moderate
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
         scene.add(ambientLight);
@@ -320,6 +597,378 @@
         const gridHelper = new THREE.GridHelper(10, 10);
         gridHelper.rotation.x = Math.PI / 2;  // Rotate to XY plane
         scene.add(gridHelper);
+
+        // ========== Clipping Plane ==========
+        const clipPlane = new THREE.Plane(new THREE.Vector3(1, 0, 0), 0);
+        const clipPlane2 = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+        let clipPlanes = [clipPlane];
+        let clipEnabled = false;
+        let clipHelperVisible = true;
+        let clipInverted = false;
+        let clipAxis = 'x+';
+        let clipGizmoMode = 'translate';  // 'translate' or 'rotate'
+        let clipSlabMode = false;
+        let clipSlabThickness = 2.0;
+        let clipPosition = 0;
+        let clipFollowCamera = false;
+
+        // Anchor object: its local +Z axis = plane normal, position = point on plane
+        const clipAnchor = new THREE.Group();
+        clipAnchor.visible = false;
+        scene.add(clipAnchor);
+
+        // Semi-transparent disc to visualize the plane
+        const discGeo = new THREE.CircleGeometry(5, 48);
+        const discMat = new THREE.MeshBasicMaterial({
+            color: 0x00aaff,
+            transparent: true,
+            opacity: 0.15,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        const clipDisc = new THREE.Mesh(discGeo, discMat);
+        clipAnchor.add(clipDisc);
+
+        // Edge ring for visibility
+        const ringGeo = new THREE.RingGeometry(4.95, 5, 48);
+        const ringMat = new THREE.MeshBasicMaterial({
+            color: 0x00aaff,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        const clipRing = new THREE.Mesh(ringGeo, ringMat);
+        clipAnchor.add(clipRing);
+
+        // Second disc + ring for slab mode
+        const clipDisc2 = new THREE.Mesh(discGeo, discMat.clone());
+        clipDisc2.visible = false;
+        clipAnchor.add(clipDisc2);
+        const clipRing2 = new THREE.Mesh(ringGeo, ringMat.clone());
+        clipRing2.visible = false;
+        clipAnchor.add(clipRing2);
+
+        // TransformControls for dragging the plane
+        const clipGizmo = new TransformControls(camera, renderer.domElement);
+        clipGizmo.attach(clipAnchor);
+        clipGizmo.setMode('translate');
+        clipGizmo.visible = false;
+        clipGizmo.enabled = false;
+        const clipGizmoHelper = clipGizmo.getHelper();
+        clipGizmoHelper.visible = false;
+        scene.add(clipGizmoHelper);
+
+        // Disable orbit while dragging gizmo
+        clipGizmo.addEventListener('dragging-changed', (e) => {
+            controls.enabled = !e.value;
+        });
+
+        // When the gizmo is dragged, derive clipPlane from anchor transform
+        const _zAxis = new THREE.Vector3();
+        let clipSyncFromGizmo = false;  // guard to prevent feedback loops
+        clipGizmo.addEventListener('change', () => {
+            if (!clipEnabled) return;
+            clipSyncFromGizmo = true;
+            // Local +Z in world space = plane normal
+            clipAnchor.getWorldDirection(_zAxis);
+
+            if (clipGizmoMode === 'translate') {
+                // Constrain position to normal axis only (no sideways dragging)
+                const dist = clipAnchor.position.dot(_zAxis);
+                clipAnchor.position.copy(_zAxis).multiplyScalar(dist);
+                clipPosition = dist;
+            } else {
+                // Rotation: recompute position along new normal
+                clipPosition = clipAnchor.position.dot(_zAxis);
+            }
+
+            clipPlane.normal.copy(_zAxis);
+            updatePlaneConstants();
+            updateDiscPositions();
+            // Sync UI
+            clipDistanceSlider.value = clipPosition;
+            clipDistanceValue.textContent = clipPosition.toFixed(2);
+            // Clear axis highlight (now in free orientation)
+            clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            clipAxis = null;
+            clipSyncFromGizmo = false;
+        });
+
+        const clipPanelEl = document.getElementById('clipping-panel');
+        const clipDistanceSlider = document.getElementById('clip-distance');
+        const clipDistanceValue = document.getElementById('clip-distance-value');
+        const clipThicknessSlider = document.getElementById('clip-thickness');
+        const clipThicknessValue = document.getElementById('clip-thickness-value');
+
+        const CLIP_AXIS_NORMALS = {
+            'x+': new THREE.Vector3(1, 0, 0),
+            'x-': new THREE.Vector3(-1, 0, 0),
+            'y+': new THREE.Vector3(0, 1, 0),
+            'y-': new THREE.Vector3(0, -1, 0),
+            'z+': new THREE.Vector3(0, 0, 1),
+            'z-': new THREE.Vector3(0, 0, -1),
+        };
+
+        // Sync anchor position/orientation from clipPlane state
+        function syncAnchorFromPlane() {
+            if (clipSyncFromGizmo) return;  // don't fight the gizmo
+            const normal = clipPlane.normal;
+            // Position anchor at clipPosition along normal
+            clipAnchor.position.copy(normal).multiplyScalar(clipPosition);
+            // Orient so local +Z = normal
+            const target = clipAnchor.position.clone().add(normal);
+            clipAnchor.lookAt(target);
+            updateDiscPositions();
+        }
+
+        function setClipAxis(axis) {
+            clipAxis = axis;
+            const normal = CLIP_AXIS_NORMALS[axis].clone();
+            if (clipInverted) normal.negate();
+            clipPlane.normal.copy(normal);
+            updatePlaneConstants();
+            syncAnchorFromPlane();
+            // Update active button
+            clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.axis === axis);
+            });
+        }
+
+        function setClipDistance(d) {
+            clipPosition = d;
+            updatePlaneConstants();
+            clipDistanceSlider.value = d;
+            clipDistanceValue.textContent = d.toFixed(2);
+            syncAnchorFromPlane();
+        }
+
+        function updatePlaneConstants() {
+            if (clipSlabMode) {
+                const halfT = clipSlabThickness / 2;
+                // Plane 1: keeps points above center - halfT
+                clipPlane.constant = -(clipPosition - halfT);
+                // Plane 2: opposite normal, keeps points below center + halfT
+                clipPlane2.normal.copy(clipPlane.normal).negate();
+                clipPlane2.constant = clipPosition + halfT;
+            } else {
+                clipPlane.constant = -clipPosition;
+            }
+        }
+
+        function updateDiscPositions() {
+            if (clipSlabMode) {
+                const halfT = clipSlabThickness / 2;
+                clipDisc.position.z = halfT;
+                clipRing.position.z = halfT;
+                clipDisc2.position.z = -halfT;
+                clipRing2.position.z = -halfT;
+                clipDisc2.visible = true;
+                clipRing2.visible = true;
+            } else {
+                clipDisc.position.z = 0;
+                clipRing.position.z = 0;
+                clipDisc2.visible = false;
+                clipRing2.visible = false;
+            }
+        }
+
+        function setClipThickness(t) {
+            clipSlabThickness = Math.max(0.01, Math.min(20, t));
+            clipThicknessSlider.value = clipSlabThickness;
+            clipThicknessValue.textContent = clipSlabThickness.toFixed(2);
+            updatePlaneConstants();
+            syncAnchorFromPlane();
+            updateClipMaterials();
+        }
+
+        function applyClipToObject(obj) {
+            const planes = clipEnabled ? clipPlanes : [];
+            obj.traverse(child => {
+                if (!child.material) return;
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const mat of mats) {
+                    mat.clippingPlanes = planes;
+                    mat.clipShadows = true;
+                    if (clipEnabled) {
+                        if (mat.userData.originalSide === undefined) mat.userData.originalSide = mat.side;
+                        mat.side = THREE.DoubleSide;
+                    } else if (mat.userData.originalSide !== undefined) {
+                        mat.side = mat.userData.originalSide;
+                        delete mat.userData.originalSide;
+                    }
+                    mat.needsUpdate = true;
+                }
+            });
+        }
+
+        function isClipHelper(child) {
+            // Skip clip anchor and its children, and gizmo helper
+            let node = child;
+            while (node) {
+                if (node === clipAnchor || node === clipGizmoHelper) return true;
+                node = node.parent;
+            }
+            return false;
+        }
+
+        function updateClipMaterials() {
+            scene.traverse(child => {
+                if (!child.material) return;
+                if (isClipHelper(child)) return;
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const mat of mats) {
+                    mat.clippingPlanes = clipEnabled ? clipPlanes : [];
+                    mat.clipShadows = true;
+                    if (clipEnabled) {
+                        if (mat.userData.originalSide === undefined) mat.userData.originalSide = mat.side;
+                        mat.side = THREE.DoubleSide;
+                    } else if (mat.userData.originalSide !== undefined) {
+                        mat.side = mat.userData.originalSide;
+                        delete mat.userData.originalSide;
+                    }
+                    mat.needsUpdate = true;
+                }
+            });
+            // Show/hide clip visuals (no disc/gizmo in camera mode)
+            clipAnchor.visible = clipEnabled && clipHelperVisible && !clipFollowCamera;
+            const showGizmo = clipEnabled && clipHelperVisible && !clipFollowCamera;
+            clipGizmo.visible = showGizmo;
+            clipGizmo.enabled = showGizmo;
+            clipGizmoHelper.visible = showGizmo;
+        }
+
+        const btnClip = document.getElementById('btn-clip');
+
+        function toggleClipPanel() {
+            clipEnabled = !clipEnabled;
+            clipPanelEl.classList.toggle('visible', clipEnabled);
+            btnClip.classList.toggle('active', clipEnabled);
+            syncAnchorFromPlane();
+            updateClipMaterials();
+        }
+
+        btnClip.addEventListener('click', toggleClipPanel);
+
+        // Orientation toggle (Fixed / Camera)
+        document.getElementById('clip-orient-fixed').addEventListener('click', (e) => {
+            clipFollowCamera = false;
+            e.currentTarget.classList.add('active');
+            document.getElementById('clip-orient-camera').classList.remove('active');
+            document.getElementById('clip-axis-section').style.display = '';
+            document.getElementById('clip-gizmo-section').style.display = '';
+            updateClipMaterials();
+        });
+        document.getElementById('clip-orient-camera').addEventListener('click', (e) => {
+            clipFollowCamera = true;
+            e.currentTarget.classList.add('active');
+            document.getElementById('clip-orient-fixed').classList.remove('active');
+            document.getElementById('clip-axis-section').style.display = 'none';
+            document.getElementById('clip-gizmo-section').style.display = 'none';
+            updateClipMaterials();
+        });
+
+        // Axis buttons
+        clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setClipAxis(btn.dataset.axis);
+            });
+        });
+
+        // Distance slider
+        clipDistanceSlider.addEventListener('input', () => {
+            setClipDistance(parseFloat(clipDistanceSlider.value));
+        });
+        // Mouse wheel on slider for fine control
+        clipDistanceSlider.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const step = e.shiftKey ? 0.1 : 0.01;
+            const delta = e.deltaY > 0 ? -step : step;
+            const newVal = Math.max(-20, Math.min(20, parseFloat(clipDistanceSlider.value) + delta));
+            setClipDistance(newVal);
+        });
+
+        // Slab mode toggles
+        document.getElementById('clip-mode-single').addEventListener('click', (e) => {
+            clipSlabMode = false;
+            e.currentTarget.classList.add('active');
+            document.getElementById('clip-mode-slab').classList.remove('active');
+            document.getElementById('clip-thickness-section').style.display = 'none';
+            clipPlanes = [clipPlane];
+            updatePlaneConstants();
+            syncAnchorFromPlane();
+            updateClipMaterials();
+        });
+        document.getElementById('clip-mode-slab').addEventListener('click', (e) => {
+            clipSlabMode = true;
+            e.currentTarget.classList.add('active');
+            document.getElementById('clip-mode-single').classList.remove('active');
+            document.getElementById('clip-thickness-section').style.display = '';
+            clipPlanes = [clipPlane, clipPlane2];
+            updatePlaneConstants();
+            syncAnchorFromPlane();
+            updateClipMaterials();
+        });
+
+        // Thickness slider (slab mode)
+        clipThicknessSlider.addEventListener('input', () => {
+            setClipThickness(parseFloat(clipThicknessSlider.value));
+        });
+        clipThicknessSlider.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const step = e.shiftKey ? 0.1 : 0.01;
+            const delta = e.deltaY > 0 ? -step : step;
+            setClipThickness(clipSlabThickness + delta);
+        });
+
+        // Flip button
+        document.getElementById('clip-flip').addEventListener('click', () => {
+            clipPlane.normal.negate();
+            updatePlaneConstants();
+            syncAnchorFromPlane();
+            if (clipAxis && clipAxis.endsWith('+')) {
+                setClipAxis(clipAxis.replace('+', '-'));
+            } else if (clipAxis) {
+                setClipAxis(clipAxis.replace('-', '+'));
+            }
+        });
+
+        // Helper toggle — controls disc + gizmo visibility
+        document.getElementById('clip-helper-toggle').addEventListener('click', (e) => {
+            clipHelperVisible = !clipHelperVisible;
+            e.currentTarget.classList.toggle('active', clipHelperVisible);
+            clipAnchor.visible = clipEnabled && clipHelperVisible && !clipFollowCamera;
+            const showGizmo = clipEnabled && clipHelperVisible && !clipFollowCamera;
+            clipGizmo.visible = showGizmo;
+            clipGizmo.enabled = showGizmo;
+            clipGizmoHelper.visible = showGizmo;
+        });
+
+        // Invert toggle
+        document.getElementById('clip-negate-render').addEventListener('click', (e) => {
+            clipInverted = !clipInverted;
+            e.currentTarget.classList.toggle('active', clipInverted);
+            if (clipAxis) setClipAxis(clipAxis);
+        });
+
+        // Gizmo mode buttons
+        document.getElementById('clip-mode-translate').addEventListener('click', (e) => {
+            clipGizmoMode = 'translate';
+            clipGizmo.setMode('translate');
+            e.currentTarget.classList.add('active');
+            document.getElementById('clip-mode-rotate').classList.remove('active');
+        });
+        document.getElementById('clip-mode-rotate').addEventListener('click', (e) => {
+            clipGizmoMode = 'rotate';
+            clipGizmo.setMode('rotate');
+            e.currentTarget.classList.add('active');
+            document.getElementById('clip-mode-translate').classList.remove('active');
+        });
+
+        // Close button
+        document.getElementById('clip-close').addEventListener('click', toggleClipPanel);
 
         // Object registry
         const objects = new Map();
@@ -711,6 +1360,63 @@
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
+            // Global shortcuts (work even without animation)
+            if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
+                switchCamera(!isOrtho);
+                return;
+            }
+            if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey) {
+                toggleClipPanel();
+                return;
+            }
+
+            // Clipping plane shortcuts (when panel is open)
+            if (clipEnabled) {
+                const step = e.shiftKey ? 0.5 : 0.05;
+                switch (e.code) {
+                    case 'KeyT':
+                        document.getElementById('clip-mode-translate').click();
+                        return;
+                    case 'KeyR':
+                        document.getElementById('clip-mode-rotate').click();
+                        return;
+                    case 'KeyF':
+                        document.getElementById('clip-flip').click();
+                        return;
+                    case 'KeyH':
+                        document.getElementById('clip-helper-toggle').click();
+                        return;
+                    case 'ArrowLeft':
+                        if (!animation) {
+                            e.preventDefault();
+                            setClipDistance(clipPosition - step);
+                            return;
+                        }
+                        break;
+                    case 'ArrowRight':
+                        if (!animation) {
+                            e.preventDefault();
+                            setClipDistance(clipPosition + step);
+                            return;
+                        }
+                        break;
+                    case 'ArrowUp':
+                        if (!animation && clipSlabMode) {
+                            e.preventDefault();
+                            setClipThickness(clipSlabThickness + step);
+                            return;
+                        }
+                        break;
+                    case 'ArrowDown':
+                        if (!animation && clipSlabMode) {
+                            e.preventDefault();
+                            setClipThickness(clipSlabThickness - step);
+                            return;
+                        }
+                        break;
+                }
+            }
+
             if (!animation) return;
 
             switch (e.code) {
@@ -820,18 +1526,19 @@
             const materialType = params.materialType || 'standard';
             const opacity = params.opacity != null ? params.opacity : 1;
             const transparent = opacity < 1;
+            const clip = clipEnabled ? clipPlanes : [];
 
             switch (materialType) {
                 case 'basic':
-                    return new THREE.MeshBasicMaterial({ color, opacity, transparent });
+                    return new THREE.MeshBasicMaterial({ color, opacity, transparent, clippingPlanes: clip });
                 case 'phong':
-                    return new THREE.MeshPhongMaterial({ color, opacity, transparent });
+                    return new THREE.MeshPhongMaterial({ color, opacity, transparent, clippingPlanes: clip });
                 case 'lambert':
-                    return new THREE.MeshLambertMaterial({ color, opacity, transparent });
+                    return new THREE.MeshLambertMaterial({ color, opacity, transparent, clippingPlanes: clip });
                 default:
                     const roughness = params.roughness != null ? params.roughness : 0.7;
                     const metalness = params.metalness != null ? params.metalness : 0.3;
-                    return new THREE.MeshStandardMaterial({ color, roughness, metalness, opacity, transparent });
+                    return new THREE.MeshStandardMaterial({ color, roughness, metalness, opacity, transparent, clippingPlanes: clip });
             }
         }
 
@@ -924,6 +1631,7 @@
 
                 addToParentOrScene(obj, parentId);
                 objects.set(id, obj);
+                if (clipEnabled) applyClipToObject(obj);
             }
         }
 
@@ -1078,7 +1786,8 @@
         }
 
         // WebSocket connection - connects directly to Python client
-        const statusEl = document.getElementById('status');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
         let ws = null;
         let reconnectTimeout = null;
         const urlParams = new URLSearchParams(window.location.search);
@@ -1095,8 +1804,9 @@
             ws = new WebSocket(`ws://localhost:${WS_PORT}`);
 
             ws.onopen = () => {
-                statusEl.textContent = 'Connected';
-                statusEl.className = 'connected';
+                statusDot.className = 'connected';
+                statusDot.title = 'Connected';
+                statusText.textContent = 'Connected';
                 // Reset asset-tracking state for this connection
                 pendingFetches = 0;
                 assetsComplete = false;
@@ -1104,8 +1814,9 @@
             };
 
             ws.onclose = () => {
-                statusEl.textContent = 'Waiting for Python...';
-                statusEl.className = 'disconnected';
+                statusDot.className = 'disconnected';
+                statusDot.title = 'Waiting for Python...';
+                statusText.textContent = 'Waiting...';
                 reconnectTimeout = setTimeout(connect, 500);
             };
 
@@ -1422,6 +2133,7 @@
                                     depthWrite: opacity >= 1,
                                     side: THREE.DoubleSide,
                                     vertexColors: !!colors,
+                                    clippingPlanes: clipEnabled ? clipPlanes : [],
                                 });
 
                                 const mesh = new THREE.Mesh(geometry, material);
@@ -1448,6 +2160,77 @@
                     case 'set_draw_range':
                         setDrawRange(data.id, data.value);
                         break;
+                    case 'set_clipping_plane': {
+                        clipEnabled = true;
+                        // Switch to single mode
+                        clipSlabMode = false;
+                        clipPlanes = [clipPlane];
+                        document.getElementById('clip-mode-single').classList.add('active');
+                        document.getElementById('clip-mode-slab').classList.remove('active');
+                        document.getElementById('clip-thickness-section').style.display = 'none';
+                        if (data.normal) {
+                            clipPlane.normal.fromArray(data.normal);
+                            clipInverted = false;
+                        }
+                        if (data.distance != null) {
+                            setClipDistance(data.distance);
+                        }
+                        if (data.show_helper != null) {
+                            clipHelperVisible = data.show_helper;
+                            document.getElementById('clip-helper-toggle').classList.toggle('active', clipHelperVisible);
+                        }
+                        // Sync UI: find matching axis
+                        let matchedAxis = null;
+                        for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
+                            if (n.equals(clipPlane.normal)) { matchedAxis = axis; break; }
+                        }
+                        if (matchedAxis) setClipAxis(matchedAxis);
+                        syncAnchorFromPlane();
+                        clipPanelEl.classList.add('visible');
+                        btnClip.classList.add('active');
+                        updateClipMaterials();
+                        break;
+                    }
+                    case 'set_clipping_slab': {
+                        clipEnabled = true;
+                        // Switch to slab mode
+                        clipSlabMode = true;
+                        clipPlanes = [clipPlane, clipPlane2];
+                        document.getElementById('clip-mode-slab').classList.add('active');
+                        document.getElementById('clip-mode-single').classList.remove('active');
+                        document.getElementById('clip-thickness-section').style.display = '';
+                        if (data.normal) {
+                            clipPlane.normal.fromArray(data.normal);
+                            clipInverted = false;
+                        }
+                        if (data.thickness != null) {
+                            setClipThickness(data.thickness);
+                        }
+                        if (data.center != null) {
+                            setClipDistance(data.center);
+                        }
+                        if (data.show_helper != null) {
+                            clipHelperVisible = data.show_helper;
+                            document.getElementById('clip-helper-toggle').classList.toggle('active', clipHelperVisible);
+                        }
+                        // Sync UI: find matching axis
+                        let matchedAxis2 = null;
+                        for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
+                            if (n.equals(clipPlane.normal)) { matchedAxis2 = axis; break; }
+                        }
+                        if (matchedAxis2) setClipAxis(matchedAxis2);
+                        syncAnchorFromPlane();
+                        clipPanelEl.classList.add('visible');
+                        btnClip.classList.add('active');
+                        updateClipMaterials();
+                        break;
+                    }
+                    case 'disable_clipping_plane':
+                        clipEnabled = false;
+                        clipPanelEl.classList.remove('visible');
+                        btnClip.classList.remove('active');
+                        updateClipMaterials();
+                        break;
                     case 'mark_assets_complete':
                         assetsComplete = true;
                         maybeNotifyAssetsLoaded();
@@ -1460,8 +2243,12 @@
 
         // Window resize handler
         window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
+            const aspect = window.innerWidth / window.innerHeight;
+            perspCamera.aspect = aspect;
+            perspCamera.updateProjectionMatrix();
+            orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+            orthoCamera.right = ORTHO_FRUSTUM * aspect;
+            orthoCamera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
             // Update LineMaterial resolution for all polylines
             objects.forEach((obj) => {
@@ -1473,8 +2260,12 @@
 
         // Animation loop
         let lastUIUpdate = 0;
+        let lastFrameTime = performance.now();
         function animate() {
             requestAnimationFrame(animate);
+            const frameNow = performance.now();
+            const frameDelta = (frameNow - lastFrameTime) / 1000;
+            lastFrameTime = frameNow;
 
             // Update animation playback
             if (animation && animationPlaying) {
@@ -1503,7 +2294,27 @@
             }
 
             controls.update();
+
+            // Camera-follow clipping: update plane normal from view direction each frame
+            if (clipEnabled && clipFollowCamera) {
+                camera.getWorldDirection(_zAxis);
+                clipPlane.normal.copy(_zAxis);
+                const targetDepth = _zAxis.dot(controls.target);
+                if (clipSlabMode) {
+                    const halfT = clipSlabThickness / 2;
+                    clipPlane.constant = -(targetDepth + clipPosition - halfT);
+                    clipPlane2.normal.copy(_zAxis).negate();
+                    clipPlane2.constant = targetDepth + clipPosition + halfT;
+                } else {
+                    clipPlane.constant = -(targetDepth + clipPosition);
+                }
+            }
+
+            if (viewHelper.animating) viewHelper.update(frameDelta);
+            renderer.autoClear = true;
             renderer.render(scene, camera);
+            renderer.autoClear = false;
+            viewHelper.render(renderer);
         }
 
         animate();

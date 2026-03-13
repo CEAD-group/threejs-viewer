@@ -64,6 +64,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - Beads: toolpath extrusion via `Toolpath.to_mesh()` + `add_mesh()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
 - **draw_range**: polylines and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
+- **Clipping plane**: interactive cross-section plane with GUI panel (press C to toggle). Supports single plane and slab (dual-plane) modes. Gizmo translate is constrained to the plane normal. Programmatic control via `set_clipping_plane(normal, distance)` / `set_clipping_slab(normal, center, thickness)` / `disable_clipping_plane()`
 
 ### Animation: Two Approaches
 **Frame-based (simple, familiar):** Build frames as Python dicts — good for small animations and prototyping.
@@ -98,3 +99,4 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `13_material_properties.py` - PBR material properties (roughness/metalness grid on primitives)
 - `14_grouping.py` - Object grouping with animated robot arm (nested parent-child hierarchy, local joint transforms)
 - `15_toolpath_interrupted.py` - Interrupted extrusion with travel moves: per-point width array (0=travel), pill/racetrack path with varying point density, merge_animation_points for segment-aligned animation (frame times merged into mesh geometry → no partial triangle rings)
+- `16_clipping_plane.py` - Interactive clipping plane with slab mode (nested spheres sliced to reveal internals, single plane + dual-plane slab, programmatic + GUI control)
