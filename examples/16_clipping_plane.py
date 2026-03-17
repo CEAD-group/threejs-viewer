@@ -68,9 +68,10 @@ for i in range(8):
     )
 
 # === Toolpath on a 45-degree inclined plane ===
-# The plane normal is tilted 45° between Y and Z: (0, -sin45, cos45)
+# Rotate local frame -45° about X. The local Z (layer stacking) direction
+# maps to world (0, sin45, cos45) via R_x(-45°).
 tilt = math.radians(45)
-plane_normal = np.array([0, -math.sin(tilt), math.cos(tilt)], dtype=np.float32)
+plane_normal = np.array([0, math.sin(tilt), math.cos(tilt)], dtype=np.float32)
 
 # Generate a spiral toolpath in the tilted plane's local coordinates,
 # then rotate into world space.
