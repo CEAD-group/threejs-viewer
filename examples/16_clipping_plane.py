@@ -1,12 +1,11 @@
 """
 Clipping Plane Demo
 
-Demonstrates the interactive clipping plane feature, including slab mode.
-A clipping plane slices through geometry, revealing internal structure.
-Slab mode uses two parallel planes to show only a thin slice.
+Demonstrates the interactive clipping plane feature, including slab mode,
+and a toolpath printed on a 45-degree inclined plane with clipping defaults.
 
 - Press C in the viewer to toggle the clipping panel
-- Use the panel to adjust axis, position, mode (Single/Slab), and options
+- Use the panel to adjust axis, position, mode (Single/Slab)
 - Arrow keys nudge position; Up/Down adjust thickness in slab mode
 - This script also shows programmatic control via set_clipping_plane() and set_clipping_slab()
 
@@ -16,7 +15,9 @@ Run: uv run python examples/16_clipping_plane.py
 import math
 import time
 
-from threejs_viewer import viewer
+import numpy as np
+
+from threejs_viewer import Toolpath, viewer
 
 v = viewer()
 v.clear()
@@ -66,6 +67,43 @@ for i in range(8):
         metalness=0.7,
     )
 
+# === Toolpath on a 45-degree inclined plane ===
+# The plane normal is tilted 45° between Y and Z: (0, -sin45, cos45)
+tilt = math.radians(45)
+plane_normal = np.array([0, -math.sin(tilt), math.cos(tilt)], dtype=np.float32)
+
+# Generate a spiral toolpath in the tilted plane's local coordinates,
+# then rotate into world space.
+n_points = 50000
+n_turns = 30
+t = np.linspace(0, 1, n_points)
+angle = t * n_turns * 2 * math.pi
+r = 0.3 + 1.2 * t  # expanding spiral
+local_x = r * np.cos(angle)
+local_y = r * np.sin(angle)
+local_z = t * n_turns * 0.08  # layer height in local frame
+
+# Rotation matrix: rotate local Z to plane_normal (rotate -45° about X)
+cos_t, sin_t = math.cos(-tilt), math.sin(-tilt)
+world_x = local_x
+world_y = local_y * cos_t - local_z * sin_t
+world_z = local_y * sin_t + local_z * cos_t
+
+# Offset to place it next to the spheres
+points = np.column_stack([world_x - 4.0, world_y, world_z + 2.0]).astype(np.float32)
+
+tp = Toolpath.from_points(points, bead_width=0.15, bead_height=0.04)
+tp.colorize("plasma")
+v.add_mesh(
+    "tilted_toolpath",
+    **tp.to_mesh(plane_normal=plane_normal),
+    roughness=0.4,
+    metalness=0.15,
+)
+
+# Set clipping defaults so pressing C uses the tilted plane normal
+v.set_clipping_defaults(normal=plane_normal.tolist(), distance=-4.0)
+
 # Enable clipping plane from Python — slice through Z at height 2.0
 time.sleep(0.5)  # Let objects load
 v.set_clipping_plane(normal=[0, 0, -1], distance=2.0)
@@ -78,6 +116,8 @@ time.sleep(3)
 v.set_clipping_slab(normal=[0, 0, 1], center=2.0, thickness=1.0)
 
 print("Slab mode enabled! Showing a 1.0-thick slice around Z=2.0")
+print()
+print("Disable clipping (C), then press C again to see the tilted-plane defaults.")
 print()
 print("Controls:")
 print("  C: toggle clipping panel")

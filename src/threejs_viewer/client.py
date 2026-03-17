@@ -792,6 +792,27 @@ class ViewerClient:
         """Disable the clipping plane."""
         self._send({"type": "disable_clipping_plane"})
 
+    def set_clipping_defaults(
+        self,
+        normal: List[float],
+        distance: float = 0.0,
+    ) -> None:
+        """
+        Set default clipping plane axis and position for when the user
+        first opens the clipping panel (C key).
+
+        Args:
+            normal: [x, y, z] plane normal direction (e.g. [0, 0, -1] for Z-).
+            distance: Default position along the normal.
+        """
+        self._send(
+            {
+                "type": "set_clipping_defaults",
+                "normal": list(normal),
+                "distance": float(distance),
+            }
+        )
+
     def clear(self) -> None:
         """Clear all objects from the scene."""
         self._send({"type": "clear_scene"})

@@ -585,6 +585,7 @@
         let clipSlabMode = false;
         let clipSlabThickness = 2.0;
         let clipPosition = 0;
+        let clipDefaults = null;  // {normal, distance} applied on first toggle
 
         // Anchor object: its local +Z axis = plane normal, position = point on plane
         const clipAnchor = new THREE.Group();
@@ -817,6 +818,20 @@
 
         function toggleClipPanel() {
             clipEnabled = !clipEnabled;
+            if (clipEnabled && clipDefaults) {
+                const d = clipDefaults;
+                clipDefaults = null;
+                if (d.normal) {
+                    clipPlane.normal.fromArray(d.normal);
+                    // Match to axis button if it's a standard axis
+                    let matched = null;
+                    for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
+                        if (n.equals(clipPlane.normal)) { matched = axis; break; }
+                    }
+                    if (matched) setClipAxis(matched);
+                }
+                if (d.distance != null) setClipDistance(d.distance);
+            }
             clipPanelEl.classList.toggle('visible', clipEnabled);
             btnClip.classList.toggle('active', clipEnabled);
             syncAnchorFromPlane();
@@ -2133,6 +2148,9 @@
                         clipPanelEl.classList.remove('visible');
                         btnClip.classList.remove('active');
                         updateClipMaterials();
+                        break;
+                    case 'set_clipping_defaults':
+                        clipDefaults = { normal: data.normal, distance: data.distance };
                         break;
                     case 'mark_assets_complete':
                         assetsComplete = true;
