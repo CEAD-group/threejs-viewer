@@ -398,7 +398,7 @@
         <div class="clip-section">
             <label>Position <span class="clip-key-hint">←→</span></label>
             <div class="clip-slider-row">
-                <input type="range" id="clip-distance" min="-20" max="20" step="0.01" value="0">
+                <input type="range" id="clip-distance" min="-10" max="10" step="0.01" value="0">
                 <span class="clip-value" id="clip-distance-value">0.00</span>
             </div>
         </div>
@@ -747,6 +747,7 @@
             updatePlaneConstants();
             syncAnchorFromPlane();
             syncNormalInputs();
+            updateClipSliderRange();
             // Update active button
             clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.axis === axis);
@@ -756,11 +757,7 @@
         function setClipDistance(d) {
             clipPosition = d;
             updatePlaneConstants();
-            // Expand slider range if needed so UI stays in sync
-            const slider = clipDistanceSlider;
-            if (d < parseFloat(slider.min)) slider.min = d;
-            if (d > parseFloat(slider.max)) slider.max = d;
-            slider.value = d;
+            clipDistanceSlider.value = d;
             clipDistanceValue.textContent = d.toFixed(2);
             syncAnchorFromPlane();
         }
@@ -833,6 +830,49 @@
             return false;
         }
 
+        const _bbox = new THREE.Box3();
+        const _bboxCenter = new THREE.Vector3();
+        function updateClipSliderRange() {
+            _bbox.makeEmpty();
+            scene.traverse(child => {
+                if (!child.geometry) return;
+                if (isClipHelper(child)) return;
+                if (child === gridHelper) return;
+                child.updateWorldMatrix(true, false);
+                const geo = child.geometry;
+                if (!geo.boundingBox) geo.computeBoundingBox();
+                _bbox.expandByObject(child);
+            });
+            if (_bbox.isEmpty()) return;
+            // Project bbox corners onto clip normal to get min/max range
+            const n = clipPlane.normal;
+            const corners = [
+                new THREE.Vector3(_bbox.min.x, _bbox.min.y, _bbox.min.z),
+                new THREE.Vector3(_bbox.max.x, _bbox.min.y, _bbox.min.z),
+                new THREE.Vector3(_bbox.min.x, _bbox.max.y, _bbox.min.z),
+                new THREE.Vector3(_bbox.max.x, _bbox.max.y, _bbox.min.z),
+                new THREE.Vector3(_bbox.min.x, _bbox.min.y, _bbox.max.z),
+                new THREE.Vector3(_bbox.max.x, _bbox.min.y, _bbox.max.z),
+                new THREE.Vector3(_bbox.min.x, _bbox.max.y, _bbox.max.z),
+                new THREE.Vector3(_bbox.max.x, _bbox.max.y, _bbox.max.z),
+            ];
+            let lo = Infinity, hi = -Infinity;
+            for (const c of corners) {
+                const d = c.dot(n);
+                if (d < lo) lo = d;
+                if (d > hi) hi = d;
+            }
+            clipDistanceSlider.min = lo.toFixed(2);
+            clipDistanceSlider.max = hi.toFixed(2);
+            clipDistanceSlider.step = ((hi - lo) / 500).toFixed(4);
+            // Thickness slider: max = scene extent along normal
+            const extent = hi - lo;
+            if (extent > 0) {
+                clipThicknessSlider.max = extent.toFixed(2);
+                clipThicknessSlider.step = (extent / 500).toFixed(4);
+            }
+        }
+
         function updateClipMaterials() {
             scene.traverse(child => {
                 if (!child.material) return;
@@ -880,6 +920,7 @@
             }
             clipPanelEl.classList.toggle('visible', clipEnabled);
             btnClip.classList.toggle('active', clipEnabled);
+            if (clipEnabled) updateClipSliderRange();
             syncAnchorFromPlane();
             updateClipMaterials();
         }
@@ -902,6 +943,7 @@
             clipPlane.normal.set(x, y, z).normalize();
             updatePlaneConstants();
             syncAnchorFromPlane();
+            updateClipSliderRange();
             updateClipMaterials();
             // Clear axis highlight (custom normal)
             clipAxis = null;
@@ -2193,6 +2235,7 @@
                             if (n.equals(clipPlane.normal)) { matchedAxis = axis; break; }
                         }
                         if (matchedAxis) setClipAxis(matchedAxis);
+                        updateClipSliderRange();
                         syncAnchorFromPlane();
                         clipPanelEl.classList.add('visible');
                         btnClip.classList.add('active');
@@ -2226,6 +2269,7 @@
                             if (n.equals(clipPlane.normal)) { matchedAxis2 = axis; break; }
                         }
                         if (matchedAxis2) setClipAxis(matchedAxis2);
+                        updateClipSliderRange();
                         syncAnchorFromPlane();
                         clipPanelEl.classList.add('visible');
                         btnClip.classList.add('active');
