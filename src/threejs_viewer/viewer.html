@@ -1396,10 +1396,9 @@
                     updateClipMaterials();
                     return;
                 }
-                // Arrow keys for clipping: always when no animation, Shift+arrows when animation loaded
-                const clipArrows = !animation || e.shiftKey;
-                if (clipArrows) {
-                    const step = e.shiftKey && animation ? 0.5 : (e.shiftKey ? 0.5 : 0.05);
+                // Arrow keys: clipping takes precedence over animation
+                {
+                    const step = e.shiftKey ? 0.5 : 0.05;
                     switch (e.code) {
                         case 'ArrowLeft':
                             e.preventDefault();
