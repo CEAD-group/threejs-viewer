@@ -1318,6 +1318,7 @@
                 }
                 if (e.code === 'KeyH') {
                     clipHelperVisible = !clipHelperVisible;
+                    clipPanelEl.classList.toggle('visible', clipHelperVisible);
                     updateClipMaterials();
                     return;
                 }
