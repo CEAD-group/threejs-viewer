@@ -102,7 +102,9 @@ v.add_mesh(
 )
 
 # Set clipping defaults so pressing C uses the tilted plane normal
-v.set_clipping_defaults(normal=plane_normal.tolist(), distance=-4.0)
+# Distance = toolpath center projected onto the plane normal
+clip_distance = float(np.dot(points.mean(axis=0), plane_normal))
+v.set_clipping_defaults(normal=plane_normal.tolist(), distance=clip_distance)
 
 # Enable clipping plane from Python — slice through Z at height 2.0
 time.sleep(0.5)  # Let objects load
