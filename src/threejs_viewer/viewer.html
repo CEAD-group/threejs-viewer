@@ -338,13 +338,6 @@
     <div id="clipping-panel">
         <h3>Clipping Plane <button id="clip-close" title="Close (C)">×</button></h3>
         <div class="clip-section">
-            <label>Orientation</label>
-            <div class="clip-toggle-row">
-                <button id="clip-orient-fixed" class="active">Fixed</button>
-                <button id="clip-orient-camera">Camera</button>
-            </div>
-        </div>
-        <div class="clip-section" id="clip-axis-section">
             <label>Axis</label>
             <div class="clip-axis-buttons">
                 <button data-axis="x+" class="active">X+</button>
@@ -376,22 +369,7 @@
                 <span class="clip-value" id="clip-thickness-value">2.00</span>
             </div>
         </div>
-        <div class="clip-section" id="clip-gizmo-section">
-            <label>Gizmo</label>
-            <div class="clip-toggle-row">
-                <button id="clip-mode-translate" class="active" title="Move plane (T)">Move</button>
-                <button id="clip-mode-rotate" title="Rotate plane (R)">Rotate</button>
-            </div>
-        </div>
-        <div class="clip-section">
-            <label>Options</label>
-            <div class="clip-toggle-row">
-                <button id="clip-flip" title="Flip normal direction (F)">Flip</button>
-                <button id="clip-helper-toggle" class="active" title="Show/hide plane helper (H)">Helper</button>
-                <button id="clip-negate-render" title="Show clipped side instead">Invert</button>
-            </div>
-        </div>
-        <div class="clip-hint">C: toggle | O: ortho | ←→: nudge | ↑↓: thickness (slab) | T/R: gizmo mode</div>
+        <div class="clip-hint">C: toggle | R: rotate gizmo | H: helper | arrows: nudge</div>
     </div>
 
     <div id="animation-controls">
@@ -525,8 +503,6 @@
         renderer.domElement.addEventListener('click', (e) => {
             if (viewHelper.handleClick(e)) {
                 controls.target.copy(viewHelper.center);
-                // Auto-switch to ortho when snapping to a standard view
-                if (!isOrtho) switchCamera(true);
             }
         });
 
@@ -604,13 +580,11 @@
         let clipPlanes = [clipPlane];
         let clipEnabled = false;
         let clipHelperVisible = true;
-        let clipInverted = false;
         let clipAxis = 'x+';
         let clipGizmoMode = 'translate';  // 'translate' or 'rotate'
         let clipSlabMode = false;
         let clipSlabThickness = 2.0;
         let clipPosition = 0;
-        let clipFollowCamera = false;
 
         // Anchor object: its local +Z axis = plane normal, position = point on plane
         const clipAnchor = new THREE.Group();
@@ -727,7 +701,6 @@
         function setClipAxis(axis) {
             clipAxis = axis;
             const normal = CLIP_AXIS_NORMALS[axis].clone();
-            if (clipInverted) normal.negate();
             clipPlane.normal.copy(normal);
             updatePlaneConstants();
             syncAnchorFromPlane();
@@ -832,9 +805,9 @@
                     mat.needsUpdate = true;
                 }
             });
-            // Show/hide clip visuals (no disc/gizmo in camera mode)
-            clipAnchor.visible = clipEnabled && clipHelperVisible && !clipFollowCamera;
-            const showGizmo = clipEnabled && clipHelperVisible && !clipFollowCamera;
+            // Show/hide clip visuals
+            clipAnchor.visible = clipEnabled && clipHelperVisible;
+            const showGizmo = clipEnabled && clipHelperVisible;
             clipGizmo.visible = showGizmo;
             clipGizmo.enabled = showGizmo;
             clipGizmoHelper.visible = showGizmo;
@@ -851,24 +824,6 @@
         }
 
         btnClip.addEventListener('click', toggleClipPanel);
-
-        // Orientation toggle (Fixed / Camera)
-        document.getElementById('clip-orient-fixed').addEventListener('click', (e) => {
-            clipFollowCamera = false;
-            e.currentTarget.classList.add('active');
-            document.getElementById('clip-orient-camera').classList.remove('active');
-            document.getElementById('clip-axis-section').style.display = '';
-            document.getElementById('clip-gizmo-section').style.display = '';
-            updateClipMaterials();
-        });
-        document.getElementById('clip-orient-camera').addEventListener('click', (e) => {
-            clipFollowCamera = true;
-            e.currentTarget.classList.add('active');
-            document.getElementById('clip-orient-fixed').classList.remove('active');
-            document.getElementById('clip-axis-section').style.display = 'none';
-            document.getElementById('clip-gizmo-section').style.display = 'none';
-            updateClipMaterials();
-        });
 
         // Axis buttons
         clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
@@ -921,50 +876,6 @@
             const step = e.shiftKey ? 0.1 : 0.01;
             const delta = e.deltaY > 0 ? -step : step;
             setClipThickness(clipSlabThickness + delta);
-        });
-
-        // Flip button
-        document.getElementById('clip-flip').addEventListener('click', () => {
-            clipPlane.normal.negate();
-            updatePlaneConstants();
-            syncAnchorFromPlane();
-            if (clipAxis && clipAxis.endsWith('+')) {
-                setClipAxis(clipAxis.replace('+', '-'));
-            } else if (clipAxis) {
-                setClipAxis(clipAxis.replace('-', '+'));
-            }
-        });
-
-        // Helper toggle — controls disc + gizmo visibility
-        document.getElementById('clip-helper-toggle').addEventListener('click', (e) => {
-            clipHelperVisible = !clipHelperVisible;
-            e.currentTarget.classList.toggle('active', clipHelperVisible);
-            clipAnchor.visible = clipEnabled && clipHelperVisible && !clipFollowCamera;
-            const showGizmo = clipEnabled && clipHelperVisible && !clipFollowCamera;
-            clipGizmo.visible = showGizmo;
-            clipGizmo.enabled = showGizmo;
-            clipGizmoHelper.visible = showGizmo;
-        });
-
-        // Invert toggle
-        document.getElementById('clip-negate-render').addEventListener('click', (e) => {
-            clipInverted = !clipInverted;
-            e.currentTarget.classList.toggle('active', clipInverted);
-            if (clipAxis) setClipAxis(clipAxis);
-        });
-
-        // Gizmo mode buttons
-        document.getElementById('clip-mode-translate').addEventListener('click', (e) => {
-            clipGizmoMode = 'translate';
-            clipGizmo.setMode('translate');
-            e.currentTarget.classList.add('active');
-            document.getElementById('clip-mode-rotate').classList.remove('active');
-        });
-        document.getElementById('clip-mode-rotate').addEventListener('click', (e) => {
-            clipGizmoMode = 'rotate';
-            clipGizmo.setMode('rotate');
-            e.currentTarget.classList.add('active');
-            document.getElementById('clip-mode-translate').classList.remove('active');
         });
 
         // Close button
@@ -1372,48 +1283,44 @@
 
             // Clipping plane shortcuts (when panel is open)
             if (clipEnabled) {
-                const step = e.shiftKey ? 0.5 : 0.05;
-                switch (e.code) {
-                    case 'KeyT':
-                        document.getElementById('clip-mode-translate').click();
-                        return;
-                    case 'KeyR':
-                        document.getElementById('clip-mode-rotate').click();
-                        return;
-                    case 'KeyF':
-                        document.getElementById('clip-flip').click();
-                        return;
-                    case 'KeyH':
-                        document.getElementById('clip-helper-toggle').click();
-                        return;
-                    case 'ArrowLeft':
-                        if (!animation) {
+                if (e.code === 'KeyR') {
+                    clipGizmoMode = clipGizmoMode === 'translate' ? 'rotate' : 'translate';
+                    clipGizmo.setMode(clipGizmoMode);
+                    return;
+                }
+                if (e.code === 'KeyH') {
+                    clipHelperVisible = !clipHelperVisible;
+                    updateClipMaterials();
+                    return;
+                }
+                // Arrow keys for clipping: always when no animation, Shift+arrows when animation loaded
+                const clipArrows = !animation || e.shiftKey;
+                if (clipArrows) {
+                    const step = e.shiftKey && animation ? 0.5 : (e.shiftKey ? 0.5 : 0.05);
+                    switch (e.code) {
+                        case 'ArrowLeft':
                             e.preventDefault();
                             setClipDistance(clipPosition - step);
                             return;
-                        }
-                        break;
-                    case 'ArrowRight':
-                        if (!animation) {
+                        case 'ArrowRight':
                             e.preventDefault();
                             setClipDistance(clipPosition + step);
                             return;
-                        }
-                        break;
-                    case 'ArrowUp':
-                        if (!animation && clipSlabMode) {
-                            e.preventDefault();
-                            setClipThickness(clipSlabThickness + step);
-                            return;
-                        }
-                        break;
-                    case 'ArrowDown':
-                        if (!animation && clipSlabMode) {
-                            e.preventDefault();
-                            setClipThickness(clipSlabThickness - step);
-                            return;
-                        }
-                        break;
+                        case 'ArrowUp':
+                            if (clipSlabMode) {
+                                e.preventDefault();
+                                setClipThickness(clipSlabThickness + step);
+                                return;
+                            }
+                            break;
+                        case 'ArrowDown':
+                            if (clipSlabMode) {
+                                e.preventDefault();
+                                setClipThickness(clipSlabThickness - step);
+                                return;
+                            }
+                            break;
+                    }
                 }
             }
 
@@ -2170,14 +2077,12 @@
                         document.getElementById('clip-thickness-section').style.display = 'none';
                         if (data.normal) {
                             clipPlane.normal.fromArray(data.normal);
-                            clipInverted = false;
                         }
                         if (data.distance != null) {
                             setClipDistance(data.distance);
                         }
                         if (data.show_helper != null) {
                             clipHelperVisible = data.show_helper;
-                            document.getElementById('clip-helper-toggle').classList.toggle('active', clipHelperVisible);
                         }
                         // Sync UI: find matching axis
                         let matchedAxis = null;
@@ -2201,7 +2106,6 @@
                         document.getElementById('clip-thickness-section').style.display = '';
                         if (data.normal) {
                             clipPlane.normal.fromArray(data.normal);
-                            clipInverted = false;
                         }
                         if (data.thickness != null) {
                             setClipThickness(data.thickness);
@@ -2211,7 +2115,6 @@
                         }
                         if (data.show_helper != null) {
                             clipHelperVisible = data.show_helper;
-                            document.getElementById('clip-helper-toggle').classList.toggle('active', clipHelperVisible);
                         }
                         // Sync UI: find matching axis
                         let matchedAxis2 = null;
@@ -2294,21 +2197,6 @@
             }
 
             controls.update();
-
-            // Camera-follow clipping: update plane normal from view direction each frame
-            if (clipEnabled && clipFollowCamera) {
-                camera.getWorldDirection(_zAxis);
-                clipPlane.normal.copy(_zAxis);
-                const targetDepth = _zAxis.dot(controls.target);
-                if (clipSlabMode) {
-                    const halfT = clipSlabThickness / 2;
-                    clipPlane.constant = -(targetDepth + clipPosition - halfT);
-                    clipPlane2.normal.copy(_zAxis).negate();
-                    clipPlane2.constant = targetDepth + clipPosition + halfT;
-                } else {
-                    clipPlane.constant = -(targetDepth + clipPosition);
-                }
-            }
 
             if (viewHelper.animating) viewHelper.update(frameDelta);
             renderer.autoClear = true;
