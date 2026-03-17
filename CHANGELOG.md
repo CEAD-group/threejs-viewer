@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.0.12
+
+Interactive clipping plane with slab mode, orthographic camera, and slice view for inspecting toolpath layers.
+
+### New features
+
+- **Clipping plane panel** — press C to toggle an interactive cross-section plane with axis selection, position slider, and rotation gizmo
+- **Slab mode** — dual-plane clipping shows a thin slice of geometry; toggle with S key or panel button
+- **Orthographic camera** — O key toggles between perspective and orthographic projection
+- **Slice view (V key)** — snaps the ortho camera to look along the clipping plane normal, ideal for layer-by-layer toolpath inspection
+- **`set_clipping_plane(normal, distance)`** — programmatic single clipping plane
+- **`set_clipping_slab(normal, center, thickness)`** — programmatic dual-plane slab
+- **`disable_clipping_plane()`** — remove clipping
+- **`set_clipping_defaults(normal, distance)`** — pre-configure the default clip axis/position for when the user first opens the panel (C key); useful for toolpath workflows where the slice plane is known
+
+### Keyboard shortcuts (clipping)
+
+| Key | Action |
+|-----|--------|
+| C | Toggle clipping on/off |
+| S | Toggle single/slab mode |
+| V | Snap ortho view along clip normal |
+| H | Toggle helper + panel visibility |
+| O | Toggle ortho/perspective |
+| ←→ | Nudge position |
+| ↑↓ | Nudge thickness (slab mode) |
+
+### New example
+
+- `16_clipping_plane.py` — nested spheres + tilted toolpath with clipping along the slice plane normal, programmatic single/slab modes
+
 ## 0.0.11
 
 Adds binary channel support for `clip_times`, enabling efficient transfer of embedded GLTF animation times alongside other binary channels.
