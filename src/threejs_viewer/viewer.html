@@ -628,6 +628,8 @@
         const clipGizmo = new TransformControls(camera, renderer.domElement);
         clipGizmo.attach(clipAnchor);
         clipGizmo.setMode('translate');
+        clipGizmo.showX = false;  // translate only along local Z (plane normal)
+        clipGizmo.showY = false;
         clipGizmo.visible = false;
         clipGizmo.enabled = false;
         const clipGizmoHelper = clipGizmo.getHelper();
@@ -1301,6 +1303,9 @@
                 if (e.code === 'KeyR') {
                     clipGizmoMode = clipGizmoMode === 'translate' ? 'rotate' : 'translate';
                     clipGizmo.setMode(clipGizmoMode);
+                    // Translate: only along normal (local Z). Rotate: all axes.
+                    clipGizmo.showX = clipGizmoMode === 'rotate';
+                    clipGizmo.showY = clipGizmoMode === 'rotate';
                     return;
                 }
                 if (e.code === 'KeyH') {
