@@ -374,7 +374,7 @@
                 <span class="clip-value" id="clip-thickness-value">2.00</span>
             </div>
         </div>
-        <div class="clip-hint">C: toggle | S: slab | H: helper | ←→: position | ↑↓: thickness</div>
+        <div class="clip-hint">C: toggle | S: slab | V: view normal | H: helper | ←→: position | ↑↓: thickness</div>
     </div>
 
     <div id="animation-controls">
@@ -1294,6 +1294,20 @@
 
             // Clipping plane shortcuts (when panel is open)
             if (clipEnabled) {
+                if (e.code === 'KeyV') {
+                    // Snap ortho camera to look along clip plane normal
+                    const center = clipPlane.normal.clone().multiplyScalar(clipPosition);
+                    controls.target.copy(center);
+                    const camDist = 50;
+                    const camPos = center.clone().addScaledVector(clipPlane.normal, camDist);
+                    if (!isOrtho) switchCamera(true);
+                    camera.position.copy(camPos);
+                    camera.lookAt(center);
+                    camera.zoom = 1;
+                    camera.updateProjectionMatrix();
+                    controls.update();
+                    return;
+                }
                 if (e.code === 'KeyS') {
                     if (clipSlabMode) {
                         document.getElementById('clip-mode-single').click();
