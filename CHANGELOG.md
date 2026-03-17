@@ -10,8 +10,11 @@ Interactive clipping plane with slab mode, orthographic camera, and slice view f
 - **Slab mode** — dual-plane clipping shows a thin slice of geometry; toggle with S key or panel button
 - **Orthographic camera** — O key toggles between perspective and orthographic projection
 - **Slice view (V key)** — snaps the ortho camera to look along the clipping plane normal, ideal for layer-by-layer toolpath inspection
-- **`set_clipping_plane(normal, distance)`** — programmatic single clipping plane
-- **`set_clipping_slab(normal, center, thickness)`** — programmatic dual-plane slab
+- **Normal XYZ inputs** — type an exact clipping plane normal in the panel; axis buttons, gizmo, and programmatic changes stay in sync
+- **Auto-fit slider range** — position and thickness sliders derive their min/max from the scene bounding box projected onto the clip normal
+- **Arrow key priority** — when clipping is active, arrow keys always control the clip plane, even with an animation loaded
+- **`set_clipping_plane(normal, distance, show_helper)`** — programmatic single clipping plane
+- **`set_clipping_slab(normal, center, thickness, show_helper)`** — programmatic dual-plane slab
 - **`disable_clipping_plane()`** — remove clipping
 - **`set_clipping_defaults(normal, distance)`** — pre-configure the default clip axis/position for when the user first opens the panel (C key); useful for toolpath workflows where the slice plane is known
 
