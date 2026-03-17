@@ -900,7 +900,6 @@
             const z = parseFloat(clipNzInput.value) || 0;
             if (x === 0 && y === 0 && z === 0) return;  // skip zero vector
             clipPlane.normal.set(x, y, z).normalize();
-            syncNormalInputs();  // show normalized values
             updatePlaneConstants();
             syncAnchorFromPlane();
             updateClipMaterials();
