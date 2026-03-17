@@ -101,31 +101,28 @@ v.add_mesh(
     metalness=0.15,
 )
 
-# Set clipping defaults so pressing C uses the tilted plane normal
-# Distance = toolpath center projected onto the plane normal
+# Clipping plane along the toolpath's slice plane normal
 clip_distance = float(np.dot(points.mean(axis=0), plane_normal))
 v.set_clipping_defaults(normal=plane_normal.tolist(), distance=clip_distance)
 
-# Enable clipping plane from Python — slice through Z at height 2.0
 time.sleep(0.5)  # Let objects load
-v.set_clipping_plane(normal=[0, 0, -1], distance=2.0)
+v.set_clipping_plane(normal=plane_normal.tolist(), distance=clip_distance)
 
-print("Single clipping plane enabled at Z=2.0")
+print(
+    f"Clipping plane enabled along toolpath slice normal, distance={clip_distance:.2f}"
+)
 print("Switching to slab mode in 3 seconds...")
 time.sleep(3)
 
-# Switch to slab mode — show a 1.0-thick slice centered at Z=2.0
-v.set_clipping_slab(normal=[0, 0, 1], center=2.0, thickness=1.0)
+# Switch to slab mode — thin slice through the toolpath
+v.set_clipping_slab(normal=plane_normal.tolist(), center=clip_distance, thickness=1.0)
 
-print("Slab mode enabled! Showing a 1.0-thick slice around Z=2.0")
-print()
-print("Disable clipping (C), then press C again to see the tilted-plane defaults.")
+print("Slab mode enabled! Showing a 1.0-thick slice through the toolpath")
 print()
 print("Controls:")
 print("  C: toggle clipping panel")
 print("  ←→: nudge position")
 print("  ↑↓: adjust thickness (slab mode)")
-print("  R: toggle gizmo translate/rotate")
 print("  H: toggle helper visibility")
 print()
 print("Press Ctrl+C to exit.")

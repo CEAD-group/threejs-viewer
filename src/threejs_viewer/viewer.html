@@ -319,6 +319,11 @@
         }
         .clip-toggle-row button:hover { background: #555; }
         .clip-toggle-row button.active { background: #0066cc; }
+        .clip-key-hint {
+            font-size: 10px;
+            color: #888;
+            margin-left: 4px;
+        }
         .clip-hint {
             font-size: 10px;
             color: #666;
@@ -356,20 +361,20 @@
             </div>
         </div>
         <div class="clip-section">
-            <label>Position</label>
+            <label>Position <span class="clip-key-hint">←→</span></label>
             <div class="clip-slider-row">
                 <input type="range" id="clip-distance" min="-20" max="20" step="0.01" value="0">
                 <span class="clip-value" id="clip-distance-value">0.00</span>
             </div>
         </div>
         <div class="clip-section" id="clip-thickness-section" style="display: none;">
-            <label>Thickness</label>
+            <label>Thickness <span class="clip-key-hint">↑↓</span></label>
             <div class="clip-slider-row">
                 <input type="range" id="clip-thickness" min="0.01" max="20" step="0.01" value="2">
                 <span class="clip-value" id="clip-thickness-value">2.00</span>
             </div>
         </div>
-        <div class="clip-hint">C: toggle | R: rotate gizmo | H: helper | arrows: nudge</div>
+        <div class="clip-hint">C: toggle | H: helper | ←→: position | ↑↓: thickness (slab)</div>
     </div>
 
     <div id="animation-controls">
@@ -581,7 +586,6 @@
         let clipEnabled = false;
         let clipHelperVisible = true;
         let clipAxis = 'x+';
-        let clipGizmoMode = 'translate';  // 'translate' or 'rotate'
         let clipSlabMode = false;
         let clipSlabThickness = 2.0;
         let clipPosition = 0;
@@ -624,12 +628,10 @@
         clipRing2.visible = false;
         clipAnchor.add(clipRing2);
 
-        // TransformControls for dragging the plane
+        // TransformControls for rotating the plane
         const clipGizmo = new TransformControls(camera, renderer.domElement);
         clipGizmo.attach(clipAnchor);
-        clipGizmo.setMode('translate');
-        clipGizmo.showX = false;  // translate only along local Z (plane normal)
-        clipGizmo.showY = false;
+        clipGizmo.setMode('rotate');
         clipGizmo.visible = false;
         clipGizmo.enabled = false;
         const clipGizmoHelper = clipGizmo.getHelper();
@@ -649,16 +651,8 @@
             clipSyncFromGizmo = true;
             // Local +Z in world space = plane normal
             clipAnchor.getWorldDirection(_zAxis);
-
-            if (clipGizmoMode === 'translate') {
-                // Constrain position to normal axis only (no sideways dragging)
-                const dist = clipAnchor.position.dot(_zAxis);
-                clipAnchor.position.copy(_zAxis).multiplyScalar(dist);
-                clipPosition = dist;
-            } else {
-                // Rotation: recompute position along new normal
-                clipPosition = clipAnchor.position.dot(_zAxis);
-            }
+            // Recompute position along new normal after rotation
+            clipPosition = clipAnchor.position.dot(_zAxis);
 
             clipPlane.normal.copy(_zAxis);
             updatePlaneConstants();
@@ -1300,14 +1294,6 @@
 
             // Clipping plane shortcuts (when panel is open)
             if (clipEnabled) {
-                if (e.code === 'KeyR') {
-                    clipGizmoMode = clipGizmoMode === 'translate' ? 'rotate' : 'translate';
-                    clipGizmo.setMode(clipGizmoMode);
-                    // Translate: only along normal (local Z). Rotate: all axes.
-                    clipGizmo.showX = clipGizmoMode === 'rotate';
-                    clipGizmo.showY = clipGizmoMode === 'rotate';
-                    return;
-                }
                 if (e.code === 'KeyH') {
                     clipHelperVisible = !clipHelperVisible;
                     updateClipMaterials();
