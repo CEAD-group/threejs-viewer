@@ -319,6 +319,33 @@
         }
         .clip-toggle-row button:hover { background: #555; }
         .clip-toggle-row button.active { background: #0066cc; }
+        .clip-normal-row {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+        .clip-normal-row label {
+            font-size: 11px;
+            color: #888;
+            min-width: 14px;
+            text-transform: none;
+            margin: 0;
+        }
+        .clip-normal-row input {
+            flex: 1;
+            background: #333;
+            border: 1px solid #555;
+            color: white;
+            padding: 4px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 12px;
+            width: 0;
+        }
+        .clip-normal-row input:focus {
+            border-color: #0066cc;
+            outline: none;
+        }
         .clip-key-hint {
             font-size: 10px;
             color: #888;
@@ -351,6 +378,14 @@
                 <button data-axis="x-">X−</button>
                 <button data-axis="y-">Y−</button>
                 <button data-axis="z-">Z−</button>
+            </div>
+        </div>
+        <div class="clip-section">
+            <label>Normal</label>
+            <div class="clip-normal-row">
+                <label>x</label><input type="number" id="clip-nx" step="0.01" value="1">
+                <label>y</label><input type="number" id="clip-ny" step="0.01" value="0">
+                <label>z</label><input type="number" id="clip-nz" step="0.01" value="0">
             </div>
         </div>
         <div class="clip-section">
@@ -666,6 +701,7 @@
                 btn.classList.remove('active');
             });
             clipAxis = null;
+            syncNormalInputs();
             clipSyncFromGizmo = false;
         });
 
@@ -684,6 +720,17 @@
             'z-': new THREE.Vector3(0, 0, -1),
         };
 
+        // Normal input elements
+        const clipNxInput = document.getElementById('clip-nx');
+        const clipNyInput = document.getElementById('clip-ny');
+        const clipNzInput = document.getElementById('clip-nz');
+
+        function syncNormalInputs() {
+            clipNxInput.value = clipPlane.normal.x.toFixed(2);
+            clipNyInput.value = clipPlane.normal.y.toFixed(2);
+            clipNzInput.value = clipPlane.normal.z.toFixed(2);
+        }
+
         // Sync anchor position/orientation from clipPlane state
         function syncAnchorFromPlane() {
             if (clipSyncFromGizmo) return;  // don't fight the gizmo
@@ -699,6 +746,7 @@
             clipPlane.normal.copy(normal);
             updatePlaneConstants();
             syncAnchorFromPlane();
+            syncNormalInputs();
             // Update active button
             clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.axis === axis);
@@ -820,6 +868,7 @@
                 clipDefaults = null;
                 if (d.normal) {
                     clipPlane.normal.fromArray(d.normal).normalize();
+                    syncNormalInputs();
                     // Match to axis button if it's a standard axis
                     let matched = null;
                     for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
@@ -842,6 +891,29 @@
             btn.addEventListener('click', () => {
                 setClipAxis(btn.dataset.axis);
             });
+        });
+
+        // Normal inputs
+        function applyNormalInputs() {
+            const x = parseFloat(clipNxInput.value) || 0;
+            const y = parseFloat(clipNyInput.value) || 0;
+            const z = parseFloat(clipNzInput.value) || 0;
+            if (x === 0 && y === 0 && z === 0) return;  // skip zero vector
+            clipPlane.normal.set(x, y, z).normalize();
+            syncNormalInputs();  // show normalized values
+            updatePlaneConstants();
+            syncAnchorFromPlane();
+            updateClipMaterials();
+            // Clear axis highlight (custom normal)
+            clipAxis = null;
+            clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+        }
+        [clipNxInput, clipNyInput, clipNzInput].forEach(input => {
+            input.addEventListener('change', applyNormalInputs);
+            // Prevent keyboard shortcuts from firing while typing
+            input.addEventListener('keydown', (e) => e.stopPropagation());
         });
 
         // Distance slider
@@ -1283,6 +1355,8 @@
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
+            // Skip shortcuts when typing in an input field
+            if (e.target.tagName === 'INPUT') return;
             // Global shortcuts (work even without animation)
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
                 switchCamera(!isOrtho);
@@ -2107,6 +2181,7 @@
                         document.getElementById('clip-thickness-section').style.display = 'none';
                         if (data.normal) {
                             clipPlane.normal.fromArray(data.normal).normalize();
+                            syncNormalInputs();
                         }
                         if (data.distance != null) {
                             setClipDistance(data.distance);
@@ -2136,6 +2211,7 @@
                         document.getElementById('clip-thickness-section').style.display = '';
                         if (data.normal) {
                             clipPlane.normal.fromArray(data.normal).normalize();
+                            syncNormalInputs();
                         }
                         if (data.thickness != null) {
                             setClipThickness(data.thickness);
