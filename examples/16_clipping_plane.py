@@ -130,6 +130,6 @@ print("Press Ctrl+C to exit.")
 
 try:
     while True:
-        pass
+        time.sleep(1)
 except KeyboardInterrupt:
     v.disconnect()
