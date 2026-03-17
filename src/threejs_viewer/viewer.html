@@ -374,7 +374,7 @@
                 <span class="clip-value" id="clip-thickness-value">2.00</span>
             </div>
         </div>
-        <div class="clip-hint">C: toggle | H: helper | ←→: position | ↑↓: thickness (slab)</div>
+        <div class="clip-hint">C: toggle | S: slab | H: helper | ←→: position | ↑↓: thickness</div>
     </div>
 
     <div id="animation-controls">
@@ -1294,6 +1294,14 @@
 
             // Clipping plane shortcuts (when panel is open)
             if (clipEnabled) {
+                if (e.code === 'KeyS') {
+                    if (clipSlabMode) {
+                        document.getElementById('clip-mode-single').click();
+                    } else {
+                        document.getElementById('clip-mode-slab').click();
+                    }
+                    return;
+                }
                 if (e.code === 'KeyH') {
                     clipHelperVisible = !clipHelperVisible;
                     updateClipMaterials();
