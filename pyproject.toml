@@ -1,6 +1,6 @@
 [project]
 name = "threejs-viewer"
-version = "0.0.11"
+version = "0.0.12"
 description = "Lightweight Three.js viewer controlled from Python via WebSocket"
 readme = "README.md"
 license = "MIT"
