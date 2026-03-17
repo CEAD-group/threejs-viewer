@@ -64,7 +64,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - Beads: toolpath extrusion via `Toolpath.to_mesh()` + `add_mesh()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
 - **draw_range**: polylines and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
-- **Clipping plane**: interactive cross-section plane with GUI panel (press C to toggle). Supports single plane and slab (dual-plane) modes. Gizmo translate is constrained to the plane normal. Programmatic control via `set_clipping_plane(normal, distance)` / `set_clipping_slab(normal, center, thickness)` / `disable_clipping_plane()`
+- **Clipping plane**: interactive cross-section plane with GUI panel (press C to toggle). Supports single plane and slab (dual-plane) modes. Rotation gizmo for orienting the plane; arrow keys nudge position. V key snaps ortho camera to clip normal for slice inspection. Programmatic control via `set_clipping_plane(normal, distance, show_helper)` / `set_clipping_slab(normal, center, thickness, show_helper)` / `disable_clipping_plane()` / `set_clipping_defaults(normal, distance)`
 
 ### Animation: Two Approaches
 **Frame-based (simple, familiar):** Build frames as Python dicts — good for small animations and prototyping.

@@ -645,6 +645,7 @@
 
         // When the gizmo is dragged, derive clipPlane from anchor transform
         const _zAxis = new THREE.Vector3();
+        const _localZ = new THREE.Vector3(0, 0, 1);
         let clipSyncFromGizmo = false;  // guard to prevent feedback loops
         clipGizmo.addEventListener('change', () => {
             if (!clipEnabled) return;
@@ -687,11 +688,8 @@
         function syncAnchorFromPlane() {
             if (clipSyncFromGizmo) return;  // don't fight the gizmo
             const normal = clipPlane.normal;
-            // Position anchor at clipPosition along normal
             clipAnchor.position.copy(normal).multiplyScalar(clipPosition);
-            // Orient so local +Z = normal
-            const target = clipAnchor.position.clone().add(normal);
-            clipAnchor.lookAt(target);
+            clipAnchor.quaternion.setFromUnitVectors(_localZ, normal);
             updateDiscPositions();
         }
 
@@ -710,7 +708,11 @@
         function setClipDistance(d) {
             clipPosition = d;
             updatePlaneConstants();
-            clipDistanceSlider.value = d;
+            // Expand slider range if needed so UI stays in sync
+            const slider = clipDistanceSlider;
+            if (d < parseFloat(slider.min)) slider.min = d;
+            if (d > parseFloat(slider.max)) slider.max = d;
+            slider.value = d;
             clipDistanceValue.textContent = d.toFixed(2);
             syncAnchorFromPlane();
         }
@@ -751,7 +753,6 @@
             clipThicknessValue.textContent = clipSlabThickness.toFixed(2);
             updatePlaneConstants();
             syncAnchorFromPlane();
-            updateClipMaterials();
         }
 
         function applyClipToObject(obj) {
@@ -818,7 +819,7 @@
                 const d = clipDefaults;
                 clipDefaults = null;
                 if (d.normal) {
-                    clipPlane.normal.fromArray(d.normal);
+                    clipPlane.normal.fromArray(d.normal).normalize();
                     // Match to axis button if it's a standard axis
                     let matched = null;
                     for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
@@ -2105,7 +2106,7 @@
                         document.getElementById('clip-mode-slab').classList.remove('active');
                         document.getElementById('clip-thickness-section').style.display = 'none';
                         if (data.normal) {
-                            clipPlane.normal.fromArray(data.normal);
+                            clipPlane.normal.fromArray(data.normal).normalize();
                         }
                         if (data.distance != null) {
                             setClipDistance(data.distance);
@@ -2134,7 +2135,7 @@
                         document.getElementById('clip-mode-single').classList.remove('active');
                         document.getElementById('clip-thickness-section').style.display = '';
                         if (data.normal) {
-                            clipPlane.normal.fromArray(data.normal);
+                            clipPlane.normal.fromArray(data.normal).normalize();
                         }
                         if (data.thickness != null) {
                             setClipThickness(data.thickness);

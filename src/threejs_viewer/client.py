@@ -739,7 +739,7 @@ class ViewerClient:
 
     def set_clipping_plane(
         self,
-        normal: List[float] = None,
+        normal: list[float] | None = None,
         distance: float = 0.0,
         show_helper: bool = True,
     ) -> None:
@@ -763,7 +763,7 @@ class ViewerClient:
 
     def set_clipping_slab(
         self,
-        normal: List[float] = None,
+        normal: list[float] | None = None,
         center: float = 0.0,
         thickness: float = 2.0,
         show_helper: bool = True,
@@ -794,7 +794,7 @@ class ViewerClient:
 
     def set_clipping_defaults(
         self,
-        normal: List[float],
+        normal: list[float],
         distance: float = 0.0,
     ) -> None:
         """
