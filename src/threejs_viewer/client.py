@@ -737,6 +737,82 @@ class ViewerClient:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
+    def set_clipping_plane(
+        self,
+        normal: list[float] | None = None,
+        distance: float = 0.0,
+        show_helper: bool = True,
+    ) -> None:
+        """
+        Enable a clipping plane that cuts through the scene.
+
+        Args:
+            normal: [x, y, z] plane normal direction (e.g. [1,0,0] for X+).
+                    If None, uses the viewer's current axis selection.
+            distance: Distance along the normal to place the plane.
+            show_helper: Whether to show the visual plane helper.
+        """
+        msg: dict = {
+            "type": "set_clipping_plane",
+            "distance": float(distance),
+            "show_helper": show_helper,
+        }
+        if normal is not None:
+            msg["normal"] = list(normal)
+        self._send(msg)
+
+    def set_clipping_slab(
+        self,
+        normal: list[float] | None = None,
+        center: float = 0.0,
+        thickness: float = 2.0,
+        show_helper: bool = True,
+    ) -> None:
+        """
+        Enable a clipping slab (two parallel clipping planes) to see only a slice.
+
+        Args:
+            normal: [x, y, z] plane normal direction (e.g. [0,0,1] for Z).
+                    If None, uses the viewer's current axis selection.
+            center: Position of the slab center along the normal.
+            thickness: Distance between the two clipping planes.
+            show_helper: Whether to show the visual plane helpers.
+        """
+        msg: dict = {
+            "type": "set_clipping_slab",
+            "center": float(center),
+            "thickness": float(thickness),
+            "show_helper": show_helper,
+        }
+        if normal is not None:
+            msg["normal"] = list(normal)
+        self._send(msg)
+
+    def disable_clipping_plane(self) -> None:
+        """Disable the clipping plane."""
+        self._send({"type": "disable_clipping_plane"})
+
+    def set_clipping_defaults(
+        self,
+        normal: list[float],
+        distance: float = 0.0,
+    ) -> None:
+        """
+        Set default clipping plane axis and position for when the user
+        first opens the clipping panel (C key).
+
+        Args:
+            normal: [x, y, z] plane normal direction (e.g. [0, 0, -1] for Z-).
+            distance: Default position along the normal.
+        """
+        self._send(
+            {
+                "type": "set_clipping_defaults",
+                "normal": list(normal),
+                "distance": float(distance),
+            }
+        )
+
     def clear(self) -> None:
         """Clear all objects from the scene."""
         self._send({"type": "clear_scene"})

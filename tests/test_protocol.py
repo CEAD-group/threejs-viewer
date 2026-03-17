@@ -388,3 +388,58 @@ def test_query_scene_sends_correct_message(client):
     assert sent[0]["type"] == "query_scene"
     assert "requestId" in sent[0]
     assert result == {}
+
+
+# === Clipping plane ===
+
+
+def test_set_clipping_plane_with_normal(client):
+    client.set_clipping_plane(normal=[0, 0, 1], distance=2.0)
+    assert client._messages == [
+        {
+            "type": "set_clipping_plane",
+            "normal": [0, 0, 1],
+            "distance": 2.0,
+            "show_helper": True,
+        }
+    ]
+
+
+def test_set_clipping_plane_no_normal(client):
+    client.set_clipping_plane(distance=1.0)
+    msg = client._messages[0]
+    assert msg == {
+        "type": "set_clipping_plane",
+        "distance": 1.0,
+        "show_helper": True,
+    }
+    assert "normal" not in msg
+
+
+def test_set_clipping_slab(client):
+    client.set_clipping_slab(normal=[0, 0, 1], center=2.0, thickness=1.0)
+    assert client._messages == [
+        {
+            "type": "set_clipping_slab",
+            "normal": [0, 0, 1],
+            "center": 2.0,
+            "thickness": 1.0,
+            "show_helper": True,
+        }
+    ]
+
+
+def test_disable_clipping_plane(client):
+    client.disable_clipping_plane()
+    assert client._messages == [{"type": "disable_clipping_plane"}]
+
+
+def test_set_clipping_defaults(client):
+    client.set_clipping_defaults(normal=[0, 0, -1], distance=3.0)
+    assert client._messages == [
+        {
+            "type": "set_clipping_defaults",
+            "normal": [0, 0, -1],
+            "distance": 3.0,
+        }
+    ]
