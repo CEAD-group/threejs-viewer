@@ -72,6 +72,8 @@ class ViewerClient:
         Args:
             timeout: Maximum seconds to wait for a browser connection.
         """
+        if timeout < 0:
+            raise ValueError("timeout must be non-negative")
         # Start HTTP server for fast binary transfers
         self._http_port = self.port + 1
         http_server = HTTPServer((self.host, self._http_port), _BlobHandler)
