@@ -19,7 +19,7 @@ uv run pytest -v
 # Run linting
 uv run ruff check . && uv run ruff format --check .
 
-# Open viewer in browser (get path with)
+# Open viewer manually (browser auto-opens by default)
 uv run python -m threejs_viewer path
 
 # Run examples

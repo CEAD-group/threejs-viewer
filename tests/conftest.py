@@ -36,7 +36,7 @@ def _free_port():
 def viewer_client():
     """Start a ViewerClient on a random port (does not wait for browser)."""
     port = _free_port()
-    client = ViewerClient(port=port)
+    client = ViewerClient(port=port, open_browser=False)
 
     # Start the server in the background without blocking for a browser connection
     client._http_port = port + 1
