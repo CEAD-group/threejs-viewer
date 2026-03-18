@@ -42,7 +42,7 @@ v.add_box("ground", width=5, height=5, depth=0.1, color=0x444444)
 input("Press Enter to exit")
 ```
 
-Open the viewer in your browser:
+The viewer opens automatically in your default browser. To open it manually:
 
 ```bash
 threejs-viewer open

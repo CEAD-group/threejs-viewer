@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.13
+
+Auto-open the viewer in the default browser when no existing tab connects.
+
+### New features
+
+- **Auto-open browser** — `connect()` now waits 2.5 seconds for an existing browser tab to reconnect; if none does, it automatically opens the viewer in the default browser via `webbrowser.open()`. Controlled by the new `open_browser` parameter on `ViewerClient` constructor (default `True`). Set `open_browser=False` to disable (e.g. headless CI, remote servers). Also available via the `viewer()` convenience function. Gracefully falls back to printing the full viewer URL if the browser cannot be opened.
+
 ## 0.0.12
 
 Interactive clipping plane with slab mode, orthographic camera, and slice view for inspecting toolpath layers.

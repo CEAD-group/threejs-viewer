@@ -8,7 +8,9 @@ Runs a WebSocket server that the browser connects to directly.
 import json
 import logging
 import threading
+import time
 import uuid
+import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -43,9 +45,15 @@ class ViewerClient:
     Runs a WebSocket server that the browser viewer connects to.
     """
 
-    def __init__(self, host: str = "localhost", port: int = 5666):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 5666,
+        open_browser: bool = True,
+    ):
         self.host = host
         self.port = port
+        self.open_browser = open_browser
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -59,7 +67,13 @@ class ViewerClient:
         self._blob_store: Dict[str, bytes] = {}
 
     def connect(self, timeout: float = 30.0):
-        """Start WebSocket server and wait for browser to connect."""
+        """Start WebSocket server and wait for browser to connect.
+
+        Args:
+            timeout: Maximum seconds to wait for a browser connection.
+        """
+        if timeout < 0:
+            raise ValueError("timeout must be non-negative")
         # Start HTTP server for fast binary transfers
         self._http_port = self.port + 1
         http_server = HTTPServer((self.host, self._http_port), _BlobHandler)
@@ -71,18 +85,51 @@ class ViewerClient:
         self._server_thread.start()
 
         print(f"Waiting for viewer to connect on ws://{self.host}:{self.port} ...")
-        print(f"Open viewer: {self.viewer_path}")
-        if not self._connected_event.wait(timeout=timeout):
+        deadline = time.monotonic() + timeout
+
+        # Give an existing browser tab time to reconnect before opening a new
+        # one.  The browser's reconnect cycle (500ms onclose + up to 1000ms
+        # probe retry) means worst-case ~1.5s, so 2.5s covers foreground tabs
+        # with margin.
+        if self.open_browser and timeout > 0:
+            grace = min(2.5, timeout)
+            if not self._connected_event.wait(timeout=grace):
+                self._open_viewer_in_browser()
+        else:
+            print(f"Open viewer: {self.viewer_url}")
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            self._connected_event.wait(timeout=remaining)
+
+        if not self._connected_event.is_set():
+            self.disconnect()
             raise TimeoutError(
-                f"No viewer connected within {timeout}s. Open the HTML viewer in a browser."
+                f"No viewer connected within {timeout}s. "
+                f"Open the HTML viewer in a browser: {self.viewer_url}"
             )
         print("Viewer connected!")
         return self
+
+    def _open_viewer_in_browser(self):
+        """Open the viewer HTML in the default browser."""
+        url = self.viewer_url
+        try:
+            print("No existing viewer found, opening browser...")
+            if not webbrowser.open(url):
+                print(f"Could not open browser. Open manually: {url}")
+        except (OSError, webbrowser.Error):
+            print(f"Could not open browser. Open manually: {url}")
 
     @property
     def viewer_path(self) -> Path:
         """Path to the viewer.html file."""
         return Path(__file__).parent / "viewer.html"
+
+    @property
+    def viewer_url(self) -> str:
+        """Full file:// URL to the viewer, including ws_port query param."""
+        return self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
 
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
@@ -193,6 +240,7 @@ class ViewerClient:
         """Disconnect and stop server."""
         if self._http_server:
             self._http_server.shutdown()
+            self._http_server.server_close()
             self._http_server = None
         if self._server:
             self._server.shutdown()
@@ -1037,6 +1085,8 @@ class ViewerClient:
         return response.get("tree", {})
 
 
-def viewer(host: str = "localhost", port: int = 5666) -> ViewerClient:
+def viewer(
+    host: str = "localhost", port: int = 5666, open_browser: bool = True
+) -> ViewerClient:
     """Create and connect a viewer client (starts WebSocket server)."""
-    return ViewerClient(host, port).connect()
+    return ViewerClient(host, port, open_browser=open_browser).connect()
