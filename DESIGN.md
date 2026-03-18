@@ -81,7 +81,7 @@ client.add_sphere("ball", radius=0.5, position=[1, 0, 0])
 client.add_model_binary("robot", "robot.stl")
 
 # Update transforms
-client.set_transforms({"ball": matrix_4x4})
+client.set_matrix("ball", matrix_4x4)
 
 # Load animation
 client.load_animation(animation)
@@ -254,7 +254,7 @@ with viewer() as v:
 ```python
 from threejs_viewer import ViewerClient
 
-client = ViewerClient()
+client = ViewerClient()  # open_browser=False for headless/remote
 client.connect()
 
 # Keep running, make calls interactively
@@ -262,6 +262,8 @@ client.add_box("cube", width=1)
 ```
 
 ### Finding the Viewer
+
+The browser opens automatically by default. To open manually or find the path:
 
 ```bash
 # CLI commands

@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 import uuid
+import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -44,9 +45,15 @@ class ViewerClient:
     Runs a WebSocket server that the browser viewer connects to.
     """
 
-    def __init__(self, host: str = "localhost", port: int = 5666):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 5666,
+        open_browser: bool = True,
+    ):
         self.host = host
         self.port = port
+        self.open_browser = open_browser
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -59,13 +66,11 @@ class ViewerClient:
         self._http_server = None
         self._blob_store: Dict[str, bytes] = {}
 
-    def connect(self, timeout: float = 30.0, open_browser: bool = True):
+    def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect.
 
         Args:
             timeout: Maximum seconds to wait for a browser connection.
-            open_browser: If True (default), automatically open the viewer in
-                the default browser if no existing tab connects within 1 second.
         """
         # Start HTTP server for fast binary transfers
         self._http_port = self.port + 1
@@ -80,19 +85,16 @@ class ViewerClient:
         print(f"Waiting for viewer to connect on ws://{self.host}:{self.port} ...")
         deadline = time.monotonic() + timeout
 
-        # Give an existing browser tab a few seconds to reconnect before
-        # opening a new one.
-        if open_browser:
-            grace = min(1.0, timeout)
+        # Give an existing browser tab time to reconnect before opening a new
+        # one.  The browser's reconnect cycle (500ms onclose + up to 1000ms
+        # probe retry) means worst-case ~1.5s, so 2.5s covers foreground tabs
+        # with margin.
+        if self.open_browser:
+            grace = min(2.5, timeout)
             if not self._connected_event.wait(timeout=grace):
-                try:
-                    import webbrowser
-
-                    url = f"file://{self.viewer_path.resolve()}"
-                    print(f"No viewer found, opening {url}")
-                    webbrowser.open(url)
-                except Exception:
-                    print(f"Could not open browser. Open manually: {self.viewer_path}")
+                self._open_viewer_in_browser()
+        else:
+            print(f"Open viewer: {self.viewer_path}")
 
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -100,10 +102,21 @@ class ViewerClient:
 
         if not self._connected_event.is_set():
             raise TimeoutError(
-                f"No viewer connected within {timeout}s. Open the HTML viewer in a browser."
+                f"No viewer connected within {timeout}s. "
+                f"Open the HTML viewer in a browser: {self.viewer_path}"
             )
         print("Viewer connected!")
         return self
+
+    def _open_viewer_in_browser(self):
+        """Open the viewer HTML in the default browser."""
+        url = self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
+        try:
+            print("No existing viewer found, opening browser...")
+            if not webbrowser.open(url):
+                print(f"Could not open browser. Open manually: {self.viewer_path}")
+        except (OSError, webbrowser.Error):
+            print(f"Could not open browser. Open manually: {self.viewer_path}")
 
     @property
     def viewer_path(self) -> Path:
@@ -1063,6 +1076,8 @@ class ViewerClient:
         return response.get("tree", {})
 
 
-def viewer(host: str = "localhost", port: int = 5666) -> ViewerClient:
+def viewer(
+    host: str = "localhost", port: int = 5666, open_browser: bool = True
+) -> ViewerClient:
     """Create and connect a viewer client (starts WebSocket server)."""
-    return ViewerClient(host, port).connect()
+    return ViewerClient(host, port, open_browser=open_browser).connect()
