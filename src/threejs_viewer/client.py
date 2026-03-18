@@ -8,6 +8,7 @@ Runs a WebSocket server that the browser connects to directly.
 import json
 import logging
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -58,8 +59,14 @@ class ViewerClient:
         self._http_server = None
         self._blob_store: Dict[str, bytes] = {}
 
-    def connect(self, timeout: float = 30.0):
-        """Start WebSocket server and wait for browser to connect."""
+    def connect(self, timeout: float = 30.0, open_browser: bool = True):
+        """Start WebSocket server and wait for browser to connect.
+
+        Args:
+            timeout: Maximum seconds to wait for a browser connection.
+            open_browser: If True (default), automatically open the viewer in
+                the default browser if no existing tab connects within 1 second.
+        """
         # Start HTTP server for fast binary transfers
         self._http_port = self.port + 1
         http_server = HTTPServer((self.host, self._http_port), _BlobHandler)
@@ -71,8 +78,27 @@ class ViewerClient:
         self._server_thread.start()
 
         print(f"Waiting for viewer to connect on ws://{self.host}:{self.port} ...")
-        print(f"Open viewer: {self.viewer_path}")
-        if not self._connected_event.wait(timeout=timeout):
+        deadline = time.monotonic() + timeout
+
+        # Give an existing browser tab a few seconds to reconnect before
+        # opening a new one.
+        if open_browser:
+            grace = min(1.0, timeout)
+            if not self._connected_event.wait(timeout=grace):
+                try:
+                    import webbrowser
+
+                    url = f"file://{self.viewer_path.resolve()}"
+                    print(f"No viewer found, opening {url}")
+                    webbrowser.open(url)
+                except Exception:
+                    print(f"Could not open browser. Open manually: {self.viewer_path}")
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            self._connected_event.wait(timeout=remaining)
+
+        if not self._connected_event.is_set():
             raise TimeoutError(
                 f"No viewer connected within {timeout}s. Open the HTML viewer in a browser."
             )
