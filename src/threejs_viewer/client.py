@@ -89,7 +89,7 @@ class ViewerClient:
         # one.  The browser's reconnect cycle (500ms onclose + up to 1000ms
         # probe retry) means worst-case ~1.5s, so 2.5s covers foreground tabs
         # with margin.
-        if self.open_browser:
+        if self.open_browser and timeout > 0:
             grace = min(2.5, timeout)
             if not self._connected_event.wait(timeout=grace):
                 self._open_viewer_in_browser()
@@ -101,6 +101,7 @@ class ViewerClient:
             self._connected_event.wait(timeout=remaining)
 
         if not self._connected_event.is_set():
+            self.disconnect()
             raise TimeoutError(
                 f"No viewer connected within {timeout}s. "
                 f"Open the HTML viewer in a browser: {self.viewer_path}"
