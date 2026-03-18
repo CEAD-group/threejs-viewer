@@ -254,7 +254,7 @@ with viewer() as v:
 ```python
 from threejs_viewer import ViewerClient
 
-client = ViewerClient()  # open_browser=False for headless/remote
+client = ViewerClient(open_browser=False)  # disable auto-open for headless/remote
 client.connect()
 
 # Keep running, make calls interactively

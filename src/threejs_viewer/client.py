@@ -94,7 +94,7 @@ class ViewerClient:
             if not self._connected_event.wait(timeout=grace):
                 self._open_viewer_in_browser()
         else:
-            print(f"Open viewer: {self.viewer_path}")
+            print(f"Open viewer: {self.viewer_url}")
 
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -104,25 +104,30 @@ class ViewerClient:
             self.disconnect()
             raise TimeoutError(
                 f"No viewer connected within {timeout}s. "
-                f"Open the HTML viewer in a browser: {self.viewer_path}"
+                f"Open the HTML viewer in a browser: {self.viewer_url}"
             )
         print("Viewer connected!")
         return self
 
     def _open_viewer_in_browser(self):
         """Open the viewer HTML in the default browser."""
-        url = self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
+        url = self.viewer_url
         try:
             print("No existing viewer found, opening browser...")
             if not webbrowser.open(url):
-                print(f"Could not open browser. Open manually: {self.viewer_path}")
+                print(f"Could not open browser. Open manually: {url}")
         except (OSError, webbrowser.Error):
-            print(f"Could not open browser. Open manually: {self.viewer_path}")
+            print(f"Could not open browser. Open manually: {url}")
 
     @property
     def viewer_path(self) -> Path:
         """Path to the viewer.html file."""
         return Path(__file__).parent / "viewer.html"
+
+    @property
+    def viewer_url(self) -> str:
+        """Full file:// URL to the viewer, including ws_port query param."""
+        return self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
 
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
