@@ -238,6 +238,7 @@ class ViewerClient:
         """Disconnect and stop server."""
         if self._http_server:
             self._http_server.shutdown()
+            self._http_server.server_close()
             self._http_server = None
         if self._server:
             self._server.shutdown()
