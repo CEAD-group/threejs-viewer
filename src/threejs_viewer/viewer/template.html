@@ -1,0 +1,79 @@
+<div class="tjsv-toolbar">
+    <div class="tjsv-status-dot disconnected" title="Disconnected"></div>
+    <span class="tjsv-status-text">Disconnected</span>
+    <div class="toolbar-sep"></div>
+    <button class="toolbar-btn tjsv-btn-clip" title="Clipping Plane (C)">&#x2702;</button>
+    <button class="toolbar-btn tjsv-btn-ortho" title="Orthographic / Perspective (O)">P</button>
+</div>
+
+<div class="tjsv-clipping-panel">
+    <h3>Clipping Plane <button class="tjsv-clip-close" title="Close (C)">&times;</button></h3>
+    <div class="clip-section">
+        <label>Axis</label>
+        <div class="clip-axis-buttons">
+            <button data-axis="x+" class="active">X+</button>
+            <button data-axis="y+">Y+</button>
+            <button data-axis="z+">Z+</button>
+            <button data-axis="x-">X&minus;</button>
+            <button data-axis="y-">Y&minus;</button>
+            <button data-axis="z-">Z&minus;</button>
+        </div>
+    </div>
+    <div class="clip-section">
+        <label>Normal</label>
+        <div class="clip-normal-row">
+            <label>x</label><input type="number" class="tjsv-clip-nx" step="0.01" value="1">
+            <label>y</label><input type="number" class="tjsv-clip-ny" step="0.01" value="0">
+            <label>z</label><input type="number" class="tjsv-clip-nz" step="0.01" value="0">
+        </div>
+    </div>
+    <div class="clip-section">
+        <label>Mode</label>
+        <div class="clip-toggle-row">
+            <button class="tjsv-clip-mode-single active">Single</button>
+            <button class="tjsv-clip-mode-slab">Slab</button>
+        </div>
+    </div>
+    <div class="clip-section">
+        <label>Position <span class="clip-key-hint">&larr;&rarr;</span></label>
+        <div class="clip-slider-row">
+            <input type="range" class="tjsv-clip-distance" min="-10" max="10" step="0.01" value="0">
+            <span class="clip-value tjsv-clip-distance-value">0.00</span>
+        </div>
+    </div>
+    <div class="clip-section tjsv-clip-thickness-section" style="display: none;">
+        <label>Thickness <span class="clip-key-hint">&uarr;&darr;</span></label>
+        <div class="clip-slider-row">
+            <input type="range" class="tjsv-clip-thickness" min="0.01" max="20" step="0.01" value="2">
+            <span class="clip-value tjsv-clip-thickness-value">2.00</span>
+        </div>
+    </div>
+    <div class="clip-hint">C: toggle | S: slab | V: view normal | H: helper | &larr;&rarr;: position | &uarr;&darr;: thickness</div>
+</div>
+
+<div class="tjsv-animation-controls">
+    <div class="timeline-row">
+        <div class="transport-buttons">
+            <button class="tjsv-btn-start" title="Jump to start (Home)">&#x23EE;</button>
+            <button class="tjsv-btn-prev-frame" title="Previous frame (&larr)">&#x25C1;</button>
+            <button class="tjsv-btn-play" title="Play/Pause (Space)">&#x25B6;</button>
+            <button class="tjsv-btn-next-frame" title="Next frame (&rarr)">&#x25B7;</button>
+            <button class="tjsv-btn-end" title="Jump to end (End)">&#x23ED;</button>
+        </div>
+        <div class="tjsv-timeline-container">
+            <div class="tjsv-timeline-progress"></div>
+            <div class="tjsv-timeline-markers"></div>
+        </div>
+        <div class="time-display">
+            <span class="tjsv-current-time">0.00</span>s / <span class="tjsv-total-time">0.00</span>s
+        </div>
+        <div class="speed-control">
+            <button class="tjsv-btn-slower" title="Slower (&darr)">&minus;</button>
+            <span class="tjsv-speed-display">1x</span>
+            <button class="tjsv-btn-faster" title="Faster (&uarr)">+</button>
+        </div>
+        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">&#x27F3; Loop</button>
+        <div class="frame-display">Frame <span class="tjsv-current-frame">0</span>/<span class="tjsv-total-frames">0</span></div>
+    </div>
+    <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | &uarr;&darr;: Speed</div>
+</div>

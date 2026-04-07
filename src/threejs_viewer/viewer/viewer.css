@@ -1,0 +1,346 @@
+.threejs-viewer {
+    position: relative;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+.threejs-viewer:focus { outline: none; }
+.threejs-viewer canvas { display: block; }
+
+/* Top toolbar */
+.threejs-viewer .tjsv-toolbar {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(30, 30, 30, 0.85);
+    padding: 4px 6px;
+    border-radius: 6px;
+    user-select: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.threejs-viewer .tjsv-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #cc3333;
+    margin: 0 4px;
+    flex-shrink: 0;
+    transition: background 0.3s;
+}
+.threejs-viewer .tjsv-status-dot.connected { background: #33cc33; }
+.threejs-viewer .tjsv-status-dot.disconnected { background: #cc3333; }
+.threejs-viewer .tjsv-status-text {
+    color: #999;
+    font-family: monospace;
+    font-size: 11px;
+    margin-right: 4px;
+}
+.threejs-viewer .toolbar-sep {
+    width: 1px;
+    height: 20px;
+    background: #555;
+    margin: 0 2px;
+}
+.threejs-viewer .toolbar-btn {
+    background: none;
+    border: none;
+    color: #aaa;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+}
+.threejs-viewer .toolbar-btn:hover { background: rgba(255,255,255,0.1); color: white; }
+.threejs-viewer .toolbar-btn.active { background: #0066cc; color: white; }
+
+/* Animation Controls */
+.threejs-viewer .tjsv-animation-controls {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(30, 30, 30, 0.95);
+    color: white;
+    padding: 12px 20px;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+}
+.threejs-viewer .tjsv-animation-controls.visible { display: flex; }
+.threejs-viewer .timeline-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.threejs-viewer .transport-buttons {
+    display: flex;
+    gap: 4px;
+}
+.threejs-viewer .transport-buttons button {
+    background: #444;
+    border: none;
+    color: white;
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.threejs-viewer .transport-buttons button:hover { background: #555; }
+.threejs-viewer .transport-buttons button:active { background: #333; }
+.threejs-viewer .transport-buttons button.active { background: #0066cc; }
+.threejs-viewer .tjsv-timeline-container {
+    flex: 1;
+    position: relative;
+    height: 24px;
+    background: #333;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.threejs-viewer .tjsv-timeline-progress {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    background: #0066cc;
+    border-radius: 4px 0 0 4px;
+    pointer-events: none;
+}
+.threejs-viewer .tjsv-timeline-markers {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+.threejs-viewer .timeline-marker {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: #ff6600;
+    pointer-events: auto;
+    cursor: pointer;
+}
+.threejs-viewer .timeline-marker::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -8px;
+    width: 18px;
+    height: 100%;
+}
+.threejs-viewer .timeline-marker::after {
+    content: attr(data-label);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #ff6600;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.threejs-viewer .tjsv-timeline-container:hover .timeline-marker::after { opacity: 1; }
+.threejs-viewer .timeline-marker:hover { background: #ffaa00; box-shadow: 0 0 6px #ffaa0088; }
+.threejs-viewer .time-display {
+    font-family: monospace;
+    font-size: 13px;
+    min-width: 120px;
+    text-align: center;
+}
+.threejs-viewer .speed-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.threejs-viewer .speed-control button {
+    background: #444;
+    border: none;
+    color: white;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.threejs-viewer .speed-control button:hover { background: #555; }
+.threejs-viewer .speed-control span {
+    font-family: monospace;
+    font-size: 12px;
+    min-width: 50px;
+    text-align: center;
+}
+.threejs-viewer .loop-toggle {
+    background: #444;
+    border: none;
+    color: white;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.threejs-viewer .loop-toggle:hover { background: #555; }
+.threejs-viewer .loop-toggle.active { background: #0066cc; }
+.threejs-viewer .frame-display {
+    font-family: monospace;
+    font-size: 11px;
+    color: #aaa;
+    min-width: 100px;
+}
+.threejs-viewer .keyboard-hint {
+    font-size: 10px;
+    color: #666;
+    text-align: center;
+}
+
+/* Clipping Plane Controls */
+.threejs-viewer .tjsv-clipping-panel {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(30, 30, 30, 0.95);
+    color: white;
+    padding: 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 220px;
+    user-select: none;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+.threejs-viewer .tjsv-clipping-panel.visible { display: flex; }
+.threejs-viewer .tjsv-clipping-panel h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.threejs-viewer .tjsv-clipping-panel h3 button {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+}
+.threejs-viewer .tjsv-clipping-panel h3 button:hover { color: white; }
+.threejs-viewer .clip-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.threejs-viewer .clip-section label {
+    font-size: 11px;
+    color: #aaa;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.threejs-viewer .clip-axis-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+}
+.threejs-viewer .clip-axis-buttons button {
+    background: #444;
+    border: none;
+    color: white;
+    padding: 6px 0;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+}
+.threejs-viewer .clip-axis-buttons button:hover { background: #555; }
+.threejs-viewer .clip-axis-buttons button.active { background: #0066cc; }
+.threejs-viewer .clip-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.threejs-viewer .clip-slider-row input[type="range"] {
+    flex: 1;
+    accent-color: #0066cc;
+}
+.threejs-viewer .clip-slider-row .clip-value {
+    font-family: monospace;
+    font-size: 12px;
+    min-width: 52px;
+    text-align: right;
+}
+.threejs-viewer .clip-toggle-row {
+    display: flex;
+    gap: 4px;
+}
+.threejs-viewer .clip-toggle-row button {
+    flex: 1;
+    background: #444;
+    border: none;
+    color: white;
+    padding: 6px 0;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.threejs-viewer .clip-toggle-row button:hover { background: #555; }
+.threejs-viewer .clip-toggle-row button.active { background: #0066cc; }
+.threejs-viewer .clip-normal-row {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+.threejs-viewer .clip-normal-row label {
+    font-size: 11px;
+    color: #888;
+    min-width: 14px;
+    text-transform: none;
+    margin: 0;
+}
+.threejs-viewer .clip-normal-row input {
+    flex: 1;
+    background: #333;
+    border: 1px solid #555;
+    color: white;
+    padding: 4px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 12px;
+    width: 0;
+}
+.threejs-viewer .clip-normal-row input:focus {
+    border-color: #0066cc;
+    outline: none;
+}
+.threejs-viewer .clip-key-hint {
+    font-size: 10px;
+    color: #888;
+    margin-left: 4px;
+}
+.threejs-viewer .clip-hint {
+    font-size: 10px;
+    color: #999;
+    text-align: center;
+}
