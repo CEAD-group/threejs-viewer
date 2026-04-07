@@ -48,6 +48,12 @@ jobs:
       - name: Check formatting
         run: uv run ruff format --check .
 
+      - name: Verify viewer.html is up to date
+        run: |
+          uv run python src/threejs_viewer/viewer/build.py
+          git diff --exit-code src/threejs_viewer/viewer.html || \
+            (echo "ERROR: viewer.html is out of date. Run: uv run python src/threejs_viewer/viewer/build.py" && exit 1)
+
       - name: Run tests
         run: uv run pytest -m "not browser"
 
