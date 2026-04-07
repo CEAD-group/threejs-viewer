@@ -1,26 +1,3 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Three.js Viewer</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; }
-        #viewer-container { width: 100%; height: 100%; }
-    </style>
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://unpkg.com/three@0.183.2/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.183.2/examples/jsm/"
-        }
-    }
-    </script>
-</head>
-<body>
-    <div id="viewer-container"></div>
-    <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -614,7 +591,7 @@ const PRIMITIVES = {
     )
 };
 
-class ThreeJSViewer {
+export class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
      * @param {Object} [options]
@@ -2347,11 +2324,3 @@ class ThreeJSViewer {
         this.el.remove();
     }
 }
-
-
-// Standalone instantiation
-const container = document.getElementById('viewer-container');
-new ThreeJSViewer(container);
-    </script>
-</body>
-</html>

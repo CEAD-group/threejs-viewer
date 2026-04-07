@@ -19,10 +19,42 @@ import numpy as np
 from websockets.sync.server import serve as sync_serve
 
 
+_STATIC_DIR = Path(__file__).parent
+
+_MIME_TYPES = {
+    ".html": "text/html",
+    ".js": "application/javascript",
+    ".css": "text/css",
+}
+
+
 class _BlobHandler(BaseHTTPRequestHandler):
-    """Serves binary blobs over HTTP for fast transfer to browser."""
+    """Serves binary blobs and static viewer files over HTTP."""
 
     def do_GET(self):
+        # Serve static viewer files
+        if self.path in ("/viewer.html", "/viewer.js") or self.path.startswith(
+            "/viewer.html?"
+        ):
+            file_name = (
+                "viewer.html" if self.path.startswith("/viewer.html") else "viewer.js"
+            )
+            file_path = _STATIC_DIR / file_name
+            try:
+                data = file_path.read_bytes()
+                ext = file_path.suffix
+                content_type = _MIME_TYPES.get(ext, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except FileNotFoundError:
+                pass
+
+        # Serve binary blobs
         blob = self.server.blob_store.get(self.path)
         if blob is not None:
             self.send_response(200)
