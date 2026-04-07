@@ -510,10 +510,13 @@
             const pmremGenerator = new THREE.PMREMGenerator(renderer);
             const faces = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
             const cubeTexture = new THREE.CubeTexture();
+            cubeTexture.colorSpace = THREE.SRGBColorSpace;
             let loaded = 0;
+            let failed = false;
             faces.forEach((face, i) => {
                 const img = new Image();
                 img.onload = () => {
+                    if (failed) return;
                     cubeTexture.images[i] = img;
                     loaded++;
                     if (loaded === 6) {
@@ -528,6 +531,13 @@
                         cubeTexture.dispose();
                         pmremGenerator.dispose();
                     }
+                };
+                img.onerror = () => {
+                    if (failed) return;
+                    failed = true;
+                    console.error(`Failed to load cubemap face: ${face}`);
+                    cubeTexture.dispose();
+                    pmremGenerator.dispose();
                 };
                 img.src = 'data:image/jpeg;base64,' + cubemapData[face];
             });
