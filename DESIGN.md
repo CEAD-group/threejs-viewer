@@ -31,10 +31,11 @@ The idea is that a user opens a single persistent viewer instance, and that whil
 
 **2. No Build Step Required**
 
-The `viewer.html` file is self-contained:
+The viewer source files live in `src/threejs_viewer/viewer/` (JS module, CSS, HTML template, cubemap images). A build script (`viewer/build.py`) inlines everything into a self-contained `viewer.html`:
 - Uses ES modules with import maps pointing to CDN
 - No npm, webpack, or bundler needed
 - Just open the HTML file in any modern browser, or in a VS Code window with the built in simple webserver
+- The `ThreeJSViewer` class can also be embedded into any page as an ES module
 
 **3. Binary Protocol for Large Data**
 
@@ -229,7 +230,13 @@ threejs-viewer/
 │   ├── __main__.py      # CLI entry point
 │   ├── client.py        # ViewerClient class
 │   ├── animation.py     # Animation, AnimationChannel, Frame, Marker classes
-│   └── viewer.html      # Browser viewer (self-contained)
+│   ├── viewer.html      # Generated standalone viewer (do not edit)
+│   └── viewer/          # Viewer source files (edit these)
+│       ├── viewer.js    # ES module: ThreeJSViewer class
+│       ├── viewer.css   # Scoped CSS (.threejs-viewer)
+│       ├── template.html # UI controls template
+│       ├── build.py     # Inlines sources → viewer.html
+│       └── static/      # Cubemap JPEG images
 ├── pyproject.toml
 ├── DESIGN.md
 ├── EXAMPLES.md

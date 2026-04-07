@@ -41,7 +41,13 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 ### Core Files
 - `src/threejs_viewer/client.py` - Python client that runs WebSocket server
 - `src/threejs_viewer/animation.py` - Animation classes (Frame, Animation, AnimationChannel, Marker)
-- `src/threejs_viewer/viewer.html` - Three.js viewer (self-contained)
+- `src/threejs_viewer/viewer.html` - Standalone viewer (**generated** — do not edit, run `uv run python src/threejs_viewer/viewer/build.py` to regenerate)
+- `src/threejs_viewer/viewer/` - Viewer source files (edit these):
+  - `viewer.js` - ES module exporting `ThreeJSViewer(container, options)` class
+  - `viewer.css` - Scoped CSS under `.threejs-viewer` class
+  - `template.html` - HTML template for toolbar, clipping panel, animation controls
+  - `build.py` - Build script that inlines all sources into standalone `viewer.html`
+  - `static/*.jpg` - Cubemap face images for PBR environment
 - `examples/` - Demo scripts showcasing library capabilities
 - `tests/` - Unit tests + Playwright browser integration tests (browser tests auto-skip without pytest-playwright)
 
