@@ -443,8 +443,8 @@
     <script type="importmap">
     {
         "imports": {
-            "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+            "three": "https://unpkg.com/three@0.183.2/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.183.2/examples/jsm/"
         }
     }
     </script>
@@ -492,47 +492,56 @@
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.toneMapping = THREE.LinearToneMapping;
-        renderer.toneMappingExposure = 1.0;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.5;
         renderer.localClippingEnabled = true;
         document.body.appendChild(renderer.domElement);
 
-        // Generate a bright studio environment map for PBR reflections
-        // Uses bright emissive panels to create visible reflections on dark/metallic surfaces
-        const pmremGenerator = new THREE.PMREMGenerator(renderer);
-        const envScene = new THREE.Scene();
-        envScene.background = new THREE.Color(0x888888);
-
-        // Bright studio panels - large emissive surfaces that create reflections
-        const panelGeo = new THREE.PlaneGeometry(20, 20);
-        const panelMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
-
-        // Top panel (key light)
-        const topPanel = new THREE.Mesh(panelGeo, panelMat);
-        topPanel.position.set(0, 0, 8);
-        topPanel.lookAt(0, 0, 0);
-        envScene.add(topPanel);
-
-        // Front panel (fill)
-        const frontPanel = new THREE.Mesh(panelGeo, panelMat.clone());
-        frontPanel.position.set(0, -8, 3);
-        frontPanel.lookAt(0, 0, 0);
-        envScene.add(frontPanel);
-
-        // Side panels
-        const sidePanel1 = new THREE.Mesh(panelGeo, panelMat.clone());
-        sidePanel1.position.set(8, 0, 3);
-        sidePanel1.lookAt(0, 0, 0);
-        envScene.add(sidePanel1);
-
-        const sidePanel2 = new THREE.Mesh(panelGeo, panelMat.clone());
-        sidePanel2.position.set(-8, 0, 3);
-        sidePanel2.lookAt(0, 0, 0);
-        envScene.add(sidePanel2);
-
-        scene.environment = pmremGenerator.fromScene(envScene).texture;
-        scene.environmentIntensity = 1.0;
-        pmremGenerator.dispose();
+        // Embedded cubemap environment for PBR reflections (64x64 JPEG, ~12KB total)
+        {
+            const cubemapData = {
+                px: '/9j/4AAQSkZJRgABAQAAYABgAAD/4QCARXhpZgAATU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAABgAAAAAQAAAGAAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA/+0AOFBob3Rvc2hvcCAzLjAAOEJJTQQEAAAAAAAAOEJJTQQlAAAAAAAQ1B2M2Y8AsgTpgAmY7PhCfv/AABEIAEAAQAMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2wBDAAkJCQkJCRAJCRAWEBAQFh4WFhYWHiYeHh4eHiYuJiYmJiYmLi4uLi4uLi43Nzc3NzdAQEBAQEhISEhISEhISEj/2wBDAQsMDBIREh8RER9LMyozS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0v/3QAEAAT/2gAMAwEAAhEDEQA/AOWZe4qtImBWgRn2qCROKzsVc5yUFJg49a9IiuIhpv2sxh5IkjUZ+ij1HrXCSxbga6PQpbi5tLjy2wyjAz0+UD8c03tqIbqvlRXcsEChE3K2B0B2DP6mslm4rSdNpwvYDPJPOOarSZ6Z61DNEZcpHyJntuP1P/1qeijFTb/NJZgCM9CPyq59ltGiR0YrIScqOgHbk0wZ/9DnwDjmgrkVaEW4Cpo4c8AUWC5hSRlZlXaSG449a1/D9tcWmn3MzjB2OwYcjpjr9avJZkuCBxTistkTbxk7Jw/y+7daco3QkzGhijaMEjt1qvKkXI6duD601tThiDRLGcqdvOD0zSQyLdttAAbORWElqbrYjELRgbx8vY1ZEZFa1tAHG1h3wfap7rSbqwdSyEK43Kp7j2/wouI//9GOOPge9a1vbAjJGKrRIO9b1pGP4ugrVIybJba0QEZFasWi2VypkuY9xj+7mmwpvAYVvwLm3HuaUtgjuc9Z+HtEuSfMto89eAK4fxjo0OjXkV3p8exCMYHSvWLOJUkYxfdzjk55rG8XWAvdLbjlen16isFsbRZwmk3Nv58V0VDqCCy+vtXo+o3Gm3ViGmxIrjKDoR757Yrw+xuFsp9hbIbtXTiRgd8ZJUjJXsf/AK9Q9DTc/9LUiQNjFbVuo6H05rLhR84rZjj2n1xW5zmpCPatcBlEO3oc5/GsuH7v1rcxtjXPAUc1nI1gJb/x8fxGluovOt3j9Rx9aqab5wRvNJOTkZ7e1adQtij5x1qzW3v5EBCqTuX6HmrmmXiyKImbDL/F0Fb/AI2sDHILgD7jFCf9lvmX/CvO1lNvLvHTuKm10aXP/9k=',
+                nx: '/9j/4AAQSkZJRgABAQAAYABgAAD/4QCARXhpZgAATU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAABgAAAAAQAAAGAAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA/+0AOFBob3Rvc2hvcCAzLjAAOEJJTQQEAAAAAAAAOEJJTQQlAAAAAAAQ1B2M2Y8AsgTpgAmY7PhCfv/AABEIAEAAQAMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2wBDAAkJCQkJCRAJCRAWEBAQFh4WFhYWHiYeHh4eHiYuJiYmJiYmLi4uLi4uLi43Nzc3NzdAQEBAQEhISEhISEhISEj/2wBDAQsMDBIREh8RER9LMyozS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0v/3QAEAAT/2gAMAwEAAhEDEQA/AOEHG5OlRvyuD1FWZtrHzIxgHsDnFRY4Dj6GsDQdYBvO8sfxVuW3yXkbdCAT+QNPght9Ghh1KcCeO6jbYQOUkRhkfl/Oi1uIrm9bZwGjcD8ql6sZDqBMt5vJHKKT+I5qgRjNaV7H5V35TnOEGPwFZbEdaaAYcdTUXHenMeKhzVCP/9DhssOev9a6jw1daTDJcWerqoiuYiFlP8JHb8f516DD4O0yTTWsZx/pDDcso/h9Cvt6jvXjd/am0uJLOV1JiYrlTkZB659K5zUoXUrAeUrMVQnaD0we+O1XdHkdbsE9BG5/JSaypAN5VScA9/StnScLdDIz8knH/AGqhM0NVVo9SO9i5aINu+tZSnNJd3M1xcPcTHPyqE4x8gHH/wBf3pkOdvrQBI1RYz0qZhUfTg0xH//RyLHxXqllYyWCOCrDCM3VD7HtXJzkFi6d+oPUU5smoSxHfgVjY0GqN/zd+lalnMsE4kkPyhXBx7qRVKJAMFfTP51ft4FnuEjckLtcnH+ypNHUHsT3dvCtsfLH7xAGK9Tgjkkc9Kzrd/lwR0q1I2+5e6l+VipIU9Dk85x6iqyEbPTLE49BgVdtCLljjoajYA9KcBkA0u0Lw35Uij//0uGkMT8kbfoMVTaHewVSMH19KsSZ61DEcszjoowPq3H8s1iaE0ZOScYz0rVsAPtXmMCVSKUn/vg1nqMAZFW7dwnmse0T/qMf1pLcGQsEnt1uXPzh9jLnjBGRj0x0p+nWSXc6WjuI92QGPTPbNGnT6ZLqCQtFvDMoXBOMk45Bqa5GHyFUKDjIrTcljJYmt5GtznKHBJBB49jUO30qZ9xwSc4GKYMgZoA//9k=',
+                py: '/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAQKADAAQAAAABAAAAQAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAQABAAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMACQkJCQkJEAkJEBYQEBAWHhYWFhYeJh4eHh4eJi4mJiYmJiYuLi4uLi4uLjc3Nzc3N0BAQEBASEhISEhISEhISP/bAEMBCwwMEhESHxERH0szKjNLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS//dAAQABP/aAAwDAQACEQMRAD8A4uJMuNxwvdv/AK1PuJ0d9yD5V4UH/P4n3quzNgEkjv7/AIUxiWOTxWBoOUEtgdTWlb6jc2astrIVBBXIOM56j6Vnfd4zg9T7Cm5BPy8D0otcY4kscmnrDu+Y9B+tKib+ldb4a0Ea5eHzDtt4sFueW9h/j/WjyEcxMGdUcjA5A+gqLaAOa981jw5p+p2SwBFiaFcRkcBQOx9q8Ua1XzHWQjCkgbTkNjv9KNtBrU//0OFIYnJ5NLnaTjqO/YVp6hZyafO9q/yspwxPJ+grKY5G3sOlYLU1Edt/I+pPqfWlRC3H50iIWOFqcBR8q/nTEScYAXoOtbGlalcabOs8TEYPb/P51kInrxirkEBlHmPxH2H97/61JoDttY8Vy6rbLBbKYoyPnPd/b/d/n9K5PYSc96sLH/n0qZUw3lqMv/d7D3NAz//R4iaeW4kMsrFmJySeTQi7zgfjTIlLnH5muk0TRbnWrn7NagKi8vIeij+pNYGhiYUDYvHvQkeee1b+q6HcaXOY5VOB39vUexrLhgWV8vkRjrjv7U0wHRRbsSS/6oevGcf0rThLTDeVIz0+nsKXylkADjPTj6dAKs/OMqvRfvsOq+w96QyMEq/lLy3duy//AF62LO1iiIkkXcScn1/H/Cn28SQIMDBPP0/z602W5SHAc9egHU0gP//S44NCQEUFQOuOf8K9k8Ganps1gunW6iKWPqO7n1+vrXiiCtGxaYSboHZCnzbl4P4e9Y7amm+h6Z4y1a2mX+zIwGdD88g/h/2QfU9/T61w0SjjsB0HpVcMS3z/AIZOaux4UA9SeAPU0eYE21xhYf8AWEcZ7D1NatvEkMQxySM5PXn+pplnZyLEZpfmJPJ7E/4CnzvsXd37e9IYye4YMI4xlz+g7n/63eoI49zFshjjJc9Of5UkSOT82A7csfTH9BWPf3qQhhFnbnP1PqfehID/2Q==',
+                ny: '/9j/4AAQSkZJRgABAQAAYABgAAD/4QCARXhpZgAATU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAABgAAAAAQAAAGAAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA/+0AOFBob3Rvc2hvcCAzLjAAOEJJTQQEAAAAAAAAOEJJTQQlAAAAAAAQ1B2M2Y8AsgTpgAmY7PhCfv/AABEIAEAAQAMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2wBDAAkJCQkJCRAJCRAWEBAQFh4WFhYWHiYeHh4eHiYuJiYmJiYmLi4uLi4uLi43Nzc3NzdAQEBAQEhISEhISEhISEj/2wBDAQsMDBIREh8RER9LMyozS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0v/3QAEAAT/2gAMAwEAAhEDEQA/AOEDfwjpRn1qP3pTjpWRZIjlak3nrVcHPAp6E5xQBMOeBTwD2poK4wvSpB60AOVQealC8803AJz0FSp6UwP/0OBIIphyKshQaYYdw3H7tZlldSxOF60/5vu4qVFANTKMnNCQhiehqwq5pQg64p6rjgVVgJEXtUgGKEB3AVa8vB5FOwrn/9HikUYy/IpWYtinBcn0p3l55rMog2ipUUjmnbTmpAB3qkA5QSOKmVMGlRQOKtLGPpVpENhEoBHGSPWtAhXXHeoEjzV2NM4B7VVhXP/S44c8VOqlhx1qEEZzUyqTz0qCgZCPrTlTPWnKp79asKARxVIQ9F2jFWUFQLx8tWUXnmrRDLcSZ+lW1HPNQRYUVoRrvHvVozZ//9k=',
+                pz: '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',
+                nz: '/9j/4AAQSkZJRgABAQAAYABgAAD/4QCARXhpZgAATU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAABgAAAAAQAAAGAAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA/+0AOFBob3Rvc2hvcCAzLjAAOEJJTQQEAAAAAAAAOEJJTQQlAAAAAAAQ1B2M2Y8AsgTpgAmY7PhCfv/AABEIAEAAQAMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2wBDAAkJCQkJCRAJCRAWEBAQFh4WFhYWHiYeHh4eHiYuJiYmJiYmLi4uLi4uLi43Nzc3NzdAQEBAQEhISEhISEhISEj/2wBDAQsMDBIREh8RER9LMyozS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0v/3QAEAAT/2gAMAwEAAhEDEQA/AOSz3FMPJzUQcDilLDHWsTQUjjNAGaM5HWm7h0oAceKaRkH3p46cUoFAFfbTyDtxUpXNNINAH//Q80/0pegyMZpwmuO4rsLy5SBtt3ZQOp6Fd0Z/Q4/SqyLo9yu4WtzF/wBczvH/AI8o/nWfmiznVuGHDLU6Sxng8GtkaTYzN+4vGQ/3ZY/6qT/KqaaFe3Bme3AlSE7GdDwTjP1pWAbuAXJ6etSqO/NVFtrlcIjIW6bCyk/TA5qaKz1YoWjjDAe47cVBVic46YxUZ29Kijhu5JAFBTnkkEj6cA4rRMVwkZUgs7E8DATB9ywH4Yp6XtcJJp2Z/9HmJpoZIo4mLEx5GSByD+Pas95JOAkjkY/iP/16VmGT+NV94xgVga2EcZJI4qzYald6a7vavjd94HkH8Koyvt5znPpzUBJJ+Tn60xE9xO08zTyHLsdxx61Pa6jeL+7WZlX0qh5LnG4H5umeh+laNlZ2/wBojW/Z4I36sF3H2IGRmjQDrg+otYYkbKnncRz/AIViHzImDI2CCD+Pr0q3favNaQjTLSWOaJMbZkUruGOhB4z+FYIvpWOX+tQojP/S4JZQWBC4Ge/JqtIpLfMSR1H0qfBqWVQQHH0/qP61ialRBnII7fnUsdnI7qsSl9/C4Gc03b83PavRfAl5YR3phnQC4kx5Uh6Z9Mds+tDEcNcW0ltOYblTFJHwQwIIPuK6K+8Tz3+mDT7+CJ5EwFmAwQB6Y4B+ldj47fS5oE3Li8XncOqr6H1z2/OvJ87c8cdxUjGkcfIevY00IpODxn8RT9mCdh4FPXBB3jtn8qYH/9k='
+            };
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
+            const faces = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
+            const cubeTexture = new THREE.CubeTexture();
+            cubeTexture.colorSpace = THREE.SRGBColorSpace;
+            let loaded = 0;
+            let failed = false;
+            faces.forEach((face, i) => {
+                const img = new Image();
+                img.onload = () => {
+                    if (failed) return;
+                    cubeTexture.images[i] = img;
+                    loaded++;
+                    if (loaded === 6) {
+                        cubeTexture.needsUpdate = true;
+                        const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
+                        scene.environment = envMap;
+                        // Higher intensity compensates for low-energy 64px cubemap; tuned with
+                        // ambientLight=1.5 and toneMappingExposure=1.5 — adjust together
+                        scene.environmentIntensity = 2.0;
+                        // Rotate 90° around X to align cubemap Y-up with scene Z-up
+                        scene.environmentRotation = new THREE.Euler(Math.PI / 2, 0, 0);
+                        cubeTexture.dispose();
+                        pmremGenerator.dispose();
+                    }
+                };
+                img.onerror = () => {
+                    if (failed) return;
+                    failed = true;
+                    console.error(`Failed to load cubemap face: ${face}`);
+                    cubeTexture.dispose();
+                    pmremGenerator.dispose();
+                };
+                img.src = 'data:image/jpeg;base64,' + cubemapData[face];
+            });
+        }
 
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
@@ -590,24 +599,10 @@
 
         btnOrtho.addEventListener('click', () => switchCamera(!isOrtho));
 
-        // Lighting - environment map handles PBR, keep scene lights moderate
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        // Lighting — ambient + environment only (tuned with environmentIntensity=2.0
+        // and toneMappingExposure=1.5 — adjust all three together)
+        const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
         scene.add(ambientLight);
-
-        // Key light (main) - soft
-        const keyLight = new THREE.DirectionalLight(0xffffff, 0.5);
-        keyLight.position.set(5, -5, 10);
-        scene.add(keyLight);
-
-        // Fill light
-        const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
-        fillLight.position.set(-5, 5, 5);
-        scene.add(fillLight);
-
-        // Back light for rim highlights
-        const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
-        backLight.position.set(0, 5, -5);
-        scene.add(backLight);
 
         // Grid helper on XY plane (Z-up)
         const gridHelper = new THREE.GridHelper(10, 10);

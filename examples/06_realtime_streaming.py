@@ -8,6 +8,7 @@ sensor data, or interactive applications.
 Run: uv run python examples/06_realtime_streaming.py
 """
 
+import colorsys
 import math
 import time
 
@@ -73,7 +74,6 @@ v.add_box(
     color=0xFFAA00,
     position=[0, 0, 2],
     roughness=0.15,
-    metalness=0.9,
 )
 
 print(f"Streaming {len(spheres)} spheres at ~60 fps. Press Ctrl+C to exit.")
@@ -106,12 +106,12 @@ try:
         # Send batch update
         v.batch_update(transforms)
 
-        # Also update colors periodically (every 30 frames)
+        # Cycle center box color through hue circle
         frame_count += 1
-        if frame_count % 30 == 0:
-            # Pulse the center box color
-            intensity = int(128 + 127 * math.sin(t * 3))
-            v.set_color("center_box", (intensity << 16) | (intensity << 8) | 0)
+        hue = (t * 0.1) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+        color = (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)
+        v.set_color("center_box", color)
 
         # Frame rate control
         elapsed = time.time() - start_time - t
