@@ -19,7 +19,14 @@ Embeddable viewer: extract monolithic viewer.html into modular ES module.
 
 ## 0.0.14
 
-Replace external HDR environment map with an embedded cubemap for PBR reflections, removing the external dependency.
+Embedded cubemap environment and Three.js upgrade.
+
+- **Embedded cubemap** — replaces external CDN dependency (polyhaven) with a 64x64 JPEG cubemap (~12KB) embedded as base64 data URIs for offline-capable PBR reflections
+- **Three.js 0.170.0 → 0.183.2** upgrade
+- **ACES filmic tone mapping** — replaces default tone mapping for better HDR rendering
+- **Simplified lighting** — ambient + environment only (removed directional lights)
+- **sRGB color space** on cubemap for correct PMREM filtering
+- **Error handling** on cubemap face loading to prevent resource leaks
 
 ## 0.0.13
 
