@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.0.15
+
+Embeddable viewer: extract monolithic viewer.html into modular ES module.
+
+### New features
+
+- **Embeddable `ThreeJSViewer` class** — ES module in `viewer/viewer.js` that mounts into any container div with `new ThreeJSViewer(container, options)`. Supports `wsUrl`, `wsPort`, `htmlTemplate`, and `cubemapData` options.
+- **`destroy()` method** — full cleanup of WebSocket, RAF, ResizeObserver, and event listeners
+- **Scoped events** — keyboard shortcuts scoped to container (`tabindex`), resize via `ResizeObserver` instead of `window`
+- **Build pipeline** — `viewer/build.py` regenerates the self-contained `viewer.html` from source files; CI verifies freshness
+- **Source file separation** — CSS, HTML template, and cubemap images extracted into `viewer/` subfolder
+
+### Bug fixes
+
+- Multi-material meshes now correctly apply color changes (previously crashed on array materials)
+- `destroy()` prevents reconnect attempts after teardown
+
+## 0.0.14
+
+Replace external HDR environment map with an embedded cubemap for PBR reflections, removing the external dependency.
+
 ## 0.0.13
 
 Auto-open the viewer in the default browser when no existing tab connects.
