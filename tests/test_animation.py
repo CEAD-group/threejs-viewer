@@ -420,3 +420,70 @@ def test_merge_animation_points_duplicate_timestamps():
     assert len(t5_indices) == 2
     assert combined[t5_indices[0], 4] == pytest.approx(bw)  # full-width first
     assert combined[t5_indices[1], 4] == pytest.approx(0.0)  # cap second
+
+
+# --- Camera tracking tests ---
+
+
+def test_camera_follow():
+    """Test camera_follow metadata on Animation."""
+    anim = Animation(loop=True, camera_follow="nozzle")
+    assert anim.camera_follow == "nozzle"
+    assert anim.camera_lookat is None
+    d = anim.to_dict()
+    assert d["camera_follow"] == "nozzle"
+    assert "camera_lookat" not in d
+
+
+def test_camera_lookat():
+    """Test camera_lookat metadata on Animation."""
+    anim = Animation(loop=True, camera_lookat="nozzle")
+    assert anim.camera_lookat == "nozzle"
+    assert anim.camera_follow is None
+    d = anim.to_dict()
+    assert d["camera_lookat"] == "nozzle"
+    assert "camera_follow" not in d
+
+
+def test_camera_follow_lookat_mutually_exclusive():
+    """Setting both camera_follow and camera_lookat raises ValueError."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Animation(camera_follow="a", camera_lookat="b")
+
+
+def test_camera_no_tracking_to_dict():
+    """to_dict omits camera keys when not set."""
+    anim = Animation()
+    d = anim.to_dict()
+    assert "camera_follow" not in d
+    assert "camera_lookat" not in d
+
+
+def test_set_camera_target():
+    """Test set_camera_target creates a camera_target channel."""
+    anim = Animation()
+    anim.set_frame_times(np.linspace(0, 1, 10))
+    data = np.random.rand(10, 3).astype(np.float32)
+    anim.set_camera_target(data)
+
+    assert len(anim._channels) == 1
+    ch = anim._channels[0]
+    assert ch.name == "camera_target"
+    assert ch.ids == ["__camera__"]
+    assert ch.stride == 3
+    assert ch.dtype == "float32"
+
+
+def test_set_camera_position():
+    """Test set_camera_position creates a camera_position channel."""
+    anim = Animation()
+    anim.set_frame_times(np.linspace(0, 1, 10))
+    data = np.random.rand(10, 3).astype(np.float32)
+    anim.set_camera_position(data)
+
+    assert len(anim._channels) == 1
+    ch = anim._channels[0]
+    assert ch.name == "camera_position"
+    assert ch.ids == ["__camera__"]
+    assert ch.stride == 3
+    assert ch.dtype == "float32"

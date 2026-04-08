@@ -98,6 +98,10 @@ function makeChannelApply(viewer) {
                 viewer._setClipTime(ch.ids[i], ch.data[base + i]);
             }
         },
+
+        // No-ops: data is read directly in _applyCameraTracking, not per-object
+        camera_target: () => {},
+        camera_position: () => {},
     };
 }
 
@@ -225,6 +229,15 @@ export class ThreeJSViewer {
         // Camera state
         this._isOrtho = false;
 
+        // Camera tracking state
+        this._trackTargetId = null;
+        this._trackMode = 'off';       // 'off' | 'follow' | 'lookat' | 'scripted'
+        this._trackLastPos = new THREE.Vector3();
+        this._trackHasLastPos = false;
+        this._trackInteractive = false; // true when user pressed T (interactive override)
+        this._tmpTrackPos = new THREE.Vector3();   // reusable scratch vectors
+        this._tmpTrackDelta = new THREE.Vector3();
+
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
 
@@ -283,6 +296,7 @@ export class ThreeJSViewer {
         this._btnLoop = q('.tjsv-btn-loop');
         this._speedDisplayEl = q('.tjsv-speed-display');
         this._timelineContainer = q('.tjsv-timeline-container');
+        this._btnTrack = q('.tjsv-btn-track');
     }
 
     _initThreeJS() {
@@ -993,6 +1007,25 @@ export class ThreeJSViewer {
         }
 
         this._applyFrame(0);
+
+        // Camera tracking from animation metadata
+        this._trackHasLastPos = false;
+        this._trackInteractive = false;
+        if (animData.camera_follow) {
+            this._trackTargetId = animData.camera_follow;
+            this._trackMode = 'follow';
+        } else if (animData.camera_lookat) {
+            this._trackTargetId = animData.camera_lookat;
+            this._trackMode = 'lookat';
+        } else if (animData.channels?.camera_target || animData.channels?.camera_position) {
+            this._trackMode = 'scripted';
+            this._trackTargetId = null;
+        } else {
+            this._trackMode = 'off';
+            this._trackTargetId = null;
+        }
+        this._updateTrackingUI();
+
         this._animationPlaying = true;
         this._lastAnimationUpdate = performance.now();
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s`);
@@ -1008,6 +1041,12 @@ export class ThreeJSViewer {
         this._animation = null;
         this._animationPlaying = false;
         this._animControlsEl.classList.remove('visible');
+
+        this._trackMode = 'off';
+        this._trackTargetId = null;
+        this._trackHasLastPos = false;
+        this._trackInteractive = false;
+        this._updateTrackingUI();
     }
 
     _applyFrame(frameIndex) {
@@ -1082,6 +1121,113 @@ export class ThreeJSViewer {
                 this._setDrawRange(id, value);
             }
         }
+
+        this._applyCameraTracking(frameIndex);
+    }
+
+    _cycleTrackMode() {
+        this._trackInteractive = true;
+        const hasChannels = this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
+
+        if (this._trackMode === 'scripted') {
+            // Scripted → off
+            this._trackMode = 'off';
+        } else if (hasChannels && this._trackMode === 'off' && !this._trackTargetId) {
+            // Off → re-enable scripted (if no object target, only channels)
+            this._trackInteractive = false;
+            this._trackMode = 'scripted';
+        } else {
+            // Object-based: off → follow → lookat → off
+            if (!this._trackTargetId && this._trackMode === 'off') {
+                this._trackTargetId = this._guessTrackTarget();
+            }
+            if (this._trackTargetId) {
+                const modes = ['off', 'follow', 'lookat'];
+                const idx = modes.indexOf(this._trackMode);
+                this._trackMode = modes[(idx + 1) % modes.length];
+            }
+        }
+        this._trackHasLastPos = false;
+        this._updateTrackingUI();
+    }
+
+    _guessTrackTarget() {
+        if (!this._animation?.channels?.transforms) return null;
+        const ids = this._animation.channels.transforms.ids;
+        const hints = ['nozzle', 'tip', 'tool', 'effector'];
+        for (const hint of hints) {
+            const match = ids.find(id => id.toLowerCase().includes(hint));
+            if (match) return match;
+        }
+        return null;
+    }
+
+    _updateTrackingUI() {
+        if (!this._btnTrack) return;
+        const hasTracking = this._trackTargetId || this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
+        this._btnTrack.style.display = (this._animation && hasTracking) ? '' : 'none';
+        this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
+
+        let title = 'Camera tracking (T)';
+        if (this._trackMode === 'scripted') {
+            title = 'Camera: scripted (T)';
+        } else if (this._trackMode !== 'off') {
+            const modeLabel = this._trackMode === 'follow' ? 'Follow' : 'Look-at';
+            title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
+        }
+        this._btnTrack.title = title;
+    }
+
+    _applyCameraTracking(frameIndex) {
+        if (this._trackMode === 'off') return;
+
+        // Scripted camera channels
+        if (this._trackMode === 'scripted' && this._animation?.channels) {
+            const ctCh = this._animation.channels.camera_target;
+            const cpCh = this._animation.channels.camera_position;
+            if (ctCh || cpCh) {
+                if (ctCh) {
+                    const base = frameIndex * 3;
+                    this._controls.target.set(
+                        ctCh.data[base], ctCh.data[base + 1], ctCh.data[base + 2]
+                    );
+                }
+                if (cpCh) {
+                    const base = frameIndex * 3;
+                    this._camera.position.set(
+                        cpCh.data[base], cpCh.data[base + 1], cpCh.data[base + 2]
+                    );
+                }
+                return;
+            }
+        }
+
+        // Object-based tracking (follow / lookat)
+        if (!this._trackTargetId) return;
+        const obj = this._objects.get(this._trackTargetId);
+        if (!obj) return;
+
+        obj.updateWorldMatrix(true, false);
+        const targetPos = this._tmpTrackPos;
+        targetPos.setFromMatrixPosition(obj.matrixWorld);
+
+        if (this._trackMode === 'follow') {
+            if (this._trackHasLastPos) {
+                const delta = this._tmpTrackDelta.copy(targetPos).sub(this._trackLastPos);
+                this._controls.target.add(delta);
+                this._camera.position.add(delta);
+            } else {
+                // First frame: snap orbit target, keep camera offset
+                const offset = this._tmpTrackDelta.copy(this._camera.position).sub(this._controls.target);
+                this._controls.target.copy(targetPos);
+                this._camera.position.copy(targetPos).add(offset);
+            }
+        } else if (this._trackMode === 'lookat') {
+            this._controls.target.copy(targetPos);
+        }
+
+        this._trackLastPos.copy(targetPos);
+        this._trackHasLastPos = true;
     }
 
     _getFrameAtTime(time) {
@@ -1241,6 +1387,7 @@ export class ThreeJSViewer {
             this._animationLoop = !this._animationLoop;
             this._btnLoop.classList.toggle('active', this._animationLoop);
         });
+        this._btnTrack.addEventListener('click', () => this._cycleTrackMode());
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
@@ -1368,6 +1515,9 @@ export class ThreeJSViewer {
                 case 'KeyL':
                     this._animationLoop = !this._animationLoop;
                     this._btnLoop.classList.toggle('active', this._animationLoop);
+                    break;
+                case 'KeyT':
+                    this._cycleTrackMode();
                     break;
                 case 'ArrowUp':
                     e.preventDefault();
@@ -1583,6 +1733,8 @@ export class ThreeJSViewer {
                                     frames: frames,
                                     markers: data.markers || [],
                                     channels: channels,
+                                    camera_follow: data.camera_follow || null,
+                                    camera_lookat: data.camera_lookat || null,
                                 });
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
