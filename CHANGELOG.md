@@ -1,14 +1,13 @@
 # Changelog
 
-## 0.0.16
-
-Public viewer API and dynamic camera improvements.
+## Unreleased
 
 ### New features
 
 - **`resize(width, height)`** — public method to force viewer resize (e.g. after container show/hide)
 - **`frameAll()`** — resets orbit controls and positions camera to frame all scene objects
 - **Dynamic near/far planes** — perspective camera near/far recomputed from scene bounding sphere, preventing geometry clipping on zoom-in
+- **Version placeholder** — source uses `0.0.0-dev`, CI substitutes real version at build time
 
 ### Bug fixes
 
