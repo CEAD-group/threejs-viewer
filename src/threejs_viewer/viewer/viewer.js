@@ -1965,8 +1965,9 @@ export class ThreeJSViewer {
         } else {
             const fov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
             const dist = (maxDim / 2) / Math.tan(fov) * 1.2;
-            const dir = this._camera.position.clone().sub(this._controls.target).normalize();
+            const dir = this._camera.position.clone().sub(this._controls.target);
             if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+            else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, dist);
         }
 
