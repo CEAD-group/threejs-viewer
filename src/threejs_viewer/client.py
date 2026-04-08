@@ -1042,6 +1042,10 @@ class ViewerClient:
             "channels": channel_manifest,
             "frames_meta": frames_meta,
         }
+        if animation.camera_follow is not None:
+            header["camera_follow"] = animation.camera_follow
+        if animation.camera_lookat is not None:
+            header["camera_lookat"] = animation.camera_lookat
         self._send(header)
 
     def stop_animation(self) -> None:

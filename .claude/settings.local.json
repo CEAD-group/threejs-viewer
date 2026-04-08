@@ -11,7 +11,12 @@
       "WebSearch",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git rm:*)",
+      "Bash(gh pr:*)",
+      "Bash(git stash:*)",
+      "Bash(git diff:*)"
     ],
     "deny": [],
     "ask": []

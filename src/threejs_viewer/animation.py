@@ -77,6 +77,12 @@ class Animation:
     frames: list[Frame] = field(default_factory=list)
     loop: bool = True
     markers: list[Marker] = field(default_factory=list)
+    camera_follow: str | None = None
+    camera_lookat: str | None = None
+
+    def __post_init__(self):
+        if self.camera_follow is not None and self.camera_lookat is not None:
+            raise ValueError("camera_follow and camera_lookat are mutually exclusive")
 
     # Generic binary channels for fast transfer.
     _channels: list[AnimationChannel] = field(default_factory=list, repr=False)
@@ -186,13 +192,25 @@ class Animation:
         """Convenience: add a 'clip_times' channel."""
         self.add_channel("clip_times", object_ids, data, dtype="float32", stride=1)
 
+    def set_camera_target(self, data: np.ndarray) -> None:
+        """Convenience: add a 'camera_target' channel with stride=3."""
+        self.add_channel(
+            "camera_target", ["__camera__"], data, dtype="float32", stride=3
+        )
+
+    def set_camera_position(self, data: np.ndarray) -> None:
+        """Convenience: add a 'camera_position' channel with stride=3."""
+        self.add_channel(
+            "camera_position", ["__camera__"], data, dtype="float32", stride=3
+        )
+
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:
         """Add a labeled marker on the timeline."""
         self.markers.append(Marker(time=time, label=label, color=color))
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "duration": self.duration,
             "fps": self.fps,
             "loop": self.loop,
@@ -213,6 +231,11 @@ class Animation:
                 for m in self.markers
             ],
         }
+        if self.camera_follow is not None:
+            result["camera_follow"] = self.camera_follow
+        if self.camera_lookat is not None:
+            result["camera_lookat"] = self.camera_lookat
+        return result
 
 
 def merge_animation_points(
