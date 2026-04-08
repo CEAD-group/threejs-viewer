@@ -814,22 +814,14 @@ class ThreeJSViewer {
             '3ds': new TDSLoader()
         };
 
+        // Scene bounds caching for dynamic near/far
+        this._sceneSphere = new THREE.Sphere();
+        this._sceneBoundsDirty = true;
+
         // ResizeObserver
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
-            if (width === 0 || height === 0) return;
-            const aspect = width / height;
-            this._perspCamera.aspect = aspect;
-            this._perspCamera.updateProjectionMatrix();
-            this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.updateProjectionMatrix();
-            this._renderer.setSize(width, height);
-            this._objects.forEach((obj) => {
-                if (obj.material && obj.material.resolution) {
-                    obj.material.resolution.set(width, height);
-                }
-            });
+            this.resize(width, height);
         });
         this._resizeObserver.observe(this.container);
     }
@@ -1237,6 +1229,7 @@ class ThreeJSViewer {
         } else {
             this._scene.add(obj);
         }
+        this._sceneBoundsDirty = true;
     }
 
     _applyTransform(obj, transform) {
@@ -1374,6 +1367,7 @@ class ThreeJSViewer {
             }
             if (obj.parent) obj.parent.remove(obj);
             this._objects.delete(id);
+            this._sceneBoundsDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); }
             obj.traverse((child) => {
@@ -2291,6 +2285,35 @@ class ThreeJSViewer {
         doConnect();
     }
 
+    // ========== Dynamic Near/Far ==========
+
+    _updateSceneBounds() {
+        const box = new THREE.Box3();
+        this._scene.traverse(child => {
+            if (!child.geometry) return;
+            if (child === this._gridHelper) return;
+            if (this._isClipHelper(child)) return;
+            box.expandByObject(child);
+        });
+        if (box.isEmpty()) {
+            this._sceneSphere.set(new THREE.Vector3(), 0);
+        } else {
+            box.getBoundingSphere(this._sceneSphere);
+        }
+        this._sceneBoundsDirty = false;
+    }
+
+    _updateNearFar() {
+        if (this._isOrtho) return;
+        if (this._sceneBoundsDirty) this._updateSceneBounds();
+        const radius = this._sceneSphere.radius;
+        if (radius === 0) return;
+        const dist = this._perspCamera.position.distanceTo(this._sceneSphere.center);
+        this._perspCamera.near = Math.max(0.001, (dist - radius * 1.5) * 0.5);
+        this._perspCamera.far = Math.max(dist + radius * 1.5, 100);
+        this._perspCamera.updateProjectionMatrix();
+    }
+
     // ========== Render Loop ==========
 
     _animate() {
@@ -2325,12 +2348,76 @@ class ThreeJSViewer {
         }
 
         this._controls.update();
+        this._updateNearFar();
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
         this._renderer.autoClear = true;
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
         this._viewHelper.render(this._renderer);
+    }
+
+    // ========== Public API ==========
+
+    resize(width, height) {
+        width = width ?? this.container.clientWidth;
+        height = height ?? this.container.clientHeight;
+        if (width === 0 || height === 0) return;
+        const aspect = width / height;
+        this._perspCamera.aspect = aspect;
+        this._perspCamera.updateProjectionMatrix();
+        this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+        this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
+        this._orthoCamera.updateProjectionMatrix();
+        this._renderer.setSize(width, height);
+        this._objects.forEach((obj) => {
+            if (obj.material && obj.material.resolution) {
+                obj.material.resolution.set(width, height);
+            }
+        });
+    }
+
+    frameAll() {
+        const bbox = new THREE.Box3();
+        this._scene.traverse(child => {
+            if (!child.geometry) return;
+            if (child === this._gridHelper) return;
+            if (this._isClipHelper(child)) return;
+            child.updateWorldMatrix(true, false);
+            bbox.expandByObject(child);
+        });
+        if (bbox.isEmpty()) return;
+
+        const center = bbox.getCenter(new THREE.Vector3());
+        const size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+
+        this._controls.target.copy(center);
+
+        if (this._isOrtho) {
+            const w = this.container.clientWidth;
+            const h = this.container.clientHeight;
+            const aspect = w / h;
+            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
+            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
+            const fitHalf = Math.max(halfHeight, halfWidth / aspect);
+            this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
+            this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+            this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
+            this._orthoCamera.top = ORTHO_FRUSTUM;
+            this._orthoCamera.bottom = -ORTHO_FRUSTUM;
+            this._orthoCamera.updateProjectionMatrix();
+            const dir = this._camera.position.clone().sub(this._controls.target).normalize();
+            this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
+        } else {
+            const fov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
+            const dist = (maxDim / 2) / Math.tan(fov) * 1.2;
+            const dir = this._camera.position.clone().sub(this._controls.target).normalize();
+            if (dir.lengthSq() === 0) dir.set(1, -1, 1).normalize();
+            this._camera.position.copy(center).addScaledVector(dir, dist);
+        }
+
+        this._controls.update();
     }
 
     // ========== Destroy ==========
