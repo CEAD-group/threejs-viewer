@@ -47,14 +47,16 @@
     background: none;
     border: none;
     color: #aaa;
-    width: 28px;
+    min-width: 28px;
     height: 28px;
+    padding: 0 6px;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 15px;
+    font-size: 13px;
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 3px;
     transition: background 0.15s, color 0.15s;
 }
 .threejs-viewer .toolbar-btn:hover { background: rgba(255,255,255,0.1); color: white; }
