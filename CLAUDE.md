@@ -32,8 +32,9 @@ uv run python examples/04_flying_teapots.py
 Source files use `0.0.0-dev` as a placeholder version. CI replaces it before build/publish:
 ```bash
 sed -i "s/0\.0\.0-dev/$VERSION/g" pyproject.toml src/threejs_viewer/__init__.py src/threejs_viewer/viewer/viewer.js
+uv run python src/threejs_viewer/viewer/build.py  # regenerate viewer.html with substituted version
 ```
-The placeholder appears in three files: `pyproject.toml`, `src/threejs_viewer/__init__.py`, `src/threejs_viewer/viewer/viewer.js`. Never commit a real version number — always keep `0.0.0-dev`.
+The placeholder appears in three files: `pyproject.toml`, `src/threejs_viewer/__init__.py`, `src/threejs_viewer/viewer/viewer.js`. The build step propagates the version into `viewer.html`. Never commit a real version number — always keep `0.0.0-dev`.
 
 ## Project Overview
 

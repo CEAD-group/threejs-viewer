@@ -1963,8 +1963,12 @@ export class ThreeJSViewer {
             else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
         } else {
-            const fov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
-            const dist = (maxDim / 2) / Math.tan(fov) * 1.2;
+            const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
+            const aspect = this._perspCamera.aspect || 1;
+            const hFov = Math.atan(Math.tan(vFov) * aspect);
+            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
+            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
+            const dist = Math.max(distV, distH) * 1.2;
             const dir = this._camera.position.clone().sub(this._controls.target);
             if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
             else dir.normalize();
