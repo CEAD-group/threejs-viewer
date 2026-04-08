@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.17
+
+### New features
+
+- **Camera tracking** — three modes for automatic camera control during animation playback:
+  - `camera_follow="nozzle"` — orbit target pans with the object, user can rotate/zoom freely
+  - `camera_lookat="nozzle"` — camera stays put but always points at the object
+  - `set_camera_target()` / `set_camera_position()` — fully scripted per-frame camera via binary channels
+- **Interactive tracking toggle** — `T` key cycles tracking modes; toolbar button shows current state
+- **Shortcut labels in toolbar** — clip (✂ C) and track (⊚ T) buttons show their keyboard shortcut inline
+
+### Bug fixes
+
+- Fixed cubemap orientation for Z-up to Y-up conversion
+
 ## 0.0.16
 
 ### New features
