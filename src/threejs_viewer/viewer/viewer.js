@@ -391,7 +391,6 @@ export class ThreeJSViewer {
                     const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
                     scene.environment = envMap;
                     scene.environmentIntensity = 2.0;
-                    scene.environmentRotation = new THREE.Euler(Math.PI / 2, 0, 0);
                     cubeTexture.dispose();
                     pmremGenerator.dispose();
                 }
