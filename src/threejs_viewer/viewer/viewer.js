@@ -13,7 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
-const VIEWER_VERSION = '0.0.15';
+const VIEWER_VERSION = '0.0.0-dev';
 
 const ORTHO_FRUSTUM = 10;
 
@@ -354,22 +354,15 @@ export class ThreeJSViewer {
             '3ds': new TDSLoader()
         };
 
+        // Scene bounds caching for dynamic near/far
+        this._sceneSphere = new THREE.Sphere();
+        this._sceneBoundsDirty = true;
+        this._boundsFrameCounter = 0;
+
         // ResizeObserver
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
-            if (width === 0 || height === 0) return;
-            const aspect = width / height;
-            this._perspCamera.aspect = aspect;
-            this._perspCamera.updateProjectionMatrix();
-            this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.updateProjectionMatrix();
-            this._renderer.setSize(width, height);
-            this._objects.forEach((obj) => {
-                if (obj.material && obj.material.resolution) {
-                    obj.material.resolution.set(width, height);
-                }
-            });
+            this.resize(width, height);
         });
         this._resizeObserver.observe(this.container);
     }
@@ -777,6 +770,7 @@ export class ThreeJSViewer {
         } else {
             this._scene.add(obj);
         }
+        this._sceneBoundsDirty = true;
     }
 
     _applyTransform(obj, transform) {
@@ -914,6 +908,7 @@ export class ThreeJSViewer {
             }
             if (obj.parent) obj.parent.remove(obj);
             this._objects.delete(id);
+            this._sceneBoundsDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); }
             obj.traverse((child) => {
@@ -1831,6 +1826,44 @@ export class ThreeJSViewer {
         doConnect();
     }
 
+    // ========== Dynamic Near/Far ==========
+
+    _updateSceneBounds() {
+        const box = new THREE.Box3();
+        for (const obj of this._objects.values()) {
+            obj.updateWorldMatrix(true, true);
+            box.expandByObject(obj);
+        }
+        if (box.isEmpty()) {
+            this._sceneSphere.set(new THREE.Vector3(), 0);
+        } else {
+            box.getBoundingSphere(this._sceneSphere);
+        }
+        this._sceneBoundsDirty = false;
+    }
+
+    _updateNearFar() {
+        if (this._isOrtho) return;
+        // Recompute bounds on dirty flag or every 30 frames (~0.5s) to catch transform changes
+        this._boundsFrameCounter++;
+        if (this._sceneBoundsDirty || this._boundsFrameCounter >= 30) {
+            this._updateSceneBounds();
+            this._boundsFrameCounter = 0;
+        }
+        const radius = this._sceneSphere.radius;
+        if (radius === 0) return;
+        const dist = this._perspCamera.position.distanceTo(this._sceneSphere.center);
+        const nextNear = Math.max(0.001, (dist - radius * 1.5) * 0.5);
+        const nextFar = Math.max(dist + radius * 1.5, 100);
+        if (
+            Math.abs(this._perspCamera.near - nextNear) < 1e-6 &&
+            Math.abs(this._perspCamera.far - nextFar) < 1e-6
+        ) return;
+        this._perspCamera.near = nextNear;
+        this._perspCamera.far = nextFar;
+        this._perspCamera.updateProjectionMatrix();
+    }
+
     // ========== Render Loop ==========
 
     _animate() {
@@ -1865,12 +1898,84 @@ export class ThreeJSViewer {
         }
 
         this._controls.update();
+        this._updateNearFar();
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
         this._renderer.autoClear = true;
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
         this._viewHelper.render(this._renderer);
+    }
+
+    // ========== Public API ==========
+
+    resize(width, height) {
+        width = width ?? this.container.clientWidth;
+        height = height ?? this.container.clientHeight;
+        if (width === 0 || height === 0) return;
+        const aspect = width / height;
+        this._perspCamera.aspect = aspect;
+        this._perspCamera.updateProjectionMatrix();
+        this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+        this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
+        this._orthoCamera.updateProjectionMatrix();
+        this._renderer.setSize(width, height);
+        this._objects.forEach((obj) => {
+            if (obj.material && obj.material.resolution) {
+                obj.material.resolution.set(width, height);
+            }
+        });
+    }
+
+    frameAll() {
+        const bbox = new THREE.Box3();
+        this._scene.traverse(child => {
+            if (!child.geometry) return;
+            if (child === this._gridHelper) return;
+            if (this._isClipHelper(child)) return;
+            child.updateWorldMatrix(true, false);
+            bbox.expandByObject(child);
+        });
+        if (bbox.isEmpty()) return;
+
+        const center = bbox.getCenter(new THREE.Vector3());
+        const size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+
+        this._controls.target.copy(center);
+
+        if (this._isOrtho) {
+            const w = this.container.clientWidth;
+            const h = this.container.clientHeight;
+            if (w === 0 || h === 0) return;
+            const aspect = w / h;
+            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
+            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
+            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
+            this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
+            this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+            this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
+            this._orthoCamera.top = ORTHO_FRUSTUM;
+            this._orthoCamera.bottom = -ORTHO_FRUSTUM;
+            this._orthoCamera.updateProjectionMatrix();
+            const dir = this._camera.position.clone().sub(this._controls.target);
+            if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+            else dir.normalize();
+            this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
+        } else {
+            const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
+            const aspect = this._perspCamera.aspect || 1;
+            const hFov = Math.atan(Math.tan(vFov) * aspect);
+            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
+            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
+            const dist = Math.max(distV, distH) * 1.2;
+            const dir = this._camera.position.clone().sub(this._controls.target);
+            if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+            else dir.normalize();
+            this._camera.position.copy(center).addScaledVector(dir, dist);
+        }
+
+        this._controls.update();
     }
 
     // ========== Destroy ==========

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.16
+
+### New features
+
+- **`resize(width, height)`** — public method to force viewer resize (e.g. after container show/hide)
+- **`frameAll()`** — resets orbit controls and positions camera to frame all scene objects
+- **Dynamic near/far planes** — perspective camera near/far recomputed from scene bounding sphere, preventing geometry clipping on zoom-in
+- **Version placeholder** — source uses `0.0.0-dev`, CI substitutes real version at build time
+
+### Bug fixes
+
+- Fixed `__version__` out of sync with package version (was stuck at 0.0.13)
+
 ## 0.0.15
 
 Embeddable viewer: extract monolithic viewer.html into modular ES module.

@@ -27,6 +27,15 @@ uv run python examples/01_primitives.py
 uv run python examples/04_flying_teapots.py
 ```
 
+## Versioning
+
+Source files use `0.0.0-dev` as a placeholder version. CI replaces it before build/publish:
+```bash
+sed -i "s/0\.0\.0-dev/$VERSION/g" pyproject.toml src/threejs_viewer/__init__.py src/threejs_viewer/viewer/viewer.js
+uv run python src/threejs_viewer/viewer/build.py  # regenerate viewer.html with substituted version
+```
+The placeholder appears in three files: `pyproject.toml`, `src/threejs_viewer/__init__.py`, `src/threejs_viewer/viewer/viewer.js`. The build step propagates the version into `viewer.html`. Never commit a real version number — always keep `0.0.0-dev`.
+
 ## Project Overview
 
 A lightweight Three.js viewer designed to be controlled from Python/Jupyter notebooks. Primary use case: visualizing 3D data and animations at 60fps. The browser viewer persists across Python script restarts.

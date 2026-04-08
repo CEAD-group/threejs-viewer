@@ -97,7 +97,7 @@ def build():
 
 // Standalone instantiation
 const container = document.getElementById('viewer-container');
-new ThreeJSViewer(container, {{
+window.threejsViewer = new ThreeJSViewer(container, {{
     htmlTemplate: HTML_TEMPLATE,
     cubemapData: CUBEMAP_DATA
 }});
