@@ -81,7 +81,7 @@ class Animation:
     camera_lookat: str | None = None
 
     def __post_init__(self):
-        if self.camera_follow and self.camera_lookat:
+        if self.camera_follow is not None and self.camera_lookat is not None:
             raise ValueError("camera_follow and camera_lookat are mutually exclusive")
 
     # Generic binary channels for fast transfer.
@@ -231,9 +231,9 @@ class Animation:
                 for m in self.markers
             ],
         }
-        if self.camera_follow:
+        if self.camera_follow is not None:
             result["camera_follow"] = self.camera_follow
-        if self.camera_lookat:
+        if self.camera_lookat is not None:
             result["camera_lookat"] = self.camera_lookat
         return result
 

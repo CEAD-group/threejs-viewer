@@ -694,7 +694,7 @@ class ThreeJSViewer {
 
         // Camera tracking state
         this._trackTargetId = null;
-        this._trackMode = 'off';       // 'off' | 'follow' | 'lookat'
+        this._trackMode = 'off';       // 'off' | 'follow' | 'lookat' | 'scripted'
         this._trackLastPos = new THREE.Vector3();
         this._trackHasLastPos = false;
         this._trackInteractive = false; // true when user pressed T (interactive override)
@@ -1482,7 +1482,7 @@ class ThreeJSViewer {
             this._trackTargetId = animData.camera_lookat;
             this._trackMode = 'lookat';
         } else if (animData.channels?.camera_target || animData.channels?.camera_position) {
-            this._trackMode = 'follow'; // enable so _applyCameraTracking runs
+            this._trackMode = 'scripted';
             this._trackTargetId = null;
         } else {
             this._trackMode = 'off';
@@ -1591,27 +1591,39 @@ class ThreeJSViewer {
 
     _cycleTrackMode() {
         this._trackInteractive = true;
-        if (!this._trackTargetId && this._trackMode === 'off') {
-            this._trackTargetId = this._guessTrackTarget();
+        const hasChannels = this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
+
+        if (this._trackMode === 'scripted') {
+            // Scripted → off
+            this._trackMode = 'off';
+        } else if (hasChannels && this._trackMode === 'off' && !this._trackTargetId) {
+            // Off → re-enable scripted (if no object target, only channels)
+            this._trackInteractive = false;
+            this._trackMode = 'scripted';
+        } else {
+            // Object-based: off → follow → lookat → off
+            if (!this._trackTargetId && this._trackMode === 'off') {
+                this._trackTargetId = this._guessTrackTarget();
+            }
+            if (this._trackTargetId) {
+                const modes = ['off', 'follow', 'lookat'];
+                const idx = modes.indexOf(this._trackMode);
+                this._trackMode = modes[(idx + 1) % modes.length];
+            }
         }
-        if (this._trackTargetId || this._animation?.channels?.camera_target || this._animation?.channels?.camera_position) {
-            const modes = ['off', 'follow', 'lookat'];
-            const idx = modes.indexOf(this._trackMode);
-            this._trackMode = modes[(idx + 1) % modes.length];
-            this._trackHasLastPos = false;
-        }
+        this._trackHasLastPos = false;
         this._updateTrackingUI();
     }
 
     _guessTrackTarget() {
         if (!this._animation?.channels?.transforms) return null;
         const ids = this._animation.channels.transforms.ids;
-        const hints = ['nozzle', 'tip', 'tool', 'head', 'effector'];
+        const hints = ['nozzle', 'tip', 'tool', 'effector'];
         for (const hint of hints) {
             const match = ids.find(id => id.toLowerCase().includes(hint));
             if (match) return match;
         }
-        return ids[ids.length - 1];
+        return null;
     }
 
     _updateTrackingUI() {
@@ -1621,14 +1633,11 @@ class ThreeJSViewer {
         this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
 
         let title = 'Camera tracking (T)';
-        if (this._trackMode !== 'off') {
-            const hasChannels = this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
-            if (hasChannels && !this._trackInteractive) {
-                title = 'Camera: scripted (T)';
-            } else {
-                const modeLabel = this._trackMode === 'follow' ? 'Follow' : 'Look-at';
-                title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
-            }
+        if (this._trackMode === 'scripted') {
+            title = 'Camera: scripted (T)';
+        } else if (this._trackMode !== 'off') {
+            const modeLabel = this._trackMode === 'follow' ? 'Follow' : 'Look-at';
+            title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
         }
         this._btnTrack.title = title;
     }
@@ -1636,8 +1645,8 @@ class ThreeJSViewer {
     _applyCameraTracking(frameIndex) {
         if (this._trackMode === 'off') return;
 
-        // Camera channels (unless interactive override is active)
-        if (!this._trackInteractive && this._animation?.channels) {
+        // Scripted camera channels
+        if (this._trackMode === 'scripted' && this._animation?.channels) {
             const ctCh = this._animation.channels.camera_target;
             const cpCh = this._animation.channels.camera_position;
             if (ctCh || cpCh) {
@@ -2188,6 +2197,8 @@ class ThreeJSViewer {
                                     frames: frames,
                                     markers: data.markers || [],
                                     channels: channels,
+                                    camera_follow: data.camera_follow || null,
+                                    camera_lookat: data.camera_lookat || null,
                                 });
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
