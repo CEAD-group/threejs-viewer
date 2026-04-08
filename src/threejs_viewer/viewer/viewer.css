@@ -189,7 +189,8 @@
     min-width: 50px;
     text-align: center;
 }
-.threejs-viewer .loop-toggle {
+.threejs-viewer .loop-toggle,
+.threejs-viewer .track-toggle {
     background: #444;
     border: none;
     color: white;
@@ -198,8 +199,10 @@
     cursor: pointer;
     font-size: 12px;
 }
-.threejs-viewer .loop-toggle:hover { background: #555; }
-.threejs-viewer .loop-toggle.active { background: #0066cc; }
+.threejs-viewer .loop-toggle:hover,
+.threejs-viewer .track-toggle:hover { background: #555; }
+.threejs-viewer .loop-toggle.active,
+.threejs-viewer .track-toggle.active { background: #0066cc; }
 .threejs-viewer .frame-display {
     font-family: monospace;
     font-size: 11px;

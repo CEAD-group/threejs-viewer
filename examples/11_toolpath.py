@@ -113,7 +113,7 @@ transforms[:, 1, 13] = tips[:, 1]
 transforms[:, 1, 14] = nz_z
 
 # Build animation — fully binary, no Python loop
-animation = Animation(loop=True)
+animation = Animation(loop=True, camera_follow="nozzle")
 animation.set_frame_times(frame_times)
 animation.set_transform_data(["path_tube", "nozzle"], transforms)
 animation.set_draw_range_data(["path_tube"], draw_fracs[:, None])
