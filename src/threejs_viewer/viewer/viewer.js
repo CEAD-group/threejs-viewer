@@ -13,7 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
-const VIEWER_VERSION = '0.0.15';
+const VIEWER_VERSION = '0.0.16';
 
 const ORTHO_FRUSTUM = 10;
 
