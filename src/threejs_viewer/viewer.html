@@ -2463,7 +2463,7 @@ class ThreeJSViewer {
 
 // Standalone instantiation
 const container = document.getElementById('viewer-container');
-new ThreeJSViewer(container, {
+window['threejs-viewer'] = new ThreeJSViewer(container, {
     htmlTemplate: HTML_TEMPLATE,
     cubemapData: CUBEMAP_DATA
 });
