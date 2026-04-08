@@ -2291,7 +2291,7 @@ class ThreeJSViewer {
     _updateSceneBounds() {
         const box = new THREE.Box3();
         for (const obj of this._objects.values()) {
-            obj.updateWorldMatrix(true, false);
+            obj.updateWorldMatrix(true, true);
             box.expandByObject(obj);
         }
         if (box.isEmpty()) {
@@ -2313,8 +2313,14 @@ class ThreeJSViewer {
         const radius = this._sceneSphere.radius;
         if (radius === 0) return;
         const dist = this._perspCamera.position.distanceTo(this._sceneSphere.center);
-        this._perspCamera.near = Math.max(0.001, (dist - radius * 1.5) * 0.5);
-        this._perspCamera.far = Math.max(dist + radius * 1.5, 100);
+        const nextNear = Math.max(0.001, (dist - radius * 1.5) * 0.5);
+        const nextFar = Math.max(dist + radius * 1.5, 100);
+        if (
+            Math.abs(this._perspCamera.near - nextNear) < 1e-6 &&
+            Math.abs(this._perspCamera.far - nextFar) < 1e-6
+        ) return;
+        this._perspCamera.near = nextNear;
+        this._perspCamera.far = nextFar;
         this._perspCamera.updateProjectionMatrix();
     }
 
@@ -2401,17 +2407,20 @@ class ThreeJSViewer {
         if (this._isOrtho) {
             const w = this.container.clientWidth;
             const h = this.container.clientHeight;
+            if (w === 0 || h === 0) return;
             const aspect = w / h;
             const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
             const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
-            const fitHalf = Math.max(halfHeight, halfWidth / aspect);
+            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
             this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
             this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
             this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
             this._orthoCamera.top = ORTHO_FRUSTUM;
             this._orthoCamera.bottom = -ORTHO_FRUSTUM;
             this._orthoCamera.updateProjectionMatrix();
-            const dir = this._camera.position.clone().sub(this._controls.target).normalize();
+            const dir = this._camera.position.clone().sub(this._controls.target);
+            if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+            else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
         } else {
             const fov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
