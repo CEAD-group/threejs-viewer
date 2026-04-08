@@ -234,7 +234,7 @@ export class ThreeJSViewer {
         this._trackMode = 'off';       // 'off' | 'follow' | 'lookat'
         this._trackLastPos = new THREE.Vector3();
         this._trackHasLastPos = false;
-        this._trackInteractive = false; // true when user pressed F (interactive override)
+        this._trackInteractive = false; // true when user pressed T (interactive override)
         this._tmpTrackPos = new THREE.Vector3();   // reusable scratch vectors
         this._tmpTrackDelta = new THREE.Vector3();
 
@@ -1153,22 +1153,21 @@ export class ThreeJSViewer {
 
     _updateTrackingUI() {
         if (!this._btnTrack) return;
-        if (this._trackMode === 'off') {
-            this._btnTrack.classList.remove('active');
-            this._btnTrack.textContent = '\u229A Track';
-        } else {
-            this._btnTrack.classList.add('active');
+        const hasTracking = this._trackTargetId || this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
+        this._btnTrack.style.display = (this._animation && hasTracking) ? '' : 'none';
+        this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
+
+        let title = 'Camera tracking (T)';
+        if (this._trackMode !== 'off') {
             const hasChannels = this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
             if (hasChannels && !this._trackInteractive) {
-                this._btnTrack.textContent = 'Camera: scripted';
+                title = 'Camera: scripted (T)';
             } else {
                 const modeLabel = this._trackMode === 'follow' ? 'Follow' : 'Look-at';
-                const shortId = this._trackTargetId && this._trackTargetId.length > 10
-                    ? this._trackTargetId.slice(0, 10) + '\u2026'
-                    : (this._trackTargetId || '');
-                this._btnTrack.textContent = `${modeLabel}: ${shortId}`;
+                title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
             }
         }
+        this._btnTrack.title = title;
     }
 
     _applyCameraTracking(frameIndex) {
