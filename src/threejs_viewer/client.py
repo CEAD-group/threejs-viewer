@@ -1072,7 +1072,10 @@ class ViewerClient:
     def query_scene(self, timeout: float = 5.0) -> dict:
         """Query the viewer's scene graph.
 
-        Returns dict of {id: {type, parent, children, visible}}.
+        Returns dict with keys:
+
+        - Object IDs mapping to ``{type, parent, children, visible}``
+        - ``"_pending_fetches"`` — number of in-flight HTTP fetches (int)
         """
         request_id = str(uuid.uuid4())
         event = threading.Event()
@@ -1086,7 +1089,9 @@ class ViewerClient:
 
         response = self._responses.pop(request_id, {})
         self._pending_responses.pop(request_id, None)
-        return response.get("tree", {})
+        result = response.get("tree", {})
+        result["_pending_fetches"] = response.get("pending_fetches", 0)
+        return result
 
 
 def viewer(

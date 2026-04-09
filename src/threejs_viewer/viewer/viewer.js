@@ -78,7 +78,16 @@ function makeChannelApply(viewer) {
         draw_ranges(ch, refs, base) {
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
-                viewer._setDrawRange(ch.ids[i], ch.data[base + i]);
+                let obj = refs[i];
+                if (!obj) { obj = viewer._objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                if (obj) {
+                    const value = ch.data[base + i];
+                    if (obj.userData.isPolyline) {
+                        obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                    } else if (obj.userData.isMesh) {
+                        obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+                    }
+                }
             }
         },
 
@@ -95,7 +104,9 @@ function makeChannelApply(viewer) {
         clip_times(ch, refs, base) {
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
-                viewer._setClipTime(ch.ids[i], ch.data[base + i]);
+                let mixer = refs[i];
+                if (!mixer || !mixer.setTime) { mixer = viewer._mixers.get(ch.ids[i]); if (mixer) refs[i] = mixer; }
+                if (mixer) mixer.setTime(ch.data[base + i]);
             }
         },
 
@@ -197,6 +208,8 @@ export class ThreeJSViewer {
         this._objects = new Map();
         this._mixers = new Map();
         this._pendingFetches = 0;
+        this._sceneGeneration = 0;
+        this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
         this._reconnectTimeout = null;
@@ -944,6 +957,7 @@ export class ThreeJSViewer {
     }
 
     _clearScene() {
+        this._sceneGeneration++;
         for (const id of this._objects.keys()) {
             this._deleteObject(id);
         }
@@ -959,6 +973,7 @@ export class ThreeJSViewer {
     // ========== Animation ==========
 
     _loadAnimation(animData) {
+        this._animGeneration++;
         this._animation = animData;
         this._animationTime = 0;
         this._animationPlaying = false;
@@ -1554,6 +1569,8 @@ export class ThreeJSViewer {
                 this._statusDot.title = 'Connected';
                 this._statusText.textContent = 'Connected';
                 this._pendingFetches = 0;
+                this._sceneGeneration++;
+                this._animGeneration++;
                 this._assetsComplete = false;
                 this._ws.send(JSON.stringify({ type: 'hello', viewer_version: VIEWER_VERSION }));
             };
@@ -1654,19 +1671,26 @@ export class ThreeJSViewer {
                             type: 'query_scene_response',
                             requestId: data.requestId,
                             tree: tree,
+                            pending_fetches: this._pendingFetches,
                         }));
                         break;
                     }
                     case 'load_animation':
                         this._loadAnimation(data.animation);
                         break;
-                    case 'load_animation_http':
+                    case 'load_animation_http': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        const capturedAnim = this._animGeneration;
                         (async () => {
                             try {
                                 const t0 = performance.now();
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
+                                    console.log('Discarding stale animation fetch');
+                                    return;
+                                }
                                 const t1 = performance.now();
                                 console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
 
@@ -1744,12 +1768,18 @@ export class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'add_model_binary':
+                    }
+                    case 'add_model_binary': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const meshBytes = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale model fetch');
+                                    return;
+                                }
                                 const blob = new Blob([meshBytes]);
                                 const blobUrl = URL.createObjectURL(blob);
                                 console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
@@ -1770,12 +1800,18 @@ export class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'add_polyline_binary':
+                    }
+                    case 'add_polyline_binary': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale polyline fetch');
+                                    return;
+                                }
                                 const rawData = new Uint8Array(buffer);
                                 const numPoints = data.numPoints || (rawData.length / 12);
                                 const positionBytes = numPoints * 12;
@@ -1830,12 +1866,18 @@ export class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'add_mesh_binary':
+                    }
+                    case 'add_mesh_binary': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale mesh fetch');
+                                    return;
+                                }
                                 const nv = data.numVertices;
                                 const ni = data.numIndices;
 
@@ -1897,6 +1939,7 @@ export class ThreeJSViewer {
                             }
                         })();
                         break;
+                    }
                     case 'stop_animation':
                         this._stopAnimation();
                         break;

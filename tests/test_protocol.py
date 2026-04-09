@@ -387,7 +387,7 @@ def test_query_scene_sends_correct_message(client):
     assert len(sent) == 1
     assert sent[0]["type"] == "query_scene"
     assert "requestId" in sent[0]
-    assert result == {}
+    assert result == {"_pending_fetches": 0}
 
 
 # === Clipping plane ===

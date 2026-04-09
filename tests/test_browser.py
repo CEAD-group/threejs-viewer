@@ -64,4 +64,6 @@ def test_clear_scene(viewer_client, viewer_page):
     viewer_client.clear()
     time.sleep(0.1)
     tree = viewer_client.query_scene()
-    assert tree == {}
+    # Only metadata keys should remain (no user objects)
+    assert "a" not in tree
+    assert "b" not in tree
