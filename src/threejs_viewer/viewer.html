@@ -2561,6 +2561,8 @@ class ThreeJSViewer {
                         this._assetsComplete = true;
                         this._maybeNotifyAssetsLoaded();
                         break;
+                    default:
+                        console.warn(`Unknown message type: '${data.type}'`);
                 }
             };
         };
