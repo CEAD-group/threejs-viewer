@@ -351,9 +351,10 @@ export class ThreeJSViewer {
         const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
         this._scene.add(ambientLight);
 
-        // Grid helper on XY plane (Z-up)
+        // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
         this._gridHelper.rotation.x = Math.PI / 2;
+        this._gridHelper.visible = false;
         this._scene.add(this._gridHelper);
 
         // Loaders
@@ -944,6 +945,7 @@ export class ThreeJSViewer {
     }
 
     _clearScene() {
+        this._resetAnimationState();
         for (const id of this._objects.keys()) {
             this._deleteObject(id);
         }
@@ -1031,6 +1033,17 @@ export class ThreeJSViewer {
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s`);
     }
 
+    _resetAnimationState() {
+        this._animation = null;
+        this._animationPlaying = false;
+        this._animControlsEl.classList.remove('visible');
+        this._trackMode = 'off';
+        this._trackTargetId = null;
+        this._trackHasLastPos = false;
+        this._trackInteractive = false;
+        this._updateTrackingUI();
+    }
+
     _stopAnimation() {
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
         for (const [id, baselineVisible] of this._baselineVisibility) {
@@ -1038,15 +1051,11 @@ export class ThreeJSViewer {
             if (obj) obj.visible = baselineVisible;
         }
         this._baselineVisibility.clear();
-        this._animation = null;
-        this._animationPlaying = false;
-        this._animControlsEl.classList.remove('visible');
-
-        this._trackMode = 'off';
-        this._trackTargetId = null;
-        this._trackHasLastPos = false;
-        this._trackInteractive = false;
-        this._updateTrackingUI();
+        // Reset draw ranges to full
+        for (const id of this._objects.keys()) {
+            this._setDrawRange(id, 1.0);
+        }
+        this._resetAnimationState();
     }
 
     _applyFrame(frameIndex) {
@@ -1641,6 +1650,17 @@ export class ThreeJSViewer {
                     case 'query_scene': {
                         const tree = {};
                         for (const [id, obj] of this._objects) {
+                            let drawRange = 1.0;
+                            const geom = obj.geometry;
+                            if (geom) {
+                                if (obj.userData.isPolyline) {
+                                    const max = obj.userData.maxInstanceCount;
+                                    drawRange = max > 0 ? (geom.instanceCount / max) : 1.0;
+                                } else if (obj.userData.isMesh) {
+                                    const total = obj.userData.totalIndexCount;
+                                    drawRange = total > 0 ? (geom.drawRange.count / total) : 1.0;
+                                }
+                            }
                             tree[id] = {
                                 type: obj.type,
                                 parent: obj.parent?.userData?.id || null,
@@ -1648,17 +1668,24 @@ export class ThreeJSViewer {
                                     .filter(c => c.userData?.id)
                                     .map(c => c.userData.id),
                                 visible: obj.visible,
+                                drawRange: drawRange,
                             };
                         }
                         this._ws.send(JSON.stringify({
                             type: 'query_scene_response',
                             requestId: data.requestId,
                             tree: tree,
+                            animation: { playing: this._animationPlaying },
+                            grid: { visible: this._gridHelper.visible },
                         }));
                         break;
                     }
                     case 'load_animation':
                         this._loadAnimation(data.animation);
+                        break;
+                    case 'clear_animation':  // alias for stop_animation
+                    case 'stop_animation':
+                        this._stopAnimation();
                         break;
                     case 'load_animation_http':
                         this._onFetchStart();
@@ -1897,9 +1924,6 @@ export class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'stop_animation':
-                        this._stopAnimation();
-                        break;
                     case 'set_clip_time':
                         this._setClipTime(data.id, data.time);
                         break;
@@ -1965,6 +1989,19 @@ export class ThreeJSViewer {
                         break;
                     case 'set_clipping_defaults':
                         this._clipDefaults = { normal: data.normal, distance: data.distance };
+                        break;
+                    case 'show_grid':
+                        this._gridHelper.visible = !!data.visible;
+                        if (data.size != null && data.divisions != null) {
+                            const parent = this._gridHelper.parent;
+                            parent.remove(this._gridHelper);
+                            this._gridHelper.geometry.dispose();
+                            this._gridHelper.material.dispose();
+                            this._gridHelper = new THREE.GridHelper(data.size, data.divisions);
+                            this._gridHelper.rotation.x = Math.PI / 2;
+                            this._gridHelper.visible = !!data.visible;
+                            parent.add(this._gridHelper);
+                        }
                         break;
                     case 'mark_assets_complete':
                         this._assetsComplete = true;

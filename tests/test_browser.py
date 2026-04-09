@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+from threejs_viewer import Animation, Frame
+
 
 @pytest.mark.browser
 def test_viewer_connects(viewer_client, viewer_page):
@@ -64,4 +66,77 @@ def test_clear_scene(viewer_client, viewer_page):
     viewer_client.clear()
     time.sleep(0.1)
     tree = viewer_client.query_scene()
-    assert tree == {}
+    # Only metadata keys should remain (no user objects)
+    assert "a" not in tree
+    assert "b" not in tree
+
+
+@pytest.mark.browser
+def test_stop_animation_resets_draw_range(viewer_client, viewer_page):
+    """stop_animation() resets draw ranges to full."""
+    viewer_client.add_box("box1")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[
+            Frame(time=0, transforms={}, draw_ranges={"box1": 0.5}),
+            Frame(time=1, transforms={}, draw_ranges={"box1": 0.5}),
+        ],
+        loop=False,
+    )
+    viewer_client.load_animation(anim)
+    # Wait for async HTTP animation load to complete
+    for _ in range(20):
+        time.sleep(0.1)
+        tree = viewer_client.query_scene()
+        if tree["_animation"]["playing"]:
+            break
+    assert tree["_animation"]["playing"] is True, "Animation did not start"
+    viewer_client.stop_animation()
+    time.sleep(0.1)
+    tree = viewer_client.query_scene()
+    assert tree["box1"]["drawRange"] == 1.0
+
+
+@pytest.mark.browser
+def test_clear_resets_animation_state(viewer_client, viewer_page):
+    """clear() resets animation state."""
+    viewer_client.add_box("obj1")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[
+            Frame(time=0, transforms={}),
+            Frame(time=1, transforms={}),
+        ],
+        loop=True,
+    )
+    viewer_client.load_animation(anim)
+    # Wait for async HTTP animation load to complete
+    for _ in range(20):
+        time.sleep(0.1)
+        tree = viewer_client.query_scene()
+        if tree["_animation"]["playing"]:
+            break
+    assert tree["_animation"]["playing"] is True, "Animation did not start"
+    viewer_client.clear()
+    time.sleep(0.2)
+    tree = viewer_client.query_scene()
+    assert tree["_animation"]["playing"] is False
+
+
+@pytest.mark.browser
+def test_show_grid(viewer_client, viewer_page):
+    """show_grid() toggles grid visibility."""
+    time.sleep(0.1)
+    tree = viewer_client.query_scene()
+    # Grid is hidden by default
+    assert tree["_grid"]["visible"] is False
+
+    viewer_client.show_grid(visible=True)
+    time.sleep(0.1)
+    tree = viewer_client.query_scene()
+    assert tree["_grid"]["visible"] is True
+
+    viewer_client.show_grid(visible=False)
+    time.sleep(0.1)
+    tree = viewer_client.query_scene()
+    assert tree["_grid"]["visible"] is False
