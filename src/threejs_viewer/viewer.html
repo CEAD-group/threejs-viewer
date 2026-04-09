@@ -493,17 +493,26 @@ const CLIP_AXIS_NORMALS = {
 };
 
 
+// Refresh cached refs array when the object/mixer map has changed.
+// Called at most once per frame per channel (guarded by generation check).
+function refreshRefs(refs, ids, map) {
+    for (let i = 0; i < ids.length; i++) {
+        refs[i] = map.get(ids[i]) || null;
+    }
+}
+
 // Channel apply functions — keyed by channel name
 function makeChannelApply(viewer) {
     return {
         transforms(ch, refs, base) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+                for (let i = 0; i < refs.length; i++) { if (refs[i]) refs[i].matrixAutoUpdate = false; }
+            }
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
-                let obj = refs[i];
-                if (!obj) {
-                    obj = viewer._objects.get(ch.ids[i]);
-                    if (obj) { refs[i] = obj; obj.matrixAutoUpdate = false; }
-                }
+                const obj = refs[i];
                 if (obj) {
                     obj.matrix.fromArray(ch.data, base + i * 16);
                     obj.matrixWorldNeedsUpdate = true;
@@ -512,13 +521,16 @@ function makeChannelApply(viewer) {
         },
 
         colors(ch, refs, base) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+            }
             const nObj = ch.ids.length;
             const colormap = ch.colormap;
             for (let i = 0; i < nObj; i++) {
                 const raw = ch.data[base + i];
                 const color = colormap ? colormap[raw] : raw;
-                let obj = refs[i];
-                if (!obj) { obj = viewer._objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                const obj = refs[i];
                 if (obj) {
                     obj.traverse(child => {
                         if (!child.material) return;
@@ -530,35 +542,58 @@ function makeChannelApply(viewer) {
         },
 
         visibility(ch, refs, base) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+            }
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
-                let obj = refs[i];
-                if (!obj) { obj = viewer._objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                const obj = refs[i];
                 if (obj) obj.visible = (ch.data[base + i] === 1);
             }
         },
 
         draw_ranges(ch, refs, base) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+            }
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
-                viewer._setDrawRange(ch.ids[i], ch.data[base + i]);
+                const obj = refs[i];
+                if (obj) {
+                    const value = ch.data[base + i];
+                    if (obj.userData.isPolyline) {
+                        obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                    } else if (obj.userData.isMesh) {
+                        obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+                    }
+                }
             }
         },
 
         opacity(ch, refs, base) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+            }
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
                 const val = ch.data[base + i];
-                let obj = refs[i];
-                if (!obj) { obj = viewer._objects.get(ch.ids[i]); if (obj) refs[i] = obj; }
+                const obj = refs[i];
                 if (obj) applyOpacity(obj, val);
             }
         },
 
         clip_times(ch, refs, base) {
+            if (ch._mixerGen !== viewer._mixerGeneration) {
+                refreshRefs(refs, ch.ids, viewer._mixers);
+                ch._mixerGen = viewer._mixerGeneration;
+            }
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
-                viewer._setClipTime(ch.ids[i], ch.data[base + i]);
+                const mixer = refs[i];
+                if (mixer && mixer.setTime) mixer.setTime(ch.data[base + i]);
             }
         },
 
@@ -659,7 +694,11 @@ class ThreeJSViewer {
         // State
         this._objects = new Map();
         this._mixers = new Map();
+        this._objGeneration = 0;
+        this._mixerGeneration = 0;
         this._pendingFetches = 0;
+        this._sceneGeneration = 0;
+        this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
         this._reconnectTimeout = null;
@@ -814,9 +853,10 @@ class ThreeJSViewer {
         const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
         this._scene.add(ambientLight);
 
-        // Grid helper on XY plane (Z-up)
+        // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
         this._gridHelper.rotation.x = Math.PI / 2;
+        this._gridHelper.visible = false;
         this._scene.add(this._gridHelper);
 
         // Loaders
@@ -1290,6 +1330,7 @@ class ThreeJSViewer {
                     }
                     mixer.setTime(0);
                     this._mixers.set(id, mixer);
+                    this._mixerGeneration++;
                     console.log(`Model ${id}: ${result.animations.length} animation clip(s) available`);
                 }
             } catch (e) {
@@ -1305,6 +1346,7 @@ class ThreeJSViewer {
             if (objData.visible === false) obj.visible = false;
             this._addToParentOrScene(obj, parentId);
             this._objects.set(id, obj);
+            this._objGeneration++;
             if (this._clipEnabled) this._applyClipToObject(obj);
         }
     }
@@ -1380,13 +1422,14 @@ class ThreeJSViewer {
             for (const childId of childIds) {
                 this._objects.delete(childId);
                 const childMixer = this._mixers.get(childId);
-                if (childMixer) { childMixer.stopAllAction(); this._mixers.delete(childId); }
+                if (childMixer) { childMixer.stopAllAction(); this._mixers.delete(childId); this._mixerGeneration++; }
             }
             if (obj.parent) obj.parent.remove(obj);
             this._objects.delete(id);
+            this._objGeneration++;
             this._sceneBoundsDirty = true;
             const mixer = this._mixers.get(id);
-            if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); }
+            if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse((child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 if (child.geometry) child.geometry.dispose();
@@ -1407,6 +1450,8 @@ class ThreeJSViewer {
     }
 
     _clearScene() {
+        this._sceneGeneration++;
+        this._resetAnimationState();
         for (const id of this._objects.keys()) {
             this._deleteObject(id);
         }
@@ -1422,6 +1467,7 @@ class ThreeJSViewer {
     // ========== Animation ==========
 
     _loadAnimation(animData) {
+        this._animGeneration++;
         this._animation = animData;
         this._animationTime = 0;
         this._animationPlaying = false;
@@ -1494,22 +1540,30 @@ class ThreeJSViewer {
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s`);
     }
 
-    _stopAnimation() {
-        this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
-        for (const [id, baselineVisible] of this._baselineVisibility) {
-            const obj = this._objects.get(id);
-            if (obj) obj.visible = baselineVisible;
-        }
-        this._baselineVisibility.clear();
+    _resetAnimationState() {
         this._animation = null;
         this._animationPlaying = false;
+        this._baselineVisibility.clear();
         this._animControlsEl.classList.remove('visible');
-
         this._trackMode = 'off';
         this._trackTargetId = null;
         this._trackHasLastPos = false;
         this._trackInteractive = false;
         this._updateTrackingUI();
+    }
+
+    _stopAnimation() {
+        this._animGeneration++;
+        this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
+        for (const [id, baselineVisible] of this._baselineVisibility) {
+            const obj = this._objects.get(id);
+            if (obj) obj.visible = baselineVisible;
+        }
+        // Reset draw ranges to full
+        for (const id of this._objects.keys()) {
+            this._setDrawRange(id, 1.0);
+        }
+        this._resetAnimationState();
     }
 
     _applyFrame(frameIndex) {
@@ -1768,7 +1822,7 @@ class ThreeJSViewer {
 
     _onFetchStart() { this._pendingFetches++; }
     _onFetchEnd() {
-        this._pendingFetches--;
+        this._pendingFetches = Math.max(0, this._pendingFetches - 1);
         this._maybeNotifyAssetsLoaded();
     }
 
@@ -1998,17 +2052,8 @@ class ThreeJSViewer {
     // ========== WebSocket ==========
 
     connect() {
-        // Derive HTTP URL from WS URL for the fetch probe
-        const httpUrl = this._wsUrl.replace(/^ws(s?):/, 'http$1:');
-
-        const doConnect = async () => {
+        const doConnect = () => {
             if (this._destroyed) return;
-            try {
-                await fetch(httpUrl, { mode: 'no-cors' });
-            } catch {
-                this._reconnectTimeout = setTimeout(doConnect, 1000);
-                return;
-            }
 
             this._ws = new WebSocket(this._wsUrl);
 
@@ -2016,7 +2061,12 @@ class ThreeJSViewer {
                 this._statusDot.className = 'tjsv-status-dot connected';
                 this._statusDot.title = 'Connected';
                 this._statusText.textContent = 'Connected';
-                this._pendingFetches = 0;
+                // Don't reset _pendingFetches to 0: in-flight HTTP fetches from the
+                // previous connection may still complete and run _onFetchEnd(), which
+                // would drive the counter negative. Generation counters ensure stale
+                // fetches are discarded; let their finally blocks balance the count.
+                this._sceneGeneration++;
+                this._animGeneration++;
                 this._assetsComplete = false;
                 this._ws.send(JSON.stringify({ type: 'hello', viewer_version: VIEWER_VERSION }));
             };
@@ -2059,6 +2109,7 @@ class ThreeJSViewer {
                         if (data.visible === false) group.visible = false;
                         this._addToParentOrScene(group, data.parent);
                         this._objects.set(data.id, group);
+                        this._objGeneration++;
                         break;
                     }
                     case 'add_object':
@@ -2104,6 +2155,20 @@ class ThreeJSViewer {
                     case 'query_scene': {
                         const tree = {};
                         for (const [id, obj] of this._objects) {
+                            let drawRange = 1.0;
+                            const geom = obj.geometry;
+                            if (geom) {
+                                if (obj.userData.isPolyline) {
+                                    const max = obj.userData.maxInstanceCount;
+                                    drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
+                                } else if (obj.userData.isMesh) {
+                                    const total = obj.userData.totalIndexCount;
+                                    if (total > 0) {
+                                        const cnt = geom.drawRange.count;
+                                        drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
+                                    }
+                                }
+                            }
                             tree[id] = {
                                 type: obj.type,
                                 parent: obj.parent?.userData?.id || null,
@@ -2111,25 +2176,37 @@ class ThreeJSViewer {
                                     .filter(c => c.userData?.id)
                                     .map(c => c.userData.id),
                                 visible: obj.visible,
+                                drawRange: drawRange,
                             };
                         }
                         this._ws.send(JSON.stringify({
                             type: 'query_scene_response',
                             requestId: data.requestId,
                             tree: tree,
+                            meta: {
+                                animation: { playing: this._animationPlaying },
+                                grid: { visible: this._gridHelper.visible },
+                                pending_fetches: this._pendingFetches,
+                            },
                         }));
                         break;
                     }
                     case 'load_animation':
                         this._loadAnimation(data.animation);
                         break;
-                    case 'load_animation_http':
+                    case 'load_animation_http': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        const capturedAnim = ++this._animGeneration;
                         (async () => {
                             try {
                                 const t0 = performance.now();
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
+                                    console.log('Discarding stale animation fetch');
+                                    return;
+                                }
                                 const t1 = performance.now();
                                 console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
 
@@ -2207,12 +2284,18 @@ class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'add_model_binary':
+                    }
+                    case 'add_model_binary': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const meshBytes = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale model fetch');
+                                    return;
+                                }
                                 const blob = new Blob([meshBytes]);
                                 const blobUrl = URL.createObjectURL(blob);
                                 console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
@@ -2233,12 +2316,18 @@ class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'add_polyline_binary':
+                    }
+                    case 'add_polyline_binary': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale polyline fetch');
+                                    return;
+                                }
                                 const rawData = new Uint8Array(buffer);
                                 const numPoints = data.numPoints || (rawData.length / 12);
                                 const positionBytes = numPoints * 12;
@@ -2286,6 +2375,7 @@ class ThreeJSViewer {
                                 line.userData.maxInstanceCount = numPoints - 1;
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
+                                this._objGeneration++;
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
                             } finally {
@@ -2293,12 +2383,18 @@ class ThreeJSViewer {
                             }
                         })();
                         break;
-                    case 'add_mesh_binary':
+                    }
+                    case 'add_mesh_binary': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale mesh fetch');
+                                    return;
+                                }
                                 const nv = data.numVertices;
                                 const ni = data.numIndices;
 
@@ -2352,6 +2448,8 @@ class ThreeJSViewer {
                                 mesh.userData.totalIndexCount = ni;
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
+                                this._objGeneration++;
+                                if (data.transform) this._applyTransform(mesh, data.transform);
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                             } catch (e) {
                                 console.error(`Error creating mesh:`, e);
@@ -2360,6 +2458,7 @@ class ThreeJSViewer {
                             }
                         })();
                         break;
+                    }
                     case 'stop_animation':
                         this._stopAnimation();
                         break;
@@ -2428,6 +2527,19 @@ class ThreeJSViewer {
                         break;
                     case 'set_clipping_defaults':
                         this._clipDefaults = { normal: data.normal, distance: data.distance };
+                        break;
+                    case 'show_grid':
+                        this._gridHelper.visible = !!data.visible;
+                        if (data.size != null && data.divisions != null) {
+                            const parent = this._gridHelper.parent;
+                            parent.remove(this._gridHelper);
+                            this._gridHelper.geometry.dispose();
+                            this._gridHelper.material.dispose();
+                            this._gridHelper = new THREE.GridHelper(data.size, data.divisions);
+                            this._gridHelper.rotation.x = Math.PI / 2;
+                            this._gridHelper.visible = !!data.visible;
+                            parent.add(this._gridHelper);
+                        }
                         break;
                     case 'mark_assets_complete':
                         this._assetsComplete = true;
