@@ -1101,8 +1101,8 @@ class ViewerClient:
     def clear_animation(self) -> None:
         """Stop animation without restoring baseline visibility.
 
-        Unlike stop_animation(), visibility changes made via set_scene_visibility()
-        before this call are preserved.
+        Unlike stop_animation(), this leaves the current visibility state as-is
+        instead of restoring baseline visibility.
         """
         self._current_animation = None
         self._send({"type": "clear_animation"})

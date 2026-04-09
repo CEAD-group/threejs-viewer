@@ -989,8 +989,10 @@ export class ThreeJSViewer {
     _setSceneVisibility(visibility) {
         for (const [id, visible] of Object.entries(visibility)) {
             const obj = this._objects.get(id);
-            if (obj) obj.visible = visible;
-            this._baselineVisibility.set(id, visible);
+            if (obj) {
+                obj.visible = visible;
+                this._baselineVisibility.set(id, visible);
+            }
         }
     }
 
