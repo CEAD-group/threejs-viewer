@@ -1036,6 +1036,7 @@ export class ThreeJSViewer {
     _resetAnimationState() {
         this._animation = null;
         this._animationPlaying = false;
+        this._baselineVisibility.clear();
         this._animControlsEl.classList.remove('visible');
         this._trackMode = 'off';
         this._trackTargetId = null;
@@ -1050,7 +1051,6 @@ export class ThreeJSViewer {
             const obj = this._objects.get(id);
             if (obj) obj.visible = baselineVisible;
         }
-        this._baselineVisibility.clear();
         // Reset draw ranges to full
         for (const id of this._objects.keys()) {
             this._setDrawRange(id, 1.0);
@@ -1683,7 +1683,6 @@ export class ThreeJSViewer {
                     case 'load_animation':
                         this._loadAnimation(data.animation);
                         break;
-                    case 'clear_animation':  // alias for stop_animation
                     case 'stop_animation':
                         this._stopAnimation();
                         break;

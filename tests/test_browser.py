@@ -2,6 +2,7 @@
 
 import time
 
+import numpy as np
 import pytest
 
 from threejs_viewer import Animation, Frame
@@ -74,12 +75,15 @@ def test_clear_scene(viewer_client, viewer_page):
 @pytest.mark.browser
 def test_stop_animation_resets_draw_range(viewer_client, viewer_page):
     """stop_animation() resets draw ranges to full."""
-    viewer_client.add_box("box1")
-    time.sleep(0.1)
+    # Use a real mesh so draw_range metadata (userData.isMesh, totalIndexCount) is set
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([0, 1, 2], dtype=np.uint32)
+    viewer_client.add_mesh("m1", positions, indices)
+    time.sleep(0.3)  # wait for HTTP fetch of binary mesh data
     anim = Animation(
         frames=[
-            Frame(time=0, transforms={}, draw_ranges={"box1": 0.5}),
-            Frame(time=1, transforms={}, draw_ranges={"box1": 0.5}),
+            Frame(time=0, transforms={}, draw_ranges={"m1": 0.5}),
+            Frame(time=1, transforms={}, draw_ranges={"m1": 0.5}),
         ],
         loop=False,
     )
@@ -94,7 +98,7 @@ def test_stop_animation_resets_draw_range(viewer_client, viewer_page):
     viewer_client.stop_animation()
     time.sleep(0.1)
     tree = viewer_client.query_scene()
-    assert tree["box1"]["drawRange"] == 1.0
+    assert tree["m1"]["drawRange"] == 1.0
 
 
 @pytest.mark.browser
