@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.18
+
+### New features
+
+- **Grid API** — `show_grid(visible, size, divisions)` to toggle/resize the ground grid (hidden by default)
+- **`add_mesh` transform** — `position`, `rotation`, `scale`, and `matrix` parameters for placing meshes directly
+- **`query_scene` restructured** — returns `{"objects": {...}, "meta": {...}}` with per-object `drawRange` and viewer metadata (`animation.playing`, `grid.visible`, `pending_fetches`). **Breaking**: replaces flat dict.
+
+### Bug fixes
+
+- **WebSocket fetch probe removed** — eliminates 404 spam on FastAPI/non-HTTP WS routes and ~30s initial connection delay
+- **Animation cleanup** — `stop_animation()` resets draw ranges to full; `clear()` resets animation state
+- **Async race protection** — generation counters guard all HTTP fetch handlers against stale completion after `clear_scene`, animation replacement, or reconnect
+- **Channel refs cache staleness** — object/mixer refs invalidated via generation counters on mutation, preventing stale updates after `delete_object` or ID reuse
+- **Pending fetches accounting** — counter clamped to 0 to prevent negative values from stale fetch completions after reconnect
+- **Animation generation guards** — `_stopAnimation()` and `load_animation_http` increment `_animGeneration` to discard in-flight loads
+
 ## 0.0.17
 
 ### New features

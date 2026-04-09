@@ -600,6 +600,10 @@ class ViewerClient:
         metalness: float = 0.1,
         roughness: float = 0.8,
         parent: Optional[str] = None,
+        position: Optional[list] = None,
+        rotation: Optional[list] = None,
+        scale: Optional[list] = None,
+        matrix: Optional[list] = None,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -614,6 +618,11 @@ class ViewerClient:
             opacity: Material opacity (0.0 = invisible, 1.0 = fully opaque)
             metalness: PBR metalness (0-1)
             roughness: PBR roughness (0-1)
+            parent: Optional parent group id
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
         """
         positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1)
         indices = np.ascontiguousarray(indices, dtype=np.uint32).reshape(-1)
@@ -644,6 +653,17 @@ class ViewerClient:
         }
         if parent:
             header["parent"] = parent
+        if matrix:
+            header["transform"] = {"matrix": matrix}
+        elif position or rotation or scale:
+            transform = {}
+            if position:
+                transform["position"] = position
+            if rotation:
+                transform["rotation"] = rotation
+            if scale:
+                transform["scale"] = scale
+            header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
     def _apply_colormap(
@@ -861,6 +881,27 @@ class ViewerClient:
             }
         )
 
+    def show_grid(
+        self,
+        visible: bool = True,
+        size: float | None = None,
+        divisions: int | None = None,
+    ) -> None:
+        """Show or hide the ground grid, optionally resizing it.
+
+        Args:
+            visible: Whether the grid is visible.
+            size: Grid size (side length). Applied when both size and
+                divisions are provided.
+            divisions: Number of grid divisions. Applied when both size
+                and divisions are provided.
+        """
+        msg: dict = {"type": "show_grid", "visible": visible}
+        if size is not None and divisions is not None:
+            msg["size"] = size
+            msg["divisions"] = divisions
+        self._send(msg)
+
     def clear(self) -> None:
         """Clear all objects from the scene."""
         self._send({"type": "clear_scene"})
@@ -1049,7 +1090,7 @@ class ViewerClient:
         self._send(header)
 
     def stop_animation(self) -> None:
-        """Stop animation playback and return to real-time mode."""
+        """Stop animation playback, reset draw ranges, and return to real-time mode."""
         self._current_animation = None
         self._send({"type": "stop_animation"})
 
@@ -1072,7 +1113,12 @@ class ViewerClient:
     def query_scene(self, timeout: float = 5.0) -> dict:
         """Query the viewer's scene graph.
 
-        Returns dict of {id: {type, parent, children, visible}}.
+        Returns ``{"objects": {id: {...}}, "meta": {...}}``:
+
+        - ``objects`` — dict of object IDs to
+          ``{type, parent, children, visible, drawRange}``
+        - ``meta`` — ``{animation: {playing}, grid: {visible},
+          pending_fetches: int}``
         """
         request_id = str(uuid.uuid4())
         event = threading.Event()
@@ -1086,7 +1132,10 @@ class ViewerClient:
 
         response = self._responses.pop(request_id, {})
         self._pending_responses.pop(request_id, None)
-        return response.get("tree", {})
+        return {
+            "objects": response.get("tree", {}),
+            "meta": response.get("meta", {}),
+        }
 
 
 def viewer(

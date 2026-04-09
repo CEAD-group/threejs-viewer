@@ -238,6 +238,31 @@ def test_add_mesh_opacity_default_is_one(client):
     assert header["opacity"] == 1.0
 
 
+def test_add_mesh_with_position(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx, position=[1, 2, 3])
+    header, _ = client._binary_messages[0]
+    assert header["transform"] == {"position": [1, 2, 3]}
+
+
+def test_add_mesh_with_matrix(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1]
+    client.add_mesh("m", pos, idx, matrix=mat)
+    header, _ = client._binary_messages[0]
+    assert header["transform"] == {"matrix": mat}
+
+
+def test_add_mesh_no_transform(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx)
+    header, _ = client._binary_messages[0]
+    assert "transform" not in header
+
+
 # === Toolpath.to_mesh + add_mesh ===
 
 
@@ -387,7 +412,7 @@ def test_query_scene_sends_correct_message(client):
     assert len(sent) == 1
     assert sent[0]["type"] == "query_scene"
     assert "requestId" in sent[0]
-    assert result == {}
+    assert result == {"objects": {}, "meta": {}}
 
 
 # === Clipping plane ===
