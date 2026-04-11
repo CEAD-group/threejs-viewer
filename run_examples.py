@@ -10,15 +10,14 @@ skips ahead early; otherwise the runner auto-advances on a timer.
     uv run python run_examples.py --dwell 10      # 10s per example
     uv run python run_examples.py --filter 03     # only examples containing "03"
 
-Kept in Python (not bash) so it runs on any OS the rest of the library does.
+Kept in Python rather than bash for clarity, argparse, and cross-platform
+support (POSIX termios + Windows msvcrt for the keypress-to-skip path).
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
-import signal
 import subprocess
 import sys
 import time
@@ -46,7 +45,17 @@ def wait_or_keypress(dwell: float) -> str:
         time.sleep(dwell)
         return "timeout"
 
-    # POSIX raw-mode single-keypress read with timeout via select.
+    if sys.platform == "win32":
+        import msvcrt
+
+        deadline = time.monotonic() + dwell
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                msvcrt.getwch()
+                return "key"
+            time.sleep(0.05)
+        return "timeout"
+
     import select
     import termios
     import tty
@@ -71,18 +80,11 @@ def wait_or_keypress(dwell: float) -> str:
 def kill_proc(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
-    try:
-        # Kill the whole process group so uv's child python goes too.
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    proc.terminate()
     try:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        proc.kill()
         proc.wait()
 
 
@@ -108,9 +110,8 @@ def main() -> int:
         rel = path.relative_to(ROOT)
         print(f"[{i}/{total}] starting {rel}")
         proc = subprocess.Popen(
-            ["uv", "run", str(path)],
+            [sys.executable, str(path)],
             cwd=str(ROOT),
-            start_new_session=True,  # so we can killpg the uv+python pair
         )
         reason = wait_or_keypress(args.dwell)
         if proc.poll() is None:
