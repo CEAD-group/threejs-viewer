@@ -77,8 +77,9 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - Polylines: gradient-colored with colormaps (viridis, plasma, turbo)
 - Meshes: pre-built triangle meshes via `add_mesh()` with optional vertex colors and normals
 - Beads: toolpath extrusion via `Toolpath.to_mesh()` + `add_mesh()` — 6-vertex bevelled rectangle cross-section, vectorized numpy, per-layer vertex colors
+- **Parametric tubes**: `add_parametric_tube(id, spine, widths, heights, colors=..., n_cross_section_verts=..., corner_radius_frac=...)` — variable-cross-section extruded tube built on the client from per-spine-point parameter arrays. Rounded-rectangle cross-section with torsion-free parallel-transport frames (V anchored to global +Z). Supports `draw_range` (snapped to whole ring pairs), the `draw_ranges` animation channel, and cheap color-mode swaps via `update_parametric_tube_colors(id, colors)`.
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
-- **draw_range**: polylines and meshes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
+- **draw_range**: polylines, meshes, and parametric tubes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
 - **Clipping plane**: interactive cross-section plane with GUI panel (press C to toggle). Supports single plane and slab (dual-plane) modes. Rotation gizmo for orienting the plane; arrow keys nudge position. V key snaps ortho camera to clip normal for slice inspection. Programmatic control via `set_clipping_plane(normal, distance, show_helper)` / `set_clipping_slab(normal, center, thickness, show_helper)` / `disable_clipping_plane()` / `set_clipping_defaults(normal, distance)`
 
 ### Animation: Two Approaches
@@ -118,3 +119,4 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `15_toolpath_interrupted.py` - Interrupted extrusion with travel moves: per-point width array (0=travel), pill/racetrack path with varying point density, merge_animation_points for segment-aligned animation (frame times merged into mesh geometry → no partial triangle rings)
 - `16_clipping_plane.py` - Interactive clipping plane with slab mode (nested spheres sliced to reveal internals, single plane + dual-plane slab, programmatic + GUI control)
 - `17_animation_interpolation.py` - HOLD ⇄ LINEAR comparison on a sparse (3 Hz) tumbling-capsules animation. Auto-alternates the two modes on the same `transforms` channel so the lerp/slerp effect is obvious.
+- `18_parametric_tube.py` - Variable-cross-section bead via `parametric_tube` with animated draw_range, nozzle-tip capsule indicator, and live color-mode swap through `update_parametric_tube_colors`.

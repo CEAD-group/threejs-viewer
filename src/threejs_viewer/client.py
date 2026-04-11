@@ -666,6 +666,145 @@ class ViewerClient:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
+    def add_parametric_tube(
+        self,
+        id: str,
+        spine: np.ndarray,
+        widths: np.ndarray,
+        heights: np.ndarray,
+        orientations: Optional[np.ndarray] = None,
+        colors: Optional[np.ndarray] = None,
+        cross_section: str = "rounded_rect",
+        corner_radius_frac: float = 0.25,
+        n_cross_section_verts: int = 8,
+        color: int = 0x7AB8CC,
+        opacity: float = 1.0,
+        metalness: float = 0.1,
+        roughness: float = 0.8,
+        parent: Optional[str] = None,
+        position: Optional[list] = None,
+        rotation: Optional[list] = None,
+        scale: Optional[list] = None,
+        matrix: Optional[list] = None,
+    ) -> None:
+        """Add a variable-cross-section extruded tube built from per-spine-point
+        parameters.
+
+        Geometry is built on the client from a packed bundle of parameter
+        arrays (spine + widths + heights + optional orientations + optional
+        colors) so the wire transfer stays O(N) instead of O(N * nCs). The
+        cross-section at each spine point is a rounded rectangle of size
+        (width, height) with corner radius ``corner_radius_frac * min(w, h)``.
+
+        Args:
+            id: Unique identifier.
+            spine: (N, 3) float32 polyline, N >= 2.
+            widths: (N,) float32 bead widths (same units as spine).
+            heights: (N,) float32 bead heights.
+            orientations: Optional (N, 4) float32 quaternions (x, y, z, w).
+                When omitted, the client derives torsion-free tangent frames
+                from the spine using parallel transport seeded from global Z.
+            colors: Optional (N,) uint32 packed 0x00RRGGBB per spine point.
+                Each ring is painted a single color. Use
+                ``update_parametric_tube_colors`` for cheap color-mode swaps.
+            cross_section: Cross-section profile. MVP ships ``"rounded_rect"``.
+            corner_radius_frac: Corner radius as a fraction of ``min(w, h)``,
+                clamped to ``[0, 0.5]``. ``0`` → rectangle, ``0.5`` → pill.
+            n_cross_section_verts: Vertices per ring. 8 is a good default.
+            color: Fallback color when ``colors`` is not provided.
+            opacity, metalness, roughness: Standard material properties.
+            parent: Optional parent group id.
+            position/rotation/scale/matrix: Optional local transform.
+        """
+        spine_arr = np.ascontiguousarray(spine, dtype=np.float32).reshape(-1, 3)
+        n = spine_arr.shape[0]
+        if n < 2:
+            raise ValueError(f"parametric_tube needs >= 2 spine points, got {n}")
+
+        widths_arr = np.ascontiguousarray(widths, dtype=np.float32).reshape(-1)
+        heights_arr = np.ascontiguousarray(heights, dtype=np.float32).reshape(-1)
+        if widths_arr.shape[0] != n or heights_arr.shape[0] != n:
+            raise ValueError(
+                f"widths/heights must have length {n}, got "
+                f"{widths_arr.shape[0]}/{heights_arr.shape[0]}"
+            )
+
+        parts = [
+            spine_arr.tobytes(),
+            widths_arr.tobytes(),
+            heights_arr.tobytes(),
+        ]
+        has_orientations = orientations is not None
+        if has_orientations:
+            orient_arr = np.ascontiguousarray(orientations, dtype=np.float32).reshape(
+                -1, 4
+            )
+            if orient_arr.shape[0] != n:
+                raise ValueError(
+                    f"orientations must have length {n}, got {orient_arr.shape[0]}"
+                )
+            parts.append(orient_arr.tobytes())
+
+        has_colors = colors is not None
+        if has_colors:
+            color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
+            if color_arr.shape[0] != n:
+                raise ValueError(
+                    f"colors must have length {n}, got {color_arr.shape[0]}"
+                )
+            parts.append(color_arr.tobytes())
+
+        header = {
+            "type": "add_parametric_tube_binary",
+            "id": id,
+            "numSpinePoints": n,
+            "hasOrientations": has_orientations,
+            "hasColors": has_colors,
+            "crossSection": cross_section,
+            "cornerRadiusFrac": float(corner_radius_frac),
+            "nCrossSectionVerts": int(n_cross_section_verts),
+            "color": color,
+            "opacity": opacity,
+            "metalness": metalness,
+            "roughness": roughness,
+        }
+        if parent:
+            header["parent"] = parent
+        if matrix:
+            header["transform"] = {"matrix": matrix}
+        elif position or rotation or scale:
+            transform = {}
+            if position:
+                transform["position"] = position
+            if rotation:
+                transform["rotation"] = rotation
+            if scale:
+                transform["scale"] = scale
+            header["transform"] = transform
+        self._send_binary(header, b"".join(parts))
+
+    def update_parametric_tube_colors(
+        self,
+        id: str,
+        colors: np.ndarray,
+    ) -> None:
+        """Swap the per-ring colors on an existing parametric_tube without
+        rebuilding its geometry. Typical use: interactive color-mode switching
+        in a toolpath preview (layer → feed rate → curvature → ...).
+
+        Args:
+            id: Target parametric_tube id.
+            colors: (N,) uint32 packed 0x00RRGGBB, one value per spine point.
+                Length must match the tube's spine length.
+        """
+        color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
+        header = {
+            "type": "update_parametric_tube_colors",
+            "id": id,
+            "numSpinePoints": int(color_arr.shape[0]),
+        }
+        self._send_binary(header, color_arr.tobytes())
+
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
     ) -> np.ndarray:

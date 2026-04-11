@@ -188,6 +188,14 @@ function makeChannelApply(viewer) {
                 }
                 if (obj.userData.isPolyline) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                } else if (obj.userData.isParametricTube) {
+                    // Snap DOWN to whole ring pairs so the reveal edge is
+                    // always a clean cross-section and never overshoots the
+                    // requested fraction.
+                    const ringPairs = obj.userData.tubeRingPairs;
+                    const perPair = obj.userData.tubeIndicesPerRingPair;
+                    const clamped = Math.max(0, Math.min(1, value));
+                    obj.geometry.setDrawRange(0, Math.floor(clamped * ringPairs) * perPair);
                 } else if (obj.userData.isMesh) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
                 }
@@ -277,6 +285,228 @@ const PRIMITIVES = {
         params.capSegments || 8, params.radialSegments || 16
     )
 };
+
+// Sample a rounded-rectangle cross-section in the local (u, v) plane.
+// Points are uniformly distributed in angle, CCW, starting at +u.
+// Radius is clamped to corner_radius_frac * min(width, height) with
+// corner_radius_frac in [0, 0.5]. Returns an (n, 2) Float32Array.
+function sampleRoundedRect(width, height, nVerts, cornerRadiusFrac) {
+    const hw = Math.max(width * 0.5, 1e-12);
+    const hh = Math.max(height * 0.5, 1e-12);
+    const frac = Math.max(0, Math.min(0.5, cornerRadiusFrac));
+    const r = frac * Math.min(width, height);
+    const cxA = hw - r;
+    const cyA = hh - r;
+    const out = new Float32Array(nVerts * 2);
+    for (let i = 0; i < nVerts; i++) {
+        const theta = (i / nVerts) * Math.PI * 2;
+        const cx = Math.cos(theta);
+        const cy = Math.sin(theta);
+        // Straight-edge hits.
+        let u, v;
+        if (cx !== 0 && Math.abs(cy / cx) * hw <= cyA) {
+            // Right / left edge at x = ±hw.
+            const sx = cx > 0 ? 1 : -1;
+            u = sx * hw;
+            v = u * cy / cx;
+        } else if (cy !== 0 && Math.abs(cx / cy) * hh <= cxA) {
+            // Top / bottom edge at y = ±hh.
+            const sy = cy > 0 ? 1 : -1;
+            v = sy * hh;
+            u = v * cx / cy;
+        } else {
+            // Corner arc: circle centered at (sx*cxA, sy*cyA) radius r.
+            const sx = cx >= 0 ? 1 : -1;
+            const sy = cy >= 0 ? 1 : -1;
+            const ccx = sx * cxA;
+            const ccy = sy * cyA;
+            const b = ccx * cx + ccy * cy;
+            const c = ccx * ccx + ccy * ccy - r * r;
+            const disc = Math.max(b * b - c, 0);
+            const t = b + Math.sqrt(disc);
+            u = t * cx;
+            v = t * cy;
+        }
+        out[i * 2] = u;
+        out[i * 2 + 1] = v;
+    }
+    return out;
+}
+
+// Build a variable-cross-section tube BufferGeometry from per-spine-point
+// parameter arrays. Topology: nSpine rings × nCs vertices, connected by
+// quad strips into (nSpine - 1) ring pairs. All rings share the same
+// azimuthal ordering so indices are consistent.
+//
+// - spine:        Float32Array length nSpine*3
+// - widths:       Float32Array length nSpine
+// - heights:      Float32Array length nSpine
+// - orientations: Float32Array length nSpine*4 quaternions, or null (client-derived)
+// - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
+// - crossSection: "rounded_rect"
+// - cornerRadiusFrac: number in [0, 0.5]
+// - nCs:          number of cross-section vertices
+//
+// Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
+function buildParametricTubeGeometry(
+    spine, widths, heights,
+    orientations, ringColors,
+    crossSection, cornerRadiusFrac, nCs,
+) {
+    if (crossSection !== 'rounded_rect') {
+        throw new Error(`Unsupported cross_section '${crossSection}'`);
+    }
+    const nSpine = spine.length / 3;
+    if (nSpine < 2) {
+        throw new Error(`parametric_tube needs >=2 spine points, got ${nSpine}`);
+    }
+
+    const positions = new Float32Array(nSpine * nCs * 3);
+    const colors = ringColors ? new Float32Array(nSpine * nCs * 3) : null;
+
+    // Compute local frames: tangent T + width axis U + height axis V.
+    // V is anchored to global +Z (up) so "height" means "up" for
+    // horizontal beads. Parallel-transport (U, V) along the spine so
+    // there is no azimuthal drift at curvature changes. When the tangent
+    // is parallel to global up (vertical bead), seed V from global +X.
+    const _T = new THREE.Vector3();
+    const _U = new THREE.Vector3();
+    const _V = new THREE.Vector3();
+    const _prevT = new THREE.Vector3();
+    const _axis = new THREE.Vector3();
+    const _quat = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 0, 1);
+    const upFallback = new THREE.Vector3(1, 0, 0);
+
+    // Precompute tangents via central difference.
+    const tangents = new Float32Array(nSpine * 3);
+    for (let i = 0; i < nSpine; i++) {
+        const iPrev = Math.max(i - 1, 0);
+        const iNext = Math.min(i + 1, nSpine - 1);
+        let tx = spine[iNext * 3] - spine[iPrev * 3];
+        let ty = spine[iNext * 3 + 1] - spine[iPrev * 3 + 1];
+        let tz = spine[iNext * 3 + 2] - spine[iPrev * 3 + 2];
+        const len = Math.hypot(tx, ty, tz);
+        if (len > 1e-12) { tx /= len; ty /= len; tz /= len; }
+        else { tx = 1; ty = 0; tz = 0; }
+        tangents[i * 3] = tx;
+        tangents[i * 3 + 1] = ty;
+        tangents[i * 3 + 2] = tz;
+    }
+
+    for (let i = 0; i < nSpine; i++) {
+        _T.set(tangents[i * 3], tangents[i * 3 + 1], tangents[i * 3 + 2]);
+        if (orientations) {
+            _quat.set(
+                orientations[i * 4],
+                orientations[i * 4 + 1],
+                orientations[i * 4 + 2],
+                orientations[i * 4 + 3],
+            );
+            _U.set(1, 0, 0).applyQuaternion(_quat);
+            _V.set(0, 1, 0).applyQuaternion(_quat);
+        } else if (i === 0) {
+            const seed = Math.abs(_T.dot(up)) > 0.99 ? upFallback : up;
+            _V.copy(seed).addScaledVector(_T, -seed.dot(_T)).normalize();
+            _U.copy(_V).cross(_T).normalize();
+            _V.copy(_T).cross(_U).normalize();
+        } else {
+            // Parallel-transport previous U/V across the tangent rotation.
+            _axis.copy(_prevT).cross(_T);
+            const sinA = _axis.length();
+            const cosA = _prevT.dot(_T);
+            if (sinA > 1e-9) {
+                _axis.divideScalar(sinA);
+                const angle = Math.atan2(sinA, cosA);
+                _quat.setFromAxisAngle(_axis, angle);
+                _U.applyQuaternion(_quat).normalize();
+                _V.applyQuaternion(_quat).normalize();
+            }
+            // Orthonormalize against current tangent to prevent drift.
+            _U.addScaledVector(_T, -_U.dot(_T)).normalize();
+            _V.copy(_T).cross(_U).normalize();
+        }
+        _prevT.copy(_T);
+
+        const w = widths[i];
+        const h = heights[i];
+        const section = sampleRoundedRect(w, h, nCs, cornerRadiusFrac);
+        const sx = spine[i * 3];
+        const sy = spine[i * 3 + 1];
+        const sz = spine[i * 3 + 2];
+        const ringBase = i * nCs * 3;
+        for (let j = 0; j < nCs; j++) {
+            const u = section[j * 2];
+            const v = section[j * 2 + 1];
+            positions[ringBase + j * 3] = sx + u * _U.x + v * _V.x;
+            positions[ringBase + j * 3 + 1] = sy + u * _U.y + v * _V.y;
+            positions[ringBase + j * 3 + 2] = sz + u * _U.z + v * _V.z;
+        }
+        if (colors) {
+            const r = ringColors[i * 3];
+            const g = ringColors[i * 3 + 1];
+            const b = ringColors[i * 3 + 2];
+            for (let j = 0; j < nCs; j++) {
+                colors[ringBase + j * 3] = r;
+                colors[ringBase + j * 3 + 1] = g;
+                colors[ringBase + j * 3 + 2] = b;
+            }
+        }
+    }
+
+    // Index buffer: two triangles per quad, nCs quads per ring pair, (nSpine-1) ring pairs.
+    const ringPairs = nSpine - 1;
+    const indicesPerRingPair = nCs * 6;
+    const indexCount = ringPairs * indicesPerRingPair;
+    const IndexCtor = (nSpine * nCs) > 65535 ? Uint32Array : Uint16Array;
+    const indices = new IndexCtor(indexCount);
+    let p = 0;
+    for (let i = 0; i < ringPairs; i++) {
+        const a0 = i * nCs;
+        const b0 = (i + 1) * nCs;
+        for (let j = 0; j < nCs; j++) {
+            const jNext = (j + 1) % nCs;
+            const a = a0 + j;
+            const b = a0 + jNext;
+            const c = b0 + jNext;
+            const d = b0 + j;
+            indices[p++] = a;
+            indices[p++] = b;
+            indices[p++] = c;
+            indices[p++] = a;
+            indices[p++] = c;
+            indices[p++] = d;
+        }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeVertexNormals();
+
+    return { geometry, ringPairs, indicesPerRingPair, nCs };
+}
+
+// Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
+// attribute of length nSpine*nCs*3, replicating each ring color across its nCs
+// vertices. Used at tube creation and by update_parametric_tube_colors.
+function expandRingColors(packedColors, nSpine, nCs) {
+    const out = new Float32Array(nSpine * nCs * 3);
+    for (let i = 0; i < nSpine; i++) {
+        const c = packedColors[i];
+        const r = ((c >> 16) & 0xff) / 255;
+        const g = ((c >> 8) & 0xff) / 255;
+        const b = (c & 0xff) / 255;
+        const base = i * nCs * 3;
+        for (let j = 0; j < nCs; j++) {
+            out[base + j * 3] = r;
+            out[base + j * 3 + 1] = g;
+            out[base + j * 3 + 2] = b;
+        }
+    }
+    return out;
+}
 
 export class ThreeJSViewer {
     /**
@@ -1035,6 +1265,11 @@ export class ThreeJSViewer {
         if (!obj) return;
         if (obj.userData.isPolyline) {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+        } else if (obj.userData.isParametricTube) {
+            const ringPairs = obj.userData.tubeRingPairs;
+            const perPair = obj.userData.tubeIndicesPerRingPair;
+            const nPairs = Math.round(Math.max(0, Math.min(1, value)) * ringPairs);
+            obj.geometry.setDrawRange(0, nPairs * perPair);
         } else if (obj.userData.isMesh) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         }
@@ -1886,7 +2121,7 @@ export class ThreeJSViewer {
                                 if (obj.userData.isPolyline) {
                                     const max = obj.userData.maxInstanceCount;
                                     drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
-                                } else if (obj.userData.isMesh) {
+                                } else if (obj.userData.isMesh || obj.userData.isParametricTube) {
                                     const total = obj.userData.totalIndexCount;
                                     if (total > 0) {
                                         const cnt = geom.drawRange.count;
@@ -2183,6 +2418,125 @@ export class ThreeJSViewer {
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                             } catch (e) {
                                 console.error(`Error creating mesh:`, e);
+                            } finally {
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
+                    case 'add_parametric_tube_binary': {
+                        this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale parametric tube fetch');
+                                    return;
+                                }
+                                const n = data.numSpinePoints;
+                                let offset = 0;
+                                const spine = new Float32Array(buffer, offset, n * 3);
+                                offset += n * 3 * 4;
+                                const widths = new Float32Array(buffer, offset, n);
+                                offset += n * 4;
+                                const heights = new Float32Array(buffer, offset, n);
+                                offset += n * 4;
+                                let orientations = null;
+                                if (data.hasOrientations) {
+                                    orientations = new Float32Array(buffer, offset, n * 4);
+                                    offset += n * 4 * 4;
+                                }
+                                let ringColors = null;
+                                if (data.hasColors) {
+                                    const packed = new Uint32Array(buffer, offset, n);
+                                    offset += n * 4;
+                                    // Decode packed uint32 0x00RRGGBB → Float32Array(n*3).
+                                    ringColors = new Float32Array(n * 3);
+                                    for (let i = 0; i < n; i++) {
+                                        const c = packed[i];
+                                        ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
+                                        ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                        ringColors[i * 3 + 2] = (c & 0xff) / 255;
+                                    }
+                                }
+                                const nCs = data.nCrossSectionVerts || 8;
+                                const { geometry, ringPairs, indicesPerRingPair } = buildParametricTubeGeometry(
+                                    spine, widths, heights,
+                                    orientations, ringColors,
+                                    data.crossSection || 'rounded_rect',
+                                    data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25,
+                                    nCs,
+                                );
+                                const hasColors = !!ringColors;
+                                const opacity = data.opacity !== undefined ? data.opacity : 1;
+                                const material = new THREE.MeshStandardMaterial({
+                                    color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
+                                    metalness: data.metalness !== undefined ? data.metalness : 0.1,
+                                    roughness: data.roughness !== undefined ? data.roughness : 0.8,
+                                    opacity,
+                                    transparent: opacity < 1,
+                                    depthWrite: opacity >= 1,
+                                    side: THREE.DoubleSide,
+                                    vertexColors: hasColors,
+                                    clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+                                });
+                                const mesh = new THREE.Mesh(geometry, material);
+                                mesh.name = data.id;
+                                mesh.userData.id = data.id;
+                                mesh.userData.isParametricTube = true;
+                                mesh.userData.tubeNumSpinePoints = n;
+                                mesh.userData.tubeNCs = nCs;
+                                mesh.userData.tubeRingPairs = ringPairs;
+                                mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
+                                mesh.userData.totalIndexCount = ringPairs * indicesPerRingPair;
+                                mesh.userData.tubeHasColors = hasColors;
+                                this._addToParentOrScene(mesh, data.parent);
+                                this._objects.set(data.id, mesh);
+                                this._objGeneration++;
+                                if (data.transform) this._applyTransform(mesh, data.transform);
+                                console.log(`Created parametric_tube ${data.id}: ${n} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs`);
+                            } catch (e) {
+                                console.error(`Error creating parametric_tube:`, e);
+                            } finally {
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
+                    case 'update_parametric_tube_colors': {
+                        this._onFetchStart();
+                        (async () => {
+                            try {
+                                const obj = this._objects.get(data.id);
+                                if (!obj || !obj.userData.isParametricTube) {
+                                    console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                    return;
+                                }
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                const n = obj.userData.tubeNumSpinePoints;
+                                const nCs = obj.userData.tubeNCs;
+                                if (buffer.byteLength < n * 4) {
+                                    console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${n * 4})`);
+                                    return;
+                                }
+                                const packed = new Uint32Array(buffer, 0, n);
+                                const colors = expandRingColors(packed, n, nCs);
+                                const existing = obj.geometry.getAttribute('color');
+                                if (existing && existing.array.length === colors.length) {
+                                    existing.array.set(colors);
+                                    existing.needsUpdate = true;
+                                } else {
+                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                                }
+                                obj.material.vertexColors = true;
+                                obj.material.color.setHex(0xffffff);
+                                obj.material.needsUpdate = true;
+                                obj.userData.tubeHasColors = true;
+                            } catch (e) {
+                                console.error(`Error updating parametric_tube colors:`, e);
                             } finally {
                                 this._onFetchEnd();
                             }
