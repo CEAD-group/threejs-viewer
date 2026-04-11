@@ -184,7 +184,12 @@ def test_hold_interp_draw_range_midpoint(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
-    """Transforms are slerped/lerped at midpoint by default (linear)."""
+    """Transforms are slerped/lerped at midpoint by default (linear).
+
+    This exercises the JSON Frame fallback path (not the binary channel
+    path): the Animation carries plain Frame objects, so the viewer's
+    JSON applier is responsible for the midpoint lerp.
+    """
     viewer_client.add_box("b1")
     time.sleep(0.1)
 
@@ -219,3 +224,164 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
         }"""
     )
     assert abs(x - 5.0) < 0.1, f"expected ~5.0 at midpoint, got {x}"
+
+
+def _wait_for_playing(viewer_client):
+    for _ in range(20):
+        time.sleep(0.1)
+        if viewer_client.query_scene()["meta"]["animation"]["playing"]:
+            return
+    raise AssertionError("animation did not start playing within timeout")
+
+
+def _object_hex(page, object_id):
+    """Return the first material's hex color for an object in the scene."""
+    return page.evaluate(
+        """(id) => {
+            const v = window.threejsViewer;
+            const obj = v._objects.get(id);
+            if (!obj) return null;
+            let hex = null;
+            obj.traverse(c => {
+                if (hex !== null || !c.material) return;
+                const mats = Array.isArray(c.material) ? c.material : [c.material];
+                for (const m of mats) { if (m.color) { hex = m.color.getHex(); return; } }
+            });
+            return hex;
+        }""",
+        object_id,
+    )
+
+
+@pytest.mark.browser
+def test_colors_channel_lerps_rgb_midpoint(viewer_client, viewer_page):
+    """uint32 'colors' binary channel lerps hex values in 8-bit RGB."""
+    viewer_client.add_box("cb1")
+    time.sleep(0.1)
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    # Red (0xFF0000) → Blue (0x0000FF). Midpoint component-wise:
+    # R: 255→0 = 127/128, B: 0→255 = 127/128, G stays 0.
+    anim.add_channel(
+        "colors",
+        ["cb1"],
+        np.array([[0xFF0000], [0x0000FF]], dtype=np.uint32),
+        dtype="uint32",
+        stride=1,
+    )
+    # Pin a static identity transform — load_animation needs at least one
+    # driving channel to progress.
+    identity = np.tile(np.eye(4, dtype=np.float32).flatten(), (2, 1, 1)).reshape(
+        2, 1, 16
+    )
+    anim.set_transform_data(["cb1"], identity)
+    viewer_client.load_animation(anim)
+    _wait_for_playing(viewer_client)
+
+    _pause_and_seek_to_midpoint(viewer_page)
+    time.sleep(0.05)
+
+    hex_mid = _object_hex(viewer_page, "cb1")
+    r = (hex_mid >> 16) & 0xFF
+    g = (hex_mid >> 8) & 0xFF
+    b = hex_mid & 0xFF
+    assert abs(r - 127) <= 1, f"R expected ~127, got {r}"
+    assert g == 0, f"G expected 0, got {g}"
+    assert abs(b - 127) <= 1, f"B expected ~127, got {b}"
+
+
+@pytest.mark.browser
+def test_colors_channel_colormap_lerps_midpoint(viewer_client, viewer_page):
+    """uint8 'colors' channel with a colormap lerps palette entries in RGB."""
+    viewer_client.add_box("cb2")
+    time.sleep(0.1)
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    # Palette: index 0 = pure red, index 1 = pure green. Midpoint R≈127, G≈127.
+    anim.add_channel(
+        "colors",
+        ["cb2"],
+        np.array([[0], [1]], dtype=np.uint8),
+        dtype="uint8",
+        stride=1,
+        metadata={"colormap": [0xFF0000, 0x00FF00]},
+    )
+    identity = np.tile(np.eye(4, dtype=np.float32).flatten(), (2, 1, 1)).reshape(
+        2, 1, 16
+    )
+    anim.set_transform_data(["cb2"], identity)
+    viewer_client.load_animation(anim)
+    _wait_for_playing(viewer_client)
+
+    _pause_and_seek_to_midpoint(viewer_page)
+    time.sleep(0.05)
+
+    hex_mid = _object_hex(viewer_page, "cb2")
+    r = (hex_mid >> 16) & 0xFF
+    g = (hex_mid >> 8) & 0xFF
+    b = hex_mid & 0xFF
+    assert abs(r - 127) <= 1, f"R expected ~127, got {r}"
+    assert abs(g - 127) <= 1, f"G expected ~127, got {g}"
+    assert b == 0, f"B expected 0, got {b}"
+
+
+@pytest.mark.browser
+def test_visibility_channel_always_holds_even_when_linear(viewer_client, viewer_page):
+    """visibility is boolean — requesting interpolation='linear' must still hold."""
+    viewer_client.add_box("vb1")
+    time.sleep(0.1)
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    anim.add_channel(
+        "visibility",
+        ["vb1"],
+        np.array([[1], [0]], dtype=np.uint8),
+        dtype="uint8",
+        stride=1,
+        interpolation="linear",  # deliberately wrong — should be ignored
+    )
+    identity = np.tile(np.eye(4, dtype=np.float32).flatten(), (2, 1, 1)).reshape(
+        2, 1, 16
+    )
+    anim.set_transform_data(["vb1"], identity)
+    viewer_client.load_animation(anim)
+    _wait_for_playing(viewer_client)
+
+    _pause_and_seek_to_midpoint(viewer_page)
+    time.sleep(0.05)
+
+    # Midpoint hold on floor keyframe → object is still visible.
+    visible = viewer_page.evaluate(
+        """() => window.threejsViewer._objects.get('vb1').visible"""
+    )
+    assert visible is True, "visibility should left-hold the floor keyframe"
+
+
+@pytest.mark.browser
+def test_json_frame_colors_lerp_midpoint(viewer_client, viewer_page):
+    """JSON Frame.colors field lerps in 8-bit RGB via the fallback path."""
+    viewer_client.add_box("jc1")
+    time.sleep(0.1)
+
+    identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    anim = Animation(
+        frames=[
+            Frame(time=0.0, transforms={"jc1": identity}, colors={"jc1": 0xFF0000}),
+            Frame(time=1.0, transforms={"jc1": identity}, colors={"jc1": 0x0000FF}),
+        ],
+        loop=False,
+    )
+    viewer_client.load_animation(anim)
+    _wait_for_playing(viewer_client)
+
+    _pause_and_seek_to_midpoint(viewer_page)
+    time.sleep(0.05)
+
+    hex_mid = _object_hex(viewer_page, "jc1")
+    r = (hex_mid >> 16) & 0xFF
+    b = hex_mid & 0xFF
+    assert abs(r - 127) <= 1, f"R expected ~127, got {r}"
+    assert abs(b - 127) <= 1, f"B expected ~127, got {b}"

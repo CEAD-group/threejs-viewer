@@ -1216,10 +1216,13 @@ export class ThreeJSViewer {
 
         const frames = this._animation.frames;
         const frame = frames[frameIndex];
-        // Between-keyframe lerp is only meaningful when t is in (0, 1) and
-        // there's actually a next keyframe. Individual channels/fields then
-        // still make their own "linear vs hold" decision.
-        const hasNext = t > 1e-6 && t < 1 - 1e-6 && frameIndex < frames.length - 1;
+        // Between-keyframe lerp needs a next keyframe and a non-zero t. We
+        // skip the lerp at t≈0 as a no-op optimization; there is no upper
+        // epsilon because t is always in [0, 1) from _getFrameAtTime and
+        // clamping near 1 would produce a visible "hold" stutter on the last
+        // sliver of each interval. Channels still make their own linear/hold
+        // decision on top of this.
+        const hasNext = t > 1e-6 && frameIndex < frames.length - 1;
         const nextFrame = hasNext ? frames[frameIndex + 1] : null;
 
         if (this._animation.channels) {
