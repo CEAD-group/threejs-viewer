@@ -749,36 +749,49 @@ const PRIMITIVES = {
     )
 };
 
-// Sample a rounded-rectangle cross-section in the local (u, v) plane.
-// Points are uniformly distributed in angle, CCW, starting at +u.
-// Radius is clamped to corner_radius_frac * min(width, height) with
-// corner_radius_frac in [0, 0.5]. Returns an (n, 2) Float32Array.
-function sampleRoundedRect(width, height, nVerts, cornerRadiusFrac) {
+// Precompute the unit-circle cos/sin ray directions for an n-vertex
+// cross-section. The angles are ring-independent, so we compute them once
+// per buildParametricTubeGeometry call and reuse across all spine points.
+function buildCrossSectionAngleTable(nVerts) {
+    const cosTable = new Float32Array(nVerts);
+    const sinTable = new Float32Array(nVerts);
+    for (let i = 0; i < nVerts; i++) {
+        const theta = (i / nVerts) * Math.PI * 2;
+        cosTable[i] = Math.cos(theta);
+        sinTable[i] = Math.sin(theta);
+    }
+    return { cosTable, sinTable };
+}
+
+// Sample a rounded-rectangle cross-section in the local (u, v) plane into
+// a caller-provided scratch buffer. Uses a precomputed cos/sin angle table
+// so the inner loop allocates nothing.
+// Radius is clamped to cornerRadiusFrac * min(width, height) with
+// cornerRadiusFrac in [0, 0.5].
+function sampleRoundedRectInto(out, width, height, cornerRadiusFrac, cosTable, sinTable) {
+    const nVerts = cosTable.length;
     const hw = Math.max(width * 0.5, 1e-12);
     const hh = Math.max(height * 0.5, 1e-12);
     const frac = Math.max(0, Math.min(0.5, cornerRadiusFrac));
     const r = frac * Math.min(width, height);
     const cxA = hw - r;
     const cyA = hh - r;
-    const out = new Float32Array(nVerts * 2);
     for (let i = 0; i < nVerts; i++) {
-        const theta = (i / nVerts) * Math.PI * 2;
-        const cx = Math.cos(theta);
-        const cy = Math.sin(theta);
-        // Straight-edge hits.
+        const cx = cosTable[i];
+        const cy = sinTable[i];
         let u, v;
         if (cx !== 0 && Math.abs(cy / cx) * hw <= cyA) {
-            // Right / left edge at x = ±hw.
+            // Right / left flat edge at x = ±hw.
             const sx = cx > 0 ? 1 : -1;
             u = sx * hw;
             v = u * cy / cx;
         } else if (cy !== 0 && Math.abs(cx / cy) * hh <= cxA) {
-            // Top / bottom edge at y = ±hh.
+            // Top / bottom flat edge at y = ±hh.
             const sy = cy > 0 ? 1 : -1;
             v = sy * hh;
             u = v * cx / cy;
         } else {
-            // Corner arc: circle centered at (sx*cxA, sy*cyA) radius r.
+            // Corner arc: circle centered at (±cxA, ±cyA) radius r.
             const sx = cx >= 0 ? 1 : -1;
             const sy = cy >= 0 ? 1 : -1;
             const ccx = sx * cxA;
@@ -793,7 +806,6 @@ function sampleRoundedRect(width, height, nVerts, cornerRadiusFrac) {
         out[i * 2] = u;
         out[i * 2 + 1] = v;
     }
-    return out;
 }
 
 // Build a variable-cross-section tube BufferGeometry from per-spine-point
@@ -826,6 +838,8 @@ function buildParametricTubeGeometry(
 
     const positions = new Float32Array(nSpine * nCs * 3);
     const colors = ringColors ? new Float32Array(nSpine * nCs * 3) : null;
+    const { cosTable, sinTable } = buildCrossSectionAngleTable(nCs);
+    const section = new Float32Array(nCs * 2);
 
     // Compute local frames: tangent T + width axis U + height axis V.
     // V is anchored to global +Z (up) so "height" means "up" for
@@ -893,7 +907,7 @@ function buildParametricTubeGeometry(
 
         const w = widths[i];
         const h = heights[i];
-        const section = sampleRoundedRect(w, h, nCs, cornerRadiusFrac);
+        sampleRoundedRectInto(section, w, h, cornerRadiusFrac, cosTable, sinTable);
         const sx = spine[i * 3];
         const sy = spine[i * 3 + 1];
         const sz = spine[i * 3 + 2];
@@ -2970,15 +2984,20 @@ class ThreeJSViewer {
                     }
                     case 'update_parametric_tube_colors': {
                         this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
                         (async () => {
                             try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale parametric tube color fetch');
+                                    return;
+                                }
                                 const obj = this._objects.get(data.id);
                                 if (!obj || !obj.userData.isParametricTube) {
                                     console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
                                     return;
                                 }
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
                                 const n = obj.userData.tubeNumSpinePoints;
                                 const nCs = obj.userData.tubeNCs;
                                 if (buffer.byteLength < n * 4) {
