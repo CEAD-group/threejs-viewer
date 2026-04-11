@@ -51,27 +51,14 @@ v.add_model_binary("avocado", model_paths["avocado"], format="glb", y_up=True)
 
 # Place morphcube at origin, raised slightly
 CUBE_SCALE = 0.5
-v.set_matrix(
-    "morphcube",
-    [
-        CUBE_SCALE,
-        0,
-        0,
-        0,
-        0,
-        CUBE_SCALE,
-        0,
-        0,
-        0,
-        0,
-        CUBE_SCALE,
-        0,
-        0,
-        0,
-        1,
-        1,
-    ],
-)
+# fmt: off
+v.set_matrix("morphcube", [
+    CUBE_SCALE, 0,          0,          0,
+    0,          CUBE_SCALE, 0,          0,
+    0,          0,          CUBE_SCALE, 0,
+    0,          0,          1,          1,
+])
+# fmt: on
 
 # The AnimatedMorphCube clip is ~3 seconds long
 CLIP_DURATION = 3.0

@@ -38,47 +38,129 @@ function refreshRefs(refs, ids, map) {
     }
 }
 
-// Channel apply functions — keyed by channel name
+// Scratch objects for matrix decompose/lerp. Module-scope to avoid per-frame alloc.
+const _lerpPosA = new THREE.Vector3();
+const _lerpPosB = new THREE.Vector3();
+const _lerpScaleA = new THREE.Vector3();
+const _lerpScaleB = new THREE.Vector3();
+const _lerpQuatA = new THREE.Quaternion();
+const _lerpQuatB = new THREE.Quaternion();
+const _lerpMatTmp = new THREE.Matrix4();
+const _lerpMatOut = new THREE.Matrix4();
+
+// Decompose two matrices (from a typed array or plain array) and write the
+// linearly-interpolated pos/slerped-quat/linearly-interpolated-scale recomposition
+// into `outMat`. Both sources are 16-element flat matrices (column-major).
+function lerpMatrixInto(srcA, baseA, srcB, baseB, t, outMat) {
+    _lerpMatTmp.fromArray(srcA, baseA);
+    _lerpMatTmp.decompose(_lerpPosA, _lerpQuatA, _lerpScaleA);
+    _lerpMatTmp.fromArray(srcB, baseB);
+    _lerpMatTmp.decompose(_lerpPosB, _lerpQuatB, _lerpScaleB);
+    _lerpPosA.lerp(_lerpPosB, t);
+    _lerpScaleA.lerp(_lerpScaleB, t);
+    _lerpQuatA.slerp(_lerpQuatB, t);
+    outMat.compose(_lerpPosA, _lerpQuatA, _lerpScaleA);
+}
+
+// Returns true when a channel should interpolate linearly between `base` and
+// `baseNext`. Every channel carries its own explicit interpolation mode, set
+// Python-side per channel — this function just checks that mode plus the
+// standard guards (there is a next keyframe and we're between keyframes).
+// Visibility overrides this to always hold (see visibility applier).
+function shouldInterpChannel(ch, baseNext, t) {
+    if (baseNext === null || t <= 0) return false;
+    return ch.interpolation === 'linear';
+}
+
+// Linear-interpolate two hex colors in 8-bit RGB space. Alpha byte (top 8
+// bits) is preserved from `a`; three.js only consumes the low 24 bits.
+function lerpHexColor(a, b, t) {
+    const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+    const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+    const r = Math.round(ar + (br - ar) * t);
+    const g = Math.round(ag + (bg - ag) * t);
+    const bl = Math.round(ab + (bb - ab) * t);
+    return (r << 16) | (g << 8) | bl;
+}
+
+// Normalize interpolation metadata from the wire. Accepts only 'hold' and
+// 'linear'; anything else (null, undefined, typo like 'cubic') falls back
+// to the provided default so stray strings can't silently switch playback
+// semantics.
+function sanitizeInterpolation(value, fallback) {
+    if (value === 'hold' || value === 'linear') return value;
+    if (value != null) {
+        console.warn(`Unknown interpolation '${value}', falling back to '${fallback}'`);
+    }
+    return fallback;
+}
+
+// Channel apply functions — keyed by channel name. Signature is
+// (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
+// is null or t <= 0, all channels take the step path (current keyframe only).
 function makeChannelApply(viewer) {
     return {
-        transforms(ch, refs, base) {
+        transforms(ch, refs, base, baseNext, t) {
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
                 for (let i = 0; i < refs.length; i++) { if (refs[i]) refs[i].matrixAutoUpdate = false; }
             }
             const nObj = ch.ids.length;
-            for (let i = 0; i < nObj; i++) {
-                const obj = refs[i];
-                if (obj) {
-                    obj.matrix.fromArray(ch.data, base + i * 16);
-                    obj.matrixWorldNeedsUpdate = true;
+            if (shouldInterpChannel(ch, baseNext, t)) {
+                for (let i = 0; i < nObj; i++) {
+                    const obj = refs[i];
+                    if (obj) {
+                        lerpMatrixInto(ch.data, base + i * 16, ch.data, baseNext + i * 16, t, _lerpMatOut);
+                        obj.matrix.copy(_lerpMatOut);
+                        obj.matrixWorldNeedsUpdate = true;
+                    }
+                }
+            } else {
+                for (let i = 0; i < nObj; i++) {
+                    const obj = refs[i];
+                    if (obj) {
+                        obj.matrix.fromArray(ch.data, base + i * 16);
+                        obj.matrixWorldNeedsUpdate = true;
+                    }
                 }
             }
         },
 
-        colors(ch, refs, base) {
+        colors(ch, refs, base, baseNext, t) {
+            // Linear mode crossfades hex values component-wise in RGB space.
+            // Indexed colors (uint8 + colormap) look up both endpoints in the
+            // palette and lerp the resulting hex — consistent with direct-hex.
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
             }
             const nObj = ch.ids.length;
             const colormap = ch.colormap;
+            const interp = shouldInterpChannel(ch, baseNext, t);
             for (let i = 0; i < nObj; i++) {
-                const raw = ch.data[base + i];
-                const color = colormap ? colormap[raw] : raw;
                 const obj = refs[i];
-                if (obj) {
-                    obj.traverse(child => {
-                        if (!child.material) return;
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
-                    });
+                if (!obj) continue;
+                const rawA = ch.data[base + i];
+                let color = colormap ? colormap[rawA] : rawA;
+                if (interp) {
+                    const rawB = ch.data[baseNext + i];
+                    const colorB = colormap ? colormap[rawB] : rawB;
+                    color = lerpHexColor(color, colorB, t);
                 }
+                obj.traverse(child => {
+                    if (!child.material) return;
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
+                });
             }
         },
 
         visibility(ch, refs, base) {
+            // Booleans have no meaningful linear interpretation — "linear on
+            // a bool" would be a step function at some arbitrary threshold.
+            // We always left-hold on the floor keyframe regardless of
+            // ch.interpolation; the setting is accepted but has no effect.
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
@@ -90,47 +172,61 @@ function makeChannelApply(viewer) {
             }
         },
 
-        draw_ranges(ch, refs, base) {
+        draw_ranges(ch, refs, base, baseNext, t) {
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
             }
             const nObj = ch.ids.length;
+            const interp = shouldInterpChannel(ch, baseNext, t);
             for (let i = 0; i < nObj; i++) {
                 const obj = refs[i];
-                if (obj) {
-                    const value = ch.data[base + i];
-                    if (obj.userData.isPolyline) {
-                        obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
-                    } else if (obj.userData.isMesh) {
-                        obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
-                    }
+                if (!obj) continue;
+                let value = ch.data[base + i];
+                if (interp) {
+                    value = value * (1 - t) + ch.data[baseNext + i] * t;
+                }
+                if (obj.userData.isPolyline) {
+                    obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                } else if (obj.userData.isMesh) {
+                    obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
                 }
             }
         },
 
-        opacity(ch, refs, base) {
+        opacity(ch, refs, base, baseNext, t) {
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
             }
             const nObj = ch.ids.length;
+            const interp = shouldInterpChannel(ch, baseNext, t);
             for (let i = 0; i < nObj; i++) {
-                const val = ch.data[base + i];
                 const obj = refs[i];
-                if (obj) applyOpacity(obj, val);
+                if (!obj) continue;
+                let val = ch.data[base + i];
+                if (interp) {
+                    val = val * (1 - t) + ch.data[baseNext + i] * t;
+                }
+                applyOpacity(obj, val);
             }
         },
 
-        clip_times(ch, refs, base) {
+        clip_times(ch, refs, base, baseNext, t) {
             if (ch._mixerGen !== viewer._mixerGeneration) {
                 refreshRefs(refs, ch.ids, viewer._mixers);
                 ch._mixerGen = viewer._mixerGeneration;
             }
             const nObj = ch.ids.length;
+            const interp = shouldInterpChannel(ch, baseNext, t);
             for (let i = 0; i < nObj; i++) {
                 const mixer = refs[i];
-                if (mixer && mixer.setTime) mixer.setTime(ch.data[base + i]);
+                if (!mixer || !mixer.setTime) continue;
+                let val = ch.data[base + i];
+                if (interp) {
+                    val = val * (1 - t) + ch.data[baseNext + i] * t;
+                }
+                mixer.setTime(val);
             }
         },
 
@@ -1115,10 +1211,19 @@ export class ThreeJSViewer {
         this._resetAnimationState();
     }
 
-    _applyFrame(frameIndex) {
+    _applyFrame(frameIndex, t = 0) {
         if (!this._animation || frameIndex < 0 || frameIndex >= this._animation.frames.length) return;
 
-        const frame = this._animation.frames[frameIndex];
+        const frames = this._animation.frames;
+        const frame = frames[frameIndex];
+        // Between-keyframe lerp needs a next keyframe and a non-zero t. We
+        // skip the lerp at t≈0 as a no-op optimization; there is no upper
+        // epsilon because t is always in [0, 1) from _getFrameAtTime and
+        // clamping near 1 would produce a visible "hold" stutter on the last
+        // sliver of each interval. Channels still make their own linear/hold
+        // decision on top of this.
+        const hasNext = t > 1e-6 && frameIndex < frames.length - 1;
+        const nextFrame = hasNext ? frames[frameIndex + 1] : null;
 
         if (this._animation.channels) {
             if (this._animation.channels.visibility) {
@@ -1132,31 +1237,47 @@ export class ThreeJSViewer {
                 if (applyFn) {
                     const nObj = ch.ids.length;
                     const base = frameIndex * nObj * ch.stride;
-                    applyFn(ch, ch.refs, base);
+                    // shouldInterpChannel checks ch.interpolation; pass baseNext
+                    // regardless of mode so the applier owns the decision.
+                    const baseNext = hasNext ? (frameIndex + 1) * nObj * ch.stride : null;
+                    applyFn(ch, ch.refs, base, baseNext, hasNext ? t : 0);
                 }
             }
         }
 
+        // JSON frame path: every lerp-able field interpolates by default,
+        // matching the binary-channel defaults. Visibility left-holds (no
+        // meaningful linear for booleans).
         if (frame.transforms) {
+            const nextT = (hasNext && nextFrame.transforms) ? nextFrame.transforms : null;
             for (const [id, matrix] of Object.entries(frame.transforms)) {
                 const obj = this._objects.get(id);
-                if (obj) {
-                    obj.matrixAutoUpdate = false;
+                if (!obj) continue;
+                obj.matrixAutoUpdate = false;
+                const nextMat = nextT ? nextT[id] : null;
+                if (nextMat) {
+                    lerpMatrixInto(matrix, 0, nextMat, 0, t, _lerpMatOut);
+                    obj.matrix.copy(_lerpMatOut);
+                } else {
                     obj.matrix.fromArray(matrix);
-                    obj.matrixWorldNeedsUpdate = true;
                 }
+                obj.matrixWorldNeedsUpdate = true;
             }
         }
         if (frame.colors) {
+            const nextC = (hasNext && nextFrame.colors) ? nextFrame.colors : null;
             for (const [id, color] of Object.entries(frame.colors)) {
                 const obj = this._objects.get(id);
-                if (obj) {
-                    obj.traverse((child) => {
-                        if (!child.material) return;
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
-                    });
+                if (!obj) continue;
+                let hex = color;
+                if (nextC && nextC[id] != null) {
+                    hex = lerpHexColor(color, nextC[id], t);
                 }
+                obj.traverse((child) => {
+                    if (!child.material) return;
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    for (const mat of mats) { if (mat.color) mat.color.setHex(hex); }
+                });
             }
         }
         if (!this._animation.channels || !this._animation.channels.visibility) {
@@ -1166,29 +1287,44 @@ export class ThreeJSViewer {
             }
         }
         if (frame.visibility) {
+            // Left-hold regardless (booleans have no meaningful lerp).
             for (const [id, visible] of Object.entries(frame.visibility)) {
                 const obj = this._objects.get(id);
                 if (obj) obj.visible = visible;
             }
         }
         if (frame.opacity) {
+            const nextO = (hasNext && nextFrame.opacity) ? nextFrame.opacity : null;
             for (const [id, opacity] of Object.entries(frame.opacity)) {
                 const obj = this._objects.get(id);
-                if (obj) applyOpacity(obj, opacity);
+                if (!obj) continue;
+                let val = opacity;
+                if (nextO && nextO[id] != null) {
+                    val = opacity * (1 - t) + nextO[id] * t;
+                }
+                applyOpacity(obj, val);
             }
         }
         if (frame.clip_times) {
+            const nextCt = (hasNext && nextFrame.clip_times) ? nextFrame.clip_times : null;
             for (const [id, time] of Object.entries(frame.clip_times)) {
-                this._setClipTime(id, time);
+                let v = time;
+                if (nextCt && nextCt[id] != null) v = time * (1 - t) + nextCt[id] * t;
+                this._setClipTime(id, v);
             }
         }
         if (frame.draw_ranges) {
+            const nextD = (hasNext && nextFrame.draw_ranges) ? nextFrame.draw_ranges : null;
             for (const [id, value] of Object.entries(frame.draw_ranges)) {
-                this._setDrawRange(id, value);
+                let v = value;
+                if (nextD && nextD[id] != null) {
+                    v = value * (1 - t) + nextD[id] * t;
+                }
+                this._setDrawRange(id, v);
             }
         }
 
-        this._applyCameraTracking(frameIndex);
+        this._applyCameraTracking(frameIndex, hasNext ? (frameIndex + 1) : frameIndex, hasNext ? t : 0);
     }
 
     _cycleTrackMode() {
@@ -1244,7 +1380,7 @@ export class ThreeJSViewer {
         this._btnTrack.title = title;
     }
 
-    _applyCameraTracking(frameIndex) {
+    _applyCameraTracking(frameIndex, frameIndexNext = frameIndex, t = 0) {
         if (this._trackMode === 'off') return;
 
         // Scripted camera channels
@@ -1252,17 +1388,36 @@ export class ThreeJSViewer {
             const ctCh = this._animation.channels.camera_target;
             const cpCh = this._animation.channels.camera_position;
             if (ctCh || cpCh) {
+                const interp = t > 0 && frameIndexNext !== frameIndex;
                 if (ctCh) {
                     const base = frameIndex * 3;
-                    this._controls.target.set(
-                        ctCh.data[base], ctCh.data[base + 1], ctCh.data[base + 2]
-                    );
+                    if (interp && ctCh.interpolation === 'linear') {
+                        const bN = frameIndexNext * 3;
+                        this._controls.target.set(
+                            ctCh.data[base]     * (1 - t) + ctCh.data[bN]     * t,
+                            ctCh.data[base + 1] * (1 - t) + ctCh.data[bN + 1] * t,
+                            ctCh.data[base + 2] * (1 - t) + ctCh.data[bN + 2] * t
+                        );
+                    } else {
+                        this._controls.target.set(
+                            ctCh.data[base], ctCh.data[base + 1], ctCh.data[base + 2]
+                        );
+                    }
                 }
                 if (cpCh) {
                     const base = frameIndex * 3;
-                    this._camera.position.set(
-                        cpCh.data[base], cpCh.data[base + 1], cpCh.data[base + 2]
-                    );
+                    if (interp && cpCh.interpolation === 'linear') {
+                        const bN = frameIndexNext * 3;
+                        this._camera.position.set(
+                            cpCh.data[base]     * (1 - t) + cpCh.data[bN]     * t,
+                            cpCh.data[base + 1] * (1 - t) + cpCh.data[bN + 1] * t,
+                            cpCh.data[base + 2] * (1 - t) + cpCh.data[bN + 2] * t
+                        );
+                    } else {
+                        this._camera.position.set(
+                            cpCh.data[base], cpCh.data[base + 1], cpCh.data[base + 2]
+                        );
+                    }
                 }
                 return;
             }
@@ -1296,21 +1451,39 @@ export class ThreeJSViewer {
         this._trackHasLastPos = true;
     }
 
+    // Returns {index, t} where index is the floor keyframe and t ∈ [0, 1)
+    // is the fractional position between frames[index] and frames[index+1].
+    // At (or past) the last frame, t is clamped to 0 so callers short-circuit
+    // to step behavior.
     _getFrameAtTime(time) {
-        if (!this._animation || this._animation.frames.length === 0) return 0;
+        if (!this._animation || this._animation.frames.length === 0) {
+            return { index: 0, t: 0 };
+        }
+        const frames = this._animation.frames;
+        const lastIdx = frames.length - 1;
         if (this._animation.uniformDt > 0) {
-            const idx = Math.floor(time / this._animation.uniformDt);
-            return Math.max(0, Math.min(this._animation.frames.length - 1, idx));
+            const raw = time / this._animation.uniformDt;
+            const idx = Math.floor(raw);
+            if (idx < 0) return { index: 0, t: 0 };
+            if (idx >= lastIdx) return { index: lastIdx, t: 0 };
+            return { index: idx, t: raw - idx };
         }
-        for (let i = this._animation.frames.length - 1; i >= 0; i--) {
-            if (this._animation.frames[i].time <= time) return i;
+        for (let i = lastIdx; i >= 0; i--) {
+            if (frames[i].time <= time) {
+                if (i >= lastIdx) return { index: lastIdx, t: 0 };
+                const dt = frames[i + 1].time - frames[i].time;
+                return {
+                    index: i,
+                    t: dt > 0 ? (time - frames[i].time) / dt : 0,
+                };
+            }
         }
-        return 0;
+        return { index: 0, t: 0 };
     }
 
     _updateAnimationUI() {
         if (!this._animation) return;
-        const frameIndex = this._getFrameAtTime(this._animationTime);
+        const { index: frameIndex } = this._getFrameAtTime(this._animationTime);
         const progress = this._animation.duration > 0 ? (this._animationTime / this._animation.duration) * 100 : 0;
         this._timelineProgressEl.style.width = `${progress}%`;
         this._currentTimeEl.textContent = this._animationTime.toFixed(2);
@@ -1320,7 +1493,7 @@ export class ThreeJSViewer {
 
     _stepFrames(delta) {
         if (!this._animation) return;
-        const currentFrame = this._getFrameAtTime(this._animationTime);
+        const { index: currentFrame } = this._getFrameAtTime(this._animationTime);
         const newFrame = Math.max(0, Math.min(this._animation.frames.length - 1, currentFrame + delta));
         this._animationTime = this._animation.frames[newFrame].time;
         this._applyFrame(newFrame);
@@ -1330,8 +1503,8 @@ export class ThreeJSViewer {
     _seekToTime(time) {
         if (!this._animation) return;
         this._animationTime = Math.max(0, Math.min(this._animation.duration, time));
-        const frameIndex = this._getFrameAtTime(this._animationTime);
-        this._applyFrame(frameIndex);
+        const { index, t } = this._getFrameAtTime(this._animationTime);
+        this._applyFrame(index, t);
         this._updateAnimationUI();
     }
 
@@ -1769,6 +1942,10 @@ export class ThreeJSViewer {
                                     uint8:   { ArrayType: Uint8Array,   bytes: 1 },
                                 };
 
+                                // Each channel carries its own interpolation mode,
+                                // set explicitly Python-side (defaults to 'linear').
+                                // Visibility is special-cased by its applier to always
+                                // hold regardless — see makeChannelApply.visibility.
                                 let byteOffset = 0;
                                 const channels = {};
                                 if (data.channels) {
@@ -1782,6 +1959,7 @@ export class ThreeJSViewer {
                                             stride: ch.stride,
                                             refs: null,
                                             colormap: ch.colormap || null,
+                                            interpolation: sanitizeInterpolation(ch.interpolation, 'linear'),
                                         };
                                         byteOffset += count * info.bytes;
                                     }
@@ -2172,8 +2350,8 @@ export class ThreeJSViewer {
                 }
             }
 
-            const frameIndex = this._getFrameAtTime(this._animationTime);
-            this._applyFrame(frameIndex);
+            const { index, t } = this._getFrameAtTime(this._animationTime);
+            this._applyFrame(index, t);
             if (now - this._lastUIUpdate > 100) {
                 this._updateAnimationUI();
                 this._lastUIUpdate = now;

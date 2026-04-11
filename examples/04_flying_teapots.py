@@ -81,7 +81,10 @@ for i in range(N_TEAPOTS):
     v.add_model_binary(f"t{i}", TEAPOT_PATH, format="obj")
 
 duration = 16.0
-fps = 30
+# Sparse keyframes — Animation's default linear interpolation smooths the
+# motion out to 60 fps in the browser, so 10 Hz keyframes play identically
+# to 30 Hz while cutting transform payloads 3x.
+fps = 10
 n_frames = int(duration * fps)
 animation = Animation(loop=True)
 
