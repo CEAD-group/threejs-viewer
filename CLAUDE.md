@@ -98,7 +98,7 @@ Indexed colors: `dtype="uint8"` + `metadata={"colormap": [0x44AA44, 0xFF3333]}`
 
 Binary channels and Frame-based JSON can coexist. A binary channel supersedes the same-named Frame field.
 
-**Interpolation:** `Animation(interpolation="linear")` enables opt-in client-side linear interpolation between keyframes (slerp for rotations, lerp for positions/scale/float channels). Default is `"step"`. Discrete channels (`visibility`, `colors`, `clip_times`, uint dtypes) always step; per-channel override via `add_channel(metadata={"interpolation": "step" | "linear"})`.
+**Interpolation:** `Animation.interpolation` defaults to `"linear"` — translations lerp, rotations slerp, and float channels (`draw_ranges`, `opacity`, scripted `camera_target`/`camera_position`) lerp element-wise between keyframes. This means producers can sample at the signal's bandwidth (e.g. 10 Hz) instead of the display refresh rate and still get smooth 60 fps playback. Opt out per-Animation with `interpolation="step"` for frame-accurate scientific/simulation replay where intermediate values would be meaningless. Discrete channels (`visibility`, `colors`, `clip_times`, any uint dtype) always step regardless of the setting; per-channel override via `add_channel(metadata={"interpolation": "step" | "linear"})`. See `examples/17_animation_interpolation.py` for a side-by-side comparison.
 
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
@@ -117,3 +117,4 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `14_grouping.py` - Object grouping with animated robot arm (nested parent-child hierarchy, local joint transforms)
 - `15_toolpath_interrupted.py` - Interrupted extrusion with travel moves: per-point width array (0=travel), pill/racetrack path with varying point density, merge_animation_points for segment-aligned animation (frame times merged into mesh geometry → no partial triangle rings)
 - `16_clipping_plane.py` - Interactive clipping plane with slab mode (nested spheres sliced to reveal internals, single plane + dual-plane slab, programmatic + GUI control)
+- `17_animation_interpolation.py` - Side-by-side comparison of `interpolation="step"` vs `"linear"` on a sparse (3 Hz) keyframe animation. Auto-alternates the two modes on the same capsules so the lerp/slerp effect is obvious.

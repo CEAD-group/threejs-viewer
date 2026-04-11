@@ -79,7 +79,13 @@ class Animation:
     markers: list[Marker] = field(default_factory=list)
     camera_follow: str | None = None
     camera_lookat: str | None = None
-    interpolation: str = "step"
+    # Default "linear": translations lerp, rotations slerp, float channels
+    # (draw_ranges, opacity) lerp between keyframes — smooth 60 fps playback
+    # even with sparse keyframe data. Set interpolation="step" for frame-accurate
+    # scientific replay or when intermediate values would be physically
+    # meaningless. Discrete channels (colors, visibility, clip_times, any
+    # integer dtype) always step regardless of this setting.
+    interpolation: str = "linear"
 
     def __post_init__(self):
         if self.camera_follow is not None and self.camera_lookat is not None:

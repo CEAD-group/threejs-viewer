@@ -68,9 +68,12 @@ for i in range(N_TRAIL):
         f"trail_{i}", radius=0.12, color=0xFF8888, roughness=0.15, metalness=0.7
     )
 
-# Pre-compute animation with binary channels
+# Pre-compute animation with binary channels.
+# Sparse keyframes — Animation's default linear interpolation smooths the
+# tracer path out to 60 fps in the browser, so 10 Hz keyframes look identical
+# to 60 Hz keyframes but cut the transform buffer 6x.
 duration = 10.0
-fps = 60
+fps = 10
 n_frames = int(duration * fps)
 n_objects = 1 + N_TRAIL  # tracer + trail spheres
 object_ids = ["tracer"] + [f"trail_{i}" for i in range(N_TRAIL)]

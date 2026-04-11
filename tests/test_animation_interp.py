@@ -11,16 +11,16 @@ from threejs_viewer import Animation, Frame
 # --- Python API unit tests ---
 
 
-def test_animation_interpolation_default_step():
-    """Animation defaults to step interpolation for back-compat."""
+def test_animation_interpolation_default_linear():
+    """Animation defaults to linear interpolation for smooth 60 fps playback."""
     anim = Animation()
-    assert anim.interpolation == "step"
-
-
-def test_animation_interpolation_linear_opt_in():
-    """interpolation='linear' is accepted via constructor."""
-    anim = Animation(interpolation="linear")
     assert anim.interpolation == "linear"
+
+
+def test_animation_interpolation_step_opt_in():
+    """interpolation='step' is accepted for frame-accurate playback."""
+    anim = Animation(interpolation="step")
+    assert anim.interpolation == "step"
 
 
 def test_animation_interpolation_invalid_raises():
@@ -31,11 +31,11 @@ def test_animation_interpolation_invalid_raises():
 
 def test_animation_to_dict_includes_interpolation():
     """to_dict serializes interpolation for the non-HTTP reconnect path."""
-    step_dict = Animation().to_dict()
-    assert step_dict["interpolation"] == "step"
-
-    linear_dict = Animation(interpolation="linear").to_dict()
+    linear_dict = Animation().to_dict()
     assert linear_dict["interpolation"] == "linear"
+
+    step_dict = Animation(interpolation="step").to_dict()
+    assert step_dict["interpolation"] == "step"
 
 
 def test_channel_metadata_interpolation_override():
@@ -130,7 +130,7 @@ def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_step_interp_draw_range_midpoint(viewer_client, viewer_page):
-    """draw_range stays at the floor keyframe when mode is step (default)."""
+    """draw_range stays at the floor keyframe when mode is step (opt-in)."""
     positions, indices = _make_grid_mesh()
     viewer_client.add_mesh("m2", positions, indices)
     time.sleep(0.3)
@@ -141,7 +141,7 @@ def test_step_interp_draw_range_midpoint(viewer_client, viewer_page):
             Frame(time=1.0, transforms={}, draw_ranges={"m2": 1.0}),
         ],
         loop=False,
-        # interpolation defaults to "step"
+        interpolation="step",
     )
     viewer_client.load_animation(anim)
 

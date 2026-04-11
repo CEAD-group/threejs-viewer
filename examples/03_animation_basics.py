@@ -108,7 +108,10 @@ v.add_sphere(
 
 # Create animation frames
 duration = 10.0  # seconds
-fps = 30
+# Sparse keyframes — Animation's default linear interpolation smooths them
+# out to 60 fps in the browser, so 10 Hz keyframes look identical to 30 Hz
+# but send 3× less data.
+fps = 10
 n_frames = int(duration * fps)
 
 animation = Animation(loop=True)

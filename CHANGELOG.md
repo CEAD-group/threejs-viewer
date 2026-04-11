@@ -4,7 +4,8 @@
 
 ### New features
 
-- **Animation interpolation** — opt-in linear interpolation between keyframes via `Animation(interpolation="linear")`. Transforms decompose/slerp correctly, float channels (`draw_ranges`, `opacity`, scripted `camera_target`/`camera_position`) lerp element-wise. Default remains `"step"` for back-compat. Discrete channels (`visibility`, `colors`, `clip_times`, uint dtypes) always step; per-channel override via `add_channel(metadata={"interpolation": "step" | "linear"})`. Lets consumers halve animation payload sizes by sampling at the signal's bandwidth instead of the display refresh rate.
+- **Animation interpolation** — linear interpolation between keyframes is now the **default** (`Animation(interpolation="linear")`). Transforms decompose/slerp correctly, float channels (`draw_ranges`, `opacity`, scripted `camera_target`/`camera_position`) lerp element-wise. Producers can now sample at the signal's bandwidth (~10 Hz) instead of the display refresh rate and still get smooth 60 fps playback. Opt out per-Animation with `interpolation="step"` for frame-accurate scientific/simulation replay. Discrete channels (`visibility`, `colors`, `clip_times`, uint dtypes) always step regardless; per-channel override via `add_channel(metadata={"interpolation": "step" | "linear"})`. Examples 03/04/05 were downsampled to 10 Hz to demonstrate the smaller payloads. See `examples/17_animation_interpolation.py` for a side-by-side comparison.
+- **Behavior change**: `Animation.interpolation` default flipped from `"step"` to `"linear"`. Existing animations that relied on exact-per-frame playback must pass `interpolation="step"` explicitly.
 
 ## 0.0.18
 
