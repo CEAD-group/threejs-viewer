@@ -1,23 +1,23 @@
 """
 Animation Interpolation Demo
 
-Demonstrates the two Animation interpolation modes by comparing them directly.
+Demonstrates the two per-channel interpolation modes by comparing them directly.
 A row of elongated capsules traces a Lissajous path while tumbling end-over-end,
-sampled at only 3 Hz — low enough that step playback visibly snaps between
+sampled at only 3 Hz — low enough that hold playback visibly snaps between
 frames.
 
-- "linear" (default): translations lerp, rotations slerp, float channels
-  (draw_ranges, opacity) lerp — smooth 60 fps playback from sparse data.
-  This is the mode used by every other example in this repo.
-- "step": each keyframe holds until the next. Use it for frame-accurate
-  scientific/simulation replay or when intermediate values would be
-  physically meaningless.
+- "linear" (default for transforms/opacity/draw_ranges/camera channels):
+  translations lerp, rotations slerp, float channels lerp — smooth 60 fps
+  playback from sparse data. This is what every other example in this repo uses.
+- "hold" (default for colors/visibility/clip_times): each keyframe holds until
+  the next. Use it on continuous channels for frame-accurate scientific /
+  simulation replay or when intermediate values would be physically meaningless.
 
-The example cannot show both modes simultaneously (a single Animation has one
-interpolation setting), so it auto-alternates: it loads the same sparse
-animation with `interpolation="step"`, plays one full loop, then reloads with
-`interpolation="linear"` and plays another loop — forever. The timeline
-marker label tells you which mode is currently active.
+Interpolation is set per channel via `add_channel(interpolation=...)` or the
+convenience wrappers (`set_transform_data`, `set_draw_range_data`, ...). The
+example auto-alternates between HOLD and LINEAR on the same transforms channel
+so the lerp/slerp effect is obvious. The timeline marker tells you which mode
+is currently active.
 
 Run: uv run python examples/17_animation_interpolation.py
 """
@@ -57,19 +57,24 @@ def trs_matrix(pos, axis, angle):
 
 
 def build_animation(mode: str) -> Animation:
-    anim = Animation(loop=True, interpolation=mode)
-    for k in range(N_FRAMES):
-        t = k / KEYFRAME_HZ
-        transforms = {}
+    """Build a sparse (3 Hz) tumbling capsules animation with the given
+    interpolation mode set explicitly on the transforms channel."""
+    ids = [f"cap_{i}" for i in range(N_CAPSULES)]
+    frame_times = np.arange(N_FRAMES, dtype=np.float64) / KEYFRAME_HZ
+
+    data = np.zeros((N_FRAMES, N_CAPSULES, 16), dtype=np.float32)
+    for k, t in enumerate(frame_times):
         for i in range(N_CAPSULES):
             phase = 2 * math.pi * i / N_CAPSULES
             x = 3.0 * math.sin(2 * math.pi * t / DURATION + phase)
             y = 2.0 * math.sin(4 * math.pi * t / DURATION + phase)
             z = 0.6 * math.sin(6 * math.pi * t / DURATION + phase) + 1.2
-            # Tumble end-over-end around a tilted axis; each capsule offset in phase.
             spin = 2 * math.pi * t / DURATION * 2 + phase
-            transforms[f"cap_{i}"] = trs_matrix([x, y, z], axis=(1, 1, 0), angle=spin)
-        anim.add_frame(time=t, transforms=transforms)
+            data[k, i] = trs_matrix([x, y, z], axis=(1, 1, 0), angle=spin)
+
+    anim = Animation(loop=True)
+    anim.set_frame_times(frame_times)
+    anim.set_transform_data(ids, data, interpolation=mode)
     color = 0x33FF88 if mode == "linear" else 0xFF5544
     anim.add_marker(0.0, f"interpolation = {mode.upper()}", color=color)
     return anim
@@ -104,9 +109,9 @@ print(
     f"Built sparse animation: {N_FRAMES} keyframes at {KEYFRAME_HZ} Hz "
     f"over {DURATION:.1f}s."
 )
-print("Auto-alternating: STEP (choppy) ⇄ LINEAR (smooth). Ctrl+C to stop.")
+print("Auto-alternating: HOLD (choppy) ⇄ LINEAR (smooth). Ctrl+C to stop.")
 
-step_anim = build_animation("step")
+hold_anim = build_animation("hold")
 linear_anim = build_animation("linear")
 
 # Give the viewer a moment to create capsules before the first load.
@@ -115,8 +120,8 @@ v.wait_for_assets(disconnect=False)
 
 try:
     while True:
-        print("  -> loading STEP animation")
-        v.load_animation(step_anim)
+        print("  -> loading HOLD animation")
+        v.load_animation(hold_anim)
         time.sleep(DURATION + 0.2)
 
         print("  -> loading LINEAR animation")

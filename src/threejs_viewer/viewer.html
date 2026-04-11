@@ -526,25 +526,32 @@ function lerpMatrixInto(srcA, baseA, srcB, baseB, t, outMat) {
 }
 
 // Returns true when a channel should interpolate linearly between `base` and
-// `baseNext` given the current (baseNext, t, channel-metadata) state.
-// Channels can opt out via `ch.interpolation === "step"`; integer dtypes and
-// discrete channels (visibility) always step regardless.
+// `baseNext`. Every channel carries its own explicit interpolation mode, set
+// Python-side per channel — this function just checks that mode plus the
+// standard guards (there is a next keyframe and we're between keyframes).
+// Visibility overrides this to always hold (see visibility applier).
 function shouldInterpChannel(ch, baseNext, t) {
     if (baseNext === null || t <= 0) return false;
-    if (ch.interpolation !== 'linear') return false;
-    // Integer typed arrays represent discrete values (enums, indices, bools)
-    // that must not be lerped even if the channel asks for it.
-    const d = ch.data;
-    if (d instanceof Float32Array || d instanceof Float64Array) return true;
-    return false;
+    return ch.interpolation === 'linear';
 }
 
-// Normalize interpolation metadata from the wire. Accepts only 'step' and
+// Linear-interpolate two hex colors in 8-bit RGB space. Alpha byte (top 8
+// bits) is preserved from `a`; three.js only consumes the low 24 bits.
+function lerpHexColor(a, b, t) {
+    const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+    const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+    const r = Math.round(ar + (br - ar) * t);
+    const g = Math.round(ag + (bg - ag) * t);
+    const bl = Math.round(ab + (bb - ab) * t);
+    return (r << 16) | (g << 8) | bl;
+}
+
+// Normalize interpolation metadata from the wire. Accepts only 'hold' and
 // 'linear'; anything else (null, undefined, typo like 'cubic') falls back
 // to the provided default so stray strings can't silently switch playback
 // semantics.
 function sanitizeInterpolation(value, fallback) {
-    if (value === 'step' || value === 'linear') return value;
+    if (value === 'hold' || value === 'linear') return value;
     if (value != null) {
         console.warn(`Unknown interpolation '${value}', falling back to '${fallback}'`);
     }
@@ -583,30 +590,40 @@ function makeChannelApply(viewer) {
             }
         },
 
-        colors(ch, refs, base) {
-            // Always step: indexed or hex values aren't meaningful to lerp.
+        colors(ch, refs, base, baseNext, t) {
+            // Linear mode crossfades hex values component-wise in RGB space.
+            // Indexed colors (uint8 + colormap) look up both endpoints in the
+            // palette and lerp the resulting hex — consistent with direct-hex.
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
             }
             const nObj = ch.ids.length;
             const colormap = ch.colormap;
+            const interp = shouldInterpChannel(ch, baseNext, t);
             for (let i = 0; i < nObj; i++) {
-                const raw = ch.data[base + i];
-                const color = colormap ? colormap[raw] : raw;
                 const obj = refs[i];
-                if (obj) {
-                    obj.traverse(child => {
-                        if (!child.material) return;
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
-                    });
+                if (!obj) continue;
+                const rawA = ch.data[base + i];
+                let color = colormap ? colormap[rawA] : rawA;
+                if (interp) {
+                    const rawB = ch.data[baseNext + i];
+                    const colorB = colormap ? colormap[rawB] : rawB;
+                    color = lerpHexColor(color, colorB, t);
                 }
+                obj.traverse(child => {
+                    if (!child.material) return;
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
+                });
             }
         },
 
         visibility(ch, refs, base) {
-            // Always step: uint8, discrete by nature.
+            // Booleans have no meaningful linear interpretation — "linear on
+            // a bool" would be a step function at some arbitrary threshold.
+            // We always left-hold on the floor keyframe regardless of
+            // ch.interpolation; the setting is accepted but has no effect.
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
                 ch._objGen = viewer._objGeneration;
@@ -664,9 +681,7 @@ function makeChannelApply(viewer) {
                 ch._mixerGen = viewer._mixerGeneration;
             }
             const nObj = ch.ids.length;
-            // Default step (clip timelines are user-facing seek values); opt-in
-            // linear via metadata={"interpolation": "linear"} on the channel.
-            const interp = baseNext !== null && t > 0 && ch.interpolation === 'linear';
+            const interp = shouldInterpChannel(ch, baseNext, t);
             for (let i = 0; i < nObj; i++) {
                 const mixer = refs[i];
                 if (!mixer || !mixer.setTime) continue;
@@ -1560,7 +1575,6 @@ class ThreeJSViewer {
     _loadAnimation(animData) {
         this._animGeneration++;
         this._animation = animData;
-        this._animation.interpolation = animData.interpolation === 'linear' ? 'linear' : 'step';
         this._animationTime = 0;
         this._animationPlaying = false;
         this._lastAnimationUpdate = performance.now();
@@ -1665,13 +1679,11 @@ class ThreeJSViewer {
 
         const frames = this._animation.frames;
         const frame = frames[frameIndex];
-        // Global interpolation mode — set per-animation via animation.interpolation.
-        // Short-circuit to step when: mode is "step", t is effectively zero/one,
-        // or we're at the last keyframe (no next frame to interpolate to).
-        const interpGlobal = this._animation.interpolation === 'linear'
-            && t > 1e-6 && t < 1 - 1e-6
-            && frameIndex < frames.length - 1;
-        const nextFrame = interpGlobal ? frames[frameIndex + 1] : null;
+        // Between-keyframe lerp is only meaningful when t is in (0, 1) and
+        // there's actually a next keyframe. Individual channels/fields then
+        // still make their own "linear vs hold" decision.
+        const hasNext = t > 1e-6 && t < 1 - 1e-6 && frameIndex < frames.length - 1;
+        const nextFrame = hasNext ? frames[frameIndex + 1] : null;
 
         if (this._animation.channels) {
             if (this._animation.channels.visibility) {
@@ -1685,14 +1697,19 @@ class ThreeJSViewer {
                 if (applyFn) {
                     const nObj = ch.ids.length;
                     const base = frameIndex * nObj * ch.stride;
-                    const baseNext = interpGlobal ? (frameIndex + 1) * nObj * ch.stride : null;
-                    applyFn(ch, ch.refs, base, baseNext, interpGlobal ? t : 0);
+                    // shouldInterpChannel checks ch.interpolation; pass baseNext
+                    // regardless of mode so the applier owns the decision.
+                    const baseNext = hasNext ? (frameIndex + 1) * nObj * ch.stride : null;
+                    applyFn(ch, ch.refs, base, baseNext, hasNext ? t : 0);
                 }
             }
         }
 
+        // JSON frame path: every lerp-able field interpolates by default,
+        // matching the binary-channel defaults. Visibility left-holds (no
+        // meaningful linear for booleans).
         if (frame.transforms) {
-            const nextT = (nextFrame && nextFrame.transforms) ? nextFrame.transforms : null;
+            const nextT = (hasNext && nextFrame.transforms) ? nextFrame.transforms : null;
             for (const [id, matrix] of Object.entries(frame.transforms)) {
                 const obj = this._objects.get(id);
                 if (!obj) continue;
@@ -1708,17 +1725,19 @@ class ThreeJSViewer {
             }
         }
         if (frame.colors) {
-            // Step: color interpolation isn't meaningful for hex-coded values
-            // (mode switches between discrete colorings should land exactly).
+            const nextC = (hasNext && nextFrame.colors) ? nextFrame.colors : null;
             for (const [id, color] of Object.entries(frame.colors)) {
                 const obj = this._objects.get(id);
-                if (obj) {
-                    obj.traverse((child) => {
-                        if (!child.material) return;
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
-                    });
+                if (!obj) continue;
+                let hex = color;
+                if (nextC && nextC[id] != null) {
+                    hex = lerpHexColor(color, nextC[id], t);
                 }
+                obj.traverse((child) => {
+                    if (!child.material) return;
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    for (const mat of mats) { if (mat.color) mat.color.setHex(hex); }
+                });
             }
         }
         if (!this._animation.channels || !this._animation.channels.visibility) {
@@ -1728,14 +1747,14 @@ class ThreeJSViewer {
             }
         }
         if (frame.visibility) {
-            // Step: discrete by nature.
+            // Left-hold regardless (booleans have no meaningful lerp).
             for (const [id, visible] of Object.entries(frame.visibility)) {
                 const obj = this._objects.get(id);
                 if (obj) obj.visible = visible;
             }
         }
         if (frame.opacity) {
-            const nextO = (nextFrame && nextFrame.opacity) ? nextFrame.opacity : null;
+            const nextO = (hasNext && nextFrame.opacity) ? nextFrame.opacity : null;
             for (const [id, opacity] of Object.entries(frame.opacity)) {
                 const obj = this._objects.get(id);
                 if (!obj) continue;
@@ -1747,14 +1766,15 @@ class ThreeJSViewer {
             }
         }
         if (frame.clip_times) {
-            // Step: clip times seek into embedded GLTF mixer clocks; the mixer
-            // has its own keyframe structure and stepping avoids compounding.
+            const nextCt = (hasNext && nextFrame.clip_times) ? nextFrame.clip_times : null;
             for (const [id, time] of Object.entries(frame.clip_times)) {
-                this._setClipTime(id, time);
+                let v = time;
+                if (nextCt && nextCt[id] != null) v = time * (1 - t) + nextCt[id] * t;
+                this._setClipTime(id, v);
             }
         }
         if (frame.draw_ranges) {
-            const nextD = (nextFrame && nextFrame.draw_ranges) ? nextFrame.draw_ranges : null;
+            const nextD = (hasNext && nextFrame.draw_ranges) ? nextFrame.draw_ranges : null;
             for (const [id, value] of Object.entries(frame.draw_ranges)) {
                 let v = value;
                 if (nextD && nextD[id] != null) {
@@ -1764,7 +1784,7 @@ class ThreeJSViewer {
             }
         }
 
-        this._applyCameraTracking(frameIndex, interpGlobal ? (frameIndex + 1) : frameIndex, interpGlobal ? t : 0);
+        this._applyCameraTracking(frameIndex, hasNext ? (frameIndex + 1) : frameIndex, hasNext ? t : 0);
     }
 
     _cycleTrackMode() {
@@ -1831,7 +1851,7 @@ class ThreeJSViewer {
                 const interp = t > 0 && frameIndexNext !== frameIndex;
                 if (ctCh) {
                     const base = frameIndex * 3;
-                    if (interp && ctCh.interpolation !== 'step') {
+                    if (interp && ctCh.interpolation === 'linear') {
                         const bN = frameIndexNext * 3;
                         this._controls.target.set(
                             ctCh.data[base]     * (1 - t) + ctCh.data[bN]     * t,
@@ -1846,7 +1866,7 @@ class ThreeJSViewer {
                 }
                 if (cpCh) {
                     const base = frameIndex * 3;
-                    if (interp && cpCh.interpolation !== 'step') {
+                    if (interp && cpCh.interpolation === 'linear') {
                         const bN = frameIndexNext * 3;
                         this._camera.position.set(
                             cpCh.data[base]     * (1 - t) + cpCh.data[bN]     * t,
@@ -2382,7 +2402,10 @@ class ThreeJSViewer {
                                     uint8:   { ArrayType: Uint8Array,   bytes: 1 },
                                 };
 
-                                const topInterp = sanitizeInterpolation(data.interpolation, 'step');
+                                // Each channel carries its own interpolation mode,
+                                // set explicitly Python-side (defaults to 'linear').
+                                // Visibility is special-cased by its applier to always
+                                // hold regardless — see makeChannelApply.visibility.
                                 let byteOffset = 0;
                                 const channels = {};
                                 if (data.channels) {
@@ -2396,7 +2419,7 @@ class ThreeJSViewer {
                                             stride: ch.stride,
                                             refs: null,
                                             colormap: ch.colormap || null,
-                                            interpolation: sanitizeInterpolation(ch.interpolation, topInterp),
+                                            interpolation: sanitizeInterpolation(ch.interpolation, 'linear'),
                                         };
                                         byteOffset += count * info.bytes;
                                     }
@@ -2437,7 +2460,6 @@ class ThreeJSViewer {
                                     duration: data.duration,
                                     fps: data.fps,
                                     loop: data.loop,
-                                    interpolation: topInterp,
                                     frames: frames,
                                     markers: data.markers || [],
                                     channels: channels,

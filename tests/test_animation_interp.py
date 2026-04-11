@@ -1,4 +1,4 @@
-"""Tests for the animation interpolation field and client-side linear interp."""
+"""Tests for per-channel interpolation (linear vs hold)."""
 
 import time
 
@@ -11,48 +11,69 @@ from threejs_viewer import Animation, Frame
 # --- Python API unit tests ---
 
 
-def test_animation_interpolation_default_linear():
-    """Animation defaults to linear interpolation for smooth 60 fps playback."""
+def test_add_channel_default_interpolation_is_linear():
+    """Every channel defaults to linear regardless of name."""
     anim = Animation()
-    assert anim.interpolation == "linear"
-
-
-def test_animation_interpolation_step_opt_in():
-    """interpolation='step' is accepted for frame-accurate playback."""
-    anim = Animation(interpolation="step")
-    assert anim.interpolation == "step"
-
-
-def test_animation_interpolation_invalid_raises():
-    """Constructor rejects unknown interpolation modes."""
-    with pytest.raises(ValueError, match="interpolation"):
-        Animation(interpolation="cubic")
-
-
-def test_animation_to_dict_includes_interpolation():
-    """to_dict serializes interpolation for the non-HTTP reconnect path."""
-    linear_dict = Animation().to_dict()
-    assert linear_dict["interpolation"] == "linear"
-
-    step_dict = Animation(interpolation="step").to_dict()
-    assert step_dict["interpolation"] == "step"
-
-
-def test_channel_metadata_interpolation_override():
-    """add_channel accepts a per-channel interpolation override via metadata."""
-    anim = Animation(interpolation="linear")
     anim.set_frame_times(np.linspace(0, 1, 2))
-    # Global linear; this channel explicitly steps.
     anim.add_channel(
         "draw_ranges",
         ["m1"],
         np.array([[0.0], [1.0]], dtype=np.float32),
         dtype="float32",
         stride=1,
-        metadata={"interpolation": "step"},
     )
-    ch = anim._channels[0]
-    assert ch.metadata == {"interpolation": "step"}
+    assert anim._channels[0].interpolation == "linear"
+
+
+def test_add_channel_hold_override():
+    """add_channel accepts a per-channel 'hold' override."""
+    anim = Animation()
+    anim.set_frame_times(np.linspace(0, 1, 2))
+    anim.add_channel(
+        "draw_ranges",
+        ["m1"],
+        np.array([[0.0], [1.0]], dtype=np.float32),
+        dtype="float32",
+        stride=1,
+        interpolation="hold",
+    )
+    assert anim._channels[0].interpolation == "hold"
+
+
+def test_add_channel_invalid_interpolation_raises():
+    """Unknown interpolation modes are rejected."""
+    anim = Animation()
+    with pytest.raises(ValueError, match="interpolation"):
+        anim.add_channel(
+            "draw_ranges",
+            ["m1"],
+            np.array([[0.0], [1.0]], dtype=np.float32),
+            interpolation="cubic",
+        )
+
+
+def test_convenience_setters_default_to_linear():
+    """All set_*_data convenience wrappers default to linear."""
+    anim = Animation()
+    mats = np.tile(np.eye(4, dtype=np.float32).flatten(), (2, 1, 1)).reshape(2, 1, 16)
+    anim.set_transform_data(["b1"], mats)
+    anim.set_draw_range_data(["b1"], np.array([[0.0], [1.0]], dtype=np.float32))
+    anim.set_clip_time_data(["b1"], np.array([[0.0], [1.0]], dtype=np.float32))
+    anim.set_camera_position(np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32))
+    anim.set_camera_target(np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32))
+    for ch in anim._channels:
+        assert ch.interpolation == "linear", f"{ch.name} should default to linear"
+
+
+def test_set_clip_time_data_hold_override():
+    """set_clip_time_data accepts an explicit 'hold' for frame-accurate seeks."""
+    anim = Animation()
+    anim.set_clip_time_data(
+        ["g1"],
+        np.array([[0.0], [1.0]], dtype=np.float32),
+        interpolation="hold",
+    )
+    assert anim._channels[0].interpolation == "hold"
 
 
 # --- Browser integration: linear draw_range interpolates at midpoint ---
@@ -81,8 +102,6 @@ def _make_grid_mesh():
     Used so that draw_range midpoint (0.5) snaps cleanly to a valid integer
     index count (50 out of 100 triangles → 150/300 indices = 0.5 exactly).
     """
-    # 10x10 vertex grid → 9x9 quads → 162 triangles → 486 indices (too odd)
-    # Use a simpler triangle-fan: 100 independent triangles = 300 indices.
     n_tris = 100
     positions = np.zeros((n_tris * 3, 3), dtype=np.float32)
     for i in range(n_tris):
@@ -95,7 +114,7 @@ def _make_grid_mesh():
 
 @pytest.mark.browser
 def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
-    """draw_range interpolates linearly at the midpoint when mode is linear."""
+    """draw_range lerps at the midpoint with its default (linear) interpolation."""
     positions, indices = _make_grid_mesh()
     viewer_client.add_mesh("m1", positions, indices)
     time.sleep(0.3)
@@ -106,7 +125,6 @@ def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
             Frame(time=1.0, transforms={}, draw_ranges={"m1": 1.0}),
         ],
         loop=False,
-        interpolation="linear",
     )
     viewer_client.load_animation(anim)
 
@@ -129,19 +147,21 @@ def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_step_interp_draw_range_midpoint(viewer_client, viewer_page):
-    """draw_range stays at the floor keyframe when mode is step (opt-in)."""
+def test_hold_interp_draw_range_midpoint(viewer_client, viewer_page):
+    """draw_range holds the floor keyframe when the channel is hold (explicit)."""
     positions, indices = _make_grid_mesh()
     viewer_client.add_mesh("m2", positions, indices)
     time.sleep(0.3)
 
-    anim = Animation(
-        frames=[
-            Frame(time=0.0, transforms={}, draw_ranges={"m2": 0.0}),
-            Frame(time=1.0, transforms={}, draw_ranges={"m2": 1.0}),
-        ],
-        loop=False,
-        interpolation="step",
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    anim.add_channel(
+        "draw_ranges",
+        ["m2"],
+        np.array([[0.0], [1.0]], dtype=np.float32),
+        dtype="float32",
+        stride=1,
+        interpolation="hold",
     )
     viewer_client.load_animation(anim)
 
@@ -158,17 +178,16 @@ def test_step_interp_draw_range_midpoint(viewer_client, viewer_page):
 
     result = viewer_client.query_scene()
     dr = result["objects"]["m2"]["drawRange"]
-    # Step at floor → draw_range equals frame[0] value = 0.0
-    assert dr < 0.05, f"expected ~0.0 under step mode, got {dr}"
+    # hold at floor → draw_range equals frame[0] value = 0.0
+    assert dr < 0.05, f"expected ~0.0 under hold mode, got {dr}"
 
 
 @pytest.mark.browser
 def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
-    """Transforms are slerped/lerped at midpoint when mode is linear."""
+    """Transforms are slerped/lerped at midpoint by default (linear)."""
     viewer_client.add_box("b1")
     time.sleep(0.1)
 
-    # Identity at t=0, translated by (10, 0, 0) at t=1.
     identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
     translated = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1]
     anim = Animation(
@@ -177,7 +196,6 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
             Frame(time=1.0, transforms={"b1": translated}),
         ],
         loop=False,
-        interpolation="linear",
     )
     viewer_client.load_animation(anim)
 
@@ -192,7 +210,6 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
     _pause_and_seek_to_midpoint(viewer_page)
     time.sleep(0.05)
 
-    # Read the box's x position from the browser directly.
     x = viewer_page.evaluate(
         """() => {
             const v = window.threejsViewer;
