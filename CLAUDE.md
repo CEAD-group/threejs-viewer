@@ -98,6 +98,8 @@ Indexed colors: `dtype="uint8"` + `metadata={"colormap": [0x44AA44, 0xFF3333]}`
 
 Binary channels and Frame-based JSON can coexist. A binary channel supersedes the same-named Frame field.
 
+**Interpolation:** `Animation(interpolation="linear")` enables opt-in client-side linear interpolation between keyframes (slerp for rotations, lerp for positions/scale/float channels). Default is `"step"`. Discrete channels (`visibility`, `colors`, `clip_times`, uint dtypes) always step; per-channel override via `add_channel(metadata={"interpolation": "step" | "linear"})`.
+
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
 - `02_polylines.py` - Gradient lines with different colormaps

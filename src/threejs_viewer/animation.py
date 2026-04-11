@@ -79,10 +79,15 @@ class Animation:
     markers: list[Marker] = field(default_factory=list)
     camera_follow: str | None = None
     camera_lookat: str | None = None
+    interpolation: str = "step"
 
     def __post_init__(self):
         if self.camera_follow is not None and self.camera_lookat is not None:
             raise ValueError("camera_follow and camera_lookat are mutually exclusive")
+        if self.interpolation not in ("step", "linear"):
+            raise ValueError(
+                f"interpolation must be 'step' or 'linear', got {self.interpolation!r}"
+            )
 
     # Generic binary channels for fast transfer.
     _channels: list[AnimationChannel] = field(default_factory=list, repr=False)
@@ -214,6 +219,7 @@ class Animation:
             "duration": self.duration,
             "fps": self.fps,
             "loop": self.loop,
+            "interpolation": self.interpolation,
             "frames": [
                 {
                     "time": f.time,

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **Animation interpolation** — opt-in linear interpolation between keyframes via `Animation(interpolation="linear")`. Transforms decompose/slerp correctly, float channels (`draw_ranges`, `opacity`, scripted `camera_target`/`camera_position`) lerp element-wise. Default remains `"step"` for back-compat. Discrete channels (`visibility`, `colors`, `clip_times`, uint dtypes) always step; per-channel override via `add_channel(metadata={"interpolation": "step" | "linear"})`. Lets consumers halve animation payload sizes by sampling at the signal's bandwidth instead of the display refresh rate.
+
 ## 0.0.18
 
 ### New features

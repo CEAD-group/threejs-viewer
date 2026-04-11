@@ -1080,6 +1080,7 @@ class ViewerClient:
             "duration": animation.duration,
             "fps": animation.fps,
             "loop": animation.loop,
+            "interpolation": animation.interpolation,
             "markers": [
                 {"time": m.time, "label": m.label, "color": m.color}
                 for m in animation.markers
