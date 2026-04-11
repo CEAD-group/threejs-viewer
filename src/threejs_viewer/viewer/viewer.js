@@ -68,8 +68,24 @@ function lerpMatrixInto(srcA, baseA, srcB, baseB, t, outMat) {
 // discrete channels (visibility) always step regardless.
 function shouldInterpChannel(ch, baseNext, t) {
     if (baseNext === null || t <= 0) return false;
-    if (ch.interpolation === 'step') return false;
-    return true;
+    if (ch.interpolation !== 'linear') return false;
+    // Integer typed arrays represent discrete values (enums, indices, bools)
+    // that must not be lerped even if the channel asks for it.
+    const d = ch.data;
+    if (d instanceof Float32Array || d instanceof Float64Array) return true;
+    return false;
+}
+
+// Normalize interpolation metadata from the wire. Accepts only 'step' and
+// 'linear'; anything else (null, undefined, typo like 'cubic') falls back
+// to the provided default so stray strings can't silently switch playback
+// semantics.
+function sanitizeInterpolation(value, fallback) {
+    if (value === 'step' || value === 'linear') return value;
+    if (value != null) {
+        console.warn(`Unknown interpolation '${value}', falling back to '${fallback}'`);
+    }
+    return fallback;
 }
 
 // Channel apply functions — keyed by channel name. Signature is
@@ -1903,6 +1919,7 @@ export class ThreeJSViewer {
                                     uint8:   { ArrayType: Uint8Array,   bytes: 1 },
                                 };
 
+                                const topInterp = sanitizeInterpolation(data.interpolation, 'step');
                                 let byteOffset = 0;
                                 const channels = {};
                                 if (data.channels) {
@@ -1916,7 +1933,7 @@ export class ThreeJSViewer {
                                             stride: ch.stride,
                                             refs: null,
                                             colormap: ch.colormap || null,
-                                            interpolation: ch.interpolation || null,
+                                            interpolation: sanitizeInterpolation(ch.interpolation, topInterp),
                                         };
                                         byteOffset += count * info.bytes;
                                     }
@@ -1957,7 +1974,7 @@ export class ThreeJSViewer {
                                     duration: data.duration,
                                     fps: data.fps,
                                     loop: data.loop,
-                                    interpolation: data.interpolation || 'step',
+                                    interpolation: topInterp,
                                     frames: frames,
                                     markers: data.markers || [],
                                     channels: channels,

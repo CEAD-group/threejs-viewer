@@ -114,6 +114,9 @@ def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
         time.sleep(0.1)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             break
+    assert viewer_client.query_scene()["meta"]["animation"]["playing"], (
+        "animation did not start playing within timeout"
+    )
 
     seek = _pause_and_seek_to_midpoint(viewer_page)
     assert seek is not None
@@ -146,6 +149,9 @@ def test_step_interp_draw_range_midpoint(viewer_client, viewer_page):
         time.sleep(0.1)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             break
+    assert viewer_client.query_scene()["meta"]["animation"]["playing"], (
+        "animation did not start playing within timeout"
+    )
 
     _pause_and_seek_to_midpoint(viewer_page)
     time.sleep(0.05)
@@ -179,6 +185,9 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
         time.sleep(0.1)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             break
+    assert viewer_client.query_scene()["meta"]["animation"]["playing"], (
+        "animation did not start playing within timeout"
+    )
 
     _pause_and_seek_to_midpoint(viewer_page)
     time.sleep(0.05)
