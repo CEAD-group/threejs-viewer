@@ -986,6 +986,16 @@ export class ThreeJSViewer {
         if (obj) obj.visible = visible;
     }
 
+    _setSceneVisibility(visibility) {
+        for (const [id, visible] of Object.entries(visibility)) {
+            const obj = this._objects.get(id);
+            if (obj) {
+                obj.visible = visible;
+                this._baselineVisibility.set(id, visible);
+            }
+        }
+    }
+
     _clearScene() {
         this._sceneGeneration++;
         this._resetAnimationState();
@@ -1089,12 +1099,14 @@ export class ThreeJSViewer {
         this._updateTrackingUI();
     }
 
-    _stopAnimation() {
+    _stopAnimation(restoreVisibility = true) {
         this._animGeneration++;
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
-        for (const [id, baselineVisible] of this._baselineVisibility) {
-            const obj = this._objects.get(id);
-            if (obj) obj.visible = baselineVisible;
+        if (restoreVisibility) {
+            for (const [id, baselineVisible] of this._baselineVisibility) {
+                const obj = this._objects.get(id);
+                if (obj) obj.visible = baselineVisible;
+            }
         }
         // Reset draw ranges to full
         for (const id of this._objects.keys()) {
@@ -1661,6 +1673,9 @@ export class ThreeJSViewer {
                     case 'set_visibility':
                         this._setVisibility(data.id, data.visible);
                         break;
+                    case 'set_scene_visibility':
+                        this._setSceneVisibility(data.visibility);
+                        break;
                     case 'clear_scene':
                         this._clearScene();
                         break;
@@ -1999,6 +2014,9 @@ export class ThreeJSViewer {
                     case 'stop_animation':
                         this._stopAnimation();
                         break;
+                    case 'clear_animation':
+                        this._stopAnimation(false);
+                        break;
                     case 'set_clip_time':
                         this._setClipTime(data.id, data.time);
                         break;
@@ -2082,6 +2100,8 @@ export class ThreeJSViewer {
                         this._assetsComplete = true;
                         this._maybeNotifyAssetsLoaded();
                         break;
+                    default:
+                        console.warn(`Unknown message type: '${data.type}'`);
                 }
             };
         };

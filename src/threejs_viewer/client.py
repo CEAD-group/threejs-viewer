@@ -786,6 +786,10 @@ class ViewerClient:
         """Set object visibility."""
         self._send({"type": "set_visibility", "id": id, "visible": visible})
 
+    def set_scene_visibility(self, visibility: dict[str, bool]):
+        """Set visibility for multiple objects atomically. Also updates animation baseline."""
+        self._send({"type": "set_scene_visibility", "visibility": visibility})
+
     def set_color(self, id: str, color: int, opacity: Optional[float] = None):
         """Set object material color, and optionally opacity (0.0-1.0)."""
         msg = {"type": "set_color", "id": id, "color": color}
@@ -1093,6 +1097,15 @@ class ViewerClient:
         """Stop animation playback, reset draw ranges, and return to real-time mode."""
         self._current_animation = None
         self._send({"type": "stop_animation"})
+
+    def clear_animation(self) -> None:
+        """Stop animation without restoring baseline visibility.
+
+        Unlike stop_animation(), this leaves the current visibility state as-is
+        instead of restoring baseline visibility.
+        """
+        self._current_animation = None
+        self._send({"type": "clear_animation"})
 
     def list_objects(self, timeout: float = 5.0) -> List[str]:
         """Get list of object IDs currently in the viewer."""
