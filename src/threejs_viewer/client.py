@@ -1049,6 +1049,10 @@ class ViewerClient:
             }
             if ch.metadata:
                 entry.update(ch.metadata)
+            # Per-channel interpolation, set explicitly on the Python side.
+            # Overwrites any stray metadata key so wire semantics stay
+            # authoritative.
+            entry["interpolation"] = ch.interpolation
             channel_manifest.append(entry)
 
         binary_payload = b"".join(binary_parts)

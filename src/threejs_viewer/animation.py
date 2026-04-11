@@ -6,10 +6,23 @@ for interactive playback with timeline scrubbing, speed control, and frame stepp
 """
 
 from dataclasses import dataclass, field
+from typing import Literal, get_args
 
 import numpy as np
 
 ALLOWED_DTYPES = {"float32", "uint32", "uint8"}
+
+# Valid interpolation modes:
+#   "linear" — lerp/slerp between keyframes (smooth playback); default
+#   "hold"   — keep the previous keyframe's value until the next one hits
+#              (a.k.a. step, forward-fill, constant). Opt in per channel.
+# Every channel defaults to "linear"; pass interpolation="hold" to
+# add_channel/set_*_data to opt out. For channel types where linear has no
+# meaningful interpretation (visibility is a boolean), the viewer applier
+# falls back to hold regardless — the setting is accepted but behaves
+# identically to hold.
+InterpolationMode = Literal["linear", "hold"]
+ALLOWED_INTERPOLATIONS: tuple[InterpolationMode, ...] = get_args(InterpolationMode)
 
 
 @dataclass
@@ -31,6 +44,10 @@ class AnimationChannel:
     dtype: str  # "float32", "uint32", "uint8"
     stride: int  # elements per object per frame (16 for 4x4 matrices, 1 for scalars)
     metadata: dict | None  # e.g. {"colormap": [0x44AA44, 0xFF3333]}
+    # How this channel blends between keyframes. Always set to a concrete
+    # mode (never None) — add_channel/set_*_data default to "linear" and let
+    # the caller opt out to "hold" per channel.
+    interpolation: InterpolationMode = "linear"
 
 
 @dataclass
@@ -146,6 +163,7 @@ class Animation:
         dtype: str = "float32",
         stride: int = 1,
         metadata: dict | None = None,
+        interpolation: InterpolationMode = "linear",
     ) -> None:
         """Add a binary data channel.
 
@@ -158,10 +176,20 @@ class Animation:
             dtype: Element type — "float32", "uint32", or "uint8".
             stride: Elements per object per frame (16 for 4x4 matrices, 1 for scalars).
             metadata: Extra info sent in the header (e.g. colormap for indexed colors).
+            interpolation: How this channel blends between keyframes — "linear"
+                (lerp/slerp; default) or "hold" (constant / forward-fill). The
+                viewer lerps transforms, colors (per-channel RGB), opacity,
+                draw_ranges, clip_times, and camera position/target. Visibility
+                is boolean and always holds regardless of this setting.
         """
         if dtype not in ALLOWED_DTYPES:
             raise ValueError(
                 f"Unsupported dtype {dtype!r}. Allowed: {sorted(ALLOWED_DTYPES)}"
+            )
+        if interpolation not in ALLOWED_INTERPOLATIONS:
+            raise ValueError(
+                f"interpolation must be one of {ALLOWED_INTERPOLATIONS}, "
+                f"got {interpolation!r}"
             )
         # Replace existing channel with same name (prevents duplicates)
         self._channels = [ch for ch in self._channels if ch.name != name]
@@ -173,35 +201,95 @@ class Animation:
                 dtype=dtype,
                 stride=stride,
                 metadata=metadata,
+                interpolation=interpolation,
             )
         )
 
-    def set_transform_data(self, object_ids: list[str], data: np.ndarray) -> None:
+    def set_transform_data(
+        self,
+        object_ids: list[str],
+        data: np.ndarray,
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
         """Convenience: add a 'transforms' channel with stride=16."""
-        self.add_channel("transforms", object_ids, data, dtype="float32", stride=16)
+        self.add_channel(
+            "transforms",
+            object_ids,
+            data,
+            dtype="float32",
+            stride=16,
+            interpolation=interpolation,
+        )
 
     def set_frame_times(self, times) -> None:
         """Set frame times from array, bypassing Frame object creation."""
         self._frame_times = np.asarray(times, dtype=np.float64)
 
-    def set_draw_range_data(self, object_ids: list[str], data: np.ndarray) -> None:
+    def set_draw_range_data(
+        self,
+        object_ids: list[str],
+        data: np.ndarray,
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
         """Convenience: add a 'draw_ranges' channel."""
-        self.add_channel("draw_ranges", object_ids, data, dtype="float32", stride=1)
-
-    def set_clip_time_data(self, object_ids: list[str], data: np.ndarray) -> None:
-        """Convenience: add a 'clip_times' channel."""
-        self.add_channel("clip_times", object_ids, data, dtype="float32", stride=1)
-
-    def set_camera_target(self, data: np.ndarray) -> None:
-        """Convenience: add a 'camera_target' channel with stride=3."""
         self.add_channel(
-            "camera_target", ["__camera__"], data, dtype="float32", stride=3
+            "draw_ranges",
+            object_ids,
+            data,
+            dtype="float32",
+            stride=1,
+            interpolation=interpolation,
         )
 
-    def set_camera_position(self, data: np.ndarray) -> None:
+    def set_clip_time_data(
+        self,
+        object_ids: list[str],
+        data: np.ndarray,
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
+        """Convenience: add a 'clip_times' channel.
+
+        clip_times drives an AnimationMixer seek into an embedded GLTF clip.
+        Linear (the default) produces smooth playback; pass "hold" for
+        frame-accurate seeks that don't advance between keyframes.
+        """
+        self.add_channel(
+            "clip_times",
+            object_ids,
+            data,
+            dtype="float32",
+            stride=1,
+            interpolation=interpolation,
+        )
+
+    def set_camera_target(
+        self,
+        data: np.ndarray,
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
+        """Convenience: add a 'camera_target' channel with stride=3."""
+        self.add_channel(
+            "camera_target",
+            ["__camera__"],
+            data,
+            dtype="float32",
+            stride=3,
+            interpolation=interpolation,
+        )
+
+    def set_camera_position(
+        self,
+        data: np.ndarray,
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
         """Convenience: add a 'camera_position' channel with stride=3."""
         self.add_channel(
-            "camera_position", ["__camera__"], data, dtype="float32", stride=3
+            "camera_position",
+            ["__camera__"],
+            data,
+            dtype="float32",
+            stride=3,
+            interpolation=interpolation,
         )
 
     def add_marker(self, time: float, label: str, color: int = 0xFF0000) -> None:

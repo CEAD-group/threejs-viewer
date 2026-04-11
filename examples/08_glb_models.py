@@ -52,27 +52,14 @@ for name, info in MODELS.items():
     x, y, z = info["position"]
     v.add_model_binary(name, model_paths[name], format="glb", y_up=True)
     # Column-major 4x4 identity with scale and translation
-    v.set_matrix(
-        name,
-        [
-            s,
-            0,
-            0,
-            0,
-            0,
-            s,
-            0,
-            0,
-            0,
-            0,
-            s,
-            0,
-            x,
-            y,
-            z,
-            1,
-        ],
-    )
+    # fmt: off
+    v.set_matrix(name, [
+        s, 0, 0, 0,
+        0, s, 0, 0,
+        0, 0, s, 0,
+        x, y, z, 1,
+    ])
+    # fmt: on
 
 print("Models loaded.")
 v.wait_for_assets()

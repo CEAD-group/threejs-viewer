@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **Animation interpolation** — animation playback now lerps/slerps between keyframes by default, so producers can sample at the signal's bandwidth (e.g. 10 Hz) and still get smooth 60 fps playback. Translations lerp, rotations slerp, float channels (`draw_ranges`, `opacity`, `clip_times`, scripted `camera_target`/`camera_position`) lerp element-wise, and the `colors` channel lerps hex values in 8-bit RGB space (works for direct hex and colormap-indexed `uint8`). Per-channel opt-out via `add_channel(interpolation="hold")` or the convenience setters (`set_transform_data`, `set_draw_range_data`, `set_clip_time_data`, `set_camera_target`, `set_camera_position`) for frame-accurate scientific/simulation replay where intermediate values would be meaningless. The `visibility` channel is boolean and always left-holds the floor keyframe regardless of the setting — a "linear bool" has no meaningful interpretation. JSON `Frame` objects don't carry per-field interpolation and always interpolate linearly; use a binary channel when you need hold behavior. See `examples/17_animation_interpolation.py` for a HOLD ⇄ LINEAR comparison on the same tumbling capsules.
+- **Behavior change**: animations relying on exact frame-accurate playback (where each frame's transforms/colors/etc. were previously pinned to the nearest keyframe) must now pass `interpolation="hold"` explicitly to the relevant `add_channel` / `set_*_data` call. Examples 03/04/05 were downsampled to 10 Hz to demonstrate the smaller payloads.
+
 ## 0.0.18
 
 ### New features
@@ -10,12 +17,12 @@
 
 ### Bug fixes
 
-- **WebSocket fetch probe removed** — eliminates 404 spam on FastAPI/non-HTTP WS routes and ~30s initial connection delay
-- **Animation cleanup** — `stop_animation()` resets draw ranges to full; `clear()` resets animation state
-- **Async race protection** — generation counters guard all HTTP fetch handlers against stale completion after `clear_scene`, animation replacement, or reconnect
-- **Channel refs cache staleness** — object/mixer refs invalidated via generation counters on mutation, preventing stale updates after `delete_object` or ID reuse
-- **Pending fetches accounting** — counter clamped to 0 to prevent negative values from stale fetch completions after reconnect
-- **Animation generation guards** — `_stopAnimation()` and `load_animation_http` increment `_animGeneration` to discard in-flight loads
+- **Faster, quieter connect on FastAPI/non-HTTP WS routes** — fixes ~30s initial connection delay and 404 spam in the browser console when the viewer is served behind a FastAPI app or any route that doesn't answer plain HTTP GETs
+- **`stop_animation()` fully resets mesh/polyline draw ranges** — previously a partial `draw_range` applied during playback could linger on screen after stopping
+- **`clear()` wipes animation state** — previously a loaded animation could keep advancing (or reappear on replay) after `clear()`
+- **No more ghost transforms after `clear_scene` / `load_animation` / reconnect** — in-flight binary fetches from a previous scene, animation, or connection used to land after the teardown and overwrite the current scene; they're now dropped
+- **No more ghost updates after `delete_object` or ID reuse** — an animation channel could still apply its last-known transform/color to an object with a recycled ID; the channel now notices and re-resolves its targets
+- **Pending-fetch counter no longer drifts negative after reconnect**
 
 ## 0.0.17
 
@@ -220,8 +227,8 @@ Enables environment map reflections on primitives and meshes, rebalances scene l
 
 ### Changes
 
-- **Environment map on all objects** — removed `envMapIntensity: 0` from `createMaterial()`, so primitives and meshes now receive the same environment reflections as GLB models
-- **Rebalanced environment intensity** — `scene.environmentIntensity` reduced from 2.0 to 1.0 to compensate
+- **Environment reflections on primitives and meshes** — built-in shapes and `add_mesh()` objects now pick up the same cubemap reflections as GLB models; previously only GLB materials reflected the environment
+- **Rebalanced environment intensity** — scene environment intensity halved to compensate for the new reflections on all objects
 - Examples updated to use `roughness`/`metalness` material properties
 - Fixed incorrect API references in README (`set_position` → `set_matrix`, `set_transforms` → `batch_update`)
 
@@ -231,9 +238,8 @@ Adds PBR material control (`roughness`/`metalness`) to primitive methods, matchi
 
 ### Changes
 
-- **`roughness` and `metalness` on primitives** — `add_box()`, `add_sphere()`, `add_cylinder()`, `add_capsule()` accept optional `roughness` and `metalness` parameters (0.0–1.0)
-- JS `createMaterial()` reads from params instead of hardcoding `0.7`/`0.3` — defaults unchanged when not specified
-- Sync `__init__.py` version (was stuck at 0.0.1) with `pyproject.toml`
+- **`roughness` and `metalness` on primitives** — `add_box()`, `add_sphere()`, `add_cylinder()`, `add_capsule()` accept optional `roughness` and `metalness` parameters (0.0–1.0); defaults unchanged when not specified
+- Fixed `__version__` out of sync with package version (was stuck at 0.0.1)
 
 ### New example
 
@@ -252,10 +258,7 @@ Adds transparency/opacity support across the entire API — primitives, runtime 
 - **Binary `opacity` animation channel** — smooth opacity pulsing via `animation.add_channel("opacity", ...)`
 - **Transform on `add_model_binary()`** — `position`, `rotation`, `scale`, and `matrix` parameters applied after async model load completes (fixes race condition)
 
-### Implementation details
-
-- Shared `applyOpacity()` helper handles Three.js material quirks: `needsUpdate` for shader recompilation, `depthWrite` for correct transparency rendering, and multi-material arrays on GLB models
-- Default `opacity=1.0` — no impact on existing code that doesn't use transparency
+- **Correct transparency rendering across all object types** — opacity now plays well with depth sorting on primitives, meshes, and GLB models (including GLBs with multi-material arrays, which previously crashed on material updates). Default `opacity=1.0` — no impact on existing code that doesn't use transparency.
 
 ### New example
 
@@ -267,11 +270,9 @@ Refactors animation to use generic binary channels, replacing the hardcoded tran
 
 ### Changes
 
-- **Generic binary animation channels** — `animation.add_channel(name, object_ids, data, dtype, stride)` replaces the fixed `set_transform_data()` / `set_draw_range_data()` methods (which are kept as convenience wrappers)
+- **Generic binary animation channels** — `animation.add_channel(name, object_ids, data, dtype, stride)` can carry any per-object-per-frame data as a typed binary channel. `set_transform_data()` / `set_draw_range_data()` are kept as convenience wrappers.
 - **New channel types** — `colors` (uint32), `visibility` (uint8), and `opacity` (float32) channels join the existing `transforms` and `draw_ranges`
-- **Extensible JS dispatcher** — `CHANNEL_APPLY` lookup table makes it trivial to add new channel types
-- **dtype validation** — `add_channel()` validates dtype against allowed set (float32, uint32, uint8)
-- **JS dtype guard** — unknown channel dtypes logged and skipped instead of crashing
+- **Clearer errors on bad channel data** — `add_channel()` raises on an unsupported dtype (allowed: float32, uint32, uint8) instead of letting it reach the browser; the viewer logs and skips unknown dtypes instead of crashing playback
 
 ### Updated examples
 

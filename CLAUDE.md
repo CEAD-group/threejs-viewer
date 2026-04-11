@@ -98,6 +98,8 @@ Indexed colors: `dtype="uint8"` + `metadata={"colormap": [0x44AA44, 0xFF3333]}`
 
 Binary channels and Frame-based JSON can coexist. A binary channel supersedes the same-named Frame field.
 
+**Interpolation (per-channel):** Every *binary* animation channel carries its own interpolation mode — `"linear"` (lerp/slerp between keyframes) or `"hold"` (keep the previous keyframe's value until the next one hits). **Every channel defaults to `"linear"`** — opt out per channel with `add_channel(interpolation="hold")` or via the convenience setters (`set_transform_data`, `set_draw_range_data`, `set_clip_time_data`, `set_camera_target`, `set_camera_position`). Translations lerp, rotations slerp, float channels lerp element-wise, and `colors` lerps hex values in 8-bit RGB space (works for direct hex and colormap-indexed `uint8`). The `visibility` channel is a boolean and always left-holds regardless of the setting — a "linear bool" has no meaningful interpretation; the setting is accepted and validated but has no effect on that channel. **JSON `Frame` objects do not carry interpolation metadata and always interpolate linearly** between consecutive frames (visibility aside) — if you need hold behavior, use a binary channel. There is no Animation-wide knob — it was redundant with per-channel. Linear playback lets producers sample at the signal's bandwidth (e.g. 10 Hz) and still get smooth 60 fps. See `examples/17_animation_interpolation.py` for a HOLD ⇄ LINEAR comparison on the same tumbling capsules.
+
 ### Examples
 - `01_primitives.py` - Basic shapes with colors and positions
 - `02_polylines.py` - Gradient lines with different colormaps
@@ -115,3 +117,4 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `14_grouping.py` - Object grouping with animated robot arm (nested parent-child hierarchy, local joint transforms)
 - `15_toolpath_interrupted.py` - Interrupted extrusion with travel moves: per-point width array (0=travel), pill/racetrack path with varying point density, merge_animation_points for segment-aligned animation (frame times merged into mesh geometry → no partial triangle rings)
 - `16_clipping_plane.py` - Interactive clipping plane with slab mode (nested spheres sliced to reveal internals, single plane + dual-plane slab, programmatic + GUI control)
+- `17_animation_interpolation.py` - HOLD ⇄ LINEAR comparison on a sparse (3 Hz) tumbling-capsules animation. Auto-alternates the two modes on the same `transforms` channel so the lerp/slerp effect is obvious.
