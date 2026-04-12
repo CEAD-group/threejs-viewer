@@ -17,7 +17,7 @@ Highlights:
   color map from layer-height gradient to width gradient without
   rebuilding any geometry.
 
-Run: uv run python examples/17_parametric_tube.py
+Run: uv run python examples/18_parametric_tube.py
 """
 
 import math
@@ -58,8 +58,8 @@ spine, t = make_spiral()
 n = len(spine)
 
 # Width modulates along the path so the effect is visible at a glance.
-widths = 0.06 + 0.04 * np.sin(t * math.pi * 8) + 0.015 * np.cos(t * math.pi * 24)
-heights = 0.03 + 0.01 * np.sin(t * math.pi * 12)
+widths = 0.06 + 0.05 * np.sin(t * math.pi * 8) + 0.015 * np.cos(t * math.pi * 24)
+heights = 0.03 + 0.02 * np.sin(t * math.pi * 12)
 widths = widths.astype(np.float32)
 heights = heights.astype(np.float32)
 

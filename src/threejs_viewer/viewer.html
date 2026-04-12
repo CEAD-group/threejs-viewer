@@ -770,8 +770,14 @@ function buildCrossSectionAngleTable(nVerts) {
 // cornerRadiusFrac in [0, 0.5].
 function sampleRoundedRectInto(out, width, height, cornerRadiusFrac, cosTable, sinTable) {
     const nVerts = cosTable.length;
-    const hw = Math.max(width * 0.5, 1e-12);
-    const hh = Math.max(height * 0.5, 1e-12);
+    if (!Number.isFinite(width) || width <= 0) {
+        throw new Error(`parametric_tube width must be finite and > 0, got ${width}`);
+    }
+    if (!Number.isFinite(height) || height <= 0) {
+        throw new Error(`parametric_tube height must be finite and > 0, got ${height}`);
+    }
+    const hw = width * 0.5;
+    const hh = height * 0.5;
     const frac = Math.max(0, Math.min(0.5, cornerRadiusFrac));
     const r = frac * Math.min(width, height);
     const cxA = hw - r;
@@ -831,9 +837,18 @@ function buildParametricTubeGeometry(
     if (crossSection !== 'rounded_rect') {
         throw new Error(`Unsupported cross_section '${crossSection}'`);
     }
+    if (!Number.isInteger(nCs) || nCs < 3) {
+        throw new Error(`parametric_tube n_cross_section_verts must be an integer >=3, got ${nCs}`);
+    }
     const nSpine = spine.length / 3;
     if (nSpine < 2) {
         throw new Error(`parametric_tube needs >=2 spine points, got ${nSpine}`);
+    }
+    if (widths.length !== nSpine) {
+        throw new Error(`parametric_tube widths length ${widths.length} does not match spine ${nSpine}`);
+    }
+    if (heights.length !== nSpine) {
+        throw new Error(`parametric_tube heights length ${heights.length} does not match spine ${nSpine}`);
     }
 
     const positions = new Float32Array(nSpine * nCs * 3);
@@ -967,9 +982,13 @@ function buildParametricTubeGeometry(
 
 // Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
 // attribute of length nSpine*nCs*3, replicating each ring color across its nCs
-// vertices. Used at tube creation and by update_parametric_tube_colors.
-function expandRingColors(packedColors, nSpine, nCs) {
-    const out = new Float32Array(nSpine * nCs * 3);
+// vertices. Writes into `out` if provided (must be pre-sized) to avoid
+// reallocating on every color update.
+function expandRingColors(packedColors, nSpine, nCs, out) {
+    const total = nSpine * nCs * 3;
+    if (!out || out.length !== total) {
+        out = new Float32Array(total);
+    }
     for (let i = 0; i < nSpine; i++) {
         const c = packedColors[i];
         const r = ((c >> 16) & 0xff) / 255;
@@ -1743,10 +1762,12 @@ class ThreeJSViewer {
         if (obj.userData.isPolyline) {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
         } else if (obj.userData.isParametricTube) {
+            // Snap DOWN to whole ring pairs: the reveal edge always stays a
+            // clean cross-section and never overshoots the requested fraction.
             const ringPairs = obj.userData.tubeRingPairs;
             const perPair = obj.userData.tubeIndicesPerRingPair;
-            const nPairs = Math.round(Math.max(0, Math.min(1, value)) * ringPairs);
-            obj.geometry.setDrawRange(0, nPairs * perPair);
+            const clamped = Math.max(0, Math.min(1, value));
+            obj.geometry.setDrawRange(0, Math.floor(clamped * ringPairs) * perPair);
         } else if (obj.userData.isMesh) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         }
@@ -3005,12 +3026,15 @@ class ThreeJSViewer {
                                     return;
                                 }
                                 const packed = new Uint32Array(buffer, 0, n);
-                                const colors = expandRingColors(packed, n, nCs);
                                 const existing = obj.geometry.getAttribute('color');
-                                if (existing && existing.array.length === colors.length) {
-                                    existing.array.set(colors);
+                                const total = n * nCs * 3;
+                                if (existing && existing.array.length === total) {
+                                    // Reuse the existing attribute's Float32Array
+                                    // so repeated color updates don't churn GC.
+                                    expandRingColors(packed, n, nCs, existing.array);
                                     existing.needsUpdate = true;
                                 } else {
+                                    const colors = expandRingColors(packed, n, nCs);
                                     obj.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
                                 }
                                 obj.material.vertexColors = true;

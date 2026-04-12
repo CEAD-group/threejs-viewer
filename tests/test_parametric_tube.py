@@ -57,6 +57,66 @@ def test_add_parametric_tube_validates_colors_length():
         c.add_parametric_tube("t", spine, widths, heights, colors=colors)
 
 
+def test_add_parametric_tube_validates_n_cross_section_verts():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="n_cross_section_verts"):
+        c.add_parametric_tube("t", spine, widths, heights, n_cross_section_verts=2)
+
+
+def test_add_parametric_tube_validates_cross_section():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="cross_section"):
+        c.add_parametric_tube("t", spine, widths, heights, cross_section="circle")
+
+
+def test_add_parametric_tube_validates_corner_radius_frac():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="corner_radius_frac"):
+        c.add_parametric_tube("t", spine, widths, heights, corner_radius_frac=0.8)
+
+
+def test_add_parametric_tube_validates_widths_positive():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.array([1.0, 0.0, 1.0, 1.0], dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="widths"):
+        c.add_parametric_tube("t", spine, widths, heights)
+
+
+def test_add_parametric_tube_validates_heights_finite():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.array([1.0, np.inf, 1.0, 1.0], dtype=np.float32)
+    with pytest.raises(ValueError, match="heights"):
+        c.add_parametric_tube("t", spine, widths, heights)
+
+
 # --- Browser integration tests ---
 
 

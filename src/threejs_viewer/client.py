@@ -716,6 +716,21 @@ class ViewerClient:
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
         """
+        if cross_section != "rounded_rect":
+            raise ValueError(
+                f"cross_section {cross_section!r} not supported; "
+                f"expected 'rounded_rect'"
+            )
+        if not isinstance(n_cross_section_verts, int) or n_cross_section_verts < 3:
+            raise ValueError(
+                f"n_cross_section_verts must be an int >= 3, got "
+                f"{n_cross_section_verts!r}"
+            )
+        if not (0.0 <= float(corner_radius_frac) <= 0.5):
+            raise ValueError(
+                f"corner_radius_frac must be in [0, 0.5], got {corner_radius_frac}"
+            )
+
         spine_arr = np.ascontiguousarray(spine, dtype=np.float32).reshape(-1, 3)
         n = spine_arr.shape[0]
         if n < 2:
@@ -728,6 +743,10 @@ class ViewerClient:
                 f"widths/heights must have length {n}, got "
                 f"{widths_arr.shape[0]}/{heights_arr.shape[0]}"
             )
+        if not np.all(np.isfinite(widths_arr)) or np.any(widths_arr <= 0):
+            raise ValueError("widths must be finite and > 0 at every spine point")
+        if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr <= 0):
+            raise ValueError("heights must be finite and > 0 at every spine point")
 
         parts = [
             spine_arr.tobytes(),
