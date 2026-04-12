@@ -563,12 +563,15 @@ function buildParametricTubeGeometry(
         }
     }
     // End cap fan (faces +tangent direction)
+    const endCapOffset = p;
     for (let j = 0; j < nCs; j++) {
         const jNext = (j + 1) % nCs;
         indices[p++] = endCapCenterIdx;
         indices[p++] = endCapRingBase + j;
         indices[p++] = endCapRingBase + jNext;
     }
+    // Extract end cap index pattern for dynamic relocation during draw_range
+    const endCapPattern = indices.slice(endCapOffset, endCapOffset + capIndicesPerCap);
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -579,7 +582,7 @@ function buildParametricTubeGeometry(
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
         localFrames, cosTable, sinTable,
-        capIndicesPerCap, endCapCenterIdx, endCapRingBase,
+        capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern,
     };
 }
 
@@ -781,8 +784,39 @@ function updateEndCap(obj, lastVisibleRing) {
     }
 }
 
-// Shared draw_range logic for parametric tubes: morphs the frontier ring
-// for smooth growth, updates end cap, falling back to snap-down if no morph data.
+// Restore end cap indices that were relocated by a previous relocateEndCap call.
+function restoreRelocatedEndCap(obj) {
+    const md = obj.userData.tubeMorphData;
+    if (!md || md.savedCapOffset < 0) return;
+    const indexAttr = obj.geometry.getIndex();
+    indexAttr.array.set(md.savedCapIndices, md.savedCapOffset);
+    md.savedCapOffset = -1;
+    indexAttr.needsUpdate = true;
+}
+
+// Move end cap fan indices to sit right after the visible ring pairs so
+// setDrawRange(0, startCap + visiblePairs + endCap) draws them correctly.
+function relocateEndCap(obj, visiblePairs) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    const capPer = ud.tubeCapIndicesPerCap;
+    const perPair = ud.tubeIndicesPerRingPair;
+    const indexAttr = obj.geometry.getIndex();
+    const idx = indexAttr.array;
+
+    // Restore previously relocated end cap indices
+    restoreRelocatedEndCap(obj);
+
+    // Place end cap right after start_cap + visible ring pairs
+    const offset = capPer + visiblePairs * perPair;
+    // Save the indices we're about to overwrite
+    md.savedCapIndices.set(idx.subarray(offset, offset + capPer));
+    md.savedCapOffset = offset;
+    // Write end cap pattern
+    idx.set(md.endCapPattern, offset);
+    indexAttr.needsUpdate = true;
+}
+
 function applyParametricTubeDrawRange(obj, value) {
     const ud = obj.userData;
     const ringPairs = ud.tubeRingPairs;
@@ -793,19 +827,21 @@ function applyParametricTubeDrawRange(obj, value) {
 
     if (!ud.tubeMorphData) {
         const pairs = Math.floor(fracRingPairs);
-        obj.geometry.setDrawRange(0, pairs * perPair);
+        obj.geometry.setDrawRange(0, capPer + pairs * perPair + capPer);
         return;
     }
 
     if (clamped < 1e-6) {
         restoreFrontierRing(obj);
+        restoreRelocatedEndCap(obj);
         obj.geometry.setDrawRange(0, 0);
         return;
     }
 
     const visiblePairs = morphFrontierRing(obj, fracRingPairs);
     updateEndCap(obj, visiblePairs);
-    // start_cap + ring_pairs + end_cap
+    relocateEndCap(obj, visiblePairs);
+    // start_cap + ring_pairs + end_cap (end cap now sits right after visible pairs)
     obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
 }
 
@@ -2761,7 +2797,7 @@ export class ThreeJSViewer {
                                 }
                                 const nCs = data.nCrossSectionVerts || 8;
                                 const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, cosTable, sinTable, capIndicesPerCap, endCapCenterIdx, endCapRingBase } = buildParametricTubeGeometry(
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, cosTable, sinTable, capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, ringColors,
                                     data.crossSection || 'rounded_rect',
@@ -2806,6 +2842,9 @@ export class ThreeJSViewer {
                                     savedRing: new Float32Array(nCs * 3),
                                     savedRingColors: null,
                                     savedRingIndex: null,
+                                    endCapPattern,
+                                    savedCapIndices: new endCapPattern.constructor(endCapPattern.length),
+                                    savedCapOffset: -1,
                                 };
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);

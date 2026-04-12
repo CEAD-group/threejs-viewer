@@ -11,7 +11,8 @@ v = viewer(open_browser=False)
 v.clear()
 
 n_pts = 10
-x = np.linspace(0, 2, n_pts, dtype=np.float32)
+x = np.array([0, 1, 2, 6, 7, 12, 13, 14, 15, 16], dtype=np.float32)
+y = 16 * np.sin(x / 3)
 spine = np.column_stack(
     [x, np.zeros(n_pts, dtype=np.float32), np.zeros(n_pts, dtype=np.float32)]
 )
