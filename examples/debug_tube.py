@@ -12,12 +12,12 @@ v.clear()
 
 n_pts = 10
 x = np.array([0, 1, 2, 6, 7, 12, 13, 14, 15, 16], dtype=np.float32)
-y = 16 * np.sin(x / 3)
-spine = np.column_stack(
-    [x, np.zeros(n_pts, dtype=np.float32), np.zeros(n_pts, dtype=np.float32)]
-)
-widths = np.full(n_pts, 0.3, dtype=np.float32)
-heights = np.full(n_pts, 0.15, dtype=np.float32)
+y = 4 * np.sin(x / 3)
+z = 3 * np.cos(x / 3)
+spine = np.column_stack([x, y, z])
+widths = np.full(n_pts, 2, dtype=np.float32)
+widths[3:6] = 5
+heights = np.full(n_pts, 1, dtype=np.float32)
 
 v.add_parametric_tube("tube", spine=spine, widths=widths, heights=heights, opacity=0.4)
 v.add_parametric_tube(

@@ -280,27 +280,14 @@ const PRIMITIVES = {
     )
 };
 
-// Precompute the unit-circle cos/sin ray directions for an n-vertex
-// cross-section. The angles are ring-independent, so we compute them once
-// per buildParametricTubeGeometry call and reuse across all spine points.
-function buildCrossSectionAngleTable(nVerts) {
-    const cosTable = new Float32Array(nVerts);
-    const sinTable = new Float32Array(nVerts);
-    for (let i = 0; i < nVerts; i++) {
-        const theta = (i / nVerts) * Math.PI * 2;
-        cosTable[i] = Math.cos(theta);
-        sinTable[i] = Math.sin(theta);
-    }
-    return { cosTable, sinTable };
-}
-
-// Sample a rounded-rectangle cross-section in the local (u, v) plane into
-// a caller-provided scratch buffer. Uses a precomputed cos/sin angle table
-// so the inner loop allocates nothing.
+// Sample a rounded-rectangle cross-section in the local (u, v) plane by
+// distributing nVerts points equally by arc length around the perimeter.
+// The shape is: 4 straight edges + 4 quarter-circle corner arcs. Points
+// are always distributed the same way relative to the shape, so changing
+// width/height scales the shape without rotating the visible polygon.
 // Radius is clamped to cornerRadiusFrac * min(width, height) with
 // cornerRadiusFrac in [0, 0.5].
-function sampleRoundedRectInto(out, width, height, cornerRadiusFrac, cosTable, sinTable) {
-    const nVerts = cosTable.length;
+function sampleRoundedRectInto(out, nVerts, width, height, cornerRadiusFrac) {
     if (!Number.isFinite(width) || width <= 0) {
         throw new Error(`parametric_tube width must be finite and > 0, got ${width}`);
     }
@@ -311,34 +298,63 @@ function sampleRoundedRectInto(out, width, height, cornerRadiusFrac, cosTable, s
     const hh = height * 0.5;
     const frac = Math.max(0, Math.min(0.5, cornerRadiusFrac));
     const r = frac * Math.min(width, height);
-    const cxA = hw - r;
-    const cyA = hh - r;
+    const cxA = hw - r;  // half-width of the flat section
+    const cyA = hh - r;  // half-height of the flat section
+
+    // Perimeter segments (starting at +hw, 0 going counter-clockwise):
+    //   right edge:  (+hw, -cyA) → (+hw, +cyA)    length = 2*cyA
+    //   TR corner:   quarter arc radius r           length = π*r/2
+    //   top edge:    (+cxA, +hh) → (-cxA, +hh)    length = 2*cxA
+    //   TL corner:   quarter arc                    length = π*r/2
+    //   left edge:   (-hw, +cyA) → (-hw, -cyA)    length = 2*cyA
+    //   BL corner:   quarter arc                    length = π*r/2
+    //   bottom edge: (-cxA, -hh) → (+cxA, -hh)    length = 2*cxA
+    //   BR corner:   quarter arc                    length = π*r/2
+    const edgeH = 2 * cyA;  // right/left edge lengths
+    const edgeW = 2 * cxA;  // top/bottom edge lengths
+    const arcLen = (Math.PI * 0.5) * r; // quarter-arc length
+    const perimeter = 2 * edgeH + 2 * edgeW + 4 * arcLen;
+
+    // Segment lengths in order
+    const segLens = [edgeH, arcLen, edgeW, arcLen, edgeH, arcLen, edgeW, arcLen];
+
     for (let i = 0; i < nVerts; i++) {
-        const cx = cosTable[i];
-        const cy = sinTable[i];
+        const d = (i / nVerts) * perimeter;
         let u, v;
-        if (cx !== 0 && Math.abs(cy / cx) * hw <= cyA) {
-            // Right / left flat edge at x = ±hw.
-            const sx = cx > 0 ? 1 : -1;
-            u = sx * hw;
-            v = u * cy / cx;
-        } else if (cy !== 0 && Math.abs(cx / cy) * hh <= cxA) {
-            // Top / bottom flat edge at y = ±hh.
-            const sy = cy > 0 ? 1 : -1;
-            v = sy * hh;
-            u = v * cx / cy;
+        let remaining = d;
+        if (remaining < segLens[0]) {
+            // Right edge: (+hw, -cyA) → (+hw, +cyA)
+            const t = edgeH > 0 ? remaining / edgeH : 0;
+            u = hw; v = -cyA + t * 2 * cyA;
+        } else if ((remaining -= segLens[0]) < segLens[1]) {
+            // TR corner arc: center (+cxA, +cyA), from 0 to π/2
+            const a = arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0;
+            u = cxA + r * Math.cos(a); v = cyA + r * Math.sin(a);
+        } else if ((remaining -= segLens[1]) < segLens[2]) {
+            // Top edge: (+cxA, +hh) → (-cxA, +hh)
+            const t = edgeW > 0 ? remaining / edgeW : 0;
+            u = cxA - t * 2 * cxA; v = hh;
+        } else if ((remaining -= segLens[2]) < segLens[3]) {
+            // TL corner arc: center (-cxA, +cyA), from π/2 to π
+            const a = (Math.PI * 0.5) + (arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0);
+            u = -cxA + r * Math.cos(a); v = cyA + r * Math.sin(a);
+        } else if ((remaining -= segLens[3]) < segLens[4]) {
+            // Left edge: (-hw, +cyA) → (-hw, -cyA)
+            const t = edgeH > 0 ? remaining / edgeH : 0;
+            u = -hw; v = cyA - t * 2 * cyA;
+        } else if ((remaining -= segLens[4]) < segLens[5]) {
+            // BL corner arc: center (-cxA, -cyA), from π to 3π/2
+            const a = Math.PI + (arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0);
+            u = -cxA + r * Math.cos(a); v = -cyA + r * Math.sin(a);
+        } else if ((remaining -= segLens[5]) < segLens[6]) {
+            // Bottom edge: (-cxA, -hh) → (+cxA, -hh)
+            const t = edgeW > 0 ? remaining / edgeW : 0;
+            u = -cxA + t * 2 * cxA; v = -hh;
         } else {
-            // Corner arc: circle centered at (±cxA, ±cyA) radius r.
-            const sx = cx >= 0 ? 1 : -1;
-            const sy = cy >= 0 ? 1 : -1;
-            const ccx = sx * cxA;
-            const ccy = sy * cyA;
-            const b = ccx * cx + ccy * cy;
-            const c = ccx * ccx + ccy * ccy - r * r;
-            const disc = Math.max(b * b - c, 0);
-            const t = b + Math.sqrt(disc);
-            u = t * cx;
-            v = t * cy;
+            // BR corner arc: center (+cxA, -cyA), from 3π/2 to 2π
+            remaining -= segLens[6];
+            const a = Math.PI * 1.5 + (arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0);
+            u = cxA + r * Math.cos(a); v = -cyA + r * Math.sin(a);
         }
         out[i * 2] = u;
         out[i * 2 + 1] = v;
@@ -393,7 +409,6 @@ function buildParametricTubeGeometry(
 
     const positions = new Float32Array(totalVerts * 3);
     const colors = ringColors ? new Float32Array(totalVerts * 3) : null;
-    const { cosTable, sinTable } = buildCrossSectionAngleTable(nCs);
     const section = new Float32Array(nCs * 2);
     // Store per-spine-point local frames (U, V) for frontier-ring morphing.
     const localFrames = new Float32Array(nSpine * 6);
@@ -466,7 +481,7 @@ function buildParametricTubeGeometry(
 
         const w = widths[i];
         const h = heights[i];
-        sampleRoundedRectInto(section, w, h, cornerRadiusFrac, cosTable, sinTable);
+        sampleRoundedRectInto(section, nCs, w, h, cornerRadiusFrac);
         const sx = spine[i * 3];
         const sy = spine[i * 3 + 1];
         const sz = spine[i * 3 + 2];
@@ -581,7 +596,7 @@ function buildParametricTubeGeometry(
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
-        localFrames, cosTable, sinTable,
+        localFrames,
         capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern,
     };
 }
@@ -693,7 +708,7 @@ function morphFrontierRing(obj, fracRingPairs) {
     if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
 
     // Sample cross-section at interpolated width/height
-    sampleRoundedRectInto(md.section, w, h, md.cornerRadiusFrac, md.cosTable, md.sinTable);
+    sampleRoundedRectInto(md.section, nCs, w, h, md.cornerRadiusFrac);
 
     // Write morphed vertices into the position buffer at ring iB
     const posAttr = obj.geometry.getAttribute('position');
@@ -2797,7 +2812,7 @@ export class ThreeJSViewer {
                                 }
                                 const nCs = data.nCrossSectionVerts || 8;
                                 const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, cosTable, sinTable, capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern } = buildParametricTubeGeometry(
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, ringColors,
                                     data.crossSection || 'rounded_rect',
@@ -2835,8 +2850,7 @@ export class ThreeJSViewer {
                                     spine: new Float32Array(spine),
                                     widths: new Float32Array(widths),
                                     heights: new Float32Array(heights),
-                                    localFrames,
-                                    cosTable, sinTable, cornerRadiusFrac,
+                                    localFrames, cornerRadiusFrac,
                                     ringColors: ringColors ? new Float32Array(ringColors) : null,
                                     section: new Float32Array(nCs * 2),
                                     savedRing: new Float32Array(nCs * 3),
