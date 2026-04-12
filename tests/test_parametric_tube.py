@@ -179,9 +179,11 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     assert info["nCs"] == n_cs
     assert info["ringPairs"] == n - 1
     assert info["perPair"] == n_cs * 6
-    assert info["totalIndex"] == (n - 1) * n_cs * 6
-    assert info["vertexCount"] == n * n_cs
-    assert info["indexCount"] == (n - 1) * n_cs * 6
+    cap_indices = n_cs * 3  # triangle fan per cap
+    assert info["totalIndex"] == 2 * cap_indices + (n - 1) * n_cs * 6
+    # Tube ring verts + 2 cap centers + 2 cap rings
+    assert info["vertexCount"] == n * n_cs + 2 + 2 * n_cs
+    assert info["indexCount"] == 2 * cap_indices + (n - 1) * n_cs * 6
     # Spine along +X. Frame derives width=+Y, height=+Z. Sharp rectangle
     # of 0.4 x 0.2 sampled at 8 angles: outermost samples land on the
     # flat edges so the bounding box matches the parameter values.
@@ -217,7 +219,8 @@ def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
         """(id) => window.threejsViewer._objects.get(id).geometry.drawRange.count""",
         "tube2",
     )
-    expected = 4 * n_cs * 6
+    cap = n_cs * 3  # per cap
+    expected = 2 * cap + 4 * n_cs * 6  # start cap + 4 ring pairs + end cap
     assert count == expected, f"expected {expected}, got {count}"
 
 

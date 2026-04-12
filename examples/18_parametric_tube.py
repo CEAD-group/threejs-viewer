@@ -60,8 +60,8 @@ n = len(spine)
 # Width modulates along the path so the effect is visible at a glance.
 widths = 0.06 + 0.05 * np.sin(t * math.pi * 8) + 0.015 * np.cos(t * math.pi * 24)
 heights = 0.03 + 0.02 * np.sin(t * math.pi * 12)
-widths = widths.astype(np.float32)
-heights = heights.astype(np.float32)
+widths = np.maximum(widths, 1e-3).astype(np.float32)
+heights = np.maximum(heights, 1e-3).astype(np.float32)
 
 # Initial colormap: paint each ring by normalized layer height (z).
 z_frac = (spine[:, 2] - spine[:, 2].min()) / (

@@ -845,8 +845,17 @@ function buildParametricTubeGeometry(
         throw new Error(`parametric_tube heights length ${heights.length} does not match spine ${nSpine}`);
     }
 
-    const positions = new Float32Array(nSpine * nCs * 3);
-    const colors = ringColors ? new Float32Array(nSpine * nCs * 3) : null;
+    // Cap vertex layout (appended after tube rings):
+    //   startCapCenter(1) | startCapRing(nCs) | endCapCenter(1) | endCapRing(nCs)
+    const startCapCenterIdx = nSpine * nCs;
+    const startCapRingBase = startCapCenterIdx + 1;
+    const endCapCenterIdx = startCapRingBase + nCs;
+    const endCapRingBase = endCapCenterIdx + 1;
+    const totalVerts = endCapRingBase + nCs;
+    const capIndicesPerCap = nCs * 3; // triangle fan
+
+    const positions = new Float32Array(totalVerts * 3);
+    const colors = ringColors ? new Float32Array(totalVerts * 3) : null;
     const { cosTable, sinTable } = buildCrossSectionAngleTable(nCs);
     const section = new Float32Array(nCs * 2);
     // Store per-spine-point local frames (U, V) for frontier-ring morphing.
@@ -944,13 +953,61 @@ function buildParametricTubeGeometry(
         }
     }
 
-    // Index buffer: two triangles per quad, nCs quads per ring pair, (nSpine-1) ring pairs.
+    // --- Cap vertices (separate from tube walls for independent normals) ---
+    // Start cap: center at spine[0], ring = copy of ring 0
+    positions[startCapCenterIdx * 3]     = spine[0];
+    positions[startCapCenterIdx * 3 + 1] = spine[1];
+    positions[startCapCenterIdx * 3 + 2] = spine[2];
+    for (let j = 0; j < nCs; j++) {
+        const dst = (startCapRingBase + j) * 3;
+        positions[dst]     = positions[j * 3];
+        positions[dst + 1] = positions[j * 3 + 1];
+        positions[dst + 2] = positions[j * 3 + 2];
+    }
+    // End cap: center at spine[N-1], ring = copy of last ring
+    const lastSp = (nSpine - 1) * 3;
+    positions[endCapCenterIdx * 3]     = spine[lastSp];
+    positions[endCapCenterIdx * 3 + 1] = spine[lastSp + 1];
+    positions[endCapCenterIdx * 3 + 2] = spine[lastSp + 2];
+    const lastRingBase = (nSpine - 1) * nCs;
+    for (let j = 0; j < nCs; j++) {
+        const src = (lastRingBase + j) * 3;
+        const dst = (endCapRingBase + j) * 3;
+        positions[dst]     = positions[src];
+        positions[dst + 1] = positions[src + 1];
+        positions[dst + 2] = positions[src + 2];
+    }
+    // Cap colors (replicate ring colors to cap vertices)
+    if (colors) {
+        const r0 = ringColors[0], g0 = ringColors[1], b0 = ringColors[2];
+        colors[startCapCenterIdx * 3] = r0; colors[startCapCenterIdx * 3 + 1] = g0; colors[startCapCenterIdx * 3 + 2] = b0;
+        for (let j = 0; j < nCs; j++) {
+            const dst = (startCapRingBase + j) * 3;
+            colors[dst] = r0; colors[dst + 1] = g0; colors[dst + 2] = b0;
+        }
+        const rN = ringColors[(nSpine - 1) * 3], gN = ringColors[(nSpine - 1) * 3 + 1], bN = ringColors[(nSpine - 1) * 3 + 2];
+        colors[endCapCenterIdx * 3] = rN; colors[endCapCenterIdx * 3 + 1] = gN; colors[endCapCenterIdx * 3 + 2] = bN;
+        for (let j = 0; j < nCs; j++) {
+            const dst = (endCapRingBase + j) * 3;
+            colors[dst] = rN; colors[dst + 1] = gN; colors[dst + 2] = bN;
+        }
+    }
+
+    // --- Index buffer: [start_cap_fan | ring_pairs | end_cap_fan] ---
     const ringPairs = nSpine - 1;
     const indicesPerRingPair = nCs * 6;
-    const indexCount = ringPairs * indicesPerRingPair;
-    const IndexCtor = (nSpine * nCs) > 65535 ? Uint32Array : Uint16Array;
-    const indices = new IndexCtor(indexCount);
+    const totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
+    const IndexCtor = totalVerts > 65535 ? Uint32Array : Uint16Array;
+    const indices = new IndexCtor(totalIndexCount);
     let p = 0;
+    // Start cap fan (faces -tangent direction)
+    for (let j = 0; j < nCs; j++) {
+        const jNext = (j + 1) % nCs;
+        indices[p++] = startCapCenterIdx;
+        indices[p++] = startCapRingBase + jNext;
+        indices[p++] = startCapRingBase + j;
+    }
+    // Ring pairs
     for (let i = 0; i < ringPairs; i++) {
         const a0 = i * nCs;
         const b0 = (i + 1) * nCs;
@@ -968,6 +1025,13 @@ function buildParametricTubeGeometry(
             indices[p++] = d;
         }
     }
+    // End cap fan (faces +tangent direction)
+    for (let j = 0; j < nCs; j++) {
+        const jNext = (j + 1) % nCs;
+        indices[p++] = endCapCenterIdx;
+        indices[p++] = endCapRingBase + j;
+        indices[p++] = endCapRingBase + jNext;
+    }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -975,7 +1039,11 @@ function buildParametricTubeGeometry(
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeVertexNormals();
 
-    return { geometry, ringPairs, indicesPerRingPair, nCs, localFrames, cosTable, sinTable };
+    return {
+        geometry, ringPairs, indicesPerRingPair, nCs,
+        localFrames, cosTable, sinTable,
+        capIndicesPerCap, endCapCenterIdx, endCapRingBase,
+    };
 }
 
 // Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
@@ -984,7 +1052,7 @@ function buildParametricTubeGeometry(
 // reallocating on every color update.
 function expandRingColors(packedColors, nSpine, nCs, out) {
     const total = nSpine * nCs * 3;
-    if (!out || out.length !== total) {
+    if (!out || out.length < total) {
         out = new Float32Array(total);
     }
     for (let i = 0; i < nSpine; i++) {
@@ -1122,19 +1190,86 @@ function morphFrontierRing(obj, fracRingPairs) {
     return completePairs + 1;
 }
 
+// Update the end cap vertices to match the last visible ring (the frontier).
+function updateEndCap(obj, lastVisibleRing) {
+    const ud = obj.userData;
+    const nCs = ud.tubeNCs;
+    const posAttr = obj.geometry.getAttribute('position');
+    const pos = posAttr.array;
+    const md = ud.tubeMorphData;
+
+    // Copy frontier ring positions to end cap ring vertices
+    const srcBase = lastVisibleRing * nCs * 3;
+    const dstRingBase = ud.tubeEndCapRingBase * 3;
+    for (let j = 0; j < nCs * 3; j++) {
+        pos[dstRingBase + j] = pos[srcBase + j];
+    }
+    // Set end cap center to the spine position (or lerped position for morphed frontier).
+    // The center is the average of the ring vertices (== spine point for un-morphed rings).
+    const dstCenter = ud.tubeEndCapCenterIdx * 3;
+    if (md && lastVisibleRing < md.spine.length / 3) {
+        // Use stored spine point (exact, works for both morphed and original)
+        // For morphed frontier, morphFrontierRing already set the ring positions,
+        // so compute center as centroid of the frontier ring.
+        let cx = 0, cy = 0, cz = 0;
+        for (let j = 0; j < nCs; j++) {
+            cx += pos[srcBase + j * 3];
+            cy += pos[srcBase + j * 3 + 1];
+            cz += pos[srcBase + j * 3 + 2];
+        }
+        pos[dstCenter]     = cx / nCs;
+        pos[dstCenter + 1] = cy / nCs;
+        pos[dstCenter + 2] = cz / nCs;
+    }
+    posAttr.needsUpdate = true;
+
+    // Update end cap colors if applicable
+    if (ud.tubeHasColors && md && md.ringColors) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            const cols = colAttr.array;
+            const colSrcBase = lastVisibleRing * nCs * 3;
+            const colDstCenter = ud.tubeEndCapCenterIdx * 3;
+            const colDstRingBase = ud.tubeEndCapRingBase * 3;
+            // Copy frontier ring colors to end cap ring
+            for (let j = 0; j < nCs * 3; j++) {
+                cols[colDstRingBase + j] = cols[colSrcBase + j];
+            }
+            // Center color = same as ring
+            cols[colDstCenter]     = cols[colSrcBase];
+            cols[colDstCenter + 1] = cols[colSrcBase + 1];
+            cols[colDstCenter + 2] = cols[colSrcBase + 2];
+            colAttr.needsUpdate = true;
+        }
+    }
+}
+
 // Shared draw_range logic for parametric tubes: morphs the frontier ring
-// for smooth growth, falling back to snap-down if no morph data.
+// for smooth growth, updates end cap, falling back to snap-down if no morph data.
 function applyParametricTubeDrawRange(obj, value) {
-    const ringPairs = obj.userData.tubeRingPairs;
-    const perPair = obj.userData.tubeIndicesPerRingPair;
+    const ud = obj.userData;
+    const ringPairs = ud.tubeRingPairs;
+    const perPair = ud.tubeIndicesPerRingPair;
+    const capPer = ud.tubeCapIndicesPerCap || 0;
     const clamped = Math.max(0, Math.min(1, value));
     const fracRingPairs = clamped * ringPairs;
-    if (obj.userData.tubeMorphData) {
-        const visiblePairs = morphFrontierRing(obj, fracRingPairs);
-        obj.geometry.setDrawRange(0, visiblePairs * perPair);
-    } else {
-        obj.geometry.setDrawRange(0, Math.floor(fracRingPairs) * perPair);
+
+    if (!ud.tubeMorphData) {
+        const pairs = Math.floor(fracRingPairs);
+        obj.geometry.setDrawRange(0, pairs * perPair);
+        return;
     }
+
+    if (clamped < 1e-6) {
+        restoreFrontierRing(obj);
+        obj.geometry.setDrawRange(0, 0);
+        return;
+    }
+
+    const visiblePairs = morphFrontierRing(obj, fracRingPairs);
+    updateEndCap(obj, visiblePairs);
+    // start_cap + ring_pairs + end_cap
+    obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
 }
 
 class ThreeJSViewer {
@@ -3089,7 +3224,7 @@ class ThreeJSViewer {
                                 }
                                 const nCs = data.nCrossSectionVerts || 8;
                                 const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, cosTable, sinTable } = buildParametricTubeGeometry(
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, cosTable, sinTable, capIndicesPerCap, endCapCenterIdx, endCapRingBase } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, ringColors,
                                     data.crossSection || 'rounded_rect',
@@ -3107,6 +3242,7 @@ class ThreeJSViewer {
                                     depthWrite: opacity >= 1,
                                     side: THREE.DoubleSide,
                                     vertexColors: hasColors,
+                                    wireframe: !!data.wireframe,
                                     clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
                                 });
                                 const mesh = new THREE.Mesh(geometry, material);
@@ -3117,8 +3253,11 @@ class ThreeJSViewer {
                                 mesh.userData.tubeNCs = nCs;
                                 mesh.userData.tubeRingPairs = ringPairs;
                                 mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
-                                mesh.userData.totalIndexCount = ringPairs * indicesPerRingPair;
+                                mesh.userData.totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
                                 mesh.userData.tubeHasColors = hasColors;
+                                mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
+                                mesh.userData.tubeEndCapCenterIdx = endCapCenterIdx;
+                                mesh.userData.tubeEndCapRingBase = endCapRingBase;
                                 mesh.userData.tubeMorphData = {
                                     spine: new Float32Array(spine),
                                     widths: new Float32Array(widths),
@@ -3167,16 +3306,59 @@ class ThreeJSViewer {
                                     return;
                                 }
                                 const packed = new Uint32Array(buffer, 0, n);
+                                // Decode per-ring colors
+                                const rc = new Float32Array(n * 3);
+                                for (let i = 0; i < n; i++) {
+                                    const c = packed[i];
+                                    rc[i * 3]     = ((c >> 16) & 0xff) / 255;
+                                    rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                    rc[i * 3 + 2] = (c & 0xff) / 255;
+                                }
                                 const existing = obj.geometry.getAttribute('color');
-                                const total = n * nCs * 3;
-                                if (existing && existing.array.length === total) {
-                                    // Reuse the existing attribute's Float32Array
-                                    // so repeated color updates don't churn GC.
+                                if (existing) {
+                                    // Expand ring colors into tube vertices
                                     expandRingColors(packed, n, nCs, existing.array);
+                                    // Fill cap vertex colors (start cap = ring 0 color, end cap = last ring color)
+                                    const posCount = obj.geometry.getAttribute('position').count;
+                                    const capVerts = posCount - n * nCs; // 2 + 2*nCs
+                                    if (capVerts > 0) {
+                                        const capBase = n * nCs * 3;
+                                        // Start cap center + ring: ring 0 color
+                                        for (let j = 0; j < 1 + nCs; j++) {
+                                            existing.array[capBase + j * 3]     = rc[0];
+                                            existing.array[capBase + j * 3 + 1] = rc[1];
+                                            existing.array[capBase + j * 3 + 2] = rc[2];
+                                        }
+                                        // End cap center + ring: last ring color
+                                        const endBase = capBase + (1 + nCs) * 3;
+                                        const lr = (n - 1) * 3;
+                                        for (let j = 0; j < 1 + nCs; j++) {
+                                            existing.array[endBase + j * 3]     = rc[lr];
+                                            existing.array[endBase + j * 3 + 1] = rc[lr + 1];
+                                            existing.array[endBase + j * 3 + 2] = rc[lr + 2];
+                                        }
+                                    }
                                     existing.needsUpdate = true;
                                 } else {
-                                    const colors = expandRingColors(packed, n, nCs);
-                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                                    // First color set — build full attribute
+                                    const posCount = obj.geometry.getAttribute('position').count;
+                                    const allColors = new Float32Array(posCount * 3);
+                                    expandRingColors(packed, n, nCs, allColors);
+                                    // Fill caps
+                                    const capBase = n * nCs * 3;
+                                    for (let j = 0; j < 1 + nCs; j++) {
+                                        allColors[capBase + j * 3]     = rc[0];
+                                        allColors[capBase + j * 3 + 1] = rc[1];
+                                        allColors[capBase + j * 3 + 2] = rc[2];
+                                    }
+                                    const endBase = capBase + (1 + nCs) * 3;
+                                    const lr = (n - 1) * 3;
+                                    for (let j = 0; j < 1 + nCs; j++) {
+                                        allColors[endBase + j * 3]     = rc[lr];
+                                        allColors[endBase + j * 3 + 1] = rc[lr + 1];
+                                        allColors[endBase + j * 3 + 2] = rc[lr + 2];
+                                    }
+                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
                                 }
                                 obj.material.vertexColors = true;
                                 obj.material.color.setHex(0xffffff);
@@ -3185,13 +3367,6 @@ class ThreeJSViewer {
                                 // Sync morph data so frontier ring lerps use new colors.
                                 const md = obj.userData.tubeMorphData;
                                 if (md) {
-                                    const rc = new Float32Array(n * 3);
-                                    for (let i = 0; i < n; i++) {
-                                        const c = packed[i];
-                                        rc[i * 3]     = ((c >> 16) & 0xff) / 255;
-                                        rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
-                                        rc[i * 3 + 2] = (c & 0xff) / 255;
-                                    }
                                     md.ringColors = rc;
                                     md.savedRingIndex = null;
                                 }

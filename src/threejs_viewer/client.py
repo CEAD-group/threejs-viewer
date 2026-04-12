@@ -681,6 +681,7 @@ class ViewerClient:
         opacity: float = 1.0,
         metalness: float = 0.1,
         roughness: float = 0.8,
+        wireframe: bool = False,
         parent: Optional[str] = None,
         position: Optional[list] = None,
         rotation: Optional[list] = None,
@@ -786,6 +787,7 @@ class ViewerClient:
             "opacity": opacity,
             "metalness": metalness,
             "roughness": roughness,
+            "wireframe": wireframe,
         }
         if parent:
             header["parent"] = parent
