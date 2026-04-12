@@ -756,6 +756,9 @@ const PRIMITIVES = {
 // When h > w: flat left & right, pointed top & bottom (hexagon).
 // When w == h: diamond — two vertex pairs coincide, giving 4 unique corners.
 const N_CROSS_SECTION = 6;
+// LOD: epsilon = camera_distance / LOD_EPSILON_DIVISOR.
+// Higher → more points kept (finer detail). Lower → more aggressive simplification.
+const LOD_EPSILON_DIVISOR = 500;
 function sampleChamferedRect(out, width, height) {
     if (!Number.isFinite(width) || width < 0) {
         throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
@@ -791,6 +794,215 @@ function sampleChamferedRect(out, width, height) {
         out[8]  = -hw;        out[9]  = -(hh - c);    // left-bottom
         out[10] = 0;          out[11] = -hh;            // bottom tip
     }
+}
+
+// ========== LOD: Distance-Weighted RDP ==========
+//
+// The RDP algorithm runs in a Web Worker to avoid blocking the render loop.
+// The worker code is defined as a string and loaded via Blob URL.
+// A synchronous fallback (distanceWeightedRDP) is kept for initial LOD at
+// tube creation time, before the worker is ready.
+
+const _LOD_WORKER_CODE = `
+const LOD_EPSILON_DIVISOR = ${LOD_EPSILON_DIVISOR};
+const LOD_CHUNK_SIZE = 5000;
+const LOD_CHUNK_REUSE_RATIO = 1.5;  // reuse chunk if distance ratio within [1/R, R]
+
+function _perpDistSq(spine, iP, iA, iB) {
+    const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
+    const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
+    const apx = spine[iP * 3] - ax, apy = spine[iP * 3 + 1] - ay, apz = spine[iP * 3 + 2] - az;
+    const cx = apy * abz - apz * aby;
+    const cy = apz * abx - apx * abz;
+    const cz = apx * aby - apy * abx;
+    const abLenSq = abx * abx + aby * aby + abz * abz;
+    if (abLenSq < 1e-24) return apx * apx + apy * apy + apz * apz;
+    return (cx * cx + cy * cy + cz * cz) / abLenSq;
+}
+
+// RDP on a single chunk range [chunkStart, chunkEnd]. Returns array of kept
+// indices (sorted), including the endpoints.
+function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
+    const keep = [];
+    keep.push(chunkStart);
+    if (chunkEnd > chunkStart) keep.push(chunkEnd);
+    const stack = [[chunkStart, chunkEnd]];
+    while (stack.length > 0) {
+        const [start, end] = stack.pop();
+        if (end - start < 2) continue;
+        let maxPerpSq = 0;
+        let maxIdx = start;
+        for (let i = start + 1; i < end; i++) {
+            const dSq = _perpDistSq(spine, i, start, end);
+            if (dSq > maxPerpSq) {
+                maxPerpSq = dSq;
+                maxIdx = i;
+            }
+        }
+        if (maxPerpSq > epsSq[maxIdx]) {
+            keep.push(maxIdx);
+            stack.push([start, maxIdx]);
+            stack.push([maxIdx, end]);
+        }
+    }
+    keep.sort((a, b) => a - b);
+    return keep;
+}
+
+// Per-tube chunk cache: tubeId -> { chunkDists: Float64Array, chunkIndices: Array<number[]> }
+const _cache = new Map();
+
+self.onmessage = function(e) {
+    const { tubeId, spine, nPoints, camX, camY, camZ } = e.data;
+    if (nPoints <= 2) {
+        const indices = new Uint32Array(nPoints < 1 ? 0 : nPoints === 1 ? [0] : [0, 1]);
+        self.postMessage({ tubeId, indices, minDist: 0, maxDist: 0, chunksReused: 0, chunksTotal: 0 }, [indices.buffer]);
+        return;
+    }
+
+    // Pre-compute per-point epsilon² and distance stats
+    const epsSq = new Float32Array(nPoints);
+    let minDist = Infinity, maxDist = 0;
+    for (let i = 0; i < nPoints; i++) {
+        const dx = spine[i * 3] - camX;
+        const dy = spine[i * 3 + 1] - camY;
+        const dz = spine[i * 3 + 2] - camZ;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < minDist) minDist = d;
+        if (d > maxDist) maxDist = d;
+        const e = d / LOD_EPSILON_DIVISOR;
+        epsSq[i] = e * e;
+    }
+
+    // Determine chunks
+    const nChunks = Math.ceil(Math.max(1, (nPoints - 1) / LOD_CHUNK_SIZE));
+    let cached = _cache.get(tubeId);
+    if (!cached || cached.chunkDists.length !== nChunks) {
+        cached = { chunkDists: new Float64Array(nChunks), chunkIndices: new Array(nChunks) };
+        _cache.set(tubeId, cached);
+    }
+
+    // Per-chunk: compute center-point distance, decide reuse or recompute
+    let totalKept = 0;
+    let chunksReused = 0;
+    for (let ci = 0; ci < nChunks; ci++) {
+        const chunkStart = ci * LOD_CHUNK_SIZE;
+        const chunkEnd = Math.min(chunkStart + LOD_CHUNK_SIZE, nPoints - 1);
+        // Distance from camera to chunk midpoint
+        const mid = Math.floor((chunkStart + chunkEnd) / 2);
+        const dx = spine[mid * 3] - camX;
+        const dy = spine[mid * 3 + 1] - camY;
+        const dz = spine[mid * 3 + 2] - camZ;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        const prevDist = cached.chunkDists[ci];
+        if (prevDist > 0 && cached.chunkIndices[ci]) {
+            const ratio = dist / prevDist;
+            if (ratio > 1 / LOD_CHUNK_REUSE_RATIO && ratio < LOD_CHUNK_REUSE_RATIO) {
+                // Reuse cached chunk
+                totalKept += cached.chunkIndices[ci].length;
+                chunksReused++;
+                continue;
+            }
+        }
+        // Recompute this chunk
+        const kept = rdpChunk(spine, epsSq, chunkStart, chunkEnd);
+        cached.chunkDists[ci] = dist;
+        cached.chunkIndices[ci] = kept;
+        totalKept += kept.length;
+    }
+
+    // Merge all chunk indices (already sorted within each chunk, chunks are in order)
+    // Deduplicate boundary points shared between adjacent chunks
+    const indices = new Uint32Array(totalKept);
+    let j = 0;
+    for (let ci = 0; ci < nChunks; ci++) {
+        const kept = cached.chunkIndices[ci];
+        for (let k = 0; k < kept.length; k++) {
+            if (j > 0 && kept[k] === indices[j - 1]) continue;  // skip duplicate boundary
+            indices[j++] = kept[k];
+        }
+    }
+    const result = indices.subarray(0, j);
+    // Copy to transferable buffer
+    const out = new Uint32Array(result);
+    self.postMessage({ tubeId, indices: out, minDist, maxDist, chunksReused, chunksTotal: nChunks }, [out.buffer]);
+};
+`;
+
+let _lodWorker = null;
+function _getLodWorker() {
+    if (!_lodWorker) {
+        const blob = new Blob([_LOD_WORKER_CODE], { type: 'application/javascript' });
+        _lodWorker = new Worker(URL.createObjectURL(blob));
+    }
+    return _lodWorker;
+}
+
+// Synchronous fallback for initial LOD at tube creation (before worker is ready).
+const LOD_CHUNK_SIZE = 5000;
+
+function _perpDistSq(spine, iP, iA, iB) {
+    const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
+    const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
+    const apx = spine[iP * 3] - ax, apy = spine[iP * 3 + 1] - ay, apz = spine[iP * 3 + 2] - az;
+    const cx = apy * abz - apz * aby;
+    const cy = apz * abx - apx * abz;
+    const cz = apx * aby - apy * abx;
+    const abLenSq = abx * abx + aby * aby + abz * abz;
+    if (abLenSq < 1e-24) return apx * apx + apy * apy + apz * apz;
+    return (cx * cx + cy * cy + cz * cz) / abLenSq;
+}
+
+function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
+    if (nPoints <= 2) {
+        return { indices: new Uint32Array(nPoints < 1 ? 0 : nPoints === 1 ? [0] : [0, 1]), minDist: 0, maxDist: 0 };
+    }
+    const epsSq = new Float32Array(nPoints);
+    let minDist = Infinity, maxDist = 0;
+    for (let i = 0; i < nPoints; i++) {
+        const dx = spine[i * 3] - camX;
+        const dy = spine[i * 3 + 1] - camY;
+        const dz = spine[i * 3 + 2] - camZ;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < minDist) minDist = d;
+        if (d > maxDist) maxDist = d;
+        const e = d / LOD_EPSILON_DIVISOR;
+        epsSq[i] = e * e;
+    }
+    const keep = new Uint8Array(nPoints);
+    keep[0] = 1;
+    keep[nPoints - 1] = 1;
+    for (let chunkStart = 0; chunkStart < nPoints - 1; chunkStart += LOD_CHUNK_SIZE) {
+        const chunkEnd = Math.min(chunkStart + LOD_CHUNK_SIZE, nPoints - 1);
+        keep[chunkStart] = 1;
+        keep[chunkEnd] = 1;
+        const stack = [[chunkStart, chunkEnd]];
+        while (stack.length > 0) {
+            const [start, end] = stack.pop();
+            if (end - start < 2) continue;
+            let maxPerpSq = 0;
+            let maxIdx = start;
+            for (let i = start + 1; i < end; i++) {
+                const dSq = _perpDistSq(spine, i, start, end);
+                if (dSq > maxPerpSq) {
+                    maxPerpSq = dSq;
+                    maxIdx = i;
+                }
+            }
+            if (maxPerpSq > epsSq[maxIdx]) {
+                keep[maxIdx] = 1;
+                stack.push([start, maxIdx]);
+                stack.push([maxIdx, end]);
+            }
+        }
+    }
+    let count = 0;
+    for (let i = 0; i < nPoints; i++) if (keep[i]) count++;
+    const indices = new Uint32Array(count);
+    let j = 0;
+    for (let i = 0; i < nPoints; i++) if (keep[i]) indices[j++] = i;
+    return { indices, minDist, maxDist };
 }
 
 // Build a variable-cross-section tube BufferGeometry from per-spine-point
@@ -1042,6 +1254,106 @@ function buildParametricTubeGeometry(
         localFrames, capAngles,
         capIndicesPerCap, endCapBase, endCapPattern,
     };
+}
+
+// ========== LOD: Geometry Rebuild ==========
+
+// Binary-search cumulative arc lengths to convert a draw_range value (0-1,
+// fraction of total original arc length) into fractional ring pairs in the
+// reduced spine.
+// Remap a draw_range value (0-1, fraction of original spine points) to
+// fractional ring pairs in the reduced spine.  Preserves the original
+// "fraction-of-points" semantics so animation pacing stays in sync.
+function remapDrawRangeToReducedPairs(lod, value) {
+    const kept = lod.keptIndices;
+    const nRed = kept.length;
+    if (nRed < 2) return 0;
+    // Target original spine index (fractional)
+    const targetIdx = value * (lod.originalCount - 1);
+    // Binary search keptIndices for targetIdx
+    let lo = 0, hi = nRed - 1;
+    while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1;
+        if (kept[mid] <= targetIdx) lo = mid; else hi = mid;
+    }
+    // Interpolate between kept[lo] and kept[hi]
+    const span = kept[hi] - kept[lo];
+    const frac = span > 0 ? (targetIdx - kept[lo]) / span : 0;
+    return Math.min(lo + frac, nRed - 1);
+}
+
+// Rebuild a parametric tube mesh with a reduced spine (from LOD).
+// keptIndices: Uint32Array of indices into the original spine arrays.
+function rebuildTubeLOD(mesh, keptIndices) {
+    const lod = mesh.userData.tubeLOD;
+    const nRed = keptIndices.length;
+    if (nRed < 2) return;
+
+    // Extract reduced arrays from originals
+    const reducedSpine = new Float32Array(nRed * 3);
+    const reducedWidths = new Float32Array(nRed);
+    const reducedHeights = new Float32Array(nRed);
+    let reducedRingColors = null;
+    if (lod.originalRingColors) {
+        reducedRingColors = new Float32Array(nRed * 3);
+    }
+    for (let i = 0; i < nRed; i++) {
+        const oi = keptIndices[i];
+        reducedSpine[i * 3] = lod.originalSpine[oi * 3];
+        reducedSpine[i * 3 + 1] = lod.originalSpine[oi * 3 + 1];
+        reducedSpine[i * 3 + 2] = lod.originalSpine[oi * 3 + 2];
+        reducedWidths[i] = lod.originalWidths[oi];
+        reducedHeights[i] = lod.originalHeights[oi];
+        if (reducedRingColors) {
+            reducedRingColors[i * 3] = lod.originalRingColors[oi * 3];
+            reducedRingColors[i * 3 + 1] = lod.originalRingColors[oi * 3 + 1];
+            reducedRingColors[i * 3 + 2] = lod.originalRingColors[oi * 3 + 2];
+        }
+    }
+
+    // Build new geometry
+    const result = buildParametricTubeGeometry(
+        reducedSpine, reducedWidths, reducedHeights,
+        null, lod.upVector, reducedRingColors,
+    );
+
+    // Dispose old geometry, assign new
+    mesh.geometry.dispose();
+    mesh.geometry = result.geometry;
+
+    // Update userData
+    const ud = mesh.userData;
+    const nCs = result.nCs;
+    ud.tubeNumSpinePoints = nRed;
+    ud.tubeRingPairs = result.ringPairs;
+    ud.tubeIndicesPerRingPair = result.indicesPerRingPair;
+    ud.totalIndexCount = result.capIndicesPerCap + result.ringPairs * result.indicesPerRingPair + result.capIndicesPerCap;
+    ud.tubeCapIndicesPerCap = result.capIndicesPerCap;
+    ud.tubeEndCapBase = result.endCapBase;
+
+    // Rebuild morphData for frontier morphing
+    ud.tubeMorphData = {
+        spine: reducedSpine,
+        widths: reducedWidths,
+        heights: reducedHeights,
+        localFrames: result.localFrames,
+        capAngles: result.capAngles,
+        ringColors: reducedRingColors,
+        section: new Float32Array(nCs * 2),
+        savedRing: new Float32Array(nCs * 3),
+        savedRingColors: null,
+        savedRingIndex: null,
+        morphedState: null,
+        endCapPattern: result.endCapPattern,
+        savedCapIndices: new result.endCapPattern.constructor(result.endCapPattern.length),
+        savedCapOffset: -1,
+    };
+
+    // Update LOD state
+    lod.keptIndices = keptIndices;
+
+    // Re-apply draw range with arc-length remapping
+    applyParametricTubeDrawRange(mesh, lod.currentDrawRange);
 }
 
 // Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
@@ -1307,7 +1619,17 @@ function applyParametricTubeDrawRange(obj, value) {
     const perPair = ud.tubeIndicesPerRingPair;
     const capPer = ud.tubeCapIndicesPerCap || 0;
     const clamped = Math.max(0, Math.min(1, value));
-    const fracRingPairs = clamped * ringPairs;
+
+    // Track draw_range for LOD rebuilds
+    if (ud.tubeLOD) ud.tubeLOD.currentDrawRange = value;
+
+    // Remap when LOD is active: preserve original point-index pacing
+    let fracRingPairs;
+    if (ud.tubeLOD && ud.tubeLOD.keptIndices) {
+        fracRingPairs = remapDrawRangeToReducedPairs(ud.tubeLOD, clamped);
+    } else {
+        fracRingPairs = clamped * ringPairs;
+    }
 
     if (!ud.tubeMorphData) {
         const pairs = Math.floor(fracRingPairs);
@@ -1551,6 +1873,31 @@ class ThreeJSViewer {
         // Controls
         this._controls = new OrbitControls(this._camera, this._renderer.domElement);
         this._controls.enableDamping = true;
+
+        // LOD: Web Worker for async RDP computation
+        this._lodThrottleMs = 500;
+        this._lodLastRunTime = 0;
+        this._lodDirty = false;
+        this._lodWorkerBusy = false;  // true while worker is computing
+        this._lodWorker = _getLodWorker();
+        this._lodWorker.onmessage = (e) => {
+            const { tubeId, indices, minDist, maxDist, chunksReused, chunksTotal } = e.data;
+            this._lodWorkerBusy = false;
+            const obj = this._objects.get(tubeId);
+            if (!obj || !obj.userData.tubeLOD) return;
+            // Skip geometry rebuild if all chunks were reused (indices unchanged)
+            if (chunksReused === chunksTotal) {
+                console.log(`LOD ${tubeId}: ${indices.length} pts (unchanged, ${chunksTotal} chunks reused)`);
+            } else {
+                const t0 = performance.now();
+                rebuildTubeLOD(obj, indices);
+                console.log(`LOD ${tubeId}: ${obj.userData.tubeLOD.originalCount} → ${indices.length} pts (rebuild ${(performance.now() - t0).toFixed(1)}ms) chunks ${chunksReused}/${chunksTotal} reused, dist=[${minDist.toFixed(1)}, ${maxDist.toFixed(1)}]`);
+            }
+            // Re-trigger is handled by the normal _animate throttle — don't bypass it
+        };
+        this._controls.addEventListener('change', () => {
+            this._lodDirty = true;
+        });
 
         // ViewHelper
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
@@ -2863,8 +3210,20 @@ class ThreeJSViewer {
     // ========== WebSocket ==========
 
     connect() {
-        const doConnect = () => {
+        // Derive HTTP probe URL from WS URL (same host/port)
+        const probeUrl = this._wsUrl.replace(/^ws/, 'http');
+
+        const doConnect = async () => {
             if (this._destroyed) return;
+
+            // Probe first to avoid browser console warnings on failed WS attempts
+            try {
+                await fetch(probeUrl, { mode: 'no-cors', signal: AbortSignal.timeout(400) });
+            } catch {
+                // Server not reachable — retry later without creating a WebSocket
+                this._reconnectTimeout = setTimeout(doConnect, 500);
+                return;
+            }
 
             this._ws = new WebSocket(this._wsUrl);
 
@@ -3316,11 +3675,68 @@ class ThreeJSViewer {
                                     }
                                 }
                                 const nCs = N_CROSS_SECTION;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
-                                    spine, widths, heights,
-                                    orientations, data.upVector || null, ringColors,
-                                );
                                 const hasColors = !!ringColors;
+                                const upVector = data.upVector || null;
+
+                                // LOD: for large tubes, reduce spine before building geometry
+                                let tubeLOD = null;
+                                let buildSpine = spine, buildWidths = widths, buildHeights = heights;
+                                let buildOrientations = orientations, buildRingColors = ringColors;
+                                let buildN = n;
+                                if (n >= 200) {
+                                    // Bounding sphere from original spine (stable across LOD rebuilds)
+                                    const _center = new THREE.Vector3();
+                                    for (let i = 0; i < n; i++) {
+                                        _center.x += spine[i * 3]; _center.y += spine[i * 3 + 1]; _center.z += spine[i * 3 + 2];
+                                    }
+                                    _center.divideScalar(n);
+                                    let _maxR2 = 0;
+                                    for (let i = 0; i < n; i++) {
+                                        const dx = spine[i * 3] - _center.x, dy = spine[i * 3 + 1] - _center.y, dz = spine[i * 3 + 2] - _center.z;
+                                        _maxR2 = Math.max(_maxR2, dx * dx + dy * dy + dz * dz);
+                                    }
+                                    const boundingRadius = Math.sqrt(_maxR2);
+                                    const cam = this._camera;
+                                    const { indices: keptIndices, minDist: _lodMinDist, maxDist: _lodMaxDist } = distanceWeightedRDP(
+                                        spine, n, cam.position.x, cam.position.y, cam.position.z,
+                                    );
+                                    const nRed = keptIndices.length;
+                                    // Extract reduced arrays
+                                    buildSpine = new Float32Array(nRed * 3);
+                                    buildWidths = new Float32Array(nRed);
+                                    buildHeights = new Float32Array(nRed);
+                                    buildRingColors = ringColors ? new Float32Array(nRed * 3) : null;
+                                    buildOrientations = null; // orientations not preserved through LOD
+                                    buildN = nRed;
+                                    for (let i = 0; i < nRed; i++) {
+                                        const oi = keptIndices[i];
+                                        buildSpine[i * 3] = spine[oi * 3]; buildSpine[i * 3 + 1] = spine[oi * 3 + 1]; buildSpine[i * 3 + 2] = spine[oi * 3 + 2];
+                                        buildWidths[i] = widths[oi];
+                                        buildHeights[i] = heights[oi];
+                                        if (buildRingColors) {
+                                            buildRingColors[i * 3] = ringColors[oi * 3]; buildRingColors[i * 3 + 1] = ringColors[oi * 3 + 1]; buildRingColors[i * 3 + 2] = ringColors[oi * 3 + 2];
+                                        }
+                                    }
+                                    tubeLOD = {
+                                        originalSpine: new Float32Array(spine),
+                                        originalWidths: new Float32Array(widths),
+                                        originalHeights: new Float32Array(heights),
+                                        originalRingColors: ringColors ? new Float32Array(ringColors) : null,
+                                        originalCount: n,
+                                        upVector,
+                                        keptIndices,
+                                        currentDrawRange: 1.0,
+                                        lastCameraPos: cam.position.clone(),
+                                        boundingCenter: _center,
+                                        boundingRadius,
+                                    };
+                                    console.log(`LOD initial ${data.id}: ${n} → ${nRed} pts`);
+                                }
+
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
+                                    buildSpine, buildWidths, buildHeights,
+                                    buildOrientations, upVector, buildRingColors,
+                                );
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
                                 const material = new THREE.MeshStandardMaterial({
                                     color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
@@ -3338,7 +3754,7 @@ class ThreeJSViewer {
                                 mesh.name = data.id;
                                 mesh.userData.id = data.id;
                                 mesh.userData.isParametricTube = true;
-                                mesh.userData.tubeNumSpinePoints = n;
+                                mesh.userData.tubeNumSpinePoints = buildN;
                                 mesh.userData.tubeNCs = nCs;
                                 mesh.userData.tubeRingPairs = ringPairs;
                                 mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
@@ -3347,11 +3763,11 @@ class ThreeJSViewer {
                                 mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
                                 mesh.userData.tubeEndCapBase = endCapBase;
                                 mesh.userData.tubeMorphData = {
-                                    spine: new Float32Array(spine),
-                                    widths: new Float32Array(widths),
-                                    heights: new Float32Array(heights),
+                                    spine: new Float32Array(buildSpine),
+                                    widths: new Float32Array(buildWidths),
+                                    heights: new Float32Array(buildHeights),
                                     localFrames, capAngles,
-                                    ringColors: ringColors ? new Float32Array(ringColors) : null,
+                                    ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
                                     section: new Float32Array(nCs * 2),
                                     savedRing: new Float32Array(nCs * 3),
                                     savedRingColors: null,
@@ -3361,11 +3777,12 @@ class ThreeJSViewer {
                                     savedCapIndices: new endCapPattern.constructor(endCapPattern.length),
                                     savedCapOffset: -1,
                                 };
+                                if (tubeLOD) mesh.userData.tubeLOD = tubeLOD;
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
                                 if (data.transform) this._applyTransform(mesh, data.transform);
-                                console.log(`Created parametric_tube ${data.id}: ${n} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs`);
+                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs`);
                             } catch (e) {
                                 console.error(`Error creating parametric_tube:`, e);
                             } finally {
@@ -3390,56 +3807,112 @@ class ThreeJSViewer {
                                     console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
                                     return;
                                 }
-                                const n = obj.userData.tubeNumSpinePoints;
+                                const lod = obj.userData.tubeLOD;
+                                // Color data from Python is always for the original spine count
+                                const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
                                 const nCs = obj.userData.tubeNCs;
-                                if (buffer.byteLength < n * 4) {
-                                    console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${n * 4})`);
+                                if (buffer.byteLength < nOrig * 4) {
+                                    console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
                                     return;
                                 }
-                                const packed = new Uint32Array(buffer, 0, n);
-                                // Decode per-ring colors
-                                const rc = new Float32Array(n * 3);
-                                for (let i = 0; i < n; i++) {
+                                const packed = new Uint32Array(buffer, 0, nOrig);
+                                // Decode per-ring colors (full original count)
+                                const rc = new Float32Array(nOrig * 3);
+                                for (let i = 0; i < nOrig; i++) {
                                     const c = packed[i];
                                     rc[i * 3]     = ((c >> 16) & 0xff) / 255;
                                     rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
                                     rc[i * 3 + 2] = (c & 0xff) / 255;
                                 }
-                                // Fill cap dome vertices with a single color
-                                function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                    for (let j = 0; j < capVerts; j++) {
-                                        arr[(baseVert + j) * 3]     = r;
-                                        arr[(baseVert + j) * 3 + 1] = g;
-                                        arr[(baseVert + j) * 3 + 2] = b;
+
+                                // When LOD is active, store full colors and rebuild with reduced subset
+                                if (lod && lod.keptIndices) {
+                                    lod.originalRingColors = new Float32Array(rc);
+                                    // Extract reduced colors for current LOD level
+                                    const nRed = lod.keptIndices.length;
+                                    const redRc = new Float32Array(nRed * 3);
+                                    const redPacked = new Uint32Array(nRed);
+                                    for (let i = 0; i < nRed; i++) {
+                                        const oi = lod.keptIndices[i];
+                                        redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                                        redPacked[i] = packed[oi];
                                     }
-                                }
-                                const posCount = obj.geometry.getAttribute('position').count;
-                                const capVertsPerCap = (posCount - n * nCs) / 2;
-                                const startCapBaseVert = n * nCs;
-                                const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                const lr = (n - 1) * 3;
-                                const existing = obj.geometry.getAttribute('color');
-                                if (existing) {
-                                    expandRingColors(packed, n, nCs, existing.array);
-                                    fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                    fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                    existing.needsUpdate = true;
+                                    // Update geometry colors for reduced mesh
+                                    const n = nRed;
+                                    // Fill cap dome vertices with a single color
+                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                        for (let j = 0; j < capVerts; j++) {
+                                            arr[(baseVert + j) * 3]     = r;
+                                            arr[(baseVert + j) * 3 + 1] = g;
+                                            arr[(baseVert + j) * 3 + 2] = b;
+                                        }
+                                    }
+                                    const posCount = obj.geometry.getAttribute('position').count;
+                                    const capVertsPerCap = (posCount - n * nCs) / 2;
+                                    const startCapBaseVert = n * nCs;
+                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                    const lr = (n - 1) * 3;
+                                    const existing = obj.geometry.getAttribute('color');
+                                    if (existing) {
+                                        expandRingColors(redPacked, n, nCs, existing.array);
+                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                        existing.needsUpdate = true;
+                                    } else {
+                                        const allColors = new Float32Array(posCount * 3);
+                                        expandRingColors(redPacked, n, nCs, allColors);
+                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                    }
+                                    obj.material.vertexColors = true;
+                                    obj.material.color.setHex(0xffffff);
+                                    obj.material.needsUpdate = true;
+                                    obj.userData.tubeHasColors = true;
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) {
+                                        md.ringColors = redRc;
+                                        md.savedRingIndex = null;
+                                    }
                                 } else {
-                                    const allColors = new Float32Array(posCount * 3);
-                                    expandRingColors(packed, n, nCs, allColors);
-                                    fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                    fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
-                                }
-                                obj.material.vertexColors = true;
-                                obj.material.color.setHex(0xffffff);
-                                obj.material.needsUpdate = true;
-                                obj.userData.tubeHasColors = true;
-                                // Sync morph data so frontier ring lerps use new colors.
-                                const md = obj.userData.tubeMorphData;
-                                if (md) {
-                                    md.ringColors = rc;
-                                    md.savedRingIndex = null;
+                                    // No LOD active — original path
+                                    if (lod) lod.originalRingColors = new Float32Array(rc);
+                                    const n = nOrig;
+                                    // Fill cap dome vertices with a single color
+                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                        for (let j = 0; j < capVerts; j++) {
+                                            arr[(baseVert + j) * 3]     = r;
+                                            arr[(baseVert + j) * 3 + 1] = g;
+                                            arr[(baseVert + j) * 3 + 2] = b;
+                                        }
+                                    }
+                                    const posCount = obj.geometry.getAttribute('position').count;
+                                    const capVertsPerCap = (posCount - n * nCs) / 2;
+                                    const startCapBaseVert = n * nCs;
+                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                    const lr = (n - 1) * 3;
+                                    const existing = obj.geometry.getAttribute('color');
+                                    if (existing) {
+                                        expandRingColors(packed, n, nCs, existing.array);
+                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                        existing.needsUpdate = true;
+                                    } else {
+                                        const allColors = new Float32Array(posCount * 3);
+                                        expandRingColors(packed, n, nCs, allColors);
+                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                    }
+                                    obj.material.vertexColors = true;
+                                    obj.material.color.setHex(0xffffff);
+                                    obj.material.needsUpdate = true;
+                                    obj.userData.tubeHasColors = true;
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) {
+                                        md.ringColors = rc;
+                                        md.savedRingIndex = null;
+                                    }
                                 }
                             } catch (e) {
                                 console.error(`Error updating parametric_tube colors:`, e);
@@ -3635,6 +4108,46 @@ class ThreeJSViewer {
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
         this._viewHelper.render(this._renderer);
+
+        // LOD: dispatch to Web Worker after render (non-blocking)
+        if (this._lodDirty && !this._lodWorkerBusy && performance.now() - this._lodLastRunTime >= this._lodThrottleMs) {
+            this._lodLastRunTime = performance.now();
+            this._lodDirty = false;
+            this._dispatchLodWorker();
+        }
+    }
+
+    _dispatchLodWorker() {
+        const cam = this._camera;
+        const camX = cam.position.x, camY = cam.position.y, camZ = cam.position.z;
+        for (const obj of this._objects.values()) {
+            if (!obj.userData.isParametricTube || !obj.userData.tubeLOD) continue;
+            const lod = obj.userData.tubeLOD;
+
+            // Skip if camera hasn't moved enough (5% of distance to tube center)
+            if (lod.keptIndices) {
+                const dx = camX - lod.lastCameraPos.x;
+                const dy = camY - lod.lastCameraPos.y;
+                const dz = camZ - lod.lastCameraPos.z;
+                const deltaSq = dx * dx + dy * dy + dz * dz;
+                const centerDist = Math.max(1e-6, lod.boundingRadius * 2);
+                const threshold = centerDist * 0.05;
+                if (deltaSq < threshold * threshold) continue;
+            }
+
+            lod.lastCameraPos.set(camX, camY, camZ);
+            // Post spine data to worker — spine is a SharedArrayBuffer-like view,
+            // so we copy it for transfer to avoid detaching the original.
+            this._lodWorkerBusy = true;
+            this._lodWorker.postMessage({
+                tubeId: obj.name,
+                spine: lod.originalSpine,
+                nPoints: lod.originalCount,
+                camX, camY, camZ,
+            });
+            // Only one tube per dispatch cycle (worker handles one at a time)
+            return;
+        }
     }
 
     // ========== Public API ==========
