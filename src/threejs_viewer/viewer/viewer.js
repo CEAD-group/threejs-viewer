@@ -698,7 +698,9 @@ let _lodWorker = null;
 function _getLodWorker() {
     if (!_lodWorker) {
         const blob = new Blob([_LOD_WORKER_CODE], { type: 'application/javascript' });
-        _lodWorker = new Worker(URL.createObjectURL(blob));
+        const url = URL.createObjectURL(blob);
+        _lodWorker = new Worker(url);
+        URL.revokeObjectURL(url);  // worker keeps running after URL is revoked
     }
     return _lodWorker;
 }
@@ -3987,6 +3989,10 @@ export class ThreeJSViewer {
             this._ws.onclose = null;
             this._ws.close();
             this._ws = null;
+        }
+        if (this._lodWorker) {
+            this._lodWorker.terminate();
+            this._lodWorker = null;
         }
         clearTimeout(this._reconnectTimeout);
         this._resizeObserver.disconnect();
