@@ -191,9 +191,9 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_parametric_tube_draw_range_snaps_to_ring_pairs(viewer_client, viewer_page):
-    """draw_range clamps the visible index count to a whole number of ring
-    pairs so the cut edge is a clean cross-section."""
+def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
+    """draw_range morphs the frontier ring, showing one extra ring pair beyond
+    the floor so the tube grows smoothly."""
     n = 10
     n_cs = 6
     spine = _straight_spine(n=n, length=1.0)
@@ -209,7 +209,7 @@ def test_parametric_tube_draw_range_snaps_to_ring_pairs(viewer_client, viewer_pa
     )
     _wait_for_object(viewer_page, "tube2")
 
-    # 0.37 * 9 ring pairs = 3.33 → snap to 3 ring pairs × (6*6)=36 indices = 108
+    # 0.37 * 9 ring pairs = 3.33 → 3 complete + 1 morphed frontier = 4 ring pairs visible
     viewer_client.set_draw_range("tube2", 0.37)
     time.sleep(0.1)
 
@@ -217,8 +217,89 @@ def test_parametric_tube_draw_range_snaps_to_ring_pairs(viewer_client, viewer_pa
         """(id) => window.threejsViewer._objects.get(id).geometry.drawRange.count""",
         "tube2",
     )
-    expected = 3 * n_cs * 6
+    expected = 4 * n_cs * 6
     assert count == expected, f"expected {expected}, got {count}"
+
+
+@pytest.mark.browser
+def test_parametric_tube_frontier_morph_positions(viewer_client, viewer_page):
+    """The frontier ring's positions are interpolated between adjacent spine points."""
+    n = 10
+    n_cs = 6
+    spine = _straight_spine(n=n, length=9.0)  # 1.0 spacing between spine points
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+
+    viewer_client.add_parametric_tube(
+        "tube_morph",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        n_cross_section_verts=n_cs,
+    )
+    _wait_for_object(viewer_page, "tube_morph")
+
+    # 0.5 * 9 ring pairs = 4.5 → frontier ring is ring 5, morphed to 50% between ring 4 and 5
+    viewer_client.set_draw_range("tube_morph", 0.5)
+    time.sleep(0.1)
+
+    x_avg = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const pos = obj.geometry.getAttribute('position').array;
+            const nCs = obj.userData.tubeNCs;
+            const frontierRing = 5;
+            let sum = 0;
+            for (let j = 0; j < nCs; j++) sum += pos[(frontierRing * nCs + j) * 3];
+            return sum / nCs;
+        }""",
+        "tube_morph",
+    )
+    # Ring 4 center at x=4.0, ring 5 center at x=5.0, morphed at 0.5 → x≈4.5
+    assert abs(x_avg - 4.5) < 0.05, f"Expected frontier ring center X ~4.5, got {x_avg}"
+
+
+@pytest.mark.browser
+def test_parametric_tube_frontier_restores_on_full(viewer_client, viewer_page):
+    """When draw_range reaches 1.0, the morphed frontier ring is restored."""
+    n = 10
+    n_cs = 6
+    spine = _straight_spine(n=n, length=9.0)
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+
+    viewer_client.add_parametric_tube(
+        "tube_restore",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        n_cross_section_verts=n_cs,
+    )
+    _wait_for_object(viewer_page, "tube_restore")
+
+    # Morph ring 5 by setting draw_range to 0.5
+    viewer_client.set_draw_range("tube_restore", 0.5)
+    time.sleep(0.1)
+
+    # Now set to 1.0 — all rings should be at original positions
+    viewer_client.set_draw_range("tube_restore", 1.0)
+    time.sleep(0.1)
+
+    x_avg = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const pos = obj.geometry.getAttribute('position').array;
+            const nCs = obj.userData.tubeNCs;
+            const ring5 = 5;
+            let sum = 0;
+            for (let j = 0; j < nCs; j++) sum += pos[(ring5 * nCs + j) * 3];
+            return sum / nCs;
+        }""",
+        "tube_restore",
+    )
+    assert abs(x_avg - 5.0) < 0.05, (
+        f"Expected restored ring 5 center X ~5.0, got {x_avg}"
+    )
 
 
 @pytest.mark.browser

@@ -189,13 +189,7 @@ function makeChannelApply(viewer) {
                 if (obj.userData.isPolyline) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
                 } else if (obj.userData.isParametricTube) {
-                    // Snap DOWN to whole ring pairs so the reveal edge is
-                    // always a clean cross-section and never overshoots the
-                    // requested fraction.
-                    const ringPairs = obj.userData.tubeRingPairs;
-                    const perPair = obj.userData.tubeIndicesPerRingPair;
-                    const clamped = Math.max(0, Math.min(1, value));
-                    obj.geometry.setDrawRange(0, Math.floor(clamped * ringPairs) * perPair);
+                    applyParametricTubeDrawRange(obj, value);
                 } else if (obj.userData.isMesh) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
                 }
@@ -392,6 +386,8 @@ function buildParametricTubeGeometry(
     const colors = ringColors ? new Float32Array(nSpine * nCs * 3) : null;
     const { cosTable, sinTable } = buildCrossSectionAngleTable(nCs);
     const section = new Float32Array(nCs * 2);
+    // Store per-spine-point local frames (U, V) for frontier-ring morphing.
+    const localFrames = new Float32Array(nSpine * 6);
 
     // Compute local frames: tangent T + width axis U + height axis V.
     // V is anchored to global +Z (up) so "height" means "up" for
@@ -456,6 +452,8 @@ function buildParametricTubeGeometry(
             _V.copy(_T).cross(_U).normalize();
         }
         _prevT.copy(_T);
+        localFrames[i * 6]     = _U.x; localFrames[i * 6 + 1] = _U.y; localFrames[i * 6 + 2] = _U.z;
+        localFrames[i * 6 + 3] = _V.x; localFrames[i * 6 + 4] = _V.y; localFrames[i * 6 + 5] = _V.z;
 
         const w = widths[i];
         const h = heights[i];
@@ -514,7 +512,7 @@ function buildParametricTubeGeometry(
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeVertexNormals();
 
-    return { geometry, ringPairs, indicesPerRingPair, nCs };
+    return { geometry, ringPairs, indicesPerRingPair, nCs, localFrames, cosTable, sinTable };
 }
 
 // Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
@@ -539,6 +537,141 @@ function expandRingColors(packedColors, nSpine, nCs, out) {
         }
     }
     return out;
+}
+
+// Restore previously morphed frontier ring to its original positions (and
+// colors if applicable).  Called when the frontier advances past a ring or
+// when draw_range reaches an exact ring boundary.
+function restoreFrontierRing(obj) {
+    const md = obj.userData.tubeMorphData;
+    if (!md || md.savedRingIndex == null) return;
+    const nCs = obj.userData.tubeNCs;
+    const ringBase = md.savedRingIndex * nCs * 3;
+    const posAttr = obj.geometry.getAttribute('position');
+    posAttr.array.set(md.savedRing, ringBase);
+    posAttr.needsUpdate = true;
+    if (md.savedRingColors) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            colAttr.array.set(md.savedRingColors, ringBase);
+            colAttr.needsUpdate = true;
+        }
+    }
+    md.savedRingIndex = null;
+}
+
+// Morph the frontier ring of a parametric tube to the interpolated spine
+// position.  Returns the number of ring pairs that should be visible
+// (complete pairs + the morphed frontier).
+function morphFrontierRing(obj, fracRingPairs) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    if (!md) return Math.floor(fracRingPairs);
+
+    const nCs = ud.tubeNCs;
+    const ringPairs = ud.tubeRingPairs;
+    const completePairs = Math.floor(fracRingPairs);
+    const frac = fracRingPairs - completePairs;
+
+    if (frac < 1e-6 || completePairs >= ringPairs) {
+        restoreFrontierRing(obj);
+        return completePairs;
+    }
+
+    const iA = completePairs;      // lerp FROM
+    const iB = completePairs + 1;  // ring we overwrite (lerp TO)
+
+    // If the frontier moved to a different ring, restore the old one first
+    // and save the new ring's original data.
+    if (md.savedRingIndex !== iB) {
+        restoreFrontierRing(obj);
+        const posArr = obj.geometry.getAttribute('position').array;
+        const ringBase = iB * nCs * 3;
+        md.savedRing.set(posArr.subarray(ringBase, ringBase + nCs * 3));
+        // Save colors if applicable
+        if (ud.tubeHasColors) {
+            const colAttr = obj.geometry.getAttribute('color');
+            if (colAttr) {
+                if (!md.savedRingColors) md.savedRingColors = new Float32Array(nCs * 3);
+                md.savedRingColors.set(colAttr.array.subarray(ringBase, ringBase + nCs * 3));
+            }
+        }
+        md.savedRingIndex = iB;
+    }
+
+    // Lerp spine position
+    const sx = md.spine[iA * 3]     * (1 - frac) + md.spine[iB * 3]     * frac;
+    const sy = md.spine[iA * 3 + 1] * (1 - frac) + md.spine[iB * 3 + 1] * frac;
+    const sz = md.spine[iA * 3 + 2] * (1 - frac) + md.spine[iB * 3 + 2] * frac;
+
+    // Lerp width & height
+    const w = md.widths[iA] * (1 - frac) + md.widths[iB] * frac;
+    const h = md.heights[iA] * (1 - frac) + md.heights[iB] * frac;
+
+    // Lerp local frame vectors (U, V) — component-wise + normalize
+    let ux = md.localFrames[iA * 6]     * (1 - frac) + md.localFrames[iB * 6]     * frac;
+    let uy = md.localFrames[iA * 6 + 1] * (1 - frac) + md.localFrames[iB * 6 + 1] * frac;
+    let uz = md.localFrames[iA * 6 + 2] * (1 - frac) + md.localFrames[iB * 6 + 2] * frac;
+    let uLen = Math.hypot(ux, uy, uz);
+    if (uLen > 1e-12) { ux /= uLen; uy /= uLen; uz /= uLen; }
+
+    let vx = md.localFrames[iA * 6 + 3] * (1 - frac) + md.localFrames[iB * 6 + 3] * frac;
+    let vy = md.localFrames[iA * 6 + 4] * (1 - frac) + md.localFrames[iB * 6 + 4] * frac;
+    let vz = md.localFrames[iA * 6 + 5] * (1 - frac) + md.localFrames[iB * 6 + 5] * frac;
+    let vLen = Math.hypot(vx, vy, vz);
+    if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
+
+    // Sample cross-section at interpolated width/height
+    sampleRoundedRectInto(md.section, w, h, md.cornerRadiusFrac, md.cosTable, md.sinTable);
+
+    // Write morphed vertices into the position buffer at ring iB
+    const posAttr = obj.geometry.getAttribute('position');
+    const pos = posAttr.array;
+    const ringBase = iB * nCs * 3;
+    for (let j = 0; j < nCs; j++) {
+        const lu = md.section[j * 2];
+        const lv = md.section[j * 2 + 1];
+        pos[ringBase + j * 3]     = sx + lu * ux + lv * vx;
+        pos[ringBase + j * 3 + 1] = sy + lu * uy + lv * vy;
+        pos[ringBase + j * 3 + 2] = sz + lu * uz + lv * vz;
+    }
+    posAttr.needsUpdate = true;
+
+    // Lerp colors if present
+    if (ud.tubeHasColors && md.ringColors) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            const cols = colAttr.array;
+            const rA = md.ringColors[iA * 3], gA = md.ringColors[iA * 3 + 1], bA = md.ringColors[iA * 3 + 2];
+            const rB = md.ringColors[iB * 3], gB = md.ringColors[iB * 3 + 1], bB = md.ringColors[iB * 3 + 2];
+            const cr = rA * (1 - frac) + rB * frac;
+            const cg = gA * (1 - frac) + gB * frac;
+            const cb = bA * (1 - frac) + bB * frac;
+            for (let j = 0; j < nCs; j++) {
+                cols[ringBase + j * 3]     = cr;
+                cols[ringBase + j * 3 + 1] = cg;
+                cols[ringBase + j * 3 + 2] = cb;
+            }
+            colAttr.needsUpdate = true;
+        }
+    }
+
+    return completePairs + 1;
+}
+
+// Shared draw_range logic for parametric tubes: morphs the frontier ring
+// for smooth growth, falling back to snap-down if no morph data.
+function applyParametricTubeDrawRange(obj, value) {
+    const ringPairs = obj.userData.tubeRingPairs;
+    const perPair = obj.userData.tubeIndicesPerRingPair;
+    const clamped = Math.max(0, Math.min(1, value));
+    const fracRingPairs = clamped * ringPairs;
+    if (obj.userData.tubeMorphData) {
+        const visiblePairs = morphFrontierRing(obj, fracRingPairs);
+        obj.geometry.setDrawRange(0, visiblePairs * perPair);
+    } else {
+        obj.geometry.setDrawRange(0, Math.floor(fracRingPairs) * perPair);
+    }
 }
 
 export class ThreeJSViewer {
@@ -1299,12 +1432,7 @@ export class ThreeJSViewer {
         if (obj.userData.isPolyline) {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
         } else if (obj.userData.isParametricTube) {
-            // Snap DOWN to whole ring pairs: the reveal edge always stays a
-            // clean cross-section and never overshoots the requested fraction.
-            const ringPairs = obj.userData.tubeRingPairs;
-            const perPair = obj.userData.tubeIndicesPerRingPair;
-            const clamped = Math.max(0, Math.min(1, value));
-            obj.geometry.setDrawRange(0, Math.floor(clamped * ringPairs) * perPair);
+            applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         }
@@ -2497,11 +2625,12 @@ export class ThreeJSViewer {
                                     }
                                 }
                                 const nCs = data.nCrossSectionVerts || 8;
-                                const { geometry, ringPairs, indicesPerRingPair } = buildParametricTubeGeometry(
+                                const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, cosTable, sinTable } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, ringColors,
                                     data.crossSection || 'rounded_rect',
-                                    data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25,
+                                    cornerRadiusFrac,
                                     nCs,
                                 );
                                 const hasColors = !!ringColors;
@@ -2527,6 +2656,18 @@ export class ThreeJSViewer {
                                 mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
                                 mesh.userData.totalIndexCount = ringPairs * indicesPerRingPair;
                                 mesh.userData.tubeHasColors = hasColors;
+                                mesh.userData.tubeMorphData = {
+                                    spine: new Float32Array(spine),
+                                    widths: new Float32Array(widths),
+                                    heights: new Float32Array(heights),
+                                    localFrames,
+                                    cosTable, sinTable, cornerRadiusFrac,
+                                    ringColors: ringColors ? new Float32Array(ringColors) : null,
+                                    section: new Float32Array(nCs * 2),
+                                    savedRing: new Float32Array(nCs * 3),
+                                    savedRingColors: null,
+                                    savedRingIndex: null,
+                                };
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
@@ -2578,6 +2719,19 @@ export class ThreeJSViewer {
                                 obj.material.color.setHex(0xffffff);
                                 obj.material.needsUpdate = true;
                                 obj.userData.tubeHasColors = true;
+                                // Sync morph data so frontier ring lerps use new colors.
+                                const md = obj.userData.tubeMorphData;
+                                if (md) {
+                                    const rc = new Float32Array(n * 3);
+                                    for (let i = 0; i < n; i++) {
+                                        const c = packed[i];
+                                        rc[i * 3]     = ((c >> 16) & 0xff) / 255;
+                                        rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                        rc[i * 3 + 2] = (c & 0xff) / 255;
+                                    }
+                                    md.ringColors = rc;
+                                    md.savedRingIndex = null;
+                                }
                             } catch (e) {
                                 console.error(`Error updating parametric_tube colors:`, e);
                             } finally {
