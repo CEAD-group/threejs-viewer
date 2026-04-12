@@ -745,11 +745,6 @@ const PRIMITIVES = {
     )
 };
 
-// Sample a rounded-rectangle cross-section in the local (u, v) plane by
-// distributing nVerts points equally by arc length around the perimeter.
-// The shape is: 4 straight edges + 4 quarter-circle corner arcs. Points
-// are always distributed the same way relative to the shape, so changing
-// width/height scales the shape without rotating the visible polygon.
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
 // min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
 // When w > h: flat top & bottom, pointed left & right (hexagon).
@@ -1017,7 +1012,25 @@ function buildGeometry(spine, widths, heights, upVec, ringColors) {
     buildCapIdx((nSpine-1)*N_CS, endCapBase, false);
     const endCapPattern = indices.slice(endCapOff, endCapOff + capIndicesPerCap);
 
-    return { positions, colors, indices, localFrames, capAngles, endCapPattern,
+    // Compute face-area-weighted vertex normals (same as Three.js computeVertexNormals)
+    const normals = new Float32Array(totalVerts * 3);
+    for (let i = 0; i < totalIdx; i += 3) {
+        const ia = indices[i], ib = indices[i+1], ic = indices[i+2];
+        const ax = positions[ia*3], ay = positions[ia*3+1], az = positions[ia*3+2];
+        const bx = positions[ib*3]-ax, by = positions[ib*3+1]-ay, bz = positions[ib*3+2]-az;
+        const cx = positions[ic*3]-ax, cy = positions[ic*3+1]-ay, cz = positions[ic*3+2]-az;
+        const nx = by*cz-bz*cy, ny = bz*cx-bx*cz, nz = bx*cy-by*cx;
+        normals[ia*3]+=nx; normals[ia*3+1]+=ny; normals[ia*3+2]+=nz;
+        normals[ib*3]+=nx; normals[ib*3+1]+=ny; normals[ib*3+2]+=nz;
+        normals[ic*3]+=nx; normals[ic*3+1]+=ny; normals[ic*3+2]+=nz;
+    }
+    for (let i = 0; i < totalVerts; i++) {
+        const x = normals[i*3], y = normals[i*3+1], z = normals[i*3+2];
+        const len = Math.hypot(x, y, z);
+        if (len > 1e-12) { normals[i*3]/=len; normals[i*3+1]/=len; normals[i*3+2]/=len; }
+    }
+
+    return { positions, normals, colors, indices, localFrames, capAngles, endCapPattern,
              ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
              nSpine, totalVerts, is32bit: totalVerts > 65535 };
 }
@@ -1047,6 +1060,13 @@ self.onmessage = function(e) {
     if (msg.type === 'updateColors') {
         const tube = _tubes.get(msg.tubeId);
         if (tube) tube.ringColors = msg.ringColors;
+        return;
+    }
+
+    // 'dispose': clean up cached state for a deleted tube
+    if (msg.type === 'dispose') {
+        _tubes.delete(msg.tubeId);
+        _rdpCache.delete(msg.tubeId);
         return;
     }
 
@@ -1137,14 +1157,14 @@ self.onmessage = function(e) {
     const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors);
 
     // Transfer ownership of large buffers
-    const transfer = [geo.positions.buffer, geo.indices.buffer, geo.localFrames.buffer,
+    const transfer = [geo.positions.buffer, geo.normals.buffer, geo.indices.buffer, geo.localFrames.buffer,
                       geo.endCapPattern.buffer, keptRaw.buffer, redSpine.buffer, redWidths.buffer, redHeights.buffer];
     if (geo.colors) transfer.push(geo.colors.buffer);
     if (redColors) transfer.push(redColors.buffer);
 
     self.postMessage({
         tubeId, allReused: false,
-        positions: geo.positions, colors: geo.colors, indices: geo.indices,
+        positions: geo.positions, normals: geo.normals, colors: geo.colors, indices: geo.indices,
         localFrames: geo.localFrames, capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
         ringPairs: geo.ringPairs, indicesPerRingPair: geo.indicesPerRingPair,
         capIndicesPerCap: geo.capIndicesPerCap, endCapBase: geo.endCapBase,
@@ -1288,10 +1308,11 @@ function buildParametricTubeGeometry(
     const localFrames = new Float32Array(nSpine * 6);
 
     // Compute local frames: tangent T + width axis U + height axis V.
-    // V is anchored to global +Z (up) so "height" means "up" for
-    // horizontal beads. Parallel-transport (U, V) along the spine so
-    // there is no azimuthal drift at curvature changes. When the tangent
-    // is parallel to global up (vertical bead), seed V from global +X.
+    // Constant-up frame derivation: V is the global up vector (default +Z)
+    // projected onto the plane perpendicular to the tangent, so "height"
+    // means "up" for horizontal beads. U = V × T completes the frame.
+    // When the tangent is parallel to up (vertical segments), V falls
+    // back to global +X to avoid degeneracy.
     const _T = new THREE.Vector3();
     const _U = new THREE.Vector3();
     const _V = new THREE.Vector3();
@@ -1521,9 +1542,9 @@ function applyWorkerGeometry(mesh, msg) {
     // Build Three.js geometry from worker arrays
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
     if (msg.colors) geometry.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
     geometry.setIndex(new THREE.BufferAttribute(msg.indices, 1));
-    geometry.computeVertexNormals();
 
     // Dispose old, assign new
     mesh.geometry.dispose();
@@ -2099,9 +2120,7 @@ class ThreeJSViewer {
             }
 
             // Worker built geometry — upload to GPU
-            const t0 = performance.now();
             applyWorkerGeometry(obj, msg);
-            console.log(`LOD ${msg.tubeId}: ${obj.userData.tubeLOD.originalCount} → ${msg.nSpine} pts (upload ${(performance.now() - t0).toFixed(1)}ms) chunks ${msg.chunksReused}/${msg.chunksTotal} reused, dist=[${msg.minDist.toFixed(1)}, ${msg.maxDist.toFixed(1)}]`);
         };
         this._controls.addEventListener('change', () => {
             this._lodDirty = true;
@@ -2703,6 +2722,9 @@ class ThreeJSViewer {
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse((child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
+                if (child.userData.tubeLOD) {
+                    this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
+                }
                 if (child.geometry) child.geometry.dispose();
                 if (child.material) {
                     if (Array.isArray(child.material)) {
@@ -3891,7 +3913,7 @@ class ThreeJSViewer {
                                 let buildSpine = spine, buildWidths = widths, buildHeights = heights;
                                 let buildOrientations = orientations, buildRingColors = ringColors;
                                 let buildN = n;
-                                if (n >= 200) {
+                                if (n >= 25000) {
                                     // Bounding sphere from original spine (stable across LOD rebuilds)
                                     const _center = new THREE.Vector3();
                                     for (let i = 0; i < n; i++) {
@@ -3938,7 +3960,7 @@ class ThreeJSViewer {
                                         boundingCenter: _center,
                                         boundingRadius,
                                     };
-                                    console.log(`LOD initial ${data.id}: ${n} → ${nRed} pts`);
+                                    // LOD initial reduction logged at debug level only
                                 }
 
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
