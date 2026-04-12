@@ -748,9 +748,13 @@ const PRIMITIVES = {
 // The shape is: 4 straight edges + 4 quarter-circle corner arcs. Points
 // are always distributed the same way relative to the shape, so changing
 // width/height scales the shape without rotating the visible polygon.
-// Radius is clamped to cornerRadiusFrac * min(width, height) with
-// cornerRadiusFrac in [0, 0.5].
-function sampleRoundedRectInto(out, nVerts, width, height, cornerRadiusFrac) {
+// Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
+// min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
+// When w > h: flat top & bottom, pointed left & right (hexagon).
+// When h > w: flat left & right, pointed top & bottom (hexagon).
+// When w == h: diamond — two vertex pairs coincide, giving 4 unique corners.
+const N_CROSS_SECTION = 6;
+function sampleChamferedRect(out, width, height) {
     if (!Number.isFinite(width) || width <= 0) {
         throw new Error(`parametric_tube width must be finite and > 0, got ${width}`);
     }
@@ -759,68 +763,27 @@ function sampleRoundedRectInto(out, nVerts, width, height, cornerRadiusFrac) {
     }
     const hw = width * 0.5;
     const hh = height * 0.5;
-    const frac = Math.max(0, Math.min(0.5, cornerRadiusFrac));
-    const r = frac * Math.min(width, height);
-    const cxA = hw - r;  // half-width of the flat section
-    const cyA = hh - r;  // half-height of the flat section
+    const c = Math.min(hw, hh); // chamfer depth (45°)
 
-    // Perimeter segments (starting at +hw, 0 going counter-clockwise):
-    //   right edge:  (+hw, -cyA) → (+hw, +cyA)    length = 2*cyA
-    //   TR corner:   quarter arc radius r           length = π*r/2
-    //   top edge:    (+cxA, +hh) → (-cxA, +hh)    length = 2*cxA
-    //   TL corner:   quarter arc                    length = π*r/2
-    //   left edge:   (-hw, +cyA) → (-hw, -cyA)    length = 2*cyA
-    //   BL corner:   quarter arc                    length = π*r/2
-    //   bottom edge: (-cxA, -hh) → (+cxA, -hh)    length = 2*cxA
-    //   BR corner:   quarter arc                    length = π*r/2
-    const edgeH = 2 * cyA;  // right/left edge lengths
-    const edgeW = 2 * cxA;  // top/bottom edge lengths
-    const arcLen = (Math.PI * 0.5) * r; // quarter-arc length
-    const perimeter = 2 * edgeH + 2 * edgeW + 4 * arcLen;
-
-    // Segment lengths in order
-    const segLens = [edgeH, arcLen, edgeW, arcLen, edgeH, arcLen, edgeW, arcLen];
-
-    for (let i = 0; i < nVerts; i++) {
-        const d = (i / nVerts) * perimeter;
-        let u, v;
-        let remaining = d;
-        if (remaining < segLens[0]) {
-            // Right edge: (+hw, -cyA) → (+hw, +cyA)
-            const t = edgeH > 0 ? remaining / edgeH : 0;
-            u = hw; v = -cyA + t * 2 * cyA;
-        } else if ((remaining -= segLens[0]) < segLens[1]) {
-            // TR corner arc: center (+cxA, +cyA), from 0 to π/2
-            const a = arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0;
-            u = cxA + r * Math.cos(a); v = cyA + r * Math.sin(a);
-        } else if ((remaining -= segLens[1]) < segLens[2]) {
-            // Top edge: (+cxA, +hh) → (-cxA, +hh)
-            const t = edgeW > 0 ? remaining / edgeW : 0;
-            u = cxA - t * 2 * cxA; v = hh;
-        } else if ((remaining -= segLens[2]) < segLens[3]) {
-            // TL corner arc: center (-cxA, +cyA), from π/2 to π
-            const a = (Math.PI * 0.5) + (arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0);
-            u = -cxA + r * Math.cos(a); v = cyA + r * Math.sin(a);
-        } else if ((remaining -= segLens[3]) < segLens[4]) {
-            // Left edge: (-hw, +cyA) → (-hw, -cyA)
-            const t = edgeH > 0 ? remaining / edgeH : 0;
-            u = -hw; v = cyA - t * 2 * cyA;
-        } else if ((remaining -= segLens[4]) < segLens[5]) {
-            // BL corner arc: center (-cxA, -cyA), from π to 3π/2
-            const a = Math.PI + (arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0);
-            u = -cxA + r * Math.cos(a); v = -cyA + r * Math.sin(a);
-        } else if ((remaining -= segLens[5]) < segLens[6]) {
-            // Bottom edge: (-cxA, -hh) → (+cxA, -hh)
-            const t = edgeW > 0 ? remaining / edgeW : 0;
-            u = -cxA + t * 2 * cxA; v = -hh;
-        } else {
-            // BR corner arc: center (+cxA, -cyA), from 3π/2 to 2π
-            remaining -= segLens[6];
-            const a = Math.PI * 1.5 + (arcLen > 0 ? (remaining / arcLen) * (Math.PI * 0.5) : 0);
-            u = cxA + r * Math.cos(a); v = -cyA + r * Math.sin(a);
-        }
-        out[i * 2] = u;
-        out[i * 2 + 1] = v;
+    // 6 corners CCW.  Which edges are flat depends on aspect ratio:
+    //   w >= h: flat top & bottom, pointed left & right
+    //   h > w:  flat left & right, pointed top & bottom
+    if (width >= height) {
+        // flat top/bottom, pointed right/left
+        out[0]  = +hw;        out[1]  = 0;            // right tip
+        out[2]  = +(hw - c);  out[3]  = +hh;          // top-right
+        out[4]  = -(hw - c);  out[5]  = +hh;          // top-left
+        out[6]  = -hw;        out[7]  = 0;             // left tip
+        out[8]  = -(hw - c);  out[9]  = -hh;          // bottom-left
+        out[10] = +(hw - c);  out[11] = -hh;           // bottom-right
+    } else {
+        // flat left/right, pointed top/bottom
+        out[0]  = +hw;        out[1]  = -(hh - c);    // right-bottom
+        out[2]  = +hw;        out[3]  = +(hh - c);    // right-top
+        out[4]  = 0;          out[5]  = +hh;           // top tip
+        out[6]  = -hw;        out[7]  = +(hh - c);    // left-top
+        out[8]  = -hw;        out[9]  = -(hh - c);    // left-bottom
+        out[10] = 0;          out[11] = -hh;            // bottom tip
     }
 }
 
@@ -835,22 +798,13 @@ function sampleRoundedRectInto(out, nVerts, width, height, cornerRadiusFrac) {
 // - orientations: Float32Array length nSpine*4 quaternions, or null (constant-up derived)
 // - upVector:     [x, y, z] up direction for constant-up frame (default [0,0,1])
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
-// - crossSection: "rounded_rect"
-// - cornerRadiusFrac: number in [0, 0.5]
-// - nCs:          number of cross-section vertices
 //
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
 function buildParametricTubeGeometry(
     spine, widths, heights,
     orientations, upVector, ringColors,
-    crossSection, cornerRadiusFrac, nCs,
 ) {
-    if (crossSection !== 'rounded_rect') {
-        throw new Error(`Unsupported cross_section '${crossSection}'`);
-    }
-    if (!Number.isInteger(nCs) || nCs < 3) {
-        throw new Error(`parametric_tube n_cross_section_verts must be an integer >=3, got ${nCs}`);
-    }
+    const nCs = N_CROSS_SECTION;
     const nSpine = spine.length / 3;
     if (nSpine < 2) {
         throw new Error(`parametric_tube needs >=2 spine points, got ${nSpine}`);
@@ -862,23 +816,23 @@ function buildParametricTubeGeometry(
         throw new Error(`parametric_tube heights length ${heights.length} does not match spine ${nSpine}`);
     }
 
-    // Dome cap vertex layout (appended after tube rings):
-    //   startCapRings(nCapRings * nCs) | startPole(1) |
-    //   endCapRings(nCapRings * nCs) | endPole(1)
-    // Each cap has nCapRings latitude rings that shrink from the tube edge
-    // ring toward a pole, forming a hemisphere-like dome.
+    // Cap vertex layout (appended after tube rings):
+    //   startCapRings(nCapRings * nCs) | endCapRings(nCapRings * nCs)
+    // Each cap has nCapRings revolution rings (including the 90° endpoint).
+    // Revolution is around the V (up) axis through the spine center, so each
+    // vertex sweeps by its own cu: pos = spine + cu*cos(θ)*U + cv*V + cu*sin(θ)*T.
+    // At θ=90° the ring collapses to a vertical line segment (cu→0), closing
+    // the cap without a pole vertex.
     const nCapRings = 3;
     const capAngles = new Float32Array(nCapRings);
     for (let k = 0; k < nCapRings; k++) {
-        capAngles[k] = ((k + 1) / (nCapRings + 1)) * (Math.PI * 0.5);
+        capAngles[k] = ((k + 1) / nCapRings) * (Math.PI * 0.5);
     }
     const startCapBase = nSpine * nCs;
-    const startPoleIdx = startCapBase + nCapRings * nCs;
-    const endCapBase = startPoleIdx + 1;
-    const endPoleIdx = endCapBase + nCapRings * nCs;
-    const totalVerts = endPoleIdx + 1;
-    // Per cap: nCapRings quad strips + 1 triangle fan to pole
-    const capIndicesPerCap = nCapRings * nCs * 6 + nCs * 3;
+    const endCapBase = startCapBase + nCapRings * nCs;
+    const totalVerts = endCapBase + nCapRings * nCs;
+    // Per cap: nCapRings quad strips with spoke triangulation
+    const capIndicesPerCap = nCapRings * nCs * 6;
 
     const positions = new Float32Array(totalVerts * 3);
     const colors = ringColors ? new Float32Array(totalVerts * 3) : null;
@@ -945,7 +899,7 @@ function buildParametricTubeGeometry(
 
         const w = widths[i];
         const h = heights[i];
-        sampleRoundedRectInto(section, nCs, w, h, cornerRadiusFrac);
+        sampleChamferedRect(section, w, h);
         const sx = spine[i * 3];
         const sy = spine[i * 3 + 1];
         const sz = spine[i * 3 + 2];
@@ -970,21 +924,17 @@ function buildParametricTubeGeometry(
     }
 
     // --- Revolution cap vertices ---
-    // The cap is a surface of revolution: the flat cross-section face is
-    // revolved around the V (height) axis. Each vertex at (u, v) sweeps
-    // through angle θ: U_component = u*cos(θ), T_offset = |u|*sin(θ),
-    // V_component = v (unchanged). In top view this gives a perfect
-    // semicircle of radius hw extending along the tangent direction.
+    // Revolution around V (up axis) through the spine center.  Each vertex
+    // at (cu, cv) sweeps: U shrinks as cu*cos(θ), T extends by |cu|*sin(θ).
+    // At θ=90° the ring collapses to a vertical line (cu→0).
     // tangentSign = -1 for start cap (extends in -T), +1 for end cap.
-    function buildDomeCap(spineIdx, capBaseVert, poleVertIdx, tangentSign) {
+    function buildRevolutionCap(spineIdx, capBaseVert, tangentSign) {
         const sx = spine[spineIdx * 3], sy = spine[spineIdx * 3 + 1], sz = spine[spineIdx * 3 + 2];
         const w = widths[spineIdx], h = heights[spineIdx];
         const ux = localFrames[spineIdx * 6], uy = localFrames[spineIdx * 6 + 1], uz = localFrames[spineIdx * 6 + 2];
         const vx = localFrames[spineIdx * 6 + 3], vy = localFrames[spineIdx * 6 + 4], vz = localFrames[spineIdx * 6 + 5];
-        // Tangent = U × V
         const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
-        // Sample cross-section once at full width/height
-        sampleRoundedRectInto(section, nCs, w, h, cornerRadiusFrac);
+        sampleChamferedRect(section, w, h);
         for (let k = 0; k < nCapRings; k++) {
             const theta = capAngles[k];
             const cosT = Math.cos(theta);
@@ -998,17 +948,12 @@ function buildParametricTubeGeometry(
                 positions[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
             }
         }
-        // Pole at the tip of the semicircle: spine + hw * tangentSign * T
-        const hw = w * 0.5;
-        positions[poleVertIdx * 3]     = sx + hw * tangentSign * tx;
-        positions[poleVertIdx * 3 + 1] = sy + hw * tangentSign * ty;
-        positions[poleVertIdx * 3 + 2] = sz + hw * tangentSign * tz;
     }
-    buildDomeCap(0, startCapBase, startPoleIdx, -1);
-    buildDomeCap(nSpine - 1, endCapBase, endPoleIdx, +1);
+    buildRevolutionCap(0, startCapBase, -1);
+    buildRevolutionCap(nSpine - 1, endCapBase, +1);
     // Cap colors (replicate ring color to all cap vertices)
     if (colors) {
-        const capVertsPerCap = nCapRings * nCs + 1;
+        const capVertsPerCap = nCapRings * nCs;
         const r0 = ringColors[0], g0 = ringColors[1], b0 = ringColors[2];
         for (let v = 0; v < capVertsPerCap; v++) {
             const dst = (startCapBase + v) * 3;
@@ -1019,9 +964,6 @@ function buildParametricTubeGeometry(
             const dst = (endCapBase + v) * 3;
             colors[dst] = rN; colors[dst + 1] = gN; colors[dst + 2] = bN;
         }
-        // pole
-        colors[startPoleIdx * 3] = r0; colors[startPoleIdx * 3 + 1] = g0; colors[startPoleIdx * 3 + 2] = b0;
-        colors[endPoleIdx * 3] = rN; colors[endPoleIdx * 3 + 1] = gN; colors[endPoleIdx * 3 + 2] = bN;
     }
 
     // --- Index buffer: [start_cap_dome | ring_pairs | end_cap_dome] ---
@@ -1032,12 +974,9 @@ function buildParametricTubeGeometry(
     const indices = new IndexCtor(totalIndexCount);
     let p = 0;
 
-    // Helper: build dome cap indices.
-    // tubeRingBase = vertex index of the tube ring that the cap connects to.
-    // capBaseVert = first vertex index of the cap rings.
-    // poleVertIdx = vertex index of the pole.
-    // reverse = true for start cap (winding reversed since dome goes in -T).
-    function buildDomeCapIndices(tubeRingBase, capBaseVert, poleVertIdx, reverse) {
+    // Helper: build revolution cap indices with radial spoke pattern.
+    // Quads between consecutive ring layers, split along the spoke direction.
+    function buildCapSpokeIndices(tubeRingBase, capBaseVert, reverse) {
         for (let k = 0; k < nCapRings; k++) {
             const innerBase = k === 0 ? tubeRingBase : capBaseVert + (k - 1) * nCs;
             const outerBase = capBaseVert + k * nCs;
@@ -1046,36 +985,22 @@ function buildParametricTubeGeometry(
                 if (reverse) {
                     indices[p++] = innerBase + j;
                     indices[p++] = outerBase + j;
-                    indices[p++] = outerBase + jN;
-                    indices[p++] = innerBase + j;
+                    indices[p++] = innerBase + jN;
+                    indices[p++] = outerBase + j;
                     indices[p++] = outerBase + jN;
                     indices[p++] = innerBase + jN;
                 } else {
                     indices[p++] = innerBase + j;
                     indices[p++] = innerBase + jN;
-                    indices[p++] = outerBase + jN;
-                    indices[p++] = innerBase + j;
+                    indices[p++] = outerBase + j;
+                    indices[p++] = innerBase + jN;
                     indices[p++] = outerBase + jN;
                     indices[p++] = outerBase + j;
                 }
             }
         }
-        // Fan to pole
-        const lastRing = capBaseVert + (nCapRings - 1) * nCs;
-        for (let j = 0; j < nCs; j++) {
-            const jN = (j + 1) % nCs;
-            if (reverse) {
-                indices[p++] = poleVertIdx;
-                indices[p++] = lastRing + jN;
-                indices[p++] = lastRing + j;
-            } else {
-                indices[p++] = poleVertIdx;
-                indices[p++] = lastRing + j;
-                indices[p++] = lastRing + jN;
-            }
-        }
     }
-    buildDomeCapIndices(0, startCapBase, startPoleIdx, true);
+    buildCapSpokeIndices(0, startCapBase, true);
     // Ring pairs
     for (let i = 0; i < ringPairs; i++) {
         const a0 = i * nCs;
@@ -1094,9 +1019,9 @@ function buildParametricTubeGeometry(
             indices[p++] = d;
         }
     }
-    // End cap dome
+    // End cap spoke pattern
     const endCapOffset = p;
-    buildDomeCapIndices((nSpine - 1) * nCs, endCapBase, endPoleIdx, false);
+    buildCapSpokeIndices((nSpine - 1) * nCs, endCapBase, false);
     // Extract end cap index pattern for dynamic relocation during draw_range
     const endCapPattern = indices.slice(endCapOffset, endCapOffset + capIndicesPerCap);
 
@@ -1108,8 +1033,8 @@ function buildParametricTubeGeometry(
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
-        localFrames, capAngles, nCapRings,
-        capIndicesPerCap, endCapBase, endPoleIdx, endCapPattern,
+        localFrames, capAngles,
+        capIndicesPerCap, endCapBase, endCapPattern,
     };
 }
 
@@ -1224,7 +1149,7 @@ function morphFrontierRing(obj, fracRingPairs) {
     md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz };
 
     // Sample cross-section at interpolated width/height
-    sampleRoundedRectInto(md.section, nCs, w, h, md.cornerRadiusFrac);
+    sampleChamferedRect(md.section, w, h);
 
     // Write morphed vertices into the position buffer at ring iB
     const posAttr = obj.geometry.getAttribute('position');
@@ -1291,10 +1216,8 @@ function updateEndCap(obj, lastVisibleRing) {
     // Tangent = U × V
     const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
 
-    // Sample cross-section once at full width/height
-    sampleRoundedRectInto(md.section, nCs, w, h, md.cornerRadiusFrac);
-
-    // Revolution: each vertex at (cu, cv) sweeps around V axis
+    // Revolution around V: each vertex sweeps by |cu| along T
+    sampleChamferedRect(md.section, w, h);
     const ecBase = ud.tubeEndCapBase;
     for (let k = 0; k < nCapRings; k++) {
         const theta = md.capAngles[k];
@@ -1309,12 +1232,6 @@ function updateEndCap(obj, lastVisibleRing) {
             pos[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
         }
     }
-    // Pole at tip of semicircle: spine + hw * T
-    const hw = w * 0.5;
-    const poleIdx = ud.tubeEndPoleIdx;
-    pos[poleIdx * 3]     = sx + hw * tx;
-    pos[poleIdx * 3 + 1] = sy + hw * ty;
-    pos[poleIdx * 3 + 2] = sz + hw * tz;
     posAttr.needsUpdate = true;
 
     // Update end cap colors if applicable
@@ -1322,10 +1239,9 @@ function updateEndCap(obj, lastVisibleRing) {
         const colAttr = obj.geometry.getAttribute('color');
         if (colAttr) {
             const cols = colAttr.array;
-            // Use frontier ring's color for all end cap vertices
             const colSrcBase = lastVisibleRing * nCs * 3;
             const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
-            const capVerts = nCapRings * nCs + 1;
+            const capVerts = nCapRings * nCs;
             for (let v = 0; v < capVerts; v++) {
                 const dst = (ecBase + v) * 3;
                 cols[dst] = cr; cols[dst + 1] = cg; cols[dst + 2] = cb;
@@ -1363,8 +1279,19 @@ function relocateEndCap(obj, visiblePairs) {
     // Save the indices we're about to overwrite
     md.savedCapIndices.set(idx.subarray(offset, offset + capPer));
     md.savedCapOffset = offset;
-    // Write end cap pattern
-    idx.set(md.endCapPattern, offset);
+    // Write end cap pattern, adjusting tube ring references from the
+    // original last ring to the current frontier ring.
+    const nCs = ud.tubeNCs;
+    const origRingBase = (ud.tubeNumSpinePoints - 1) * nCs;
+    const frontierRingBase = visiblePairs * nCs;
+    for (let i = 0; i < capPer; i++) {
+        const v = md.endCapPattern[i];
+        if (v >= origRingBase && v < origRingBase + nCs) {
+            idx[offset + i] = v - origRingBase + frontierRingBase;
+        } else {
+            idx[offset + i] = v;
+        }
+    }
     indexAttr.needsUpdate = true;
 }
 
@@ -3346,14 +3273,10 @@ class ThreeJSViewer {
                                         ringColors[i * 3 + 2] = (c & 0xff) / 255;
                                     }
                                 }
-                                const nCs = data.nCrossSectionVerts || 8;
-                                const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endPoleIdx, endCapPattern } = buildParametricTubeGeometry(
+                                const nCs = N_CROSS_SECTION;
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, data.upVector || null, ringColors,
-                                    data.crossSection || 'rounded_rect',
-                                    cornerRadiusFrac,
-                                    nCs,
                                 );
                                 const hasColors = !!ringColors;
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
@@ -3381,12 +3304,11 @@ class ThreeJSViewer {
                                 mesh.userData.tubeHasColors = hasColors;
                                 mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
                                 mesh.userData.tubeEndCapBase = endCapBase;
-                                mesh.userData.tubeEndPoleIdx = endPoleIdx;
                                 mesh.userData.tubeMorphData = {
                                     spine: new Float32Array(spine),
                                     widths: new Float32Array(widths),
                                     heights: new Float32Array(heights),
-                                    localFrames, cornerRadiusFrac, capAngles,
+                                    localFrames, capAngles,
                                     ringColors: ringColors ? new Float32Array(ringColors) : null,
                                     section: new Float32Array(nCs * 2),
                                     savedRing: new Float32Array(nCs * 3),

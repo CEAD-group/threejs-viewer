@@ -57,41 +57,6 @@ def test_add_parametric_tube_validates_colors_length():
         c.add_parametric_tube("t", spine, widths, heights, colors=colors)
 
 
-def test_add_parametric_tube_validates_n_cross_section_verts():
-    from threejs_viewer import ViewerClient
-
-    c = ViewerClient(port=0, open_browser=False)
-    spine = np.zeros((4, 3), dtype=np.float32)
-    spine[:, 0] = [0, 1, 2, 3]
-    widths = np.ones(4, dtype=np.float32)
-    heights = np.ones(4, dtype=np.float32)
-    with pytest.raises(ValueError, match="n_cross_section_verts"):
-        c.add_parametric_tube("t", spine, widths, heights, n_cross_section_verts=2)
-
-
-def test_add_parametric_tube_validates_cross_section():
-    from threejs_viewer import ViewerClient
-
-    c = ViewerClient(port=0, open_browser=False)
-    spine = np.zeros((4, 3), dtype=np.float32)
-    spine[:, 0] = [0, 1, 2, 3]
-    widths = np.ones(4, dtype=np.float32)
-    heights = np.ones(4, dtype=np.float32)
-    with pytest.raises(ValueError, match="cross_section"):
-        c.add_parametric_tube("t", spine, widths, heights, cross_section="circle")
-
-
-def test_add_parametric_tube_validates_corner_radius_frac():
-    from threejs_viewer import ViewerClient
-
-    c = ViewerClient(port=0, open_browser=False)
-    spine = np.zeros((4, 3), dtype=np.float32)
-    spine[:, 0] = [0, 1, 2, 3]
-    widths = np.ones(4, dtype=np.float32)
-    heights = np.ones(4, dtype=np.float32)
-    with pytest.raises(ValueError, match="corner_radius_frac"):
-        c.add_parametric_tube("t", spine, widths, heights, corner_radius_frac=0.8)
-
 
 def test_add_parametric_tube_validates_widths_positive():
     from threejs_viewer import ViewerClient
@@ -134,7 +99,7 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     """Creating a parametric_tube produces a mesh with the expected vertex
     and index counts, and the width parameter shows up in the bounds."""
     n = 20
-    n_cs = 8
+    n_cs = 6
     spine = _straight_spine(n=n, length=2.0)
     widths = np.full(n, 0.4, dtype=np.float32)
     heights = np.full(n, 0.2, dtype=np.float32)
@@ -144,8 +109,6 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-        n_cross_section_verts=n_cs,
-        corner_radius_frac=0.0,
     )
     _wait_for_object(viewer_page, "tube")
 
@@ -179,17 +142,18 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     assert info["nCs"] == n_cs
     assert info["ringPairs"] == n - 1
     assert info["perPair"] == n_cs * 6
-    n_cap_rings = 3  # dome cap latitude rings
-    cap_indices = n_cap_rings * n_cs * 6 + n_cs * 3  # dome per cap
+    n_cap_rings = 3
+    cap_indices = n_cap_rings * n_cs * 6  # spoke quads only (no pole)
     assert info["totalIndex"] == 2 * cap_indices + (n - 1) * n_cs * 6
-    # Tube ring verts + 2 dome caps (each: nCapRings * nCs + 1 pole)
-    assert info["vertexCount"] == n * n_cs + 2 * (n_cap_rings * n_cs + 1)
+    # Tube ring verts + 2 caps (each: nCapRings * nCs, no pole)
+    assert info["vertexCount"] == n * n_cs + 2 * (n_cap_rings * n_cs)
     assert info["indexCount"] == 2 * cap_indices + (n - 1) * n_cs * 6
     # Spine along +X. Frame derives width=+Y, height=+Z. Sharp rectangle
     # of 0.4 x 0.2 sampled at 8 angles: outermost samples land on the
     # flat edges so the bounding box matches the parameter values.
-    # Revolution caps extend hw = w/2 = 0.2 beyond each spine endpoint
-    assert abs(info["bbLength"] - 2.4) < 0.05, info
+    # Revolution cap extends ~hw beyond each endpoint
+    assert info["bbLength"] > 2.3, info
+    assert info["bbLength"] < 2.5, info
     assert abs(info["bbWidth"] - 0.4) < 0.05, info
     assert abs(info["bbHeight"] - 0.2) < 0.05, info
 
@@ -209,8 +173,7 @@ def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-        n_cross_section_verts=n_cs,
-    )
+            )
     _wait_for_object(viewer_page, "tube2")
 
     # 0.37 * 9 ring pairs = 3.33 → 3 complete + 1 morphed frontier = 4 ring pairs visible
@@ -222,7 +185,7 @@ def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
         "tube2",
     )
     n_cap_rings = 3
-    cap = n_cap_rings * n_cs * 6 + n_cs * 3  # dome per cap
+    cap = n_cap_rings * n_cs * 6  # spoke quads per cap (no pole)
     expected = 2 * cap + 4 * n_cs * 6  # start cap + 4 ring pairs + end cap
     assert count == expected, f"expected {expected}, got {count}"
 
@@ -241,8 +204,7 @@ def test_parametric_tube_frontier_morph_positions(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-        n_cross_section_verts=n_cs,
-    )
+            )
     _wait_for_object(viewer_page, "tube_morph")
 
     # 0.5 * 9 ring pairs = 4.5 → frontier ring is ring 5, morphed to 50% between ring 4 and 5
@@ -279,8 +241,7 @@ def test_parametric_tube_frontier_restores_on_full(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-        n_cross_section_verts=n_cs,
-    )
+            )
     _wait_for_object(viewer_page, "tube_restore")
 
     # Morph ring 5 by setting draw_range to 0.5
@@ -325,8 +286,7 @@ def test_parametric_tube_color_swap(viewer_client, viewer_page):
         widths=widths,
         heights=heights,
         colors=initial_colors,
-        n_cross_section_verts=n_cs,
-    )
+            )
     _wait_for_object(viewer_page, "tube3")
 
     before = viewer_page.evaluate(

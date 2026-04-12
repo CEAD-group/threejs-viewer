@@ -675,9 +675,6 @@ class ViewerClient:
         orientations: Optional[np.ndarray] = None,
         up_vector: Optional[list] = None,
         colors: Optional[np.ndarray] = None,
-        cross_section: str = "rounded_rect",
-        corner_radius_frac: float = 0.25,
-        n_cross_section_verts: int = 8,
         color: int = 0x7AB8CC,
         opacity: float = 1.0,
         metalness: float = 0.1,
@@ -695,8 +692,7 @@ class ViewerClient:
         Geometry is built on the client from a packed bundle of parameter
         arrays (spine + widths + heights + optional orientations + optional
         colors) so the wire transfer stays O(N) instead of O(N * nCs). The
-        cross-section at each spine point is a rounded rectangle of size
-        (width, height) with corner radius ``corner_radius_frac * min(w, h)``.
+        cross-section is a chamfered rectangle (45° chamfers, 6 vertices).
 
         Args:
             id: Unique identifier.
@@ -712,29 +708,11 @@ class ViewerClient:
             colors: Optional (N,) uint32 packed 0x00RRGGBB per spine point.
                 Each ring is painted a single color. Use
                 ``update_parametric_tube_colors`` for cheap color-mode swaps.
-            cross_section: Cross-section profile. MVP ships ``"rounded_rect"``.
-            corner_radius_frac: Corner radius as a fraction of ``min(w, h)``,
-                clamped to ``[0, 0.5]``. ``0`` → rectangle, ``0.5`` → pill.
-            n_cross_section_verts: Vertices per ring. 8 is a good default.
             color: Fallback color when ``colors`` is not provided.
             opacity, metalness, roughness: Standard material properties.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
         """
-        if cross_section != "rounded_rect":
-            raise ValueError(
-                f"cross_section {cross_section!r} not supported; "
-                f"expected 'rounded_rect'"
-            )
-        if not isinstance(n_cross_section_verts, int) or n_cross_section_verts < 3:
-            raise ValueError(
-                f"n_cross_section_verts must be an int >= 3, got "
-                f"{n_cross_section_verts!r}"
-            )
-        if not (0.0 <= float(corner_radius_frac) <= 0.5):
-            raise ValueError(
-                f"corner_radius_frac must be in [0, 0.5], got {corner_radius_frac}"
-            )
 
         spine_arr = np.ascontiguousarray(spine, dtype=np.float32).reshape(-1, 3)
         n = spine_arr.shape[0]
@@ -784,9 +762,6 @@ class ViewerClient:
             "numSpinePoints": n,
             "hasOrientations": has_orientations,
             "hasColors": has_colors,
-            "crossSection": cross_section,
-            "cornerRadiusFrac": float(corner_radius_frac),
-            "nCrossSectionVerts": int(n_cross_section_verts),
             "color": color,
             "opacity": opacity,
             "metalness": metalness,

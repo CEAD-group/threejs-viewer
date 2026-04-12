@@ -75,9 +75,6 @@ v.add_parametric_tube(
     widths=widths,
     heights=heights,
     colors=layer_colors,
-    cross_section="rounded_rect",
-    corner_radius_frac=0.4,
-    n_cross_section_verts=12,
 )
 
 # --- Nozzle indicator: a group that rides the animation, with a capsule
