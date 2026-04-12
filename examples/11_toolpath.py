@@ -97,7 +97,10 @@ v.add_box(
 duration = 600.0
 
 tp = Toolpath.from_points(
-    spiral_vase(), bead_width=HEIGHT / N_TURNS * 4, bead_height=HEIGHT / N_TURNS, duration=duration
+    spiral_vase(),
+    bead_width=HEIGHT / N_TURNS * 4,
+    bead_height=HEIGHT / N_TURNS,
+    duration=duration,
 )
 
 # Bead (parametric tube — chamfered hex cross-section, built client-side)
