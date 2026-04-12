@@ -9,11 +9,12 @@ instead of the ~1 MB a baked mesh would cost.
 
 Highlights:
 - Variable width/height along the path (neck narrows, belly swells).
-- Draw-range animation reveals the bead one ring-pair at a time — the
-  cut edge is snapped to ring boundaries so the wavefront stays clean.
+- Chamfered hexagonal cross-section (45° chamfers, 6 vertices per ring).
+- Draw-range animation with smooth frontier-ring morphing — the tube
+  grows pixel-smoothly instead of snapping ring-by-ring.
 - A capsule parented to an animated group acts as a nozzle-tip
   indicator, showing where material is currently being deposited.
-- After 3 seconds, ``update_parametric_tube_colors`` swaps the bead's
+- After 4 seconds, ``update_parametric_tube_colors`` swaps the bead's
   color map from layer-height gradient to width gradient without
   rebuilding any geometry.
 

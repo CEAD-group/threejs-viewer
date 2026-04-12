@@ -57,7 +57,6 @@ def test_add_parametric_tube_validates_colors_length():
         c.add_parametric_tube("t", spine, widths, heights, colors=colors)
 
 
-
 def test_add_parametric_tube_validates_widths_positive():
     from threejs_viewer import ViewerClient
 
@@ -148,10 +147,9 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     # Tube ring verts + 2 caps (each: nCapRings * nCs, no pole)
     assert info["vertexCount"] == n * n_cs + 2 * (n_cap_rings * n_cs)
     assert info["indexCount"] == 2 * cap_indices + (n - 1) * n_cs * 6
-    # Spine along +X. Frame derives width=+Y, height=+Z. Sharp rectangle
-    # of 0.4 x 0.2 sampled at 8 angles: outermost samples land on the
-    # flat edges so the bounding box matches the parameter values.
-    # Revolution cap extends ~hw beyond each endpoint
+    # Spine along +X. Frame derives width=+Y, height=+Z. Chamfered hex
+    # with w=0.4 > h=0.2: right/left tips at ±hw, flat top/bottom at ±hh.
+    # Revolution cap extends ~hw beyond each endpoint.
     assert info["bbLength"] > 2.3, info
     assert info["bbLength"] < 2.5, info
     assert abs(info["bbWidth"] - 0.4) < 0.05, info
@@ -173,7 +171,7 @@ def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-            )
+    )
     _wait_for_object(viewer_page, "tube2")
 
     # 0.37 * 9 ring pairs = 3.33 → 3 complete + 1 morphed frontier = 4 ring pairs visible
@@ -194,7 +192,6 @@ def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
 def test_parametric_tube_frontier_morph_positions(viewer_client, viewer_page):
     """The frontier ring's positions are interpolated between adjacent spine points."""
     n = 10
-    n_cs = 6
     spine = _straight_spine(n=n, length=9.0)  # 1.0 spacing between spine points
     widths = np.full(n, 0.3, dtype=np.float32)
     heights = np.full(n, 0.2, dtype=np.float32)
@@ -204,7 +201,7 @@ def test_parametric_tube_frontier_morph_positions(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-            )
+    )
     _wait_for_object(viewer_page, "tube_morph")
 
     # 0.5 * 9 ring pairs = 4.5 → frontier ring is ring 5, morphed to 50% between ring 4 and 5
@@ -231,7 +228,6 @@ def test_parametric_tube_frontier_morph_positions(viewer_client, viewer_page):
 def test_parametric_tube_frontier_restores_on_full(viewer_client, viewer_page):
     """When draw_range reaches 1.0, the morphed frontier ring is restored."""
     n = 10
-    n_cs = 6
     spine = _straight_spine(n=n, length=9.0)
     widths = np.full(n, 0.3, dtype=np.float32)
     heights = np.full(n, 0.2, dtype=np.float32)
@@ -241,7 +237,7 @@ def test_parametric_tube_frontier_restores_on_full(viewer_client, viewer_page):
         spine=spine,
         widths=widths,
         heights=heights,
-            )
+    )
     _wait_for_object(viewer_page, "tube_restore")
 
     # Morph ring 5 by setting draw_range to 0.5
@@ -274,7 +270,6 @@ def test_parametric_tube_color_swap(viewer_client, viewer_page):
     """update_parametric_tube_colors replaces the color attribute without
     rebuilding positions/indices."""
     n = 8
-    n_cs = 6
     spine = _straight_spine(n=n, length=1.0)
     widths = np.full(n, 0.2, dtype=np.float32)
     heights = np.full(n, 0.1, dtype=np.float32)
@@ -286,7 +281,7 @@ def test_parametric_tube_color_swap(viewer_client, viewer_page):
         widths=widths,
         heights=heights,
         colors=initial_colors,
-            )
+    )
     _wait_for_object(viewer_page, "tube3")
 
     before = viewer_page.evaluate(

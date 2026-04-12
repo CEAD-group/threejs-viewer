@@ -18,7 +18,22 @@ spine = np.column_stack([x, y, z])
 widths = np.array([8, 8, 2, 2], dtype=np.float32)
 heights = np.array([4, 4, 4, 4], dtype=np.float32)
 
-v.add_parametric_tube("tube", spine=spine, widths=widths, heights=heights, opacity=1, color=0xCCCCCC)
+
+n_pts = 10
+x = np.array([0, 1, 2, 6, 7, 12, 13, 14, 15, 16], dtype=np.float32)
+y = 4 * np.sin(x / 3)
+z = 3 * np.cos(x / 3)
+
+
+spine = np.column_stack([x, y, z])
+widths = np.full(n_pts, 2, dtype=np.float32)
+widths[3:6] = 5
+heights = np.full(n_pts, 1, dtype=np.float32)
+
+
+v.add_parametric_tube(
+    "tube", spine=spine, widths=widths, heights=heights, opacity=1, color=0xCCCCCC
+)
 v.add_parametric_tube(
     "wire", spine=spine, widths=widths, heights=heights, color=0xFF0000, wireframe=True
 )
