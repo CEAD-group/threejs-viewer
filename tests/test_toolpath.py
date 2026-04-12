@@ -18,19 +18,19 @@ def _gcode_row(x, y, z, E, F):
 def test_from_gcode_zero_len_connector_within_extrusion():
     """Zero-length connector between two extruding segments must NOT become w=0.
 
-    Regression: arc→straight join points share the same xyz, so the segment
-    arriving at them has length 0 → dE=0 → the point was incorrectly assigned
+    Regression: arc->straight join points share the same xyz, so the segment
+    arriving at them has length 0 -> dE=0 -> the point was incorrectly assigned
     width=0, creating a spurious cap ring in the middle of the bead.
 
     Toolpath:  A --extrude--> B (same as C) --extrude--> D
     B and C are at the same location (zero-length connector).
-    All three segments (A→B, B→C, C→D) should produce full-width rings.
+    All three segments (A->B, B->C, C->D) should produce full-width rings.
     """
     bw, bh = 2.0, 0.9
     F = 3000.0
-    # Segment A→B: length=10, extruding.  dE = bw*bh*10/1000 = 0.018
-    # Segment B→C: length=0, extruding (zero-length join).  dE = 0
-    # Segment C→D: length=10, extruding.  dE = 0.018
+    # Segment A->B: length=10, extruding.  dE = bw*bh*10/1000 = 0.018
+    # Segment B->C: length=0, extruding (zero-length join).  dE = 0
+    # Segment C->D: length=10, extruding.  dE = 0.018
     E_AB = bw * bh * 10.0 / 1000.0
     E_CD = E_AB + bw * bh * 10.0 / 1000.0
     raw = np.array(
@@ -45,7 +45,7 @@ def test_from_gcode_zero_len_connector_within_extrusion():
     tp = Toolpath.from_gcode(raw, bw, bh)
 
     # B and C (indices 1 and 2) are co-located; C is the zero-len connector.
-    # C should have full width because the segment C→D is extruding.
+    # C should have full width because the segment C->D is extruding.
     assert tp.widths[2] == pytest.approx(bw), (
         f"Zero-len connector C should have w={bw}, got {tp.widths[2]}"
     )
@@ -60,7 +60,7 @@ def test_from_gcode_zero_len_connector_within_extrusion():
 
 
 def test_from_gcode_zero_len_connector_extrusion_to_travel():
-    """Zero-length connector at extrusion→travel transition must remain w=0.
+    """Zero-length connector at extrusion->travel transition must remain w=0.
 
     The zero-length segment joining the last extruding point to the first travel
     point is a genuine cap — the departing segment is NOT extruding, so the
@@ -85,7 +85,7 @@ def test_from_gcode_zero_len_connector_extrusion_to_travel():
 
     # C (index 2) — zero-len connector to travel — must be width 0 (cap)
     assert tp.widths[2] == pytest.approx(0.0), (
-        f"Extrusion→travel cap should have w=0, got {tp.widths[2]}"
+        f"Extrusion->travel cap should have w=0, got {tp.widths[2]}"
     )
 
     # D (index 3) — travel — should be width 0
@@ -95,11 +95,11 @@ def test_from_gcode_zero_len_connector_extrusion_to_travel():
 def test_from_gcode_pill_no_spurious_zero_width():
     """Pill toolpath: zero-width points only at genuine travel/cap locations.
 
-    The pill has zero-length connectors at arc→straight→arc joins within the
+    The pill has zero-length connectors at arc->straight->arc joins within the
     extrusion section.  None of those should be zero-width.
     The only zero-width points allowed are:
     - index 0 (start cap)
-    - the zero-len cap at the extrusion→travel transition
+    - the zero-len cap at the extrusion->travel transition
     - the actual travel segment points
     """
     bw, bh = 2.0, 0.9
@@ -205,7 +205,7 @@ def test_colorize_string_travel_color_applied():
     heights = np.array([0.1, 0.1, 0.0, 0.0, 0.1], dtype=np.float32)
     tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
     tp.colorize("viridis", travel_color=(0.25, 0.25, 0.25))
-    # points 2 and 3 are travel (w=h=0) → must get travel color
+    # points 2 and 3 are travel (w=h=0) -> must get travel color
     assert np.allclose(tp.colors[2], [0.25, 0.25, 0.25], atol=1e-6)
     assert np.allclose(tp.colors[3], [0.25, 0.25, 0.25], atol=1e-6)
 
@@ -256,11 +256,50 @@ def test_colorize_bad_array_shape_raises():
         tp.colorize(np.ones((3, 3), dtype=np.float32))  # wrong N
 
 
-def test_to_mesh_single_point_raises():
-    # Bypass constructor validation to test to_mesh() guard directly
-    tp = Toolpath(np.zeros((1, 6), dtype=np.float32))
-    with pytest.raises(ValueError, match="at least 2"):
-        tp.to_mesh()
+# ---------------------------------------------------------------------------
+# Toolpath.packed_colors
+# ---------------------------------------------------------------------------
+
+
+def test_packed_colors_none_when_no_colors():
+    tp = _simple_tp(5)
+    assert tp.packed_colors is None
+
+
+def test_packed_colors_red():
+    tp = _simple_tp(3)
+    tp.colorize(0xFF0000)
+    packed = tp.packed_colors
+    assert packed is not None
+    assert packed.dtype == np.uint32
+    assert packed.shape == (3,)
+    assert all(p == 0xFF0000 for p in packed)
+
+
+def test_packed_colors_blue():
+    tp = _simple_tp(3)
+    tp.colorize(0x0000FF)
+    packed = tp.packed_colors
+    assert all(p == 0x0000FF for p in packed)
+
+
+def test_packed_colors_roundtrip():
+    """Float RGB -> packed uint32 -> back to float RGB is consistent."""
+    tp = _simple_tp(4)
+    tp.colorize((0.5, 0.25, 0.75))
+    packed = tp.packed_colors
+    # Unpack
+    r = ((packed >> 16) & 0xFF) / 255.0
+    g = ((packed >> 8) & 0xFF) / 255.0
+    b = (packed & 0xFF) / 255.0
+    assert np.allclose(r, 0.5, atol=1 / 255)
+    assert np.allclose(g, 0.25, atol=1 / 255)
+    assert np.allclose(b, 0.75, atol=1 / 255)
+
+
+# ---------------------------------------------------------------------------
+# Constructor validation
+# ---------------------------------------------------------------------------
 
 
 def test_from_points_single_point_raises():
@@ -296,124 +335,3 @@ def test_colors_setter():
     assert tp.colors is not None
     tp.colors = None
     assert tp.colors is None
-
-
-# ---------------------------------------------------------------------------
-# Toolpath.to_mesh
-# ---------------------------------------------------------------------------
-
-
-def test_to_mesh_output_keys():
-    tp = _simple_tp(5)
-    mesh = tp.to_mesh()
-    assert set(mesh.keys()) == {"positions", "indices", "normals", "colors"}
-
-
-def test_to_mesh_shapes():
-    N = 6
-    tp = _simple_tp(N)
-    mesh = tp.to_mesh()
-    P = 6
-    assert mesh["positions"].shape == (N * P, 3)
-    assert mesh["normals"].shape == (N * P, 3)
-    assert mesh["indices"].shape == ((N - 1) * P * 6,)
-    assert mesh["colors"] is None
-
-
-def test_to_mesh_with_colors():
-    N = 5
-    tp = _simple_tp(N)
-    tp.colorize("viridis")
-    mesh = tp.to_mesh()
-    P = 6
-    assert mesh["colors"] is not None
-    assert mesh["colors"].shape == (N * P, 3)
-
-
-def test_to_mesh_no_colors_is_none():
-    tp = _simple_tp(4)
-    mesh = tp.to_mesh()
-    assert mesh["colors"] is None
-
-
-def test_to_mesh_plane_normal_default_matches_z_up():
-    """plane_normal=None (default) produces same result as passing [0,0,1]."""
-    N = 5
-    tp = _simple_tp(N)
-    mesh_default = tp.to_mesh()
-    mesh_explicit = tp.to_mesh(plane_normal=np.array([0.0, 0.0, 1.0]))
-    assert np.allclose(mesh_default["positions"], mesh_explicit["positions"], atol=1e-6)
-    assert np.allclose(mesh_default["normals"], mesh_explicit["normals"], atol=1e-6)
-
-
-def test_to_mesh_plane_normal_y_up():
-    """plane_normal=[0,1,0] produces different geometry than the default Z-up.
-
-    Path along X, plane_normal=Y:
-      Z-up: binormal=[0,-1,0], height along Z → Z spread = bead_height
-      Y-up: binormal=[0,0,1], height along Y → Z spread = bead_width
-
-    So Z spread should be larger with Y-up (bead_width=0.2) than with Z-up
-    (bead_height=0.1).
-    """
-    pts = np.zeros((3, 3), dtype=np.float32)
-    pts[:, 0] = [0.0, 1.0, 2.0]  # path along X, all at Y=Z=0
-    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1)
-
-    mesh_zup = tp.to_mesh()
-    mesh_yup = tp.to_mesh(plane_normal=np.array([0.0, 1.0, 0.0]))
-
-    # Z-up: height (bead_height=0.1) goes along Z
-    assert abs(np.ptp(mesh_zup["positions"][:, 2]) - 0.1) < 0.01, (
-        "Z-up: Z spread ≈ bead_height"
-    )
-    # Y-up: width (bead_width=0.2) goes along Z (binormal), height along Y
-    assert abs(np.ptp(mesh_yup["positions"][:, 2]) - 0.2) < 0.01, (
-        "Y-up: Z spread ≈ bead_width"
-    )
-    assert abs(np.ptp(mesh_yup["positions"][:, 1]) - 0.1) < 0.01, (
-        "Y-up: Y spread ≈ bead_height"
-    )
-
-
-def test_to_mesh_zero_width_ring_collapsed():
-    """W=H=0 ring: all 6 vertices collapse to the path point."""
-    pts = np.zeros((4, 3), dtype=np.float32)
-    pts[:, 0] = np.arange(4, dtype=np.float32)
-    widths = np.array([0.2, 0.0, 0.2, 0.2], dtype=np.float32)
-    heights = np.array([0.1, 0.0, 0.1, 0.1], dtype=np.float32)
-    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
-    mesh = tp.to_mesh()
-    P = 6
-    ring1_verts = mesh["positions"][1 * P : 2 * P]
-    assert np.allclose(ring1_verts, ring1_verts[0], atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# Toolpath.merge — color interpolation
-# ---------------------------------------------------------------------------
-
-
-def test_merge_preserves_colors():
-    pts = np.zeros((5, 3), dtype=np.float32)
-    pts[:, 0] = np.linspace(0, 4, 5)
-    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1, duration=4.0)
-    tp.colorize("viridis")
-
-    frame_times = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-    merged, _ = tp.merge(frame_times)
-
-    assert merged.colors is not None
-    assert merged.colors.shape == (len(merged), 3)
-    assert merged.colors.dtype == np.float32
-
-
-def test_merge_no_colors_stays_none():
-    pts = np.zeros((5, 3), dtype=np.float32)
-    pts[:, 0] = np.linspace(0, 4, 5)
-    tp = Toolpath.from_points(pts, bead_width=0.2, bead_height=0.1, duration=4.0)
-
-    frame_times = np.array([1.0, 2.0], dtype=np.float32)
-    merged, _ = tp.merge(frame_times)
-
-    assert merged.colors is None

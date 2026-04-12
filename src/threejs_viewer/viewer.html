@@ -649,8 +649,12 @@ function makeChannelApply(viewer) {
                 if (interp) {
                     value = value * (1 - t) + ch.data[baseNext + i] * t;
                 }
-                if (obj.userData.isPolyline) {
+                if (obj.userData.isToolpathGroup) {
+                    applyToolpathGroupDrawRange(obj, value, viewer._objects);
+                } else if (obj.userData.isPolyline) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                } else if (obj.userData.isParametricTube) {
+                    applyParametricTubeDrawRange(obj, value);
                 } else if (obj.userData.isMesh) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
                 }
@@ -740,6 +744,1168 @@ const PRIMITIVES = {
         params.capSegments || 8, params.radialSegments || 16
     )
 };
+
+// Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
+// min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
+// When w > h: flat top & bottom, pointed left & right (hexagon).
+// When h > w: flat left & right, pointed top & bottom (hexagon).
+// When w == h: diamond — two vertex pairs coincide, giving 4 unique corners.
+const N_CROSS_SECTION = 6;
+// LOD: epsilon = camera_distance / LOD_EPSILON_DIVISOR.
+// Higher → more points kept (finer detail). Lower → more aggressive simplification.
+const LOD_EPSILON_DIVISOR = 2500;
+function sampleChamferedRect(out, width, height) {
+    if (!Number.isFinite(width) || width < 0) {
+        throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
+    }
+    if (!Number.isFinite(height) || height < 0) {
+        throw new Error(`parametric_tube height must be finite and >= 0, got ${height}`);
+    }
+    if (width === 0 || height === 0) {
+        for (let i = 0; i < N_CROSS_SECTION * 2; i++) out[i] = 0;
+        return;
+    }
+    const hw = width * 0.5;
+    const hh = height * 0.5;
+    const c = Math.min(hw, hh); // chamfer depth (45°)
+
+    // 6 corners CCW.  Which edges are flat depends on aspect ratio:
+    //   w >= h: flat top & bottom, pointed left & right
+    //   h > w:  flat left & right, pointed top & bottom
+    if (width >= height) {
+        // flat top/bottom, pointed right/left
+        out[0]  = +hw;        out[1]  = 0;            // right tip
+        out[2]  = +(hw - c);  out[3]  = +hh;          // top-right
+        out[4]  = -(hw - c);  out[5]  = +hh;          // top-left
+        out[6]  = -hw;        out[7]  = 0;             // left tip
+        out[8]  = -(hw - c);  out[9]  = -hh;          // bottom-left
+        out[10] = +(hw - c);  out[11] = -hh;           // bottom-right
+    } else {
+        // flat left/right, pointed top/bottom
+        out[0]  = +hw;        out[1]  = -(hh - c);    // right-bottom
+        out[2]  = +hw;        out[3]  = +(hh - c);    // right-top
+        out[4]  = 0;          out[5]  = +hh;           // top tip
+        out[6]  = -hw;        out[7]  = +(hh - c);    // left-top
+        out[8]  = -hw;        out[9]  = -(hh - c);    // left-bottom
+        out[10] = 0;          out[11] = -hh;            // bottom tip
+    }
+}
+
+// ========== LOD: Distance-Weighted RDP ==========
+//
+// The RDP algorithm runs in a Web Worker to avoid blocking the render loop.
+// The worker code is defined as a string and loaded via Blob URL.
+// A synchronous fallback (distanceWeightedRDP) is kept for initial LOD at
+// tube creation time, before the worker is ready.
+
+const _LOD_WORKER_CODE = `
+const LOD_EPSILON_DIVISOR = ${LOD_EPSILON_DIVISOR};
+const LOD_CHUNK_SIZE = 5000;
+const LOD_CHUNK_REUSE_RATIO = 1.5;
+const N_CS = ${N_CROSS_SECTION};
+const N_CAP_RINGS = 3;
+
+// ---- RDP helpers ----
+
+function _perpDistSq(spine, iP, iA, iB) {
+    const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
+    const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
+    const apx = spine[iP * 3] - ax, apy = spine[iP * 3 + 1] - ay, apz = spine[iP * 3 + 2] - az;
+    const cx = apy * abz - apz * aby;
+    const cy = apz * abx - apx * abz;
+    const cz = apx * aby - apy * abx;
+    const abLenSq = abx * abx + aby * aby + abz * abz;
+    if (abLenSq < 1e-24) return apx * apx + apy * apy + apz * apz;
+    return (cx * cx + cy * cy + cz * cz) / abLenSq;
+}
+
+function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
+    const keep = [chunkStart];
+    if (chunkEnd > chunkStart) keep.push(chunkEnd);
+    const stack = [[chunkStart, chunkEnd]];
+    while (stack.length > 0) {
+        const [start, end] = stack.pop();
+        if (end - start < 2) continue;
+        let maxPerpSq = 0, maxIdx = start;
+        for (let i = start + 1; i < end; i++) {
+            const dSq = _perpDistSq(spine, i, start, end);
+            if (dSq > maxPerpSq) { maxPerpSq = dSq; maxIdx = i; }
+        }
+        if (maxPerpSq > epsSq[maxIdx]) {
+            keep.push(maxIdx);
+            stack.push([start, maxIdx]);
+            stack.push([maxIdx, end]);
+        }
+    }
+    keep.sort((a, b) => a - b);
+    return keep;
+}
+
+// ---- Cross-section (chamfered hex) ----
+
+function sampleChamferedRect(out, width, height) {
+    if (width === 0 || height === 0) {
+        for (let i = 0; i < N_CS * 2; i++) out[i] = 0;
+        return;
+    }
+    const hw = width * 0.5, hh = height * 0.5;
+    const c = Math.min(hw, hh);
+    if (width >= height) {
+        out[0]=+hw;       out[1]=0;       out[2]=+(hw-c); out[3]=+hh;
+        out[4]=-(hw-c);   out[5]=+hh;     out[6]=-hw;     out[7]=0;
+        out[8]=-(hw-c);   out[9]=-hh;     out[10]=+(hw-c);out[11]=-hh;
+    } else {
+        out[0]=+hw;       out[1]=-(hh-c); out[2]=+hw;     out[3]=+(hh-c);
+        out[4]=0;         out[5]=+hh;     out[6]=-hw;     out[7]=+(hh-c);
+        out[8]=-hw;       out[9]=-(hh-c); out[10]=0;      out[11]=-hh;
+    }
+}
+
+// ---- Geometry build (plain math, no Three.js) ----
+
+function buildGeometry(spine, widths, heights, upVec, ringColors) {
+    const nSpine = spine.length / 3;
+    const capAngles = new Float32Array(N_CAP_RINGS);
+    for (let k = 0; k < N_CAP_RINGS; k++) capAngles[k] = ((k + 1) / N_CAP_RINGS) * (Math.PI * 0.5);
+
+    const startCapBase = nSpine * N_CS;
+    const endCapBase = startCapBase + N_CAP_RINGS * N_CS;
+    const totalVerts = endCapBase + N_CAP_RINGS * N_CS;
+    const capIndicesPerCap = N_CAP_RINGS * N_CS * 6;
+
+    const positions = new Float32Array(totalVerts * 3);
+    const colors = ringColors ? new Float32Array(totalVerts * 3) : null;
+    const section = new Float32Array(N_CS * 2);
+    const localFrames = new Float32Array(nSpine * 6);
+
+    // Up vector
+    let ux0 = upVec ? upVec[0] : 0, uy0 = upVec ? upVec[1] : 0, uz0 = upVec ? upVec[2] : 1;
+    const uLen = Math.hypot(ux0, uy0, uz0);
+    if (uLen > 1e-12) { ux0 /= uLen; uy0 /= uLen; uz0 /= uLen; }
+    // Fallback when tangent parallel to up
+    let fbx, fby, fbz;
+    if (Math.abs(ux0) < 0.9) { fbx = 1; fby = 0; fbz = 0; }
+    else { fbx = 0; fby = 1; fbz = 0; }
+
+    // Tangents via central difference
+    const tangents = new Float32Array(nSpine * 3);
+    for (let i = 0; i < nSpine; i++) {
+        const ip = Math.max(i - 1, 0), in_ = Math.min(i + 1, nSpine - 1);
+        let tx = spine[in_ * 3] - spine[ip * 3];
+        let ty = spine[in_ * 3 + 1] - spine[ip * 3 + 1];
+        let tz = spine[in_ * 3 + 2] - spine[ip * 3 + 2];
+        const len = Math.hypot(tx, ty, tz);
+        if (len > 1e-12) { tx /= len; ty /= len; tz /= len; }
+        else { tx = 1; ty = 0; tz = 0; }
+        tangents[i * 3] = tx; tangents[i * 3 + 1] = ty; tangents[i * 3 + 2] = tz;
+    }
+
+    // Frames + vertex positions
+    for (let i = 0; i < nSpine; i++) {
+        const tx = tangents[i * 3], ty = tangents[i * 3 + 1], tz = tangents[i * 3 + 2];
+        // Constant-up frame: project up onto plane perp to tangent
+        const dot = tx * ux0 + ty * uy0 + tz * uz0;
+        let sx_, sy_, sz_;
+        if (Math.abs(dot) > 0.99) { sx_ = fbx; sy_ = fby; sz_ = fbz; }
+        else { sx_ = ux0; sy_ = uy0; sz_ = uz0; }
+        // V = seed - dot(seed,T)*T, normalized
+        const sdot = sx_ * tx + sy_ * ty + sz_ * tz;
+        let vx = sx_ - sdot * tx, vy = sy_ - sdot * ty, vz = sz_ - sdot * tz;
+        let vlen = Math.hypot(vx, vy, vz);
+        if (vlen > 1e-12) { vx /= vlen; vy /= vlen; vz /= vlen; }
+        // U = V × T, normalized
+        let Ux = vy * tz - vz * ty, Uy = vz * tx - vx * tz, Uz = vx * ty - vy * tx;
+        let ulen = Math.hypot(Ux, Uy, Uz);
+        if (ulen > 1e-12) { Ux /= ulen; Uy /= ulen; Uz /= ulen; }
+        // V = T × U (ensure orthonormal)
+        vx = ty * Uz - tz * Uy; vy = tz * Ux - tx * Uz; vz = tx * Uy - ty * Ux;
+
+        localFrames[i*6]=Ux; localFrames[i*6+1]=Uy; localFrames[i*6+2]=Uz;
+        localFrames[i*6+3]=vx; localFrames[i*6+4]=vy; localFrames[i*6+5]=vz;
+
+        sampleChamferedRect(section, widths[i], heights[i]);
+        const px = spine[i*3], py = spine[i*3+1], pz = spine[i*3+2];
+        const rb = i * N_CS * 3;
+        for (let j = 0; j < N_CS; j++) {
+            const cu = section[j*2], cv = section[j*2+1];
+            positions[rb+j*3]   = px + cu*Ux + cv*vx;
+            positions[rb+j*3+1] = py + cu*Uy + cv*vy;
+            positions[rb+j*3+2] = pz + cu*Uz + cv*vz;
+        }
+        if (colors) {
+            const r = ringColors[i*3], g = ringColors[i*3+1], b = ringColors[i*3+2];
+            for (let j = 0; j < N_CS; j++) {
+                colors[rb+j*3]=r; colors[rb+j*3+1]=g; colors[rb+j*3+2]=b;
+            }
+        }
+    }
+
+    // Revolution caps
+    function buildCap(spineIdx, capBase, tSign) {
+        const px = spine[spineIdx*3], py = spine[spineIdx*3+1], pz = spine[spineIdx*3+2];
+        const Ux = localFrames[spineIdx*6], Uy = localFrames[spineIdx*6+1], Uz = localFrames[spineIdx*6+2];
+        const vx = localFrames[spineIdx*6+3], vy = localFrames[spineIdx*6+4], vz = localFrames[spineIdx*6+5];
+        const Tx = Uy*vz-Uz*vy, Ty = Uz*vx-Ux*vz, Tz = Ux*vy-Uy*vx;
+        sampleChamferedRect(section, widths[spineIdx], heights[spineIdx]);
+        for (let k = 0; k < N_CAP_RINGS; k++) {
+            const cosT = Math.cos(capAngles[k]);
+            const sinT = Math.sin(capAngles[k]) * tSign;
+            const rb = (capBase + k * N_CS) * 3;
+            for (let j = 0; j < N_CS; j++) {
+                const cu = section[j*2], cv = section[j*2+1];
+                const tOff = Math.abs(cu) * sinT;
+                positions[rb+j*3]   = px + cu*cosT*Ux + cv*vx + tOff*Tx;
+                positions[rb+j*3+1] = py + cu*cosT*Uy + cv*vy + tOff*Ty;
+                positions[rb+j*3+2] = pz + cu*cosT*Uz + cv*vz + tOff*Tz;
+            }
+        }
+    }
+    buildCap(0, startCapBase, -1);
+    buildCap(nSpine - 1, endCapBase, +1);
+
+    if (colors) {
+        const cpv = N_CAP_RINGS * N_CS;
+        const r0=ringColors[0], g0=ringColors[1], b0=ringColors[2];
+        for (let v = 0; v < cpv; v++) {
+            const d=(startCapBase+v)*3; colors[d]=r0; colors[d+1]=g0; colors[d+2]=b0;
+        }
+        const li=(nSpine-1)*3;
+        const rN=ringColors[li], gN=ringColors[li+1], bN=ringColors[li+2];
+        for (let v = 0; v < cpv; v++) {
+            const d=(endCapBase+v)*3; colors[d]=rN; colors[d+1]=gN; colors[d+2]=bN;
+        }
+    }
+
+    // Index buffer: [start_cap | ring_pairs | end_cap]
+    const ringPairs = nSpine - 1;
+    const indicesPerRingPair = N_CS * 6;
+    const totalIdx = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
+    const indices = totalVerts > 65535 ? new Uint32Array(totalIdx) : new Uint16Array(totalIdx);
+    let p = 0;
+
+    function buildCapIdx(tubeRingBase, capBase, reverse) {
+        for (let k = 0; k < N_CAP_RINGS; k++) {
+            const inner = k === 0 ? tubeRingBase : capBase + (k-1)*N_CS;
+            const outer = capBase + k*N_CS;
+            for (let j = 0; j < N_CS; j++) {
+                const jN = (j+1)%N_CS;
+                if (reverse) {
+                    indices[p++]=inner+j; indices[p++]=outer+j; indices[p++]=inner+jN;
+                    indices[p++]=outer+j; indices[p++]=outer+jN; indices[p++]=inner+jN;
+                } else {
+                    indices[p++]=inner+j; indices[p++]=inner+jN; indices[p++]=outer+j;
+                    indices[p++]=inner+jN; indices[p++]=outer+jN; indices[p++]=outer+j;
+                }
+            }
+        }
+    }
+    buildCapIdx(0, startCapBase, true);
+    for (let i = 0; i < ringPairs; i++) {
+        const a0 = i*N_CS, b0 = (i+1)*N_CS;
+        for (let j = 0; j < N_CS; j++) {
+            const jN = (j+1)%N_CS;
+            indices[p++]=a0+j; indices[p++]=a0+jN; indices[p++]=b0+jN;
+            indices[p++]=a0+j; indices[p++]=b0+jN; indices[p++]=b0+j;
+        }
+    }
+    const endCapOff = p;
+    buildCapIdx((nSpine-1)*N_CS, endCapBase, false);
+    const endCapPattern = indices.slice(endCapOff, endCapOff + capIndicesPerCap);
+
+    // Compute face-area-weighted vertex normals (same as Three.js computeVertexNormals)
+    const normals = new Float32Array(totalVerts * 3);
+    for (let i = 0; i < totalIdx; i += 3) {
+        const ia = indices[i], ib = indices[i+1], ic = indices[i+2];
+        const ax = positions[ia*3], ay = positions[ia*3+1], az = positions[ia*3+2];
+        const bx = positions[ib*3]-ax, by = positions[ib*3+1]-ay, bz = positions[ib*3+2]-az;
+        const cx = positions[ic*3]-ax, cy = positions[ic*3+1]-ay, cz = positions[ic*3+2]-az;
+        const nx = by*cz-bz*cy, ny = bz*cx-bx*cz, nz = bx*cy-by*cx;
+        normals[ia*3]+=nx; normals[ia*3+1]+=ny; normals[ia*3+2]+=nz;
+        normals[ib*3]+=nx; normals[ib*3+1]+=ny; normals[ib*3+2]+=nz;
+        normals[ic*3]+=nx; normals[ic*3+1]+=ny; normals[ic*3+2]+=nz;
+    }
+    for (let i = 0; i < totalVerts; i++) {
+        const x = normals[i*3], y = normals[i*3+1], z = normals[i*3+2];
+        const len = Math.hypot(x, y, z);
+        if (len > 1e-12) { normals[i*3]/=len; normals[i*3+1]/=len; normals[i*3+2]/=len; }
+    }
+
+    return { positions, normals, colors, indices, localFrames, capAngles, endCapPattern,
+             ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
+             nSpine, totalVerts, is32bit: totalVerts > 65535 };
+}
+
+// ---- Per-tube state cache ----
+const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints }
+const _rdpCache = new Map(); // tubeId -> { chunkDists, chunkIndices }
+
+self.onmessage = function(e) {
+    const msg = e.data;
+
+    // 'init': register original arrays for a tube
+    if (msg.type === 'init') {
+        _tubes.set(msg.tubeId, {
+            spine: msg.spine,
+            widths: msg.widths,
+            heights: msg.heights,
+            ringColors: msg.ringColors,
+            upVec: msg.upVec,
+            nPoints: msg.nPoints,
+        });
+        _rdpCache.delete(msg.tubeId);
+        return;
+    }
+
+    // 'updateColors': update cached ring colors
+    if (msg.type === 'updateColors') {
+        const tube = _tubes.get(msg.tubeId);
+        if (tube) tube.ringColors = msg.ringColors;
+        return;
+    }
+
+    // 'dispose': clean up cached state for a deleted tube
+    if (msg.type === 'dispose') {
+        _tubes.delete(msg.tubeId);
+        _rdpCache.delete(msg.tubeId);
+        return;
+    }
+
+    // 'update': run LOD (RDP + geometry build)
+    const { tubeId, camX, camY, camZ } = msg;
+    const tube = _tubes.get(tubeId);
+    if (!tube) return;
+    const { spine, widths, heights, ringColors, upVec, nPoints } = tube;
+
+    if (nPoints <= 2) {
+        self.postMessage({ tubeId, allReused: true, nReduced: nPoints });
+        return;
+    }
+
+    // Per-point epsilon²
+    const epsSq = new Float32Array(nPoints);
+    let minDist = Infinity, maxDist = 0;
+    for (let i = 0; i < nPoints; i++) {
+        const dx = spine[i*3]-camX, dy = spine[i*3+1]-camY, dz = spine[i*3+2]-camZ;
+        const d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if (d < minDist) minDist = d;
+        if (d > maxDist) maxDist = d;
+        const ep = d / LOD_EPSILON_DIVISOR;
+        epsSq[i] = ep * ep;
+    }
+
+    // Chunked RDP with caching
+    const nChunks = Math.ceil(Math.max(1, (nPoints - 1) / LOD_CHUNK_SIZE));
+    let cached = _rdpCache.get(tubeId);
+    if (!cached || cached.chunkDists.length !== nChunks) {
+        cached = { chunkDists: new Float64Array(nChunks), chunkIndices: new Array(nChunks) };
+        _rdpCache.set(tubeId, cached);
+    }
+
+    let totalKept = 0, chunksReused = 0;
+    for (let ci = 0; ci < nChunks; ci++) {
+        const cs = ci * LOD_CHUNK_SIZE;
+        const ce = Math.min(cs + LOD_CHUNK_SIZE, nPoints - 1);
+        const mid = Math.floor((cs + ce) / 2);
+        const dx = spine[mid*3]-camX, dy = spine[mid*3+1]-camY, dz = spine[mid*3+2]-camZ;
+        const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        const prev = cached.chunkDists[ci];
+        if (prev > 0 && cached.chunkIndices[ci]) {
+            const ratio = dist / prev;
+            if (ratio > 1/LOD_CHUNK_REUSE_RATIO && ratio < LOD_CHUNK_REUSE_RATIO) {
+                totalKept += cached.chunkIndices[ci].length;
+                chunksReused++;
+                continue;
+            }
+        }
+        const kept = rdpChunk(spine, epsSq, cs, ce);
+        cached.chunkDists[ci] = dist;
+        cached.chunkIndices[ci] = kept;
+        totalKept += kept.length;
+    }
+
+    if (chunksReused === nChunks) {
+        self.postMessage({ tubeId, allReused: true, nReduced: totalKept, chunksReused, chunksTotal: nChunks });
+        return;
+    }
+
+    // Merge kept indices (deduplicate boundaries)
+    const keptRaw = new Uint32Array(totalKept);
+    let j = 0;
+    for (let ci = 0; ci < nChunks; ci++) {
+        const kept = cached.chunkIndices[ci];
+        for (let k = 0; k < kept.length; k++) {
+            if (j > 0 && kept[k] === keptRaw[j-1]) continue;
+            keptRaw[j++] = kept[k];
+        }
+    }
+    const nRed = j;
+    const keptIndices = keptRaw.subarray(0, nRed);
+
+    // Extract reduced arrays
+    const redSpine = new Float32Array(nRed * 3);
+    const redWidths = new Float32Array(nRed);
+    const redHeights = new Float32Array(nRed);
+    let redColors = ringColors ? new Float32Array(nRed * 3) : null;
+    for (let i = 0; i < nRed; i++) {
+        const oi = keptIndices[i];
+        redSpine[i*3]=spine[oi*3]; redSpine[i*3+1]=spine[oi*3+1]; redSpine[i*3+2]=spine[oi*3+2];
+        redWidths[i]=widths[oi]; redHeights[i]=heights[oi];
+        if (redColors) { redColors[i*3]=ringColors[oi*3]; redColors[i*3+1]=ringColors[oi*3+1]; redColors[i*3+2]=ringColors[oi*3+2]; }
+    }
+
+    // Build geometry in worker
+    const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors);
+
+    // Transfer ownership of large buffers
+    const transfer = [geo.positions.buffer, geo.normals.buffer, geo.indices.buffer, geo.localFrames.buffer,
+                      geo.endCapPattern.buffer, keptRaw.buffer, redSpine.buffer, redWidths.buffer, redHeights.buffer];
+    if (geo.colors) transfer.push(geo.colors.buffer);
+    if (redColors) transfer.push(redColors.buffer);
+
+    self.postMessage({
+        tubeId, allReused: false,
+        positions: geo.positions, normals: geo.normals, colors: geo.colors, indices: geo.indices,
+        localFrames: geo.localFrames, capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
+        ringPairs: geo.ringPairs, indicesPerRingPair: geo.indicesPerRingPair,
+        capIndicesPerCap: geo.capIndicesPerCap, endCapBase: geo.endCapBase,
+        nSpine: geo.nSpine, is32bit: geo.is32bit,
+        keptIndices: keptRaw.subarray(0, nRed),
+        reducedSpine: redSpine, reducedWidths: redWidths, reducedHeights: redHeights,
+        reducedColors: redColors,
+        minDist, maxDist, chunksReused, chunksTotal: nChunks,
+    }, transfer);
+};
+`;
+
+let _lodWorker = null;
+function _getLodWorker() {
+    if (!_lodWorker) {
+        const blob = new Blob([_LOD_WORKER_CODE], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        _lodWorker = new Worker(url);
+        URL.revokeObjectURL(url);  // worker keeps running after URL is revoked
+    }
+    return _lodWorker;
+}
+
+// Synchronous fallback for initial LOD at tube creation (before worker is ready).
+const LOD_CHUNK_SIZE = 5000;
+
+function _perpDistSq(spine, iP, iA, iB) {
+    const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
+    const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
+    const apx = spine[iP * 3] - ax, apy = spine[iP * 3 + 1] - ay, apz = spine[iP * 3 + 2] - az;
+    const cx = apy * abz - apz * aby;
+    const cy = apz * abx - apx * abz;
+    const cz = apx * aby - apy * abx;
+    const abLenSq = abx * abx + aby * aby + abz * abz;
+    if (abLenSq < 1e-24) return apx * apx + apy * apy + apz * apz;
+    return (cx * cx + cy * cy + cz * cz) / abLenSq;
+}
+
+function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
+    if (nPoints <= 2) {
+        return { indices: new Uint32Array(nPoints < 1 ? 0 : nPoints === 1 ? [0] : [0, 1]), minDist: 0, maxDist: 0 };
+    }
+    const epsSq = new Float32Array(nPoints);
+    let minDist = Infinity, maxDist = 0;
+    for (let i = 0; i < nPoints; i++) {
+        const dx = spine[i * 3] - camX;
+        const dy = spine[i * 3 + 1] - camY;
+        const dz = spine[i * 3 + 2] - camZ;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < minDist) minDist = d;
+        if (d > maxDist) maxDist = d;
+        const e = d / LOD_EPSILON_DIVISOR;
+        epsSq[i] = e * e;
+    }
+    const keep = new Uint8Array(nPoints);
+    keep[0] = 1;
+    keep[nPoints - 1] = 1;
+    for (let chunkStart = 0; chunkStart < nPoints - 1; chunkStart += LOD_CHUNK_SIZE) {
+        const chunkEnd = Math.min(chunkStart + LOD_CHUNK_SIZE, nPoints - 1);
+        keep[chunkStart] = 1;
+        keep[chunkEnd] = 1;
+        const stack = [[chunkStart, chunkEnd]];
+        while (stack.length > 0) {
+            const [start, end] = stack.pop();
+            if (end - start < 2) continue;
+            let maxPerpSq = 0;
+            let maxIdx = start;
+            for (let i = start + 1; i < end; i++) {
+                const dSq = _perpDistSq(spine, i, start, end);
+                if (dSq > maxPerpSq) {
+                    maxPerpSq = dSq;
+                    maxIdx = i;
+                }
+            }
+            if (maxPerpSq > epsSq[maxIdx]) {
+                keep[maxIdx] = 1;
+                stack.push([start, maxIdx]);
+                stack.push([maxIdx, end]);
+            }
+        }
+    }
+    let count = 0;
+    for (let i = 0; i < nPoints; i++) if (keep[i]) count++;
+    const indices = new Uint32Array(count);
+    let j = 0;
+    for (let i = 0; i < nPoints; i++) if (keep[i]) indices[j++] = i;
+    return { indices, minDist, maxDist };
+}
+
+// Build a variable-cross-section tube BufferGeometry from per-spine-point
+// parameter arrays. Topology: nSpine rings × nCs vertices, connected by
+// quad strips into (nSpine - 1) ring pairs. All rings share the same
+// azimuthal ordering so indices are consistent.
+//
+// - spine:        Float32Array length nSpine*3
+// - widths:       Float32Array length nSpine
+// - heights:      Float32Array length nSpine
+// - orientations: Float32Array length nSpine*4 quaternions, or null (constant-up derived)
+// - upVector:     [x, y, z] up direction for constant-up frame (default [0,0,1])
+// - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
+//
+// Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
+function buildParametricTubeGeometry(
+    spine, widths, heights,
+    orientations, upVector, ringColors,
+) {
+    const nCs = N_CROSS_SECTION;
+    const nSpine = spine.length / 3;
+    if (nSpine < 2) {
+        throw new Error(`parametric_tube needs >=2 spine points, got ${nSpine}`);
+    }
+    if (widths.length !== nSpine) {
+        throw new Error(`parametric_tube widths length ${widths.length} does not match spine ${nSpine}`);
+    }
+    if (heights.length !== nSpine) {
+        throw new Error(`parametric_tube heights length ${heights.length} does not match spine ${nSpine}`);
+    }
+
+    // Cap vertex layout (appended after tube rings):
+    //   startCapRings(nCapRings * nCs) | endCapRings(nCapRings * nCs)
+    // Each cap has nCapRings revolution rings (including the 90° endpoint).
+    // Revolution is around the V (up) axis through the spine center, so each
+    // vertex sweeps by its own cu: pos = spine + cu*cos(θ)*U + cv*V + cu*sin(θ)*T.
+    // At θ=90° the ring collapses to a vertical line segment (cu→0), closing
+    // the cap without a pole vertex.
+    const nCapRings = 3;
+    const capAngles = new Float32Array(nCapRings);
+    for (let k = 0; k < nCapRings; k++) {
+        capAngles[k] = ((k + 1) / nCapRings) * (Math.PI * 0.5);
+    }
+    const startCapBase = nSpine * nCs;
+    const endCapBase = startCapBase + nCapRings * nCs;
+    const totalVerts = endCapBase + nCapRings * nCs;
+    // Per cap: nCapRings quad strips with spoke triangulation
+    const capIndicesPerCap = nCapRings * nCs * 6;
+
+    const positions = new Float32Array(totalVerts * 3);
+    const colors = ringColors ? new Float32Array(totalVerts * 3) : null;
+    const section = new Float32Array(nCs * 2);
+    // Store per-spine-point local frames (U, V) for frontier-ring morphing.
+    const localFrames = new Float32Array(nSpine * 6);
+
+    // Compute local frames: tangent T + width axis U + height axis V.
+    // Constant-up frame derivation: V is the global up vector (default +Z)
+    // projected onto the plane perpendicular to the tangent, so "height"
+    // means "up" for horizontal beads. U = V × T completes the frame.
+    // When the tangent is parallel to up (vertical segments), V falls
+    // back to global +X to avoid degeneracy.
+    const _T = new THREE.Vector3();
+    const _U = new THREE.Vector3();
+    const _V = new THREE.Vector3();
+    const _quat = new THREE.Quaternion();
+    // Constant-up direction: project onto plane perpendicular to tangent at each point.
+    const up = new THREE.Vector3(
+        upVector ? upVector[0] : 0,
+        upVector ? upVector[1] : 0,
+        upVector ? upVector[2] : 1,
+    ).normalize();
+    // Fallback when tangent is parallel to up.
+    const upFallback = new THREE.Vector3();
+    if (Math.abs(up.x) < 0.9) upFallback.set(1, 0, 0);
+    else upFallback.set(0, 1, 0);
+
+    // Precompute tangents via central difference.
+    const tangents = new Float32Array(nSpine * 3);
+    for (let i = 0; i < nSpine; i++) {
+        const iPrev = Math.max(i - 1, 0);
+        const iNext = Math.min(i + 1, nSpine - 1);
+        let tx = spine[iNext * 3] - spine[iPrev * 3];
+        let ty = spine[iNext * 3 + 1] - spine[iPrev * 3 + 1];
+        let tz = spine[iNext * 3 + 2] - spine[iPrev * 3 + 2];
+        const len = Math.hypot(tx, ty, tz);
+        if (len > 1e-12) { tx /= len; ty /= len; tz /= len; }
+        else { tx = 1; ty = 0; tz = 0; }
+        tangents[i * 3] = tx;
+        tangents[i * 3 + 1] = ty;
+        tangents[i * 3 + 2] = tz;
+    }
+
+    for (let i = 0; i < nSpine; i++) {
+        _T.set(tangents[i * 3], tangents[i * 3 + 1], tangents[i * 3 + 2]);
+        if (orientations) {
+            _quat.set(
+                orientations[i * 4],
+                orientations[i * 4 + 1],
+                orientations[i * 4 + 2],
+                orientations[i * 4 + 3],
+            );
+            _U.set(1, 0, 0).applyQuaternion(_quat);
+            _V.set(0, 1, 0).applyQuaternion(_quat);
+        } else {
+            // Constant-up: project up vector onto plane perpendicular to tangent.
+            const seed = Math.abs(_T.dot(up)) > 0.99 ? upFallback : up;
+            _V.copy(seed).addScaledVector(_T, -seed.dot(_T)).normalize();
+            _U.copy(_V).cross(_T).normalize();
+            _V.copy(_T).cross(_U).normalize();
+        }
+        localFrames[i * 6]     = _U.x; localFrames[i * 6 + 1] = _U.y; localFrames[i * 6 + 2] = _U.z;
+        localFrames[i * 6 + 3] = _V.x; localFrames[i * 6 + 4] = _V.y; localFrames[i * 6 + 5] = _V.z;
+
+        const w = widths[i];
+        const h = heights[i];
+        sampleChamferedRect(section, w, h);
+        const sx = spine[i * 3];
+        const sy = spine[i * 3 + 1];
+        const sz = spine[i * 3 + 2];
+        const ringBase = i * nCs * 3;
+        for (let j = 0; j < nCs; j++) {
+            const u = section[j * 2];
+            const v = section[j * 2 + 1];
+            positions[ringBase + j * 3] = sx + u * _U.x + v * _V.x;
+            positions[ringBase + j * 3 + 1] = sy + u * _U.y + v * _V.y;
+            positions[ringBase + j * 3 + 2] = sz + u * _U.z + v * _V.z;
+        }
+        if (colors) {
+            const r = ringColors[i * 3];
+            const g = ringColors[i * 3 + 1];
+            const b = ringColors[i * 3 + 2];
+            for (let j = 0; j < nCs; j++) {
+                colors[ringBase + j * 3] = r;
+                colors[ringBase + j * 3 + 1] = g;
+                colors[ringBase + j * 3 + 2] = b;
+            }
+        }
+    }
+
+    // --- Revolution cap vertices ---
+    // Revolution around V (up axis) through the spine center.  Each vertex
+    // at (cu, cv) sweeps: U shrinks as cu*cos(θ), T extends by |cu|*sin(θ).
+    // At θ=90° the ring collapses to a vertical line (cu→0).
+    // tangentSign = -1 for start cap (extends in -T), +1 for end cap.
+    function buildRevolutionCap(spineIdx, capBaseVert, tangentSign) {
+        const sx = spine[spineIdx * 3], sy = spine[spineIdx * 3 + 1], sz = spine[spineIdx * 3 + 2];
+        const w = widths[spineIdx], h = heights[spineIdx];
+        const ux = localFrames[spineIdx * 6], uy = localFrames[spineIdx * 6 + 1], uz = localFrames[spineIdx * 6 + 2];
+        const vx = localFrames[spineIdx * 6 + 3], vy = localFrames[spineIdx * 6 + 4], vz = localFrames[spineIdx * 6 + 5];
+        const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
+        sampleChamferedRect(section, w, h);
+        for (let k = 0; k < nCapRings; k++) {
+            const theta = capAngles[k];
+            const cosT = Math.cos(theta);
+            const sinT = Math.sin(theta) * tangentSign;
+            const ringBase = (capBaseVert + k * nCs) * 3;
+            for (let j = 0; j < nCs; j++) {
+                const cu = section[j * 2], cv = section[j * 2 + 1];
+                const tOff = Math.abs(cu) * sinT;
+                positions[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
+                positions[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
+                positions[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
+            }
+        }
+    }
+    buildRevolutionCap(0, startCapBase, -1);
+    buildRevolutionCap(nSpine - 1, endCapBase, +1);
+    // Cap colors (replicate ring color to all cap vertices)
+    if (colors) {
+        const capVertsPerCap = nCapRings * nCs;
+        const r0 = ringColors[0], g0 = ringColors[1], b0 = ringColors[2];
+        for (let v = 0; v < capVertsPerCap; v++) {
+            const dst = (startCapBase + v) * 3;
+            colors[dst] = r0; colors[dst + 1] = g0; colors[dst + 2] = b0;
+        }
+        const rN = ringColors[(nSpine - 1) * 3], gN = ringColors[(nSpine - 1) * 3 + 1], bN = ringColors[(nSpine - 1) * 3 + 2];
+        for (let v = 0; v < capVertsPerCap; v++) {
+            const dst = (endCapBase + v) * 3;
+            colors[dst] = rN; colors[dst + 1] = gN; colors[dst + 2] = bN;
+        }
+    }
+
+    // --- Index buffer: [start_cap_dome | ring_pairs | end_cap_dome] ---
+    const ringPairs = nSpine - 1;
+    const indicesPerRingPair = nCs * 6;
+    const totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
+    const IndexCtor = totalVerts > 65535 ? Uint32Array : Uint16Array;
+    const indices = new IndexCtor(totalIndexCount);
+    let p = 0;
+
+    // Helper: build revolution cap indices with radial spoke pattern.
+    // Quads between consecutive ring layers, split along the spoke direction.
+    function buildCapSpokeIndices(tubeRingBase, capBaseVert, reverse) {
+        for (let k = 0; k < nCapRings; k++) {
+            const innerBase = k === 0 ? tubeRingBase : capBaseVert + (k - 1) * nCs;
+            const outerBase = capBaseVert + k * nCs;
+            for (let j = 0; j < nCs; j++) {
+                const jN = (j + 1) % nCs;
+                if (reverse) {
+                    indices[p++] = innerBase + j;
+                    indices[p++] = outerBase + j;
+                    indices[p++] = innerBase + jN;
+                    indices[p++] = outerBase + j;
+                    indices[p++] = outerBase + jN;
+                    indices[p++] = innerBase + jN;
+                } else {
+                    indices[p++] = innerBase + j;
+                    indices[p++] = innerBase + jN;
+                    indices[p++] = outerBase + j;
+                    indices[p++] = innerBase + jN;
+                    indices[p++] = outerBase + jN;
+                    indices[p++] = outerBase + j;
+                }
+            }
+        }
+    }
+    buildCapSpokeIndices(0, startCapBase, true);
+    // Ring pairs
+    for (let i = 0; i < ringPairs; i++) {
+        const a0 = i * nCs;
+        const b0 = (i + 1) * nCs;
+        for (let j = 0; j < nCs; j++) {
+            const jNext = (j + 1) % nCs;
+            const a = a0 + j;
+            const b = a0 + jNext;
+            const c = b0 + jNext;
+            const d = b0 + j;
+            indices[p++] = a;
+            indices[p++] = b;
+            indices[p++] = c;
+            indices[p++] = a;
+            indices[p++] = c;
+            indices[p++] = d;
+        }
+    }
+    // End cap spoke pattern
+    const endCapOffset = p;
+    buildCapSpokeIndices((nSpine - 1) * nCs, endCapBase, false);
+    // Extract end cap index pattern for dynamic relocation during draw_range
+    const endCapPattern = indices.slice(endCapOffset, endCapOffset + capIndicesPerCap);
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeVertexNormals();
+
+    return {
+        geometry, ringPairs, indicesPerRingPair, nCs,
+        localFrames, capAngles,
+        capIndicesPerCap, endCapBase, endCapPattern,
+    };
+}
+
+// ========== LOD: Geometry Rebuild ==========
+
+// Binary-search cumulative arc lengths to convert a draw_range value (0-1,
+// fraction of total original arc length) into fractional ring pairs in the
+// reduced spine.
+// Remap a draw_range value (0-1, fraction of original spine points) to
+// fractional ring pairs in the reduced spine.  Preserves the original
+// "fraction-of-points" semantics so animation pacing stays in sync.
+function remapDrawRangeToReducedPairs(lod, value) {
+    const kept = lod.keptIndices;
+    const nRed = kept.length;
+    if (nRed < 2) return 0;
+    // Target original spine index (fractional)
+    const targetIdx = value * (lod.originalCount - 1);
+    // Binary search keptIndices for targetIdx
+    let lo = 0, hi = nRed - 1;
+    while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1;
+        if (kept[mid] <= targetIdx) lo = mid; else hi = mid;
+    }
+    // Interpolate between kept[lo] and kept[hi]
+    const span = kept[hi] - kept[lo];
+    const frac = span > 0 ? (targetIdx - kept[lo]) / span : 0;
+    return Math.min(lo + frac, nRed - 1);
+}
+
+// Apply pre-built geometry from LOD worker to a parametric tube mesh.
+// msg: worker message containing typed arrays + metadata.
+function applyWorkerGeometry(mesh, msg) {
+    const lod = mesh.userData.tubeLOD;
+    const nRed = msg.nSpine;
+    const nCs = N_CROSS_SECTION;
+
+    // Build Three.js geometry from worker arrays
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
+    if (msg.colors) geometry.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(msg.indices, 1));
+
+    // Dispose old, assign new
+    mesh.geometry.dispose();
+    mesh.geometry = geometry;
+
+    // Update userData
+    const ud = mesh.userData;
+    ud.tubeNumSpinePoints = nRed;
+    ud.tubeRingPairs = msg.ringPairs;
+    ud.tubeIndicesPerRingPair = msg.indicesPerRingPair;
+    ud.totalIndexCount = msg.capIndicesPerCap + msg.ringPairs * msg.indicesPerRingPair + msg.capIndicesPerCap;
+    ud.tubeCapIndicesPerCap = msg.capIndicesPerCap;
+    ud.tubeEndCapBase = msg.endCapBase;
+
+    // Rebuild morphData for frontier morphing
+    ud.tubeMorphData = {
+        spine: msg.reducedSpine,
+        widths: msg.reducedWidths,
+        heights: msg.reducedHeights,
+        localFrames: msg.localFrames,
+        capAngles: msg.capAngles,
+        ringColors: msg.reducedColors,
+        section: new Float32Array(nCs * 2),
+        savedRing: new Float32Array(nCs * 3),
+        savedRingColors: null,
+        savedRingIndex: null,
+        morphedState: null,
+        endCapPattern: msg.endCapPattern,
+        savedCapIndices: new msg.endCapPattern.constructor(msg.endCapPattern.length),
+        savedCapOffset: -1,
+    };
+
+    // Update LOD state
+    lod.keptIndices = msg.keptIndices;
+
+    // Re-apply draw range with arc-length remapping
+    applyParametricTubeDrawRange(mesh, lod.currentDrawRange);
+}
+
+// Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
+// attribute of length nSpine*nCs*3, replicating each ring color across its nCs
+// vertices. Writes into `out` if provided (must be pre-sized) to avoid
+// reallocating on every color update.
+function expandRingColors(packedColors, nSpine, nCs, out) {
+    const total = nSpine * nCs * 3;
+    if (!out || out.length < total) {
+        out = new Float32Array(total);
+    }
+    for (let i = 0; i < nSpine; i++) {
+        const c = packedColors[i];
+        const r = ((c >> 16) & 0xff) / 255;
+        const g = ((c >> 8) & 0xff) / 255;
+        const b = (c & 0xff) / 255;
+        const base = i * nCs * 3;
+        for (let j = 0; j < nCs; j++) {
+            out[base + j * 3] = r;
+            out[base + j * 3 + 1] = g;
+            out[base + j * 3 + 2] = b;
+        }
+    }
+    return out;
+}
+
+// Restore previously morphed frontier ring to its original positions (and
+// colors if applicable).  Called when the frontier advances past a ring or
+// when draw_range reaches an exact ring boundary.
+function restoreFrontierRing(obj) {
+    const md = obj.userData.tubeMorphData;
+    if (!md || md.savedRingIndex == null) return;
+    const nCs = obj.userData.tubeNCs;
+    const ringBase = md.savedRingIndex * nCs * 3;
+    const posAttr = obj.geometry.getAttribute('position');
+    posAttr.array.set(md.savedRing, ringBase);
+    posAttr.needsUpdate = true;
+    if (md.savedRingColors) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            colAttr.array.set(md.savedRingColors, ringBase);
+            colAttr.needsUpdate = true;
+        }
+    }
+    md.savedRingIndex = null;
+    md.morphedState = null;
+}
+
+// Morph the frontier ring of a parametric tube to the interpolated spine
+// position.  Returns the number of ring pairs that should be visible
+// (complete pairs + the morphed frontier).
+function morphFrontierRing(obj, fracRingPairs) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    if (!md) return Math.floor(fracRingPairs);
+
+    const nCs = ud.tubeNCs;
+    const ringPairs = ud.tubeRingPairs;
+    const completePairs = Math.floor(fracRingPairs);
+    const frac = fracRingPairs - completePairs;
+
+    if (frac < 1e-6 || completePairs >= ringPairs) {
+        restoreFrontierRing(obj);
+        return completePairs;
+    }
+
+    const iA = completePairs;      // lerp FROM
+    const iB = completePairs + 1;  // ring we overwrite (lerp TO)
+
+    // If the frontier moved to a different ring, restore the old one first
+    // and save the new ring's original data.
+    if (md.savedRingIndex !== iB) {
+        restoreFrontierRing(obj);
+        const posArr = obj.geometry.getAttribute('position').array;
+        const ringBase = iB * nCs * 3;
+        md.savedRing.set(posArr.subarray(ringBase, ringBase + nCs * 3));
+        // Save colors if applicable
+        if (ud.tubeHasColors) {
+            const colAttr = obj.geometry.getAttribute('color');
+            if (colAttr) {
+                if (!md.savedRingColors) md.savedRingColors = new Float32Array(nCs * 3);
+                md.savedRingColors.set(colAttr.array.subarray(ringBase, ringBase + nCs * 3));
+            }
+        }
+        md.savedRingIndex = iB;
+    }
+
+    // Lerp spine position
+    const sx = md.spine[iA * 3]     * (1 - frac) + md.spine[iB * 3]     * frac;
+    const sy = md.spine[iA * 3 + 1] * (1 - frac) + md.spine[iB * 3 + 1] * frac;
+    const sz = md.spine[iA * 3 + 2] * (1 - frac) + md.spine[iB * 3 + 2] * frac;
+
+    // Lerp width & height
+    const w = md.widths[iA] * (1 - frac) + md.widths[iB] * frac;
+    const h = md.heights[iA] * (1 - frac) + md.heights[iB] * frac;
+
+    // Lerp local frame vectors (U, V) — component-wise + normalize
+    let ux = md.localFrames[iA * 6]     * (1 - frac) + md.localFrames[iB * 6]     * frac;
+    let uy = md.localFrames[iA * 6 + 1] * (1 - frac) + md.localFrames[iB * 6 + 1] * frac;
+    let uz = md.localFrames[iA * 6 + 2] * (1 - frac) + md.localFrames[iB * 6 + 2] * frac;
+    let uLen = Math.hypot(ux, uy, uz);
+    if (uLen > 1e-12) { ux /= uLen; uy /= uLen; uz /= uLen; }
+
+    let vx = md.localFrames[iA * 6 + 3] * (1 - frac) + md.localFrames[iB * 6 + 3] * frac;
+    let vy = md.localFrames[iA * 6 + 4] * (1 - frac) + md.localFrames[iB * 6 + 4] * frac;
+    let vz = md.localFrames[iA * 6 + 5] * (1 - frac) + md.localFrames[iB * 6 + 5] * frac;
+    let vLen = Math.hypot(vx, vy, vz);
+    if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
+
+    // Store morphed state for updateEndCap to use
+    md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz };
+
+    // Sample cross-section at interpolated width/height
+    sampleChamferedRect(md.section, w, h);
+
+    // Write morphed vertices into the position buffer at ring iB
+    const posAttr = obj.geometry.getAttribute('position');
+    const pos = posAttr.array;
+    const ringBase = iB * nCs * 3;
+    for (let j = 0; j < nCs; j++) {
+        const lu = md.section[j * 2];
+        const lv = md.section[j * 2 + 1];
+        pos[ringBase + j * 3]     = sx + lu * ux + lv * vx;
+        pos[ringBase + j * 3 + 1] = sy + lu * uy + lv * vy;
+        pos[ringBase + j * 3 + 2] = sz + lu * uz + lv * vz;
+    }
+    posAttr.needsUpdate = true;
+
+    // Lerp colors if present
+    if (ud.tubeHasColors && md.ringColors) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            const cols = colAttr.array;
+            const rA = md.ringColors[iA * 3], gA = md.ringColors[iA * 3 + 1], bA = md.ringColors[iA * 3 + 2];
+            const rB = md.ringColors[iB * 3], gB = md.ringColors[iB * 3 + 1], bB = md.ringColors[iB * 3 + 2];
+            const cr = rA * (1 - frac) + rB * frac;
+            const cg = gA * (1 - frac) + gB * frac;
+            const cb = bA * (1 - frac) + bB * frac;
+            for (let j = 0; j < nCs; j++) {
+                cols[ringBase + j * 3]     = cr;
+                cols[ringBase + j * 3 + 1] = cg;
+                cols[ringBase + j * 3 + 2] = cb;
+            }
+            colAttr.needsUpdate = true;
+        }
+    }
+
+    return completePairs + 1;
+}
+
+// Update the end cap revolution surface to match the last visible ring.
+// Uses morphed spine/frame/width/height stored by morphFrontierRing, or reads
+// original data for un-morphed rings.
+function updateEndCap(obj, lastVisibleRing) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    if (!md) return;
+    const nCs = ud.tubeNCs;
+    const nCapRings = md.capAngles.length;
+    const posAttr = obj.geometry.getAttribute('position');
+    const pos = posAttr.array;
+
+    // Determine spine pos, width, height, frame at the frontier ring
+    let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz;
+    if (md.morphedState) {
+        const ms = md.morphedState;
+        sx = ms.sx; sy = ms.sy; sz = ms.sz;
+        w = ms.w; h = ms.h;
+        ux = ms.ux; uy = ms.uy; uz = ms.uz;
+        vx = ms.vx; vy = ms.vy; vz = ms.vz;
+    } else {
+        const i = lastVisibleRing;
+        sx = md.spine[i * 3]; sy = md.spine[i * 3 + 1]; sz = md.spine[i * 3 + 2];
+        w = md.widths[i]; h = md.heights[i];
+        ux = md.localFrames[i * 6]; uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
+        vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
+    }
+    // Tangent = U × V
+    const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
+
+    // Revolution around V: each vertex sweeps by |cu| along T
+    sampleChamferedRect(md.section, w, h);
+    const ecBase = ud.tubeEndCapBase;
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = md.capAngles[k];
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+        const ringBase = (ecBase + k * nCs) * 3;
+        for (let j = 0; j < nCs; j++) {
+            const cu = md.section[j * 2], cv = md.section[j * 2 + 1];
+            const tOff = Math.abs(cu) * sinT;
+            pos[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
+            pos[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
+            pos[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
+        }
+    }
+    posAttr.needsUpdate = true;
+
+    // Update end cap colors if applicable
+    if (ud.tubeHasColors && md.ringColors) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            const cols = colAttr.array;
+            const colSrcBase = lastVisibleRing * nCs * 3;
+            const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
+            const capVerts = nCapRings * nCs;
+            for (let v = 0; v < capVerts; v++) {
+                const dst = (ecBase + v) * 3;
+                cols[dst] = cr; cols[dst + 1] = cg; cols[dst + 2] = cb;
+            }
+            colAttr.needsUpdate = true;
+        }
+    }
+}
+
+// Restore end cap indices that were relocated by a previous relocateEndCap call.
+function restoreRelocatedEndCap(obj) {
+    const md = obj.userData.tubeMorphData;
+    if (!md || md.savedCapOffset < 0) return;
+    const indexAttr = obj.geometry.getIndex();
+    indexAttr.array.set(md.savedCapIndices, md.savedCapOffset);
+    md.savedCapOffset = -1;
+    indexAttr.needsUpdate = true;
+}
+
+// Move end cap fan indices to sit right after the visible ring pairs so
+// setDrawRange(0, startCap + visiblePairs + endCap) draws them correctly.
+function relocateEndCap(obj, visiblePairs) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    const capPer = ud.tubeCapIndicesPerCap;
+    const perPair = ud.tubeIndicesPerRingPair;
+    const indexAttr = obj.geometry.getIndex();
+    const idx = indexAttr.array;
+
+    // Restore previously relocated end cap indices
+    restoreRelocatedEndCap(obj);
+
+    // Place end cap right after start_cap + visible ring pairs
+    const offset = capPer + visiblePairs * perPair;
+    // Save the indices we're about to overwrite
+    md.savedCapIndices.set(idx.subarray(offset, offset + capPer));
+    md.savedCapOffset = offset;
+    // Write end cap pattern, adjusting tube ring references from the
+    // original last ring to the current frontier ring.
+    const nCs = ud.tubeNCs;
+    const origRingBase = (ud.tubeNumSpinePoints - 1) * nCs;
+    const frontierRingBase = visiblePairs * nCs;
+    for (let i = 0; i < capPer; i++) {
+        const v = md.endCapPattern[i];
+        if (v >= origRingBase && v < origRingBase + nCs) {
+            idx[offset + i] = v - origRingBase + frontierRingBase;
+        } else {
+            idx[offset + i] = v;
+        }
+    }
+    indexAttr.needsUpdate = true;
+}
+
+function applyParametricTubeDrawRange(obj, value) {
+    const ud = obj.userData;
+    const ringPairs = ud.tubeRingPairs;
+    const perPair = ud.tubeIndicesPerRingPair;
+    const capPer = ud.tubeCapIndicesPerCap || 0;
+    const clamped = Math.max(0, Math.min(1, value));
+
+    // Track draw_range for LOD rebuilds
+    if (ud.tubeLOD) ud.tubeLOD.currentDrawRange = value;
+
+    // Remap when LOD is active: preserve original point-index pacing
+    let fracRingPairs;
+    if (ud.tubeLOD && ud.tubeLOD.keptIndices) {
+        fracRingPairs = remapDrawRangeToReducedPairs(ud.tubeLOD, clamped);
+    } else {
+        fracRingPairs = clamped * ringPairs;
+    }
+
+    if (!ud.tubeMorphData) {
+        const pairs = Math.floor(fracRingPairs);
+        obj.geometry.setDrawRange(0, capPer + pairs * perPair + capPer);
+        return;
+    }
+
+    if (clamped < 1e-6) {
+        restoreFrontierRing(obj);
+        restoreRelocatedEndCap(obj);
+        obj.geometry.setDrawRange(0, 0);
+        return;
+    }
+
+    const visiblePairs = morphFrontierRing(obj, fracRingPairs);
+    updateEndCap(obj, visiblePairs);
+    relocateEndCap(obj, visiblePairs);
+    // start_cap + ring_pairs + end_cap (end cap now sits right after visible pairs)
+    obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
+}
+
+/**
+ * Distribute a [0,1] draw_range fraction to children of a toolpath group.
+ * Each child segment knows its (start, end) position in the overall toolpath.
+ * Segments fully before the current position get 1.0, the active segment gets
+ * a proportional fraction, and segments after get 0.0.
+ */
+function applyToolpathGroupDrawRange(grp, value, objects) {
+    const segIds = grp.userData.toolpathSegmentIds;
+    const segRanges = grp.userData.toolpathSegmentRanges;
+    const clamped = Math.max(0, Math.min(1, value));
+    for (let i = 0; i < segIds.length; i++) {
+        const [sStart, sEnd] = segRanges[i];
+        const span = sEnd - sStart;
+        let segFrac;
+        if (clamped >= sEnd) {
+            segFrac = 1.0;
+        } else if (clamped <= sStart || span < 1e-10) {
+            segFrac = 0.0;
+        } else {
+            segFrac = (clamped - sStart) / span;
+        }
+        const child = objects.get(segIds[i]);
+        if (child && child.userData.isParametricTube) {
+            applyParametricTubeDrawRange(child, segFrac);
+        }
+    }
+}
 
 class ThreeJSViewer {
     /**
@@ -935,6 +2101,30 @@ class ThreeJSViewer {
         // Controls
         this._controls = new OrbitControls(this._camera, this._renderer.domElement);
         this._controls.enableDamping = true;
+
+        // LOD: Web Worker for async RDP computation
+        this._lodThrottleMs = 500;
+        this._lodLastRunTime = 0;
+        this._lodDirty = false;
+        this._lodWorkerBusy = false;  // true while worker is computing
+        this._lodWorker = _getLodWorker();
+        this._lodWorker.onmessage = (e) => {
+            const msg = e.data;
+            this._lodWorkerBusy = false;
+            const obj = this._objects.get(msg.tubeId);
+            if (!obj || !obj.userData.tubeLOD) return;
+
+            if (msg.allReused) {
+                // All chunks cached — no geometry change needed
+                return;
+            }
+
+            // Worker built geometry — upload to GPU
+            applyWorkerGeometry(obj, msg);
+        };
+        this._controls.addEventListener('change', () => {
+            this._lodDirty = true;
+        });
 
         // ViewHelper
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
@@ -1496,8 +2686,12 @@ class ThreeJSViewer {
     _setDrawRange(id, value) {
         const obj = this._objects.get(id);
         if (!obj) return;
-        if (obj.userData.isPolyline) {
+        if (obj.userData.isToolpathGroup) {
+            applyToolpathGroupDrawRange(obj, value, this._objects);
+        } else if (obj.userData.isPolyline) {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+        } else if (obj.userData.isParametricTube) {
+            applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         }
@@ -1528,6 +2722,9 @@ class ThreeJSViewer {
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse((child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
+                if (child.userData.tubeLOD) {
+                    this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
+                }
                 if (child.geometry) child.geometry.dispose();
                 if (child.material) {
                     if (Array.isArray(child.material)) {
@@ -1590,8 +2787,15 @@ class ThreeJSViewer {
         }
 
         if (this._animation.frames.length >= 2) {
-            const dt = this._animation.frames[1].time - this._animation.frames[0].time;
-            this._animation.uniformDt = dt > 0 ? dt : 0;
+            const dt0 = this._animation.frames[1].time - this._animation.frames[0].time;
+            let uniform = dt0 > 0;
+            if (uniform) {
+                for (let i = 2; i < this._animation.frames.length; i++) {
+                    const dt = this._animation.frames[i].time - this._animation.frames[i - 1].time;
+                    if (Math.abs(dt - dt0) > dt0 * 1e-3) { uniform = false; break; }
+                }
+            }
+            this._animation.uniformDt = uniform ? dt0 : 0;
         }
 
         this._baselineVisibility.clear();
@@ -1931,17 +3135,16 @@ class ThreeJSViewer {
             if (idx >= lastIdx) return { index: lastIdx, t: 0 };
             return { index: idx, t: raw - idx };
         }
-        for (let i = lastIdx; i >= 0; i--) {
-            if (frames[i].time <= time) {
-                if (i >= lastIdx) return { index: lastIdx, t: 0 };
-                const dt = frames[i + 1].time - frames[i].time;
-                return {
-                    index: i,
-                    t: dt > 0 ? (time - frames[i].time) / dt : 0,
-                };
-            }
+        // Binary search for the floor keyframe.
+        let lo = 0, hi = lastIdx;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >>> 1;
+            if (frames[mid].time <= time) lo = mid;
+            else hi = mid - 1;
         }
-        return { index: 0, t: 0 };
+        if (lo >= lastIdx) return { index: lastIdx, t: 0 };
+        const dt = frames[lo + 1].time - frames[lo].time;
+        return { index: lo, t: dt > 0 ? (time - frames[lo].time) / dt : 0 };
     }
 
     _updateAnimationUI() {
@@ -2237,8 +3440,20 @@ class ThreeJSViewer {
     // ========== WebSocket ==========
 
     connect() {
-        const doConnect = () => {
+        // Derive HTTP probe URL from WS URL (same host/port)
+        const probeUrl = this._wsUrl.replace(/^ws/, 'http');
+
+        const doConnect = async () => {
             if (this._destroyed) return;
+
+            // Probe first to avoid browser console warnings on failed WS attempts
+            try {
+                await fetch(probeUrl, { mode: 'no-cors', signal: AbortSignal.timeout(400) });
+            } catch {
+                // Server not reachable — retry later without creating a WebSocket
+                this._reconnectTimeout = setTimeout(doConnect, 500);
+                return;
+            }
 
             this._ws = new WebSocket(this._wsUrl);
 
@@ -2349,7 +3564,7 @@ class ThreeJSViewer {
                                 if (obj.userData.isPolyline) {
                                     const max = obj.userData.maxInstanceCount;
                                     drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
-                                } else if (obj.userData.isMesh) {
+                                } else if (obj.userData.isMesh || obj.userData.isParametricTube) {
                                     const total = obj.userData.totalIndexCount;
                                     if (total > 0) {
                                         const cnt = geom.drawRange.count;
@@ -2652,6 +3867,317 @@ class ThreeJSViewer {
                         })();
                         break;
                     }
+                    case 'add_parametric_tube_binary': {
+                        this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale parametric tube fetch');
+                                    return;
+                                }
+                                const n = data.numSpinePoints;
+                                let offset = 0;
+                                const spine = new Float32Array(buffer, offset, n * 3);
+                                offset += n * 3 * 4;
+                                const widths = new Float32Array(buffer, offset, n);
+                                offset += n * 4;
+                                const heights = new Float32Array(buffer, offset, n);
+                                offset += n * 4;
+                                let orientations = null;
+                                if (data.hasOrientations) {
+                                    orientations = new Float32Array(buffer, offset, n * 4);
+                                    offset += n * 4 * 4;
+                                }
+                                let ringColors = null;
+                                if (data.hasColors) {
+                                    const packed = new Uint32Array(buffer, offset, n);
+                                    offset += n * 4;
+                                    // Decode packed uint32 0x00RRGGBB → Float32Array(n*3).
+                                    ringColors = new Float32Array(n * 3);
+                                    for (let i = 0; i < n; i++) {
+                                        const c = packed[i];
+                                        ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
+                                        ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                        ringColors[i * 3 + 2] = (c & 0xff) / 255;
+                                    }
+                                }
+                                const nCs = N_CROSS_SECTION;
+                                const hasColors = !!ringColors;
+                                const upVector = data.upVector || null;
+
+                                // LOD: for large tubes, reduce spine before building geometry
+                                let tubeLOD = null;
+                                let buildSpine = spine, buildWidths = widths, buildHeights = heights;
+                                let buildOrientations = orientations, buildRingColors = ringColors;
+                                let buildN = n;
+                                if (n >= 25000) {
+                                    // Bounding sphere from original spine (stable across LOD rebuilds)
+                                    const _center = new THREE.Vector3();
+                                    for (let i = 0; i < n; i++) {
+                                        _center.x += spine[i * 3]; _center.y += spine[i * 3 + 1]; _center.z += spine[i * 3 + 2];
+                                    }
+                                    _center.divideScalar(n);
+                                    let _maxR2 = 0;
+                                    for (let i = 0; i < n; i++) {
+                                        const dx = spine[i * 3] - _center.x, dy = spine[i * 3 + 1] - _center.y, dz = spine[i * 3 + 2] - _center.z;
+                                        _maxR2 = Math.max(_maxR2, dx * dx + dy * dy + dz * dz);
+                                    }
+                                    const boundingRadius = Math.sqrt(_maxR2);
+                                    const cam = this._camera;
+                                    const { indices: keptIndices, minDist: _lodMinDist, maxDist: _lodMaxDist } = distanceWeightedRDP(
+                                        spine, n, cam.position.x, cam.position.y, cam.position.z,
+                                    );
+                                    const nRed = keptIndices.length;
+                                    // Extract reduced arrays
+                                    buildSpine = new Float32Array(nRed * 3);
+                                    buildWidths = new Float32Array(nRed);
+                                    buildHeights = new Float32Array(nRed);
+                                    buildRingColors = ringColors ? new Float32Array(nRed * 3) : null;
+                                    buildOrientations = null; // orientations not preserved through LOD
+                                    buildN = nRed;
+                                    for (let i = 0; i < nRed; i++) {
+                                        const oi = keptIndices[i];
+                                        buildSpine[i * 3] = spine[oi * 3]; buildSpine[i * 3 + 1] = spine[oi * 3 + 1]; buildSpine[i * 3 + 2] = spine[oi * 3 + 2];
+                                        buildWidths[i] = widths[oi];
+                                        buildHeights[i] = heights[oi];
+                                        if (buildRingColors) {
+                                            buildRingColors[i * 3] = ringColors[oi * 3]; buildRingColors[i * 3 + 1] = ringColors[oi * 3 + 1]; buildRingColors[i * 3 + 2] = ringColors[oi * 3 + 2];
+                                        }
+                                    }
+                                    tubeLOD = {
+                                        originalSpine: new Float32Array(spine),
+                                        originalWidths: new Float32Array(widths),
+                                        originalHeights: new Float32Array(heights),
+                                        originalRingColors: ringColors ? new Float32Array(ringColors) : null,
+                                        originalCount: n,
+                                        upVector,
+                                        keptIndices,
+                                        currentDrawRange: 1.0,
+                                        lastCameraPos: cam.position.clone(),
+                                        boundingCenter: _center,
+                                        boundingRadius,
+                                    };
+                                    // LOD initial reduction logged at debug level only
+                                }
+
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
+                                    buildSpine, buildWidths, buildHeights,
+                                    buildOrientations, upVector, buildRingColors,
+                                );
+                                const opacity = data.opacity !== undefined ? data.opacity : 1;
+                                const material = new THREE.MeshStandardMaterial({
+                                    color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
+                                    metalness: data.metalness !== undefined ? data.metalness : 0.1,
+                                    roughness: data.roughness !== undefined ? data.roughness : 0.8,
+                                    opacity,
+                                    transparent: opacity < 1,
+                                    depthWrite: opacity >= 1,
+                                    side: THREE.DoubleSide,
+                                    vertexColors: hasColors,
+                                    wireframe: !!data.wireframe,
+                                    clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+                                });
+                                const mesh = new THREE.Mesh(geometry, material);
+                                mesh.name = data.id;
+                                mesh.userData.id = data.id;
+                                mesh.userData.isParametricTube = true;
+                                mesh.userData.tubeNumSpinePoints = buildN;
+                                mesh.userData.tubeNCs = nCs;
+                                mesh.userData.tubeRingPairs = ringPairs;
+                                mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
+                                mesh.userData.totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
+                                mesh.userData.tubeHasColors = hasColors;
+                                mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
+                                mesh.userData.tubeEndCapBase = endCapBase;
+                                mesh.userData.tubeMorphData = {
+                                    spine: new Float32Array(buildSpine),
+                                    widths: new Float32Array(buildWidths),
+                                    heights: new Float32Array(buildHeights),
+                                    localFrames, capAngles,
+                                    ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
+                                    section: new Float32Array(nCs * 2),
+                                    savedRing: new Float32Array(nCs * 3),
+                                    savedRingColors: null,
+                                    savedRingIndex: null,
+                                    morphedState: null,
+                                    endCapPattern,
+                                    savedCapIndices: new endCapPattern.constructor(endCapPattern.length),
+                                    savedCapOffset: -1,
+                                };
+                                if (tubeLOD) {
+                                    mesh.userData.tubeLOD = tubeLOD;
+                                    // Register original arrays with LOD worker
+                                    this._lodWorker.postMessage({
+                                        type: 'init',
+                                        tubeId: data.id,
+                                        spine: tubeLOD.originalSpine,
+                                        widths: tubeLOD.originalWidths,
+                                        heights: tubeLOD.originalHeights,
+                                        ringColors: tubeLOD.originalRingColors,
+                                        upVec: upVector,
+                                        nPoints: tubeLOD.originalCount,
+                                    });
+                                }
+                                this._addToParentOrScene(mesh, data.parent);
+                                this._objects.set(data.id, mesh);
+                                this._objGeneration++;
+                                if (data.transform) this._applyTransform(mesh, data.transform);
+                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs`);
+                            } catch (e) {
+                                console.error(`Error creating parametric_tube:`, e);
+                            } finally {
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
+                    case 'update_parametric_tube_colors': {
+                        this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale parametric tube color fetch');
+                                    return;
+                                }
+                                const obj = this._objects.get(data.id);
+                                if (!obj || !obj.userData.isParametricTube) {
+                                    console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                    return;
+                                }
+                                const lod = obj.userData.tubeLOD;
+                                // Color data from Python is always for the original spine count
+                                const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
+                                const nCs = obj.userData.tubeNCs;
+                                if (buffer.byteLength < nOrig * 4) {
+                                    console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
+                                    return;
+                                }
+                                const packed = new Uint32Array(buffer, 0, nOrig);
+                                // Decode per-ring colors (full original count)
+                                const rc = new Float32Array(nOrig * 3);
+                                for (let i = 0; i < nOrig; i++) {
+                                    const c = packed[i];
+                                    rc[i * 3]     = ((c >> 16) & 0xff) / 255;
+                                    rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                    rc[i * 3 + 2] = (c & 0xff) / 255;
+                                }
+
+                                // When LOD is active, store full colors and rebuild with reduced subset
+                                if (lod && lod.keptIndices) {
+                                    lod.originalRingColors = new Float32Array(rc);
+                                    this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
+                                    // Extract reduced colors for current LOD level
+                                    const nRed = lod.keptIndices.length;
+                                    const redRc = new Float32Array(nRed * 3);
+                                    const redPacked = new Uint32Array(nRed);
+                                    for (let i = 0; i < nRed; i++) {
+                                        const oi = lod.keptIndices[i];
+                                        redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                                        redPacked[i] = packed[oi];
+                                    }
+                                    // Update geometry colors for reduced mesh
+                                    const n = nRed;
+                                    // Fill cap dome vertices with a single color
+                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                        for (let j = 0; j < capVerts; j++) {
+                                            arr[(baseVert + j) * 3]     = r;
+                                            arr[(baseVert + j) * 3 + 1] = g;
+                                            arr[(baseVert + j) * 3 + 2] = b;
+                                        }
+                                    }
+                                    const posCount = obj.geometry.getAttribute('position').count;
+                                    const capVertsPerCap = (posCount - n * nCs) / 2;
+                                    const startCapBaseVert = n * nCs;
+                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                    const lr = (n - 1) * 3;
+                                    const existing = obj.geometry.getAttribute('color');
+                                    if (existing) {
+                                        expandRingColors(redPacked, n, nCs, existing.array);
+                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                        existing.needsUpdate = true;
+                                    } else {
+                                        const allColors = new Float32Array(posCount * 3);
+                                        expandRingColors(redPacked, n, nCs, allColors);
+                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                    }
+                                    obj.material.vertexColors = true;
+                                    obj.material.color.setHex(0xffffff);
+                                    obj.material.needsUpdate = true;
+                                    obj.userData.tubeHasColors = true;
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) {
+                                        md.ringColors = redRc;
+                                        md.savedRingIndex = null;
+                                    }
+                                } else {
+                                    // No LOD active — original path
+                                    if (lod) {
+                                        lod.originalRingColors = new Float32Array(rc);
+                                        this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
+                                    }
+                                    const n = nOrig;
+                                    // Fill cap dome vertices with a single color
+                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                        for (let j = 0; j < capVerts; j++) {
+                                            arr[(baseVert + j) * 3]     = r;
+                                            arr[(baseVert + j) * 3 + 1] = g;
+                                            arr[(baseVert + j) * 3 + 2] = b;
+                                        }
+                                    }
+                                    const posCount = obj.geometry.getAttribute('position').count;
+                                    const capVertsPerCap = (posCount - n * nCs) / 2;
+                                    const startCapBaseVert = n * nCs;
+                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                    const lr = (n - 1) * 3;
+                                    const existing = obj.geometry.getAttribute('color');
+                                    if (existing) {
+                                        expandRingColors(packed, n, nCs, existing.array);
+                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                        existing.needsUpdate = true;
+                                    } else {
+                                        const allColors = new Float32Array(posCount * 3);
+                                        expandRingColors(packed, n, nCs, allColors);
+                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                    }
+                                    obj.material.vertexColors = true;
+                                    obj.material.color.setHex(0xffffff);
+                                    obj.material.needsUpdate = true;
+                                    obj.userData.tubeHasColors = true;
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) {
+                                        md.ringColors = rc;
+                                        md.savedRingIndex = null;
+                                    }
+                                }
+                            } catch (e) {
+                                console.error(`Error updating parametric_tube colors:`, e);
+                            } finally {
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
+                    case 'register_toolpath_group': {
+                        const grp = this._objects.get(data.id);
+                        if (grp) {
+                            grp.userData.isToolpathGroup = true;
+                            grp.userData.toolpathSegmentIds = data.segmentIds;
+                            grp.userData.toolpathSegmentRanges = data.segmentRanges;
+                        }
+                        break;
+                    }
                     case 'stop_animation':
                         this._stopAnimation();
                         break;
@@ -2829,6 +4355,43 @@ class ThreeJSViewer {
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
         this._viewHelper.render(this._renderer);
+
+        // LOD: dispatch to Web Worker after render (non-blocking)
+        if (this._lodDirty && !this._lodWorkerBusy && performance.now() - this._lodLastRunTime >= this._lodThrottleMs) {
+            this._lodLastRunTime = performance.now();
+            this._lodDirty = false;
+            this._dispatchLodWorker();
+        }
+    }
+
+    _dispatchLodWorker() {
+        const cam = this._camera;
+        const camX = cam.position.x, camY = cam.position.y, camZ = cam.position.z;
+        for (const obj of this._objects.values()) {
+            if (!obj.userData.isParametricTube || !obj.userData.tubeLOD) continue;
+            const lod = obj.userData.tubeLOD;
+
+            // Skip if camera hasn't moved enough (5% of distance to tube center)
+            if (lod.keptIndices) {
+                const dx = camX - lod.lastCameraPos.x;
+                const dy = camY - lod.lastCameraPos.y;
+                const dz = camZ - lod.lastCameraPos.z;
+                const deltaSq = dx * dx + dy * dy + dz * dz;
+                const centerDist = Math.max(1e-6, lod.boundingRadius * 2);
+                const threshold = centerDist * 0.05;
+                if (deltaSq < threshold * threshold) continue;
+            }
+
+            lod.lastCameraPos.set(camX, camY, camZ);
+            this._lodWorkerBusy = true;
+            this._lodWorker.postMessage({
+                type: 'update',
+                tubeId: obj.name,
+                camX, camY, camZ,
+            });
+            // Only one tube per dispatch cycle (worker handles one at a time)
+            return;
+        }
     }
 
     // ========== Public API ==========
@@ -2911,6 +4474,10 @@ class ThreeJSViewer {
             this._ws.onclose = null;
             this._ws.close();
             this._ws = null;
+        }
+        if (this._lodWorker) {
+            this._lodWorker.terminate();
+            this._lodWorker = null;
         }
         clearTimeout(this._reconnectTimeout);
         this._resizeObserver.disconnect();
