@@ -399,14 +399,23 @@ function buildParametricTubeGeometry(
         throw new Error(`parametric_tube heights length ${heights.length} does not match spine ${nSpine}`);
     }
 
-    // Cap vertex layout (appended after tube rings):
-    //   startCapCenter(1) | startCapRing(nCs) | endCapCenter(1) | endCapRing(nCs)
-    const startCapCenterIdx = nSpine * nCs;
-    const startCapRingBase = startCapCenterIdx + 1;
-    const endCapCenterIdx = startCapRingBase + nCs;
-    const endCapRingBase = endCapCenterIdx + 1;
-    const totalVerts = endCapRingBase + nCs;
-    const capIndicesPerCap = nCs * 3; // triangle fan
+    // Dome cap vertex layout (appended after tube rings):
+    //   startCapRings(nCapRings * nCs) | startPole(1) |
+    //   endCapRings(nCapRings * nCs) | endPole(1)
+    // Each cap has nCapRings latitude rings that shrink from the tube edge
+    // ring toward a pole, forming a hemisphere-like dome.
+    const nCapRings = 3;
+    const capAngles = new Float32Array(nCapRings);
+    for (let k = 0; k < nCapRings; k++) {
+        capAngles[k] = ((k + 1) / (nCapRings + 1)) * (Math.PI * 0.5);
+    }
+    const startCapBase = nSpine * nCs;
+    const startPoleIdx = startCapBase + nCapRings * nCs;
+    const endCapBase = startPoleIdx + 1;
+    const endPoleIdx = endCapBase + nCapRings * nCs;
+    const totalVerts = endPoleIdx + 1;
+    // Per cap: nCapRings quad strips + 1 triangle fan to pole
+    const capIndicesPerCap = nCapRings * nCs * 6 + nCs * 3;
 
     const positions = new Float32Array(totalVerts * 3);
     const colors = ringColors ? new Float32Array(totalVerts * 3) : null;
@@ -497,60 +506,108 @@ function buildParametricTubeGeometry(
         }
     }
 
-    // --- Cap vertices (separate from tube walls for independent normals) ---
-    // Start cap: center at spine[0], ring = copy of ring 0
-    positions[startCapCenterIdx * 3]     = spine[0];
-    positions[startCapCenterIdx * 3 + 1] = spine[1];
-    positions[startCapCenterIdx * 3 + 2] = spine[2];
-    for (let j = 0; j < nCs; j++) {
-        const dst = (startCapRingBase + j) * 3;
-        positions[dst]     = positions[j * 3];
-        positions[dst + 1] = positions[j * 3 + 1];
-        positions[dst + 2] = positions[j * 3 + 2];
+    // --- Dome cap vertices ---
+    // Helper: build dome cap positions for a given spine point.
+    // capBase = first vertex index of the cap rings in the positions array.
+    // poleIdx = vertex index of the pole.
+    // tangentSign = -1 for start cap (dome extends in -T), +1 for end cap.
+    function buildDomeCap(spineIdx, capBaseVert, poleVertIdx, tangentSign) {
+        const sx = spine[spineIdx * 3], sy = spine[spineIdx * 3 + 1], sz = spine[spineIdx * 3 + 2];
+        const w = widths[spineIdx], h = heights[spineIdx];
+        const ux = localFrames[spineIdx * 6], uy = localFrames[spineIdx * 6 + 1], uz = localFrames[spineIdx * 6 + 2];
+        const vx = localFrames[spineIdx * 6 + 3], vy = localFrames[spineIdx * 6 + 4], vz = localFrames[spineIdx * 6 + 5];
+        // Tangent = U × V
+        const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
+        const capDepth = Math.min(w, h) * 0.5;
+        for (let k = 0; k < nCapRings; k++) {
+            const theta = capAngles[k];
+            const s = Math.cos(theta);
+            const d = Math.sin(theta) * capDepth * tangentSign;
+            sampleRoundedRectInto(section, nCs, w * s, h * s, cornerRadiusFrac);
+            const ringBase = (capBaseVert + k * nCs) * 3;
+            for (let j = 0; j < nCs; j++) {
+                const cu = section[j * 2], cv = section[j * 2 + 1];
+                positions[ringBase + j * 3]     = sx + d * tx + cu * ux + cv * vx;
+                positions[ringBase + j * 3 + 1] = sy + d * ty + cu * uy + cv * vy;
+                positions[ringBase + j * 3 + 2] = sz + d * tz + cu * uz + cv * vz;
+            }
+        }
+        positions[poleVertIdx * 3]     = sx + capDepth * tangentSign * tx;
+        positions[poleVertIdx * 3 + 1] = sy + capDepth * tangentSign * ty;
+        positions[poleVertIdx * 3 + 2] = sz + capDepth * tangentSign * tz;
     }
-    // End cap: center at spine[N-1], ring = copy of last ring
-    const lastSp = (nSpine - 1) * 3;
-    positions[endCapCenterIdx * 3]     = spine[lastSp];
-    positions[endCapCenterIdx * 3 + 1] = spine[lastSp + 1];
-    positions[endCapCenterIdx * 3 + 2] = spine[lastSp + 2];
-    const lastRingBase = (nSpine - 1) * nCs;
-    for (let j = 0; j < nCs; j++) {
-        const src = (lastRingBase + j) * 3;
-        const dst = (endCapRingBase + j) * 3;
-        positions[dst]     = positions[src];
-        positions[dst + 1] = positions[src + 1];
-        positions[dst + 2] = positions[src + 2];
-    }
-    // Cap colors (replicate ring colors to cap vertices)
+    buildDomeCap(0, startCapBase, startPoleIdx, -1);
+    buildDomeCap(nSpine - 1, endCapBase, endPoleIdx, +1);
+    // Cap colors (replicate ring color to all cap vertices)
     if (colors) {
+        const capVertsPerCap = nCapRings * nCs + 1;
         const r0 = ringColors[0], g0 = ringColors[1], b0 = ringColors[2];
-        colors[startCapCenterIdx * 3] = r0; colors[startCapCenterIdx * 3 + 1] = g0; colors[startCapCenterIdx * 3 + 2] = b0;
-        for (let j = 0; j < nCs; j++) {
-            const dst = (startCapRingBase + j) * 3;
+        for (let v = 0; v < capVertsPerCap; v++) {
+            const dst = (startCapBase + v) * 3;
             colors[dst] = r0; colors[dst + 1] = g0; colors[dst + 2] = b0;
         }
         const rN = ringColors[(nSpine - 1) * 3], gN = ringColors[(nSpine - 1) * 3 + 1], bN = ringColors[(nSpine - 1) * 3 + 2];
-        colors[endCapCenterIdx * 3] = rN; colors[endCapCenterIdx * 3 + 1] = gN; colors[endCapCenterIdx * 3 + 2] = bN;
-        for (let j = 0; j < nCs; j++) {
-            const dst = (endCapRingBase + j) * 3;
+        for (let v = 0; v < capVertsPerCap; v++) {
+            const dst = (endCapBase + v) * 3;
             colors[dst] = rN; colors[dst + 1] = gN; colors[dst + 2] = bN;
         }
+        // pole
+        colors[startPoleIdx * 3] = r0; colors[startPoleIdx * 3 + 1] = g0; colors[startPoleIdx * 3 + 2] = b0;
+        colors[endPoleIdx * 3] = rN; colors[endPoleIdx * 3 + 1] = gN; colors[endPoleIdx * 3 + 2] = bN;
     }
 
-    // --- Index buffer: [start_cap_fan | ring_pairs | end_cap_fan] ---
+    // --- Index buffer: [start_cap_dome | ring_pairs | end_cap_dome] ---
     const ringPairs = nSpine - 1;
     const indicesPerRingPair = nCs * 6;
     const totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
     const IndexCtor = totalVerts > 65535 ? Uint32Array : Uint16Array;
     const indices = new IndexCtor(totalIndexCount);
     let p = 0;
-    // Start cap fan (faces -tangent direction)
-    for (let j = 0; j < nCs; j++) {
-        const jNext = (j + 1) % nCs;
-        indices[p++] = startCapCenterIdx;
-        indices[p++] = startCapRingBase + jNext;
-        indices[p++] = startCapRingBase + j;
+
+    // Helper: build dome cap indices.
+    // tubeRingBase = vertex index of the tube ring that the cap connects to.
+    // capBaseVert = first vertex index of the cap rings.
+    // poleVertIdx = vertex index of the pole.
+    // reverse = true for start cap (winding reversed since dome goes in -T).
+    function buildDomeCapIndices(tubeRingBase, capBaseVert, poleVertIdx, reverse) {
+        for (let k = 0; k < nCapRings; k++) {
+            const innerBase = k === 0 ? tubeRingBase : capBaseVert + (k - 1) * nCs;
+            const outerBase = capBaseVert + k * nCs;
+            for (let j = 0; j < nCs; j++) {
+                const jN = (j + 1) % nCs;
+                if (reverse) {
+                    indices[p++] = innerBase + j;
+                    indices[p++] = outerBase + j;
+                    indices[p++] = outerBase + jN;
+                    indices[p++] = innerBase + j;
+                    indices[p++] = outerBase + jN;
+                    indices[p++] = innerBase + jN;
+                } else {
+                    indices[p++] = innerBase + j;
+                    indices[p++] = innerBase + jN;
+                    indices[p++] = outerBase + jN;
+                    indices[p++] = innerBase + j;
+                    indices[p++] = outerBase + jN;
+                    indices[p++] = outerBase + j;
+                }
+            }
+        }
+        // Fan to pole
+        const lastRing = capBaseVert + (nCapRings - 1) * nCs;
+        for (let j = 0; j < nCs; j++) {
+            const jN = (j + 1) % nCs;
+            if (reverse) {
+                indices[p++] = poleVertIdx;
+                indices[p++] = lastRing + jN;
+                indices[p++] = lastRing + j;
+            } else {
+                indices[p++] = poleVertIdx;
+                indices[p++] = lastRing + j;
+                indices[p++] = lastRing + jN;
+            }
+        }
     }
+    buildDomeCapIndices(0, startCapBase, startPoleIdx, true);
     // Ring pairs
     for (let i = 0; i < ringPairs; i++) {
         const a0 = i * nCs;
@@ -569,14 +626,9 @@ function buildParametricTubeGeometry(
             indices[p++] = d;
         }
     }
-    // End cap fan (faces +tangent direction)
+    // End cap dome
     const endCapOffset = p;
-    for (let j = 0; j < nCs; j++) {
-        const jNext = (j + 1) % nCs;
-        indices[p++] = endCapCenterIdx;
-        indices[p++] = endCapRingBase + j;
-        indices[p++] = endCapRingBase + jNext;
-    }
+    buildDomeCapIndices((nSpine - 1) * nCs, endCapBase, endPoleIdx, false);
     // Extract end cap index pattern for dynamic relocation during draw_range
     const endCapPattern = indices.slice(endCapOffset, endCapOffset + capIndicesPerCap);
 
@@ -588,8 +640,8 @@ function buildParametricTubeGeometry(
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
-        localFrames,
-        capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern,
+        localFrames, capAngles, nCapRings,
+        capIndicesPerCap, endCapBase, endPoleIdx, endCapPattern,
     };
 }
 
@@ -636,6 +688,7 @@ function restoreFrontierRing(obj) {
         }
     }
     md.savedRingIndex = null;
+    md.morphedState = null;
 }
 
 // Morph the frontier ring of a parametric tube to the interpolated spine
@@ -699,6 +752,9 @@ function morphFrontierRing(obj, fracRingPairs) {
     let vLen = Math.hypot(vx, vy, vz);
     if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
 
+    // Store morphed state for updateEndCap to use
+    md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz };
+
     // Sample cross-section at interpolated width/height
     sampleRoundedRectInto(md.section, nCs, w, h, md.cornerRadiusFrac);
 
@@ -737,55 +793,74 @@ function morphFrontierRing(obj, fracRingPairs) {
     return completePairs + 1;
 }
 
-// Update the end cap vertices to match the last visible ring (the frontier).
+// Update the end cap dome vertices to match the last visible ring (the frontier).
+// Uses morphed spine/frame/width/height stored by morphFrontierRing, or reads
+// original data for un-morphed rings.
 function updateEndCap(obj, lastVisibleRing) {
     const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    if (!md) return;
     const nCs = ud.tubeNCs;
+    const nCapRings = md.capAngles.length;
     const posAttr = obj.geometry.getAttribute('position');
     const pos = posAttr.array;
-    const md = ud.tubeMorphData;
 
-    // Copy frontier ring positions to end cap ring vertices
-    const srcBase = lastVisibleRing * nCs * 3;
-    const dstRingBase = ud.tubeEndCapRingBase * 3;
-    for (let j = 0; j < nCs * 3; j++) {
-        pos[dstRingBase + j] = pos[srcBase + j];
+    // Determine spine pos, width, height, frame at the frontier ring
+    let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz;
+    if (md.morphedState) {
+        // morphFrontierRing stored the lerped state
+        const ms = md.morphedState;
+        sx = ms.sx; sy = ms.sy; sz = ms.sz;
+        w = ms.w; h = ms.h;
+        ux = ms.ux; uy = ms.uy; uz = ms.uz;
+        vx = ms.vx; vy = ms.vy; vz = ms.vz;
+    } else {
+        // Un-morphed: use original data for the visible ring
+        const i = lastVisibleRing;
+        sx = md.spine[i * 3]; sy = md.spine[i * 3 + 1]; sz = md.spine[i * 3 + 2];
+        w = md.widths[i]; h = md.heights[i];
+        ux = md.localFrames[i * 6]; uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
+        vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
     }
-    // Set end cap center to the spine position (or lerped position for morphed frontier).
-    // The center is the average of the ring vertices (== spine point for un-morphed rings).
-    const dstCenter = ud.tubeEndCapCenterIdx * 3;
-    if (md && lastVisibleRing < md.spine.length / 3) {
-        // Use stored spine point (exact, works for both morphed and original)
-        // For morphed frontier, morphFrontierRing already set the ring positions,
-        // so compute center as centroid of the frontier ring.
-        let cx = 0, cy = 0, cz = 0;
+    // Tangent = U × V
+    const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
+    const capDepth = Math.min(w, h) * 0.5;
+
+    // Build dome cap ring positions
+    const ecBase = ud.tubeEndCapBase;
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = md.capAngles[k];
+        const s = Math.cos(theta);
+        const d = Math.sin(theta) * capDepth;
+        sampleRoundedRectInto(md.section, nCs, w * s, h * s, md.cornerRadiusFrac);
+        const ringBase = (ecBase + k * nCs) * 3;
         for (let j = 0; j < nCs; j++) {
-            cx += pos[srcBase + j * 3];
-            cy += pos[srcBase + j * 3 + 1];
-            cz += pos[srcBase + j * 3 + 2];
+            const cu = md.section[j * 2], cv = md.section[j * 2 + 1];
+            pos[ringBase + j * 3]     = sx + d * tx + cu * ux + cv * vx;
+            pos[ringBase + j * 3 + 1] = sy + d * ty + cu * uy + cv * vy;
+            pos[ringBase + j * 3 + 2] = sz + d * tz + cu * uz + cv * vz;
         }
-        pos[dstCenter]     = cx / nCs;
-        pos[dstCenter + 1] = cy / nCs;
-        pos[dstCenter + 2] = cz / nCs;
     }
+    // Pole
+    const poleIdx = ud.tubeEndPoleIdx;
+    pos[poleIdx * 3]     = sx + capDepth * tx;
+    pos[poleIdx * 3 + 1] = sy + capDepth * ty;
+    pos[poleIdx * 3 + 2] = sz + capDepth * tz;
     posAttr.needsUpdate = true;
 
     // Update end cap colors if applicable
-    if (ud.tubeHasColors && md && md.ringColors) {
+    if (ud.tubeHasColors && md.ringColors) {
         const colAttr = obj.geometry.getAttribute('color');
         if (colAttr) {
             const cols = colAttr.array;
+            // Use frontier ring's color for all end cap vertices
             const colSrcBase = lastVisibleRing * nCs * 3;
-            const colDstCenter = ud.tubeEndCapCenterIdx * 3;
-            const colDstRingBase = ud.tubeEndCapRingBase * 3;
-            // Copy frontier ring colors to end cap ring
-            for (let j = 0; j < nCs * 3; j++) {
-                cols[colDstRingBase + j] = cols[colSrcBase + j];
+            const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
+            const capVerts = nCapRings * nCs + 1;
+            for (let v = 0; v < capVerts; v++) {
+                const dst = (ecBase + v) * 3;
+                cols[dst] = cr; cols[dst + 1] = cg; cols[dst + 2] = cb;
             }
-            // Center color = same as ring
-            cols[colDstCenter]     = cols[colSrcBase];
-            cols[colDstCenter + 1] = cols[colSrcBase + 1];
-            cols[colDstCenter + 2] = cols[colSrcBase + 2];
             colAttr.needsUpdate = true;
         }
     }
@@ -2804,7 +2879,7 @@ export class ThreeJSViewer {
                                 }
                                 const nCs = data.nCrossSectionVerts || 8;
                                 const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern } = buildParametricTubeGeometry(
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, nCapRings, capIndicesPerCap, endCapBase, endPoleIdx, endCapPattern } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, data.upVector || null, ringColors,
                                     data.crossSection || 'rounded_rect',
@@ -2836,18 +2911,19 @@ export class ThreeJSViewer {
                                 mesh.userData.totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
                                 mesh.userData.tubeHasColors = hasColors;
                                 mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
-                                mesh.userData.tubeEndCapCenterIdx = endCapCenterIdx;
-                                mesh.userData.tubeEndCapRingBase = endCapRingBase;
+                                mesh.userData.tubeEndCapBase = endCapBase;
+                                mesh.userData.tubeEndPoleIdx = endPoleIdx;
                                 mesh.userData.tubeMorphData = {
                                     spine: new Float32Array(spine),
                                     widths: new Float32Array(widths),
                                     heights: new Float32Array(heights),
-                                    localFrames, cornerRadiusFrac,
+                                    localFrames, cornerRadiusFrac, capAngles,
                                     ringColors: ringColors ? new Float32Array(ringColors) : null,
                                     section: new Float32Array(nCs * 2),
                                     savedRing: new Float32Array(nCs * 3),
                                     savedRingColors: null,
                                     savedRingIndex: null,
+                                    morphedState: null,
                                     endCapPattern,
                                     savedCapIndices: new endCapPattern.constructor(endCapPattern.length),
                                     savedCapOffset: -1,
@@ -2896,50 +2972,30 @@ export class ThreeJSViewer {
                                     rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
                                     rc[i * 3 + 2] = (c & 0xff) / 255;
                                 }
+                                // Fill cap dome vertices with a single color
+                                function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                    for (let j = 0; j < capVerts; j++) {
+                                        arr[(baseVert + j) * 3]     = r;
+                                        arr[(baseVert + j) * 3 + 1] = g;
+                                        arr[(baseVert + j) * 3 + 2] = b;
+                                    }
+                                }
+                                const posCount = obj.geometry.getAttribute('position').count;
+                                const capVertsPerCap = (posCount - n * nCs) / 2;
+                                const startCapBaseVert = n * nCs;
+                                const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                const lr = (n - 1) * 3;
                                 const existing = obj.geometry.getAttribute('color');
                                 if (existing) {
-                                    // Expand ring colors into tube vertices
                                     expandRingColors(packed, n, nCs, existing.array);
-                                    // Fill cap vertex colors (start cap = ring 0 color, end cap = last ring color)
-                                    const posCount = obj.geometry.getAttribute('position').count;
-                                    const capVerts = posCount - n * nCs; // 2 + 2*nCs
-                                    if (capVerts > 0) {
-                                        const capBase = n * nCs * 3;
-                                        // Start cap center + ring: ring 0 color
-                                        for (let j = 0; j < 1 + nCs; j++) {
-                                            existing.array[capBase + j * 3]     = rc[0];
-                                            existing.array[capBase + j * 3 + 1] = rc[1];
-                                            existing.array[capBase + j * 3 + 2] = rc[2];
-                                        }
-                                        // End cap center + ring: last ring color
-                                        const endBase = capBase + (1 + nCs) * 3;
-                                        const lr = (n - 1) * 3;
-                                        for (let j = 0; j < 1 + nCs; j++) {
-                                            existing.array[endBase + j * 3]     = rc[lr];
-                                            existing.array[endBase + j * 3 + 1] = rc[lr + 1];
-                                            existing.array[endBase + j * 3 + 2] = rc[lr + 2];
-                                        }
-                                    }
+                                    fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                    fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
                                     existing.needsUpdate = true;
                                 } else {
-                                    // First color set — build full attribute
-                                    const posCount = obj.geometry.getAttribute('position').count;
                                     const allColors = new Float32Array(posCount * 3);
                                     expandRingColors(packed, n, nCs, allColors);
-                                    // Fill caps
-                                    const capBase = n * nCs * 3;
-                                    for (let j = 0; j < 1 + nCs; j++) {
-                                        allColors[capBase + j * 3]     = rc[0];
-                                        allColors[capBase + j * 3 + 1] = rc[1];
-                                        allColors[capBase + j * 3 + 2] = rc[2];
-                                    }
-                                    const endBase = capBase + (1 + nCs) * 3;
-                                    const lr = (n - 1) * 3;
-                                    for (let j = 0; j < 1 + nCs; j++) {
-                                        allColors[endBase + j * 3]     = rc[lr];
-                                        allColors[endBase + j * 3 + 1] = rc[lr + 1];
-                                        allColors[endBase + j * 3 + 2] = rc[lr + 2];
-                                    }
+                                    fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                    fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
                                     obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
                                 }
                                 obj.material.vertexColors = true;
