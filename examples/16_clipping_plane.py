@@ -95,9 +95,10 @@ points = np.column_stack([world_x - 4.0, world_y, world_z + 2.0]).astype(np.floa
 
 tp = Toolpath.from_points(points, bead_width=0.15, bead_height=0.04)
 tp.colorize("plasma")
-v.add_mesh(
+v.add_toolpath(
     "tilted_toolpath",
-    **tp.to_mesh(plane_normal=plane_normal),
+    tp,
+    up_vector=plane_normal.tolist(),
     roughness=0.4,
     metalness=0.15,
 )

@@ -1,23 +1,17 @@
-"""Toolpath processing: G-code → bead geometry with animation support.
+"""Toolpath processing: G-code → parametric tube visualization.
 
 Typical usage::
 
     raw = make_my_toolpath()  # (N,5) [x,y,z,E_cc,F_mm_per_min]
     tp = Toolpath.from_gcode(raw, bead_width=2.0, bead_height=0.9)
-
-    frame_times, _ = tp.frame_times(n_frames=1000)
-    merged, frame_indices = tp.merge(frame_times)
-    draw_fracs = (frame_indices / max(len(merged) - 1, 1)).reshape(-1, 1)
-
-    merged.colorize("plasma")
-    v.add_mesh("bead", **merged.to_mesh())
+    tp.colorize("plasma")
+    v.add_toolpath("bead", tp, roughness=0.4)
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .animation import merge_animation_points, toolpath_frame_times
 
 # ---------------------------------------------------------------------------
 # Perceptual colormap tables — 11 key colours at t=0, 0.1, …, 1.0
@@ -101,13 +95,10 @@ class Toolpath:
     - ``Toolpath.from_points(points, bead_width, bead_height, duration)``
       for a continuous path with no travel/extrusion distinction.
 
-    Then use the instance to drive mesh building + animation::
+    Then visualize as a parametric tube::
 
-        frame_times, _ = tp.frame_times(n_frames)
-        merged, frame_indices = tp.merge(frame_times)
-        merged.colorize("plasma")
-        draw_fracs = (frame_indices / max(len(merged) - 1, 1)).reshape(-1, 1)
-        v.add_mesh("bead", **merged.to_mesh())
+        tp.colorize("plasma")
+        v.add_toolpath("bead", tp, roughness=0.4)
     """
 
     def __init__(self, data: np.ndarray) -> None:
@@ -235,53 +226,6 @@ class Toolpath:
         """Total path duration in seconds."""
         return float(self._data[-1, 0] - self._data[0, 0])
 
-    # ── animation helpers ─────────────────────────────────────────────────────
-
-    def frame_times(self, n_frames: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(frame_times, draw_fracs)`` evenly spaced in time.
-
-        Wraps :func:`toolpath_frame_times`: frames advance proportionally to
-        print time, so fast travel moves pass quickly and slow extrusion is
-        gradual.  Use the returned ``frame_times`` with :meth:`merge` for
-        segment-aligned animation.
-        """
-        return toolpath_frame_times(self.times, n_frames)
-
-    def merge(self, frame_times: np.ndarray) -> tuple[Toolpath, np.ndarray]:
-        """Insert ``frame_times`` into geometry for segment-aligned draw_range.
-
-        Wraps :func:`merge_animation_points`.  Each frame time gets an exact
-        mesh vertex so ``draw_range`` never cuts through a triangle ring.
-
-        If ``self.colors`` is set, colors are interpolated for the new points.
-
-        Returns:
-            merged: new :class:`Toolpath` with interpolated points added.
-            frame_indices: (n_frames,) index into *merged* for each frame.
-        """
-        combined, frame_indices = merge_animation_points(self._data, frame_times)
-        merged = Toolpath(combined)
-        if self._colors is not None:
-            merged_times = combined[:, 0]
-            orig_times = self.times
-            # np.interp requires strictly increasing xp; deduplicate by keeping
-            # the last occurrence at each duplicate timestamp (matches geometry
-            # behavior where the last point at a duplicate time wins).
-            N_orig = len(orig_times)
-            _, last_idx = np.unique(orig_times[::-1], return_index=True)
-            last_idx = np.sort(N_orig - 1 - last_idx)
-            merged_colors = np.stack(
-                [
-                    np.interp(
-                        merged_times, orig_times[last_idx], self._colors[last_idx, c]
-                    )
-                    for c in range(3)
-                ],
-                axis=1,
-            ).astype(np.float32)
-            merged._colors = merged_colors
-        return merged, frame_indices
-
     # ── color ─────────────────────────────────────────────────────────────────
 
     @property
@@ -300,6 +244,20 @@ class Toolpath:
                 f"colors must have shape ({len(self)}, 3), got {arr.shape!r}"
             )
         self._colors = arr
+
+    @property
+    def packed_colors(self) -> np.ndarray | None:
+        """(N,) uint32 packed 0x00RRGGBB, or None if colors not set.
+
+        Suitable for passing to ``add_parametric_tube(colors=...)``.
+        """
+        if self._colors is None:
+            return None
+        c = np.clip(self._colors, 0.0, 1.0)
+        r = (c[:, 0] * 255).astype(np.uint32)
+        g = (c[:, 1] * 255).astype(np.uint32)
+        b = (c[:, 2] * 255).astype(np.uint32)
+        return (r << 16) | (g << 8) | b
 
     def colorize(
         self,
@@ -372,113 +330,3 @@ class Toolpath:
 
         self._colors = result
         return self
-
-    # ── geometry ──────────────────────────────────────────────────────────────
-
-    def to_mesh(self, plane_normal: "np.ndarray | None" = None) -> dict:
-        """Build bead mesh geometry.
-
-        Generates a 6-vertex bevelled rectangle cross-section extruded along
-        the path with analytical normals.  Supports ``draw_range`` for
-        progressive reveal animation.
-
-        Args:
-            plane_normal: The "up" direction for the bead cross-section, i.e.
-                the slice-plane normal in viewer space.  Defaults to
-                ``[0, 0, 1]`` (world Z-up).  Pass the transformed plane normal
-                when slicing on a tilted plane so the bead height is
-                perpendicular to the layer surface rather than world-vertical.
-
-        Returns:
-            Dict with keys ``positions``, ``indices``, ``normals``, ``colors``.
-            Use with ``v.add_mesh(id, **tp.to_mesh())``.
-        """
-        points = self.points  # (N, 3)
-        N = len(points)
-        if N < 2:
-            raise ValueError("to_mesh() requires at least 2 path points")
-        P = 6  # vertices per ring
-
-        W = self.widths.copy()
-        H = self.heights.copy()
-        hw = W / 2
-        hh = H / 2
-        ft = np.maximum(0.0, W - H) / 2
-
-        # Per-point profiles: (N, P, 2) — [binormal_offset, z_offset]
-        zeros = np.zeros(N, dtype=np.float32)
-        pb = np.column_stack([ft, hw, ft, -ft, -hw, -ft])  # (N, P) binormal offsets
-        pz = -np.column_stack([zeros, hh, H, H, hh, zeros])  # (N, P) z offsets
-
-        # Profile vertex normals (vectorized, average of adjacent edge outward normals)
-        profile = np.stack([pb, pz], axis=-1)  # (N, P, 2)
-        edges = np.roll(profile, -1, axis=1) - profile  # (N, P, 2)
-        edge_n = np.stack([edges[:, :, 1], -edges[:, :, 0]], axis=-1)  # (N, P, 2)
-        edge_n /= np.maximum(np.linalg.norm(edge_n, axis=-1, keepdims=True), 1e-10)
-        prof_n = edge_n + np.roll(edge_n, 1, axis=1)  # (N, P, 2)
-        prof_n /= np.maximum(np.linalg.norm(prof_n, axis=-1, keepdims=True), 1e-10)
-
-        # Plane normal ("up" direction for cross-section height)
-        if plane_normal is None:
-            up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        else:
-            up = np.asarray(plane_normal, dtype=np.float32)
-            up = up / np.maximum(float(np.linalg.norm(up)), 1e-10)
-
-        # Central-difference tangents (3D), projected perpendicular to plane normal
-        tangents = np.empty((N, 3), dtype=np.float32)
-        tangents[0] = points[1] - points[0]
-        tangents[-1] = points[-1] - points[-2]
-        tangents[1:-1] = points[2:] - points[:-2]
-        tangents -= (tangents * up).sum(axis=1, keepdims=True) * up
-        t_len = np.linalg.norm(tangents, axis=1, keepdims=True)
-        tangents /= np.maximum(t_len, 1e-10)
-
-        # Binormals: tangent × up  (perpendicular to both, lies in the layer plane)
-        binormals = np.cross(tangents, up).astype(np.float32)  # (N, 3)
-        b_len = np.linalg.norm(binormals, axis=1, keepdims=True)
-        binormals /= np.maximum(b_len, 1e-10)
-
-        # Positions: (N, P, 3)
-        positions = (
-            points[:, np.newaxis, :]  # (N, 1, 3)
-            + pb[:, :, np.newaxis] * binormals[:, np.newaxis, :]  # (N, P, 3)
-            + pz[:, :, np.newaxis] * up  # (N, P, 3)
-        )
-
-        # Normals: (N, P, 3) — profile normals rotated into world frame
-        nb = prof_n[:, :, 0]  # (N, P) binormal component
-        nz = prof_n[:, :, 1]  # (N, P) z (plane-normal) component
-        normals = (
-            nb[:, :, np.newaxis] * binormals[:, np.newaxis, :]  # (N, P, 3)
-            + nz[:, :, np.newaxis] * up  # (N, P, 3)
-        )
-
-        # Step-major indices for draw_range reveal along path
-        i_range = np.arange(N - 1, dtype=np.uint32)
-        j_range = np.arange(P, dtype=np.uint32)
-        ig, jg = np.meshgrid(i_range, j_range, indexing="ij")
-        j1 = (jg + 1) % P
-        va = ig * P + jg
-        vb = ig * P + j1
-        vc = (ig + 1) * P + jg
-        vd = (ig + 1) * P + j1
-        # Two tris per quad: (va,vc,vb) and (vb,vc,vd)
-        tris = np.stack([va, vc, vb, vb, vc, vd], axis=-1)  # (N-1, P, 6)
-        indices = tris.reshape(-1).astype(np.uint32)
-
-        # Broadcast per-path-point colors to per-vertex (N, P, 3)
-        vertex_colors = None
-        if self._colors is not None:
-            c_arr = np.asarray(self._colors, dtype=np.float32)
-            if c_arr.ndim == 2 and c_arr.shape == (N, 3):
-                vertex_colors = np.broadcast_to(c_arr[:, None, :], (N, P, 3)).reshape(
-                    -1, 3
-                )
-
-        return {
-            "positions": positions.reshape(-1, 3),
-            "indices": indices,
-            "normals": normals.reshape(-1, 3),
-            "colors": vertex_colors,
-        }

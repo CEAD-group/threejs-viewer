@@ -666,6 +666,252 @@ class ViewerClient:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
+    def add_parametric_tube(
+        self,
+        id: str,
+        spine: np.ndarray,
+        widths: np.ndarray,
+        heights: np.ndarray,
+        orientations: Optional[np.ndarray] = None,
+        up_vector: Optional[list] = None,
+        colors: Optional[np.ndarray] = None,
+        color: int = 0x7AB8CC,
+        opacity: float = 1.0,
+        metalness: float = 0.1,
+        roughness: float = 0.8,
+        wireframe: bool = False,
+        parent: Optional[str] = None,
+        position: Optional[list] = None,
+        rotation: Optional[list] = None,
+        scale: Optional[list] = None,
+        matrix: Optional[list] = None,
+    ) -> None:
+        """Add a variable-cross-section extruded tube built from per-spine-point
+        parameters.
+
+        Geometry is built on the client from a packed bundle of parameter
+        arrays (spine + widths + heights + optional orientations + optional
+        colors) so the wire transfer stays O(N) instead of O(N * nCs). The
+        cross-section is a chamfered rectangle (45° chamfers, 6 vertices).
+
+        Args:
+            id: Unique identifier.
+            spine: (N, 3) float32 polyline, N >= 2.
+            widths: (N,) float32 bead widths (same units as spine).
+            heights: (N,) float32 bead heights.
+            orientations: Optional (N, 4) float32 quaternions (x, y, z, w).
+                Per-spine-point frame override for non-planar toolpaths.
+            up_vector: [x, y, z] constant up direction for frame derivation.
+                Defaults to [0, 0, 1] (Z-up). Ignored when orientations
+                are provided. The height axis always points as close to
+                this direction as possible.
+            colors: Optional (N,) uint32 packed 0x00RRGGBB per spine point.
+                Each ring is painted a single color. Use
+                ``update_parametric_tube_colors`` for cheap color-mode swaps.
+            color: Fallback color when ``colors`` is not provided.
+            opacity, metalness, roughness: Standard material properties.
+            parent: Optional parent group id.
+            position/rotation/scale/matrix: Optional local transform.
+        """
+
+        spine_arr = np.ascontiguousarray(spine, dtype=np.float32).reshape(-1, 3)
+        n = spine_arr.shape[0]
+        if n < 2:
+            raise ValueError(f"parametric_tube needs >= 2 spine points, got {n}")
+
+        widths_arr = np.ascontiguousarray(widths, dtype=np.float32).reshape(-1)
+        heights_arr = np.ascontiguousarray(heights, dtype=np.float32).reshape(-1)
+        if widths_arr.shape[0] != n or heights_arr.shape[0] != n:
+            raise ValueError(
+                f"widths/heights must have length {n}, got "
+                f"{widths_arr.shape[0]}/{heights_arr.shape[0]}"
+            )
+        if not np.all(np.isfinite(widths_arr)) or np.any(widths_arr < 0):
+            raise ValueError("widths must be finite and >= 0 at every spine point")
+        if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr < 0):
+            raise ValueError("heights must be finite and >= 0 at every spine point")
+
+        parts = [
+            spine_arr.tobytes(),
+            widths_arr.tobytes(),
+            heights_arr.tobytes(),
+        ]
+        has_orientations = orientations is not None
+        if has_orientations:
+            orient_arr = np.ascontiguousarray(orientations, dtype=np.float32).reshape(
+                -1, 4
+            )
+            if orient_arr.shape[0] != n:
+                raise ValueError(
+                    f"orientations must have length {n}, got {orient_arr.shape[0]}"
+                )
+            parts.append(orient_arr.tobytes())
+
+        has_colors = colors is not None
+        if has_colors:
+            color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
+            if color_arr.shape[0] != n:
+                raise ValueError(
+                    f"colors must have length {n}, got {color_arr.shape[0]}"
+                )
+            parts.append(color_arr.tobytes())
+
+        header = {
+            "type": "add_parametric_tube_binary",
+            "id": id,
+            "numSpinePoints": n,
+            "hasOrientations": has_orientations,
+            "hasColors": has_colors,
+            "color": color,
+            "opacity": opacity,
+            "metalness": metalness,
+            "roughness": roughness,
+            "wireframe": wireframe,
+        }
+        if up_vector is not None:
+            header["upVector"] = [
+                float(up_vector[0]),
+                float(up_vector[1]),
+                float(up_vector[2]),
+            ]
+        if parent:
+            header["parent"] = parent
+        if matrix:
+            header["transform"] = {"matrix": matrix}
+        elif position or rotation or scale:
+            transform = {}
+            if position:
+                transform["position"] = position
+            if rotation:
+                transform["rotation"] = rotation
+            if scale:
+                transform["scale"] = scale
+            header["transform"] = transform
+        self._send_binary(header, b"".join(parts))
+
+    def update_parametric_tube_colors(
+        self,
+        id: str,
+        colors: np.ndarray,
+    ) -> None:
+        """Swap the per-ring colors on an existing parametric_tube without
+        rebuilding its geometry. Typical use: interactive color-mode switching
+        in a toolpath preview (layer → feed rate → curvature → ...).
+
+        Args:
+            id: Target parametric_tube id.
+            colors: (N,) uint32 packed 0x00RRGGBB, one value per spine point.
+                Length must match the tube's spine length.
+        """
+        color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
+        header = {
+            "type": "update_parametric_tube_colors",
+            "id": id,
+            "numSpinePoints": int(color_arr.shape[0]),
+        }
+        self._send_binary(header, color_arr.tobytes())
+
+    def add_toolpath(self, id: str, toolpath, **kwargs) -> None:
+        """Add a Toolpath as one or more parametric tubes.
+
+        When the toolpath has zero-width travel segments, it is split into
+        separate extrusion segments — each rendered as its own parametric
+        tube with proper revolution end caps.  A single
+        ``set_draw_range(id, frac)`` on the group distributes the fraction
+        to the child segments automatically.
+
+        Args:
+            id: Unique object identifier.
+            toolpath: A :class:`Toolpath` instance.
+            **kwargs: Forwarded to :meth:`add_parametric_tube` (e.g.
+                ``roughness``, ``metalness``, ``opacity``, ``parent``).
+        """
+        if "colors" not in kwargs:
+            packed = toolpath.packed_colors
+            if packed is not None:
+                kwargs["colors"] = packed
+
+        widths = toolpath.widths
+        heights = toolpath.heights
+        has_travel = np.any((widths == 0) | (heights == 0))
+
+        if not has_travel:
+            # Single continuous extrusion — simple path
+            self.add_parametric_tube(
+                id,
+                spine=toolpath.points,
+                widths=widths,
+                heights=heights,
+                **kwargs,
+            )
+            return
+
+        # Find contiguous extrusion segments (runs where w>0 and h>0)
+        extruding = (widths > 0) & (heights > 0)
+        segments = []
+        in_seg = False
+        seg_start = 0
+        for i in range(len(extruding)):
+            if extruding[i] and not in_seg:
+                seg_start = i
+                in_seg = True
+            elif not extruding[i] and in_seg:
+                segments.append((seg_start, i))  # exclusive end
+                in_seg = False
+        if in_seg:
+            segments.append((seg_start, len(extruding)))
+
+        if not segments:
+            return
+
+        if len(segments) == 1:
+            s, e = segments[0]
+            colors = kwargs.pop("colors", None)
+            seg_colors = colors[s:e] if colors is not None else None
+            self.add_parametric_tube(
+                id,
+                spine=toolpath.points[s:e],
+                widths=widths[s:e],
+                heights=heights[s:e],
+                **({"colors": seg_colors} if seg_colors is not None else {}),
+                **kwargs,
+            )
+            return
+
+        # Multiple segments — create group + child tubes
+        parent = kwargs.pop("parent", None)
+        self.add_group(id, parent=parent)
+        colors = kwargs.pop("colors", None)
+
+        n_total = len(toolpath)
+        seg_ids = []
+        seg_ranges = []  # (start_frac, end_frac) in [0,1] over total spine
+
+        for i, (s, e) in enumerate(segments):
+            seg_id = f"{id}_seg_{i}"
+            seg_ids.append(seg_id)
+            seg_ranges.append([s / n_total, (e - 1) / n_total])
+            seg_colors = colors[s:e] if colors is not None else None
+            self.add_parametric_tube(
+                seg_id,
+                spine=toolpath.points[s:e],
+                widths=widths[s:e],
+                heights=heights[s:e],
+                parent=id,
+                **({"colors": seg_colors} if seg_colors is not None else {}),
+                **kwargs,
+            )
+
+        # Tell the viewer this group is a toolpath with segment mapping
+        self._send(
+            {
+                "type": "register_toolpath_group",
+                "id": id,
+                "segmentIds": seg_ids,
+                "segmentRanges": seg_ranges,
+            }
+        )
+
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
     ) -> np.ndarray:
