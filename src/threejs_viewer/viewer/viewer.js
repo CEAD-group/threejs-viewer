@@ -506,11 +506,13 @@ function buildParametricTubeGeometry(
         }
     }
 
-    // --- Dome cap vertices ---
-    // Helper: build dome cap positions for a given spine point.
-    // capBase = first vertex index of the cap rings in the positions array.
-    // poleIdx = vertex index of the pole.
-    // tangentSign = -1 for start cap (dome extends in -T), +1 for end cap.
+    // --- Revolution cap vertices ---
+    // The cap is a surface of revolution: the flat cross-section face is
+    // revolved around the V (height) axis. Each vertex at (u, v) sweeps
+    // through angle θ: U_component = u*cos(θ), T_offset = |u|*sin(θ),
+    // V_component = v (unchanged). In top view this gives a perfect
+    // semicircle of radius hw extending along the tangent direction.
+    // tangentSign = -1 for start cap (extends in -T), +1 for end cap.
     function buildDomeCap(spineIdx, capBaseVert, poleVertIdx, tangentSign) {
         const sx = spine[spineIdx * 3], sy = spine[spineIdx * 3 + 1], sz = spine[spineIdx * 3 + 2];
         const w = widths[spineIdx], h = heights[spineIdx];
@@ -518,23 +520,26 @@ function buildParametricTubeGeometry(
         const vx = localFrames[spineIdx * 6 + 3], vy = localFrames[spineIdx * 6 + 4], vz = localFrames[spineIdx * 6 + 5];
         // Tangent = U × V
         const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
-        const capDepth = Math.min(w, h) * 0.5;
+        // Sample cross-section once at full width/height
+        sampleRoundedRectInto(section, nCs, w, h, cornerRadiusFrac);
         for (let k = 0; k < nCapRings; k++) {
             const theta = capAngles[k];
-            const s = Math.cos(theta);
-            const d = Math.sin(theta) * capDepth * tangentSign;
-            sampleRoundedRectInto(section, nCs, w * s, h * s, cornerRadiusFrac);
+            const cosT = Math.cos(theta);
+            const sinT = Math.sin(theta) * tangentSign;
             const ringBase = (capBaseVert + k * nCs) * 3;
             for (let j = 0; j < nCs; j++) {
                 const cu = section[j * 2], cv = section[j * 2 + 1];
-                positions[ringBase + j * 3]     = sx + d * tx + cu * ux + cv * vx;
-                positions[ringBase + j * 3 + 1] = sy + d * ty + cu * uy + cv * vy;
-                positions[ringBase + j * 3 + 2] = sz + d * tz + cu * uz + cv * vz;
+                const tOff = Math.abs(cu) * sinT;
+                positions[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
+                positions[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
+                positions[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
             }
         }
-        positions[poleVertIdx * 3]     = sx + capDepth * tangentSign * tx;
-        positions[poleVertIdx * 3 + 1] = sy + capDepth * tangentSign * ty;
-        positions[poleVertIdx * 3 + 2] = sz + capDepth * tangentSign * tz;
+        // Pole at the tip of the semicircle: spine + hw * tangentSign * T
+        const hw = w * 0.5;
+        positions[poleVertIdx * 3]     = sx + hw * tangentSign * tx;
+        positions[poleVertIdx * 3 + 1] = sy + hw * tangentSign * ty;
+        positions[poleVertIdx * 3 + 2] = sz + hw * tangentSign * tz;
     }
     buildDomeCap(0, startCapBase, startPoleIdx, -1);
     buildDomeCap(nSpine - 1, endCapBase, endPoleIdx, +1);
@@ -793,7 +798,7 @@ function morphFrontierRing(obj, fracRingPairs) {
     return completePairs + 1;
 }
 
-// Update the end cap dome vertices to match the last visible ring (the frontier).
+// Update the end cap revolution surface to match the last visible ring.
 // Uses morphed spine/frame/width/height stored by morphFrontierRing, or reads
 // original data for un-morphed rings.
 function updateEndCap(obj, lastVisibleRing) {
@@ -808,14 +813,12 @@ function updateEndCap(obj, lastVisibleRing) {
     // Determine spine pos, width, height, frame at the frontier ring
     let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz;
     if (md.morphedState) {
-        // morphFrontierRing stored the lerped state
         const ms = md.morphedState;
         sx = ms.sx; sy = ms.sy; sz = ms.sz;
         w = ms.w; h = ms.h;
         ux = ms.ux; uy = ms.uy; uz = ms.uz;
         vx = ms.vx; vy = ms.vy; vz = ms.vz;
     } else {
-        // Un-morphed: use original data for the visible ring
         const i = lastVisibleRing;
         sx = md.spine[i * 3]; sy = md.spine[i * 3 + 1]; sz = md.spine[i * 3 + 2];
         w = md.widths[i]; h = md.heights[i];
@@ -824,28 +827,31 @@ function updateEndCap(obj, lastVisibleRing) {
     }
     // Tangent = U × V
     const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
-    const capDepth = Math.min(w, h) * 0.5;
 
-    // Build dome cap ring positions
+    // Sample cross-section once at full width/height
+    sampleRoundedRectInto(md.section, nCs, w, h, md.cornerRadiusFrac);
+
+    // Revolution: each vertex at (cu, cv) sweeps around V axis
     const ecBase = ud.tubeEndCapBase;
     for (let k = 0; k < nCapRings; k++) {
         const theta = md.capAngles[k];
-        const s = Math.cos(theta);
-        const d = Math.sin(theta) * capDepth;
-        sampleRoundedRectInto(md.section, nCs, w * s, h * s, md.cornerRadiusFrac);
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
         const ringBase = (ecBase + k * nCs) * 3;
         for (let j = 0; j < nCs; j++) {
             const cu = md.section[j * 2], cv = md.section[j * 2 + 1];
-            pos[ringBase + j * 3]     = sx + d * tx + cu * ux + cv * vx;
-            pos[ringBase + j * 3 + 1] = sy + d * ty + cu * uy + cv * vy;
-            pos[ringBase + j * 3 + 2] = sz + d * tz + cu * uz + cv * vz;
+            const tOff = Math.abs(cu) * sinT;
+            pos[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
+            pos[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
+            pos[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
         }
     }
-    // Pole
+    // Pole at tip of semicircle: spine + hw * T
+    const hw = w * 0.5;
     const poleIdx = ud.tubeEndPoleIdx;
-    pos[poleIdx * 3]     = sx + capDepth * tx;
-    pos[poleIdx * 3 + 1] = sy + capDepth * ty;
-    pos[poleIdx * 3 + 2] = sz + capDepth * tz;
+    pos[poleIdx * 3]     = sx + hw * tx;
+    pos[poleIdx * 3 + 1] = sy + hw * ty;
+    pos[poleIdx * 3 + 2] = sz + hw * tz;
     posAttr.needsUpdate = true;
 
     // Update end cap colors if applicable
@@ -2879,7 +2885,7 @@ export class ThreeJSViewer {
                                 }
                                 const nCs = data.nCrossSectionVerts || 8;
                                 const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, nCapRings, capIndicesPerCap, endCapBase, endPoleIdx, endCapPattern } = buildParametricTubeGeometry(
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endPoleIdx, endCapPattern } = buildParametricTubeGeometry(
                                     spine, widths, heights,
                                     orientations, data.upVector || null, ringColors,
                                     data.crossSection || 'rounded_rect',

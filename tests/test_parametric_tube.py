@@ -188,8 +188,8 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     # Spine along +X. Frame derives width=+Y, height=+Z. Sharp rectangle
     # of 0.4 x 0.2 sampled at 8 angles: outermost samples land on the
     # flat edges so the bounding box matches the parameter values.
-    # Dome caps extend min(w,h)/2 = 0.1 beyond each spine endpoint
-    assert abs(info["bbLength"] - 2.2) < 0.05, info
+    # Revolution caps extend hw = w/2 = 0.2 beyond each spine endpoint
+    assert abs(info["bbLength"] - 2.4) < 0.05, info
     assert abs(info["bbWidth"] - 0.4) < 0.05, info
     assert abs(info["bbHeight"] - 0.2) < 0.05, info
 
