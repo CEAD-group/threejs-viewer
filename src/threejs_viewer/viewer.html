@@ -649,7 +649,9 @@ function makeChannelApply(viewer) {
                 if (interp) {
                     value = value * (1 - t) + ch.data[baseNext + i] * t;
                 }
-                if (obj.userData.isPolyline) {
+                if (obj.userData.isToolpathGroup) {
+                    applyToolpathGroupDrawRange(obj, value, viewer._objects);
+                } else if (obj.userData.isPolyline) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
                 } else if (obj.userData.isParametricTube) {
                     applyParametricTubeDrawRange(obj, value);
@@ -755,11 +757,15 @@ const PRIMITIVES = {
 // When w == h: diamond — two vertex pairs coincide, giving 4 unique corners.
 const N_CROSS_SECTION = 6;
 function sampleChamferedRect(out, width, height) {
-    if (!Number.isFinite(width) || width <= 0) {
-        throw new Error(`parametric_tube width must be finite and > 0, got ${width}`);
+    if (!Number.isFinite(width) || width < 0) {
+        throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
     }
-    if (!Number.isFinite(height) || height <= 0) {
-        throw new Error(`parametric_tube height must be finite and > 0, got ${height}`);
+    if (!Number.isFinite(height) || height < 0) {
+        throw new Error(`parametric_tube height must be finite and >= 0, got ${height}`);
+    }
+    if (width === 0 || height === 0) {
+        for (let i = 0; i < N_CROSS_SECTION * 2; i++) out[i] = 0;
+        return;
     }
     const hw = width * 0.5;
     const hh = height * 0.5;
@@ -1321,6 +1327,34 @@ function applyParametricTubeDrawRange(obj, value) {
     relocateEndCap(obj, visiblePairs);
     // start_cap + ring_pairs + end_cap (end cap now sits right after visible pairs)
     obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
+}
+
+/**
+ * Distribute a [0,1] draw_range fraction to children of a toolpath group.
+ * Each child segment knows its (start, end) position in the overall toolpath.
+ * Segments fully before the current position get 1.0, the active segment gets
+ * a proportional fraction, and segments after get 0.0.
+ */
+function applyToolpathGroupDrawRange(grp, value, objects) {
+    const segIds = grp.userData.toolpathSegmentIds;
+    const segRanges = grp.userData.toolpathSegmentRanges;
+    const clamped = Math.max(0, Math.min(1, value));
+    for (let i = 0; i < segIds.length; i++) {
+        const [sStart, sEnd] = segRanges[i];
+        const span = sEnd - sStart;
+        let segFrac;
+        if (clamped >= sEnd) {
+            segFrac = 1.0;
+        } else if (clamped <= sStart || span < 1e-10) {
+            segFrac = 0.0;
+        } else {
+            segFrac = (clamped - sStart) / span;
+        }
+        const child = objects.get(segIds[i]);
+        if (child && child.userData.isParametricTube) {
+            applyParametricTubeDrawRange(child, segFrac);
+        }
+    }
 }
 
 class ThreeJSViewer {
@@ -2078,7 +2112,9 @@ class ThreeJSViewer {
     _setDrawRange(id, value) {
         const obj = this._objects.get(id);
         if (!obj) return;
-        if (obj.userData.isPolyline) {
+        if (obj.userData.isToolpathGroup) {
+            applyToolpathGroupDrawRange(obj, value, this._objects);
+        } else if (obj.userData.isPolyline) {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
         } else if (obj.userData.isParametricTube) {
             applyParametricTubeDrawRange(obj, value);
@@ -2174,8 +2210,15 @@ class ThreeJSViewer {
         }
 
         if (this._animation.frames.length >= 2) {
-            const dt = this._animation.frames[1].time - this._animation.frames[0].time;
-            this._animation.uniformDt = dt > 0 ? dt : 0;
+            const dt0 = this._animation.frames[1].time - this._animation.frames[0].time;
+            let uniform = dt0 > 0;
+            if (uniform) {
+                for (let i = 2; i < this._animation.frames.length; i++) {
+                    const dt = this._animation.frames[i].time - this._animation.frames[i - 1].time;
+                    if (Math.abs(dt - dt0) > dt0 * 1e-3) { uniform = false; break; }
+                }
+            }
+            this._animation.uniformDt = uniform ? dt0 : 0;
         }
 
         this._baselineVisibility.clear();
@@ -2515,17 +2558,16 @@ class ThreeJSViewer {
             if (idx >= lastIdx) return { index: lastIdx, t: 0 };
             return { index: idx, t: raw - idx };
         }
-        for (let i = lastIdx; i >= 0; i--) {
-            if (frames[i].time <= time) {
-                if (i >= lastIdx) return { index: lastIdx, t: 0 };
-                const dt = frames[i + 1].time - frames[i].time;
-                return {
-                    index: i,
-                    t: dt > 0 ? (time - frames[i].time) / dt : 0,
-                };
-            }
+        // Binary search for the floor keyframe.
+        let lo = 0, hi = lastIdx;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >>> 1;
+            if (frames[mid].time <= time) lo = mid;
+            else hi = mid - 1;
         }
-        return { index: 0, t: 0 };
+        if (lo >= lastIdx) return { index: lastIdx, t: 0 };
+        const dt = frames[lo + 1].time - frames[lo].time;
+        return { index: lo, t: dt > 0 ? (time - frames[lo].time) / dt : 0 };
     }
 
     _updateAnimationUI() {
@@ -3405,6 +3447,15 @@ class ThreeJSViewer {
                                 this._onFetchEnd();
                             }
                         })();
+                        break;
+                    }
+                    case 'register_toolpath_group': {
+                        const grp = this._objects.get(data.id);
+                        if (grp) {
+                            grp.userData.isToolpathGroup = true;
+                            grp.userData.toolpathSegmentIds = data.segmentIds;
+                            grp.userData.toolpathSegmentRanges = data.segmentRanges;
+                        }
                         break;
                     }
                     case 'stop_animation':

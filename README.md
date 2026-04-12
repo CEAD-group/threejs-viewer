@@ -67,10 +67,10 @@ v.add_model_binary("robot", "robot.stl", format="stl")
 # Polylines with colormaps
 v.add_polyline("path", points, colors=z_values, colormap="viridis", line_width=3)
 
-# Bead mesh (extruded toolpath)
+# Bead toolpath (parametric tube, built client-side)
 tp = Toolpath.from_points(points, bead_width=0.3, bead_height=0.08)
 tp.colorize(per_point_rgb)
-v.add_mesh("bead", **tp.to_mesh())
+v.add_toolpath("bead", tp)
 
 # Transparency
 v.set_opacity("box1", 0.5)

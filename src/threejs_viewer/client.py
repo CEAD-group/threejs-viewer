@@ -726,10 +726,10 @@ class ViewerClient:
                 f"widths/heights must have length {n}, got "
                 f"{widths_arr.shape[0]}/{heights_arr.shape[0]}"
             )
-        if not np.all(np.isfinite(widths_arr)) or np.any(widths_arr <= 0):
-            raise ValueError("widths must be finite and > 0 at every spine point")
-        if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr <= 0):
-            raise ValueError("heights must be finite and > 0 at every spine point")
+        if not np.all(np.isfinite(widths_arr)) or np.any(widths_arr < 0):
+            raise ValueError("widths must be finite and >= 0 at every spine point")
+        if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr < 0):
+            raise ValueError("heights must be finite and >= 0 at every spine point")
 
         parts = [
             spine_arr.tobytes(),
@@ -810,6 +810,107 @@ class ViewerClient:
             "numSpinePoints": int(color_arr.shape[0]),
         }
         self._send_binary(header, color_arr.tobytes())
+
+    def add_toolpath(self, id: str, toolpath, **kwargs) -> None:
+        """Add a Toolpath as one or more parametric tubes.
+
+        When the toolpath has zero-width travel segments, it is split into
+        separate extrusion segments — each rendered as its own parametric
+        tube with proper revolution end caps.  A single
+        ``set_draw_range(id, frac)`` on the group distributes the fraction
+        to the child segments automatically.
+
+        Args:
+            id: Unique object identifier.
+            toolpath: A :class:`Toolpath` instance.
+            **kwargs: Forwarded to :meth:`add_parametric_tube` (e.g.
+                ``roughness``, ``metalness``, ``opacity``, ``parent``).
+        """
+        if "colors" not in kwargs:
+            packed = toolpath.packed_colors
+            if packed is not None:
+                kwargs["colors"] = packed
+
+        widths = toolpath.widths
+        heights = toolpath.heights
+        has_travel = np.any((widths == 0) | (heights == 0))
+
+        if not has_travel:
+            # Single continuous extrusion — simple path
+            self.add_parametric_tube(
+                id,
+                spine=toolpath.points,
+                widths=widths,
+                heights=heights,
+                **kwargs,
+            )
+            return
+
+        # Find contiguous extrusion segments (runs where w>0 and h>0)
+        extruding = (widths > 0) & (heights > 0)
+        segments = []
+        in_seg = False
+        seg_start = 0
+        for i in range(len(extruding)):
+            if extruding[i] and not in_seg:
+                seg_start = i
+                in_seg = True
+            elif not extruding[i] and in_seg:
+                segments.append((seg_start, i))  # exclusive end
+                in_seg = False
+        if in_seg:
+            segments.append((seg_start, len(extruding)))
+
+        if not segments:
+            return
+
+        if len(segments) == 1:
+            s, e = segments[0]
+            colors = kwargs.pop("colors", None)
+            seg_colors = colors[s:e] if colors is not None else None
+            self.add_parametric_tube(
+                id,
+                spine=toolpath.points[s:e],
+                widths=widths[s:e],
+                heights=heights[s:e],
+                **({"colors": seg_colors} if seg_colors is not None else {}),
+                **kwargs,
+            )
+            return
+
+        # Multiple segments — create group + child tubes
+        parent = kwargs.pop("parent", None)
+        self.add_group(id, parent=parent)
+        colors = kwargs.pop("colors", None)
+
+        n_total = len(toolpath)
+        seg_ids = []
+        seg_ranges = []  # (start_frac, end_frac) in [0,1] over total spine
+
+        for i, (s, e) in enumerate(segments):
+            seg_id = f"{id}_seg_{i}"
+            seg_ids.append(seg_id)
+            seg_ranges.append([s / n_total, (e - 1) / n_total])
+            seg_colors = colors[s:e] if colors is not None else None
+            self.add_parametric_tube(
+                seg_id,
+                spine=toolpath.points[s:e],
+                widths=widths[s:e],
+                heights=heights[s:e],
+                parent=id,
+                **({"colors": seg_colors} if seg_colors is not None else {}),
+                **kwargs,
+            )
+
+        # Tell the viewer this group is a toolpath with segment mapping
+        self._send(
+            {
+                "type": "register_toolpath_group",
+                "id": id,
+                "segmentIds": seg_ids,
+                "segmentRanges": seg_ranges,
+            }
+        )
 
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float

@@ -59,8 +59,8 @@ spine, t = make_spiral()
 n = len(spine)
 
 # Width modulates along the path so the effect is visible at a glance.
-widths = 0.06 + 0.05 * np.sin(t * math.pi * 8) + 0.015 * np.cos(t * math.pi * 24)
-heights = 0.03 + 0.02 * np.sin(t * math.pi * 12)
+widths = 0.26 + 0.25 * np.sin(t * math.pi * 8) + 0.015 * np.cos(t * math.pi * 24)
+heights = 0.13 + 0.12 * np.sin(t * math.pi * 12)
 widths = np.maximum(widths, 1e-3).astype(np.float32)
 heights = np.maximum(heights, 1e-3).astype(np.float32)
 
@@ -78,16 +78,6 @@ v.add_parametric_tube(
     colors=layer_colors,
 )
 
-# --- Nozzle indicator: a group that rides the animation, with a capsule
-# child that visually represents the bead being deposited right now. ---
-v.add_group("nozzle")
-v.add_capsule(
-    "nozzle_tip",
-    radius=0.035,
-    length=0.05,
-    color=0xFF4400,
-    parent="nozzle",
-)
 
 # --- Animation: reveal the tube with draw_range while the nozzle group
 # follows the spine tip. ---

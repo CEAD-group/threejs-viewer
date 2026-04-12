@@ -2,7 +2,12 @@
 Toolpath Visualization — draw_range + Bead demo
 
 Generates a spiral vase toolpath with animated draw_range and a nozzle
-following the tip.
+following the tip.  Uses ``add_toolpath`` which renders the bead as a
+parametric tube (client-side geometry, smooth frontier morphing).
+
+The animation uses one keyframe per spine point with linear interpolation,
+so even a 10k-point toolpath plays back smoothly at 60 fps without
+pre-computing hundreds of thousands of frames.
 
 Run: uv run python examples/11_toolpath.py
 """
@@ -15,14 +20,14 @@ from threejs_viewer import Animation, Toolpath, viewer
 
 
 def spiral_vase(
-    n_points=400000,
-    n_turns=80,
-    radius=2.0,
-    height=5.0,
-    lumps=18,
-    bump=0.35,
+    n_points=30000,
+    n_turns=180,
+    radius=4.0,
+    height=9.0,
+    lumps=7,
+    bump=0.05,
     steep=3.5,
-    twist=1.2,
+    twist=0.2,
 ):
     """Generate a lumpy asymmetric spiral vase toolpath.
 
@@ -62,18 +67,16 @@ v.add_box(
     "ground", width=8, height=8, depth=0.02, color=0x333333, position=[0, 0, -0.01]
 )
 
-# Generate toolpath and wrap in Toolpath for animation + coloring
-duration = 3600.0
-fps = 60
-n_frames = int(duration * fps)
+# Generate toolpath
+duration = 600.0
 
 tp = Toolpath.from_points(
     spiral_vase(), bead_width=0.3, bead_height=0.08, duration=duration
 )
 
-# Bead (extruded bevelled rectangle cross-section)
+# Bead (parametric tube — chamfered hex cross-section, built client-side)
 tp.colorize("viridis")
-v.add_mesh("path_tube", **tp.to_mesh(), roughness=0.4, metalness=0.15)
+v.add_toolpath("path_tube", tp, roughness=0.4, metalness=0.15)
 
 # Nozzle: tapered cylinder hovering above the path tip
 nozzle_height = 0.8
@@ -88,31 +91,24 @@ v.add_cylinder(
     metalness=0.8,
 )
 
-# Animate draw_range + nozzle position (vectorized)
-print(f"Pre-computing {n_frames} frames...")
+# One keyframe per spine point — linear interpolation handles 60 fps smoothly
+n_frames = len(tp)
+frame_times = tp.times
+draw_fracs = np.linspace(0.0, 1.0, n_frames, dtype=np.float32)
 
-frame_times, draw_fracs = tp.frame_times(n_frames)
-
-# Path indices for each frame's nozzle position
-pt_indices = np.clip((draw_fracs * (len(tp) - 1)).astype(int), 0, len(tp) - 1)
-tips = tp.points[pt_indices]  # (n_frames, 3)
-
-# Object order: path_tube, nozzle
-transforms = np.zeros((n_frames, 2, 16), dtype=np.float32)
-
-# path_tube: identity matrix
-transforms[:, 0, [0, 5, 10, 15]] = 1.0
-
-# Nozzle: Rot(+90° about X) so Y-up cylinder stands vertically, + per-frame translation
-# Rx(+90°) column-major: [1,0,0,0, 0,0,1,0, 0,-1,0,0, x,y,z,1]
+# Nozzle transforms: Rot(+90 about X) so Y-up cylinder stands vertically
+tips = tp.points
 nz_z = tips[:, 2] + nozzle_height / 2 + nozzle_gap
 rx90 = np.array([1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1], dtype=np.float32)
+
+transforms = np.zeros((n_frames, 2, 16), dtype=np.float32)
+transforms[:, 0, [0, 5, 10, 15]] = 1.0  # path_tube: identity
 transforms[:, 1] = rx90
 transforms[:, 1, 12] = tips[:, 0]
 transforms[:, 1, 13] = tips[:, 1]
 transforms[:, 1, 14] = nz_z
 
-# Build animation — fully binary, no Python loop
+# Build animation — fully binary, linear interpolation fills in 60 fps
 animation = Animation(loop=True, camera_follow="nozzle")
 animation.set_frame_times(frame_times)
 animation.set_transform_data(["path_tube", "nozzle"], transforms)
@@ -124,8 +120,8 @@ animation.add_marker(duration * 0.99, "Done", color=0xFF0000)
 
 v.load_animation(animation)
 
-print(f"Toolpath: {len(tp)} points, {animation.n_frames} frames at {fps} fps")
-print("Bead + nozzle — grows via draw_range animation.")
+print(f"Toolpath: {len(tp)} points/keyframes, {duration:.0f}s duration")
+print("Bead + nozzle — linear interpolation gives smooth 60 fps playback.")
 print("Waiting for browser to finish loading assets...")
 v.wait_for_assets()
 print("Assets loaded — server closed.")

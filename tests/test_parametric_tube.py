@@ -57,13 +57,14 @@ def test_add_parametric_tube_validates_colors_length():
         c.add_parametric_tube("t", spine, widths, heights, colors=colors)
 
 
-def test_add_parametric_tube_validates_widths_positive():
+def test_add_parametric_tube_validates_widths_non_negative():
     from threejs_viewer import ViewerClient
 
     c = ViewerClient(port=0, open_browser=False)
     spine = np.zeros((4, 3), dtype=np.float32)
     spine[:, 0] = [0, 1, 2, 3]
-    widths = np.array([1.0, 0.0, 1.0, 1.0], dtype=np.float32)
+    # Zero is allowed (travel/cap), negative is not
+    widths = np.array([1.0, -0.1, 1.0, 1.0], dtype=np.float32)
     heights = np.ones(4, dtype=np.float32)
     with pytest.raises(ValueError, match="widths"):
         c.add_parametric_tube("t", spine, widths, heights)
