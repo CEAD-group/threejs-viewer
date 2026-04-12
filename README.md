@@ -15,7 +15,7 @@ A Python client runs a WebSocket server that a browser-based Three.js viewer con
 - **GLB/PBR support**: Load GLB models with PBR materials, embedded skeletal/morph animations
 - **Animation support**: Pre-compute animations, scrub timeline, adjust playback speed
 - **Binary channels**: Efficient transfer of large animations (100k+ objects × frames)
-- **Bead meshes**: Extruded toolpath visualization with per-layer colors and draw_range animation
+- **Toolpath visualization**: Extruded bead tubes with per-point colors, draw_range animation, and automatic LOD — handles 1M+ point toolpaths at 60 fps with smooth camera-distance-adaptive simplification via Web Worker
 - **Auto-reconnect**: Browser reconnects automatically, animations persist
 - **Z-up coordinates**: Robotics convention (matches ROS, URDF)
 - **No build step**: Self-contained HTML viewer, just open in browser
