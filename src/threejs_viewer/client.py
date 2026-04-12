@@ -673,6 +673,7 @@ class ViewerClient:
         widths: np.ndarray,
         heights: np.ndarray,
         orientations: Optional[np.ndarray] = None,
+        up_vector: Optional[list] = None,
         colors: Optional[np.ndarray] = None,
         cross_section: str = "rounded_rect",
         corner_radius_frac: float = 0.25,
@@ -703,8 +704,11 @@ class ViewerClient:
             widths: (N,) float32 bead widths (same units as spine).
             heights: (N,) float32 bead heights.
             orientations: Optional (N, 4) float32 quaternions (x, y, z, w).
-                When omitted, the client derives torsion-free tangent frames
-                from the spine using parallel transport seeded from global Z.
+                Per-spine-point frame override for non-planar toolpaths.
+            up_vector: [x, y, z] constant up direction for frame derivation.
+                Defaults to [0, 0, 1] (Z-up). Ignored when orientations
+                are provided. The height axis always points as close to
+                this direction as possible.
             colors: Optional (N,) uint32 packed 0x00RRGGBB per spine point.
                 Each ring is painted a single color. Use
                 ``update_parametric_tube_colors`` for cheap color-mode swaps.
@@ -789,6 +793,12 @@ class ViewerClient:
             "roughness": roughness,
             "wireframe": wireframe,
         }
+        if up_vector is not None:
+            header["upVector"] = [
+                float(up_vector[0]),
+                float(up_vector[1]),
+                float(up_vector[2]),
+            ]
         if parent:
             header["parent"] = parent
         if matrix:

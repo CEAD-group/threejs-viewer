@@ -369,7 +369,8 @@ function sampleRoundedRectInto(out, nVerts, width, height, cornerRadiusFrac) {
 // - spine:        Float32Array length nSpine*3
 // - widths:       Float32Array length nSpine
 // - heights:      Float32Array length nSpine
-// - orientations: Float32Array length nSpine*4 quaternions, or null (client-derived)
+// - orientations: Float32Array length nSpine*4 quaternions, or null (constant-up derived)
+// - upVector:     [x, y, z] up direction for constant-up frame (default [0,0,1])
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
 // - crossSection: "rounded_rect"
 // - cornerRadiusFrac: number in [0, 0.5]
@@ -378,7 +379,7 @@ function sampleRoundedRectInto(out, nVerts, width, height, cornerRadiusFrac) {
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
 function buildParametricTubeGeometry(
     spine, widths, heights,
-    orientations, ringColors,
+    orientations, upVector, ringColors,
     crossSection, cornerRadiusFrac, nCs,
 ) {
     if (crossSection !== 'rounded_rect') {
@@ -421,11 +422,17 @@ function buildParametricTubeGeometry(
     const _T = new THREE.Vector3();
     const _U = new THREE.Vector3();
     const _V = new THREE.Vector3();
-    const _prevT = new THREE.Vector3();
-    const _axis = new THREE.Vector3();
     const _quat = new THREE.Quaternion();
-    const up = new THREE.Vector3(0, 0, 1);
-    const upFallback = new THREE.Vector3(1, 0, 0);
+    // Constant-up direction: project onto plane perpendicular to tangent at each point.
+    const up = new THREE.Vector3(
+        upVector ? upVector[0] : 0,
+        upVector ? upVector[1] : 0,
+        upVector ? upVector[2] : 1,
+    ).normalize();
+    // Fallback when tangent is parallel to up.
+    const upFallback = new THREE.Vector3();
+    if (Math.abs(up.x) < 0.9) upFallback.set(1, 0, 0);
+    else upFallback.set(0, 1, 0);
 
     // Precompute tangents via central difference.
     const tangents = new Float32Array(nSpine * 3);
@@ -454,28 +461,13 @@ function buildParametricTubeGeometry(
             );
             _U.set(1, 0, 0).applyQuaternion(_quat);
             _V.set(0, 1, 0).applyQuaternion(_quat);
-        } else if (i === 0) {
+        } else {
+            // Constant-up: project up vector onto plane perpendicular to tangent.
             const seed = Math.abs(_T.dot(up)) > 0.99 ? upFallback : up;
             _V.copy(seed).addScaledVector(_T, -seed.dot(_T)).normalize();
             _U.copy(_V).cross(_T).normalize();
             _V.copy(_T).cross(_U).normalize();
-        } else {
-            // Parallel-transport previous U/V across the tangent rotation.
-            _axis.copy(_prevT).cross(_T);
-            const sinA = _axis.length();
-            const cosA = _prevT.dot(_T);
-            if (sinA > 1e-9) {
-                _axis.divideScalar(sinA);
-                const angle = Math.atan2(sinA, cosA);
-                _quat.setFromAxisAngle(_axis, angle);
-                _U.applyQuaternion(_quat).normalize();
-                _V.applyQuaternion(_quat).normalize();
-            }
-            // Orthonormalize against current tangent to prevent drift.
-            _U.addScaledVector(_T, -_U.dot(_T)).normalize();
-            _V.copy(_T).cross(_U).normalize();
         }
-        _prevT.copy(_T);
         localFrames[i * 6]     = _U.x; localFrames[i * 6 + 1] = _U.y; localFrames[i * 6 + 2] = _U.z;
         localFrames[i * 6 + 3] = _V.x; localFrames[i * 6 + 4] = _V.y; localFrames[i * 6 + 5] = _V.z;
 
@@ -2814,7 +2806,7 @@ export class ThreeJSViewer {
                                 const cornerRadiusFrac = data.cornerRadiusFrac != null ? data.cornerRadiusFrac : 0.25;
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, capIndicesPerCap, endCapCenterIdx, endCapRingBase, endCapPattern } = buildParametricTubeGeometry(
                                     spine, widths, heights,
-                                    orientations, ringColors,
+                                    orientations, data.upVector || null, ringColors,
                                     data.crossSection || 'rounded_rect',
                                     cornerRadiusFrac,
                                     nCs,
