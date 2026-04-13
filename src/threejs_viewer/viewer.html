@@ -2294,6 +2294,7 @@ class ThreeJSViewer {
                         out[(startCapBase + j) * 3]     = redRc[0]; out[(startCapBase + j) * 3 + 1] = redRc[1]; out[(startCapBase + j) * 3 + 2] = redRc[2];
                         out[(endCapBase + j) * 3]       = redRc[lr]; out[(endCapBase + j) * 3 + 1] = redRc[lr + 1]; out[(endCapBase + j) * 3 + 2] = redRc[lr + 2];
                     }
+                    colAttr.clearUpdateRanges();
                     colAttr.needsUpdate = true;
                 }
                 if (md) md.ringColors = redRc;
@@ -4316,6 +4317,7 @@ class ThreeJSViewer {
                                         expandRingColors(redPacked, n, nCs, existing.array);
                                         fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
                                         fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                        existing.clearUpdateRanges();
                                         existing.needsUpdate = true;
                                     } else {
                                         const allColors = new Float32Array(posCount * 3);
@@ -4359,6 +4361,7 @@ class ThreeJSViewer {
                                         expandRingColors(packed, n, nCs, existing.array);
                                         fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
                                         fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                        existing.clearUpdateRanges();
                                         existing.needsUpdate = true;
                                     } else {
                                         const allColors = new Float32Array(posCount * 3);
