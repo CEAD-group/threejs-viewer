@@ -1818,8 +1818,8 @@ export class ThreeJSViewer {
                 // Update morph data ring colors
                 const md = obj.userData.tubeMorphData;
                 if (md) {
+                    restoreFrontierRing(obj);
                     md.ringColors = redRc;
-                    md.savedRingIndex = null;
                 }
             }
         };
@@ -3851,8 +3851,10 @@ export class ThreeJSViewer {
                                     obj.userData.tubeHasColors = true;
                                     const md = obj.userData.tubeMorphData;
                                     if (md) {
+                                        // Restore morphed frontier ring before updating colors,
+                                        // otherwise the next morph saves wrong positions as "original".
+                                        restoreFrontierRing(obj);
                                         md.ringColors = redRc;
-                                        md.savedRingIndex = null;
                                     }
                                 } else {
                                     // No LOD active — original path
@@ -3894,8 +3896,8 @@ export class ThreeJSViewer {
                                     obj.userData.tubeHasColors = true;
                                     const md = obj.userData.tubeMorphData;
                                     if (md) {
+                                        restoreFrontierRing(obj);
                                         md.ringColors = rc;
-                                        md.savedRingIndex = null;
                                     }
                                 }
                             } catch (e) {
