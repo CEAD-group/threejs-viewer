@@ -1549,6 +1549,20 @@ function applyParametricTubeDrawRange(obj, value) {
     relocateEndCap(obj, visiblePairs);
     // start_cap + ring_pairs + end_cap (end cap now sits right after visible pairs)
     obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
+
+    // After a full color rewrite (_colorFullUploadNeeded), morphFrontierRing,
+    // restoreFrontierRing, and updateEndCap may have added partial addUpdateRange
+    // calls on the color attribute.  With pending ranges, Three.js only uploads
+    // those ranges — not the full buffer.  Clear them so needsUpdate triggers a
+    // complete upload of the rewritten color buffer on the next render.
+    if (ud._colorFullUploadNeeded) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            colAttr.clearUpdateRanges();
+            colAttr.needsUpdate = true;
+        }
+        ud._colorFullUploadNeeded = false;
+    }
 }
 
 /**
@@ -1834,6 +1848,7 @@ export class ThreeJSViewer {
                     colAttr.clearUpdateRanges();
                     colAttr.needsUpdate = true;
                 }
+                obj.userData._colorFullUploadNeeded = true;
                 if (md) md.ringColors = redRc;
             }
         };
@@ -3867,6 +3882,7 @@ export class ThreeJSViewer {
                                     obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                     obj.userData.tubeHasColors = true;
+                                    obj.userData._colorFullUploadNeeded = true;
                                     if (md) md.ringColors = redRc;
                                 } else {
                                     // No LOD active — original path
@@ -3911,6 +3927,7 @@ export class ThreeJSViewer {
                                     obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                     obj.userData.tubeHasColors = true;
+                                    obj.userData._colorFullUploadNeeded = true;
                                     if (md) md.ringColors = rc;
                                 }
                             } catch (e) {

@@ -5,6 +5,8 @@ import time
 import numpy as np
 import pytest
 
+from threejs_viewer import Animation
+
 
 def _wait_for_object(page, obj_id, timeout=5.0):
     """Poll until a named object appears in the viewer's _objects map."""
@@ -323,3 +325,360 @@ def test_parametric_tube_color_swap(viewer_client, viewer_page):
     assert after["posHash"] == before["posHash"]  # positions untouched
     assert after["r0"] < 0.01
     assert abs(after["b0"] - 1.0) < 1e-3
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_swap_during_draw_range(viewer_client, viewer_page):
+    """Swapping colors while draw_range animation is playing must update ALL
+    visible rings — not just the rings outside the frontier morph zone.
+
+    This reproduces the bug from example 18 where update_parametric_tube_colors
+    mid-animation leaves some rings with stale colors.
+    """
+    n = 20
+    spine = _straight_spine(n=n, length=4.0)
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    initial_colors = np.full(n, 0xFF0000, dtype=np.uint32)  # all red
+
+    viewer_client.add_parametric_tube(
+        "tube_anim",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=initial_colors,
+    )
+    _wait_for_object(viewer_page, "tube_anim")
+
+    # Set draw_range to 0.5 to trigger frontier morphing (like animation mid-play)
+    viewer_client.set_draw_range("tube_anim", 0.5)
+    time.sleep(0.15)
+
+    # Verify frontier is morphed (savedRingIndex should be set)
+    morph_state = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const md = obj.userData.tubeMorphData;
+            return {
+                savedRingIndex: md ? md.savedRingIndex : null,
+                hasRingColors: md ? !!md.ringColors : false,
+                hasSavedRingColors: md ? !!md.savedRingColors : false,
+            };
+        }""",
+        "tube_anim",
+    )
+    assert morph_state["savedRingIndex"] is not None, (
+        "Frontier ring should be morphed at draw_range=0.5"
+    )
+
+    # Now swap colors to blue (while frontier is morphed)
+    new_colors = np.full(n, 0x0000FF, dtype=np.uint32)  # all blue
+    viewer_client.update_parametric_tube_colors("tube_anim", new_colors)
+    time.sleep(0.5)
+
+    # Sample colors at multiple rings — ALL should be blue now
+    color_check = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const col = obj.geometry.getAttribute('color');
+            const nCs = obj.userData.tubeNCs;
+            const nSpine = obj.userData.tubeNumSpinePoints;
+            const results = [];
+            // Sample first vertex of each ring
+            for (let ring = 0; ring < nSpine; ring++) {
+                const base = ring * nCs * 3;
+                results.push({
+                    ring: ring,
+                    r: col.array[base],
+                    g: col.array[base + 1],
+                    b: col.array[base + 2],
+                });
+            }
+            // Also check md.ringColors
+            const md = obj.userData.tubeMorphData;
+            const mdColors = [];
+            if (md && md.ringColors) {
+                for (let i = 0; i < nSpine; i++) {
+                    mdColors.push({
+                        ring: i,
+                        r: md.ringColors[i * 3],
+                        g: md.ringColors[i * 3 + 1],
+                        b: md.ringColors[i * 3 + 2],
+                    });
+                }
+            }
+            return { vertexColors: results, ringColors: mdColors };
+        }""",
+        "tube_anim",
+    )
+
+    # Check that ALL rings in the vertex buffer are blue (b≈1, r≈0)
+    stale_rings = []
+    for entry in color_check["vertexColors"]:
+        if entry["r"] > 0.1 or entry["b"] < 0.9:
+            stale_rings.append(entry)
+    assert not stale_rings, (
+        f"Rings still have stale (non-blue) colors after swap: {stale_rings}"
+    )
+
+    # Check that md.ringColors is also fully updated
+    stale_md = []
+    for entry in color_check["ringColors"]:
+        if entry["r"] > 0.1 or entry["b"] < 0.9:
+            stale_md.append(entry)
+    assert not stale_md, f"md.ringColors still has stale colors: {stale_md}"
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_swap_then_advance_draw_range(viewer_client, viewer_page):
+    """After a color swap during draw_range animation, advancing draw_range
+    further must use the NEW colors for frontier lerp, not stale saved colors."""
+    n = 20
+    spine = _straight_spine(n=n, length=4.0)
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    initial_colors = np.full(n, 0xFF0000, dtype=np.uint32)  # all red
+
+    viewer_client.add_parametric_tube(
+        "tube_advance",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=initial_colors,
+    )
+    _wait_for_object(viewer_page, "tube_advance")
+
+    # Set draw_range to 0.3 to trigger frontier morphing
+    viewer_client.set_draw_range("tube_advance", 0.3)
+    time.sleep(0.15)
+
+    # Swap to blue
+    new_colors = np.full(n, 0x0000FF, dtype=np.uint32)
+    viewer_client.update_parametric_tube_colors("tube_advance", new_colors)
+    time.sleep(0.3)
+
+    # Now advance draw_range to 0.7 — this triggers more morphing
+    viewer_client.set_draw_range("tube_advance", 0.7)
+    time.sleep(0.15)
+
+    # Then set to 1.0 to show all rings
+    viewer_client.set_draw_range("tube_advance", 1.0)
+    time.sleep(0.15)
+
+    # ALL rings should be blue
+    color_check = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const col = obj.geometry.getAttribute('color');
+            const nCs = obj.userData.tubeNCs;
+            const nSpine = obj.userData.tubeNumSpinePoints;
+            const stale = [];
+            for (let ring = 0; ring < nSpine; ring++) {
+                const base = ring * nCs * 3;
+                const r = col.array[base];
+                const b = col.array[base + 2];
+                if (r > 0.1 || b < 0.9) {
+                    stale.push({ ring, r, g: col.array[base + 1], b });
+                }
+            }
+            return stale;
+        }""",
+        "tube_advance",
+    )
+    assert not color_check, (
+        f"Rings have stale colors after swap + draw_range advance: {color_check}"
+    )
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_swap_during_looping_animation(
+    viewer_client, viewer_page
+):
+    """Reproduces example 18: color swap while a looping draw_range animation
+    is actively playing.  After the swap, ALL rings must show the new color —
+    checked by pausing the animation and sampling the buffer."""
+    n = 20
+    spine = _straight_spine(n=n, length=4.0)
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    initial_colors = np.full(n, 0xFF0000, dtype=np.uint32)  # all red
+
+    viewer_client.add_parametric_tube(
+        "tube_loop",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=initial_colors,
+    )
+    _wait_for_object(viewer_page, "tube_loop")
+
+    # Build a looping draw_range animation (like example 18)
+    n_frames = 60
+    frame_times = np.linspace(0, 3.0, n_frames, dtype=np.float32)
+    draw_fracs = np.linspace(0.0, 1.0, n_frames, dtype=np.float32)
+
+    anim = Animation(loop=True)
+    anim.set_frame_times(frame_times)
+    anim.set_draw_range_data(["tube_loop"], draw_fracs.reshape(n_frames, 1))
+    viewer_client.load_animation(anim)
+
+    # Let the animation play for a bit so frontier morphing is actively happening
+    time.sleep(1.0)
+
+    # Swap colors to blue while animation is playing
+    new_colors = np.full(n, 0x0000FF, dtype=np.uint32)
+    viewer_client.update_parametric_tube_colors("tube_loop", new_colors)
+
+    # Wait for the color update to be processed
+    time.sleep(0.5)
+
+    # Pause animation and set draw_range to 1.0 so all rings are visible
+    viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            // Stop animation playback
+            v._animPlaying = false;
+        }"""
+    )
+    viewer_client.set_draw_range("tube_loop", 1.0)
+    time.sleep(0.2)
+
+    # Check ALL ring vertex colors — should all be blue
+    color_check = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const col = obj.geometry.getAttribute('color');
+            const nCs = obj.userData.tubeNCs;
+            const nSpine = obj.userData.tubeNumSpinePoints;
+            const md = obj.userData.tubeMorphData;
+            const stale = [];
+            for (let ring = 0; ring < nSpine; ring++) {
+                const base = ring * nCs * 3;
+                const r = col.array[base];
+                const g = col.array[base + 1];
+                const b = col.array[base + 2];
+                if (r > 0.1 || b < 0.9) {
+                    stale.push({ ring, r, g, b });
+                }
+            }
+            // Also check md.ringColors
+            const mdStale = [];
+            if (md && md.ringColors) {
+                for (let i = 0; i < nSpine; i++) {
+                    const r = md.ringColors[i * 3];
+                    const b = md.ringColors[i * 3 + 2];
+                    if (r > 0.1 || b < 0.9) {
+                        mdStale.push({ ring: i, r, g: md.ringColors[i * 3 + 1], b });
+                    }
+                }
+            }
+            // Check savedRingColors if frontier is morphed
+            let savedInfo = null;
+            if (md && md.savedRingIndex != null && md.savedRingColors) {
+                savedInfo = {
+                    savedRingIndex: md.savedRingIndex,
+                    r: md.savedRingColors[0],
+                    g: md.savedRingColors[1],
+                    b: md.savedRingColors[2],
+                };
+            }
+            return { staleVertexRings: stale, staleMdRings: mdStale, savedInfo };
+        }""",
+        "tube_loop",
+    )
+    assert not color_check["staleVertexRings"], (
+        f"Vertex buffer has stale ring colors: {color_check['staleVertexRings']}"
+    )
+    assert not color_check["staleMdRings"], (
+        f"md.ringColors has stale entries: {color_check['staleMdRings']}"
+    )
+    if color_check["savedInfo"]:
+        si = color_check["savedInfo"]
+        assert si["r"] < 0.1 and si["b"] > 0.9, f"savedRingColors has stale color: {si}"
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_update_clears_pending_update_ranges(
+    viewer_client, viewer_page
+):
+    """Race condition: morphFrontierRing adds addUpdateRange on the color attr.
+    If update_parametric_tube_colors runs before the renderer consumes those
+    ranges, Three.js only uploads the partial ranges instead of the full buffer.
+
+    The fix: color update sets _colorFullUploadNeeded, and
+    applyParametricTubeDrawRange clears all color update ranges at the end
+    when the flag is set.
+
+    This test simulates the exact frame sequence:
+    1. morphFrontierRing adds partial color ranges (via set_draw_range)
+    2. Color update writes full buffer, sets flag
+    3. Next set_draw_range runs — morphFrontierRing adds ranges again,
+       but cleanup at end clears them
+    """
+    n = 20
+    spine = _straight_spine(n=n, length=4.0)
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    initial_colors = np.full(n, 0xFF0000, dtype=np.uint32)
+
+    viewer_client.add_parametric_tube(
+        "tube_race",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=initial_colors,
+    )
+    _wait_for_object(viewer_page, "tube_race")
+
+    result = viewer_page.evaluate(
+        """(id) => {
+            const v = window.threejsViewer;
+            const obj = v._objects.get(id);
+            const ud = obj.userData;
+            const nCs = ud.tubeNCs;
+            const nSpine = ud.tubeNumSpinePoints;
+            const colAttr = obj.geometry.getAttribute('color');
+            const md = ud.tubeMorphData;
+
+            // Phase 1: morphFrontierRing adds partial color ranges
+            v._setDrawRange(id, 0.5);
+            const rangesFromMorph = colAttr.updateRanges.length;
+
+            // Phase 2: Simulate color update (clears ranges, writes full buffer, sets flag)
+            const out = colAttr.array;
+            for (let i = 0; i < nSpine * nCs; i++) {
+                out[i * 3] = 0; out[i * 3 + 1] = 0; out[i * 3 + 2] = 1;
+            }
+            colAttr.clearUpdateRanges();
+            colAttr.needsUpdate = true;
+            ud._colorFullUploadNeeded = true;
+            if (md && md.ringColors) {
+                for (let i = 0; i < nSpine; i++) {
+                    md.ringColors[i * 3] = 0;
+                    md.ringColors[i * 3 + 1] = 0;
+                    md.ringColors[i * 3 + 2] = 1;
+                }
+            }
+
+            // Phase 3: Next draw_range update — morphFrontierRing runs again,
+            // but cleanup should clear all color ranges at the end
+            v._setDrawRange(id, 0.6);
+
+            return {
+                rangesFromMorph,
+                rangesAfterFix: colAttr.updateRanges.length,
+                flagCleared: !ud._colorFullUploadNeeded,
+            };
+        }""",
+        "tube_race",
+    )
+
+    # Phase 1 should have added color ranges from morphFrontierRing
+    assert result["rangesFromMorph"] > 0, (
+        "morphFrontierRing should add color update ranges"
+    )
+    # Phase 3 cleanup should have cleared all color ranges
+    assert result["rangesAfterFix"] == 0, (
+        f"Expected 0 pending color ranges after fix, got {result['rangesAfterFix']}"
+    )
+    assert result["flagCleared"], "_colorFullUploadNeeded flag was not consumed"
