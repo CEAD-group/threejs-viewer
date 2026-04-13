@@ -680,6 +680,8 @@ class ViewerClient:
         metalness: float = 0.1,
         roughness: float = 0.8,
         wireframe: bool = False,
+        wireframe_color: Optional[int] = None,
+        anchor: str = "center",
         parent: Optional[str] = None,
         position: Optional[list] = None,
         rotation: Optional[list] = None,
@@ -692,7 +694,7 @@ class ViewerClient:
         Geometry is built on the client from a packed bundle of parameter
         arrays (spine + widths + heights + optional orientations + optional
         colors) so the wire transfer stays O(N) instead of O(N * nCs). The
-        cross-section is a chamfered rectangle (45° chamfers, 6 vertices).
+        cross-section is a chamfered hexagon (6 vertices).
 
         Args:
             id: Unique identifier.
@@ -710,6 +712,14 @@ class ViewerClient:
                 ``update_parametric_tube_colors`` for cheap color-mode swaps.
             color: Fallback color when ``colors`` is not provided.
             opacity, metalness, roughness: Standard material properties.
+            wireframe: Render the mesh as wireframe only (no solid faces).
+            wireframe_color: When set (e.g. ``0x000000``), adds a flat-color
+                wireframe overlay on top of the solid mesh. The overlay
+                shares the same geometry, so draw_range and LOD updates
+                apply to both automatically.
+            anchor: Cross-section anchor point. ``"center"`` (default) centers
+                the bead on the spine. ``"top"`` places the spine at the top
+                surface so the bead extends downward.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
         """
@@ -767,7 +777,12 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
             "wireframe": wireframe,
+            "wireframeColor": wireframe_color,
         }
+        if anchor == "top":
+            header["heightOffset"] = 0.5
+        elif anchor != "center":
+            raise ValueError(f"anchor must be 'center' or 'top', got {anchor!r}")
         if up_vector is not None:
             header["upVector"] = [
                 float(up_vector[0]),

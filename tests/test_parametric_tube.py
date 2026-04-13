@@ -142,7 +142,7 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     assert info["nCs"] == n_cs
     assert info["ringPairs"] == n - 1
     assert info["perPair"] == n_cs * 6
-    n_cap_rings = 3
+    n_cap_rings = 8
     cap_indices = n_cap_rings * n_cs * 6  # spoke quads only (no pole)
     assert info["totalIndex"] == 2 * cap_indices + (n - 1) * n_cs * 6
     # Tube ring verts + 2 caps (each: nCapRings * nCs, no pole)
@@ -183,7 +183,7 @@ def test_parametric_tube_draw_range_morphs_frontier(viewer_client, viewer_page):
         """(id) => window.threejsViewer._objects.get(id).geometry.drawRange.count""",
         "tube2",
     )
-    n_cap_rings = 3
+    n_cap_rings = 8
     cap = n_cap_rings * n_cs * 6  # spoke quads per cap (no pole)
     expected = 2 * cap + 4 * n_cs * 6  # start cap + 4 ring pairs + end cap
     assert count == expected, f"expected {expected}, got {count}"
