@@ -1801,6 +1801,9 @@ export class ThreeJSViewer {
                 const nRed = lod.keptIndices.length;
                 const nCs = obj.userData.tubeNCs;
                 const rc = lod.originalRingColors;
+                // Restore frontier ring before writing new colors
+                const md = obj.userData.tubeMorphData;
+                if (md) restoreFrontierRing(obj);
                 // Extract reduced Float32 RGB from original colors at kept indices
                 const redRc = new Float32Array(nRed * 3);
                 for (let i = 0; i < nRed; i++) {
@@ -1830,12 +1833,7 @@ export class ThreeJSViewer {
                     }
                     colAttr.needsUpdate = true;
                 }
-                // Update morph data ring colors
-                const md = obj.userData.tubeMorphData;
-                if (md) {
-                    restoreFrontierRing(obj);
-                    md.ringColors = redRc;
-                }
+                if (md) md.ringColors = redRc;
             }
         };
         this._controls.addEventListener('change', () => {
@@ -3834,6 +3832,9 @@ export class ThreeJSViewer {
                                     }
                                     // Update geometry colors for reduced mesh
                                     const n = nRed;
+                                    // Restore frontier ring BEFORE writing new colors
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) restoreFrontierRing(obj);
                                     // Fill cap dome vertices with a single color
                                     function fillCapColors(arr, baseVert, capVerts, r, g, b) {
                                         for (let j = 0; j < capVerts; j++) {
@@ -3864,13 +3865,7 @@ export class ThreeJSViewer {
                                     obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                     obj.userData.tubeHasColors = true;
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) {
-                                        // Restore morphed frontier ring before updating colors,
-                                        // otherwise the next morph saves wrong positions as "original".
-                                        restoreFrontierRing(obj);
-                                        md.ringColors = redRc;
-                                    }
+                                    if (md) md.ringColors = redRc;
                                 } else {
                                     // No LOD active — original path
                                     if (lod) {
@@ -3892,6 +3887,10 @@ export class ThreeJSViewer {
                                     const startCapBaseVert = n * nCs;
                                     const endCapBaseVert = startCapBaseVert + capVertsPerCap;
                                     const lr = (n - 1) * 3;
+                                    // Restore frontier ring BEFORE writing new colors so
+                                    // the stale savedRingColors don't overwrite the update.
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) restoreFrontierRing(obj);
                                     const existing = obj.geometry.getAttribute('color');
                                     if (existing) {
                                         expandRingColors(packed, n, nCs, existing.array);
@@ -3909,11 +3908,7 @@ export class ThreeJSViewer {
                                     obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                     obj.userData.tubeHasColors = true;
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) {
-                                        restoreFrontierRing(obj);
-                                        md.ringColors = rc;
-                                    }
+                                    if (md) md.ringColors = rc;
                                 }
                             } catch (e) {
                                 console.error(`Error updating parametric_tube colors:`, e);
