@@ -291,6 +291,9 @@ const N_CROSS_SECTION = 6;
 // LOD: epsilon = camera_distance / LOD_EPSILON_DIVISOR.
 // Higher → more points kept (finer detail). Lower → more aggressive simplification.
 const LOD_EPSILON_DIVISOR = 2500;
+// Max original points that can be skipped between two kept points.
+// Prevents color banding on geometrically straight segments.
+const LOD_MAX_SKIP = 100;
 function sampleChamferedRect(out, width, height) {
     if (!Number.isFinite(width) || width < 0) {
         throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
@@ -335,6 +338,7 @@ function sampleChamferedRect(out, width, height) {
 
 const _LOD_WORKER_CODE = `
 const LOD_EPSILON_DIVISOR = ${LOD_EPSILON_DIVISOR};
+const LOD_MAX_SKIP = ${LOD_MAX_SKIP};
 const LOD_CHUNK_SIZE = 5000;
 const LOD_CHUNK_REUSE_RATIO = 1.5;
 const N_CS = ${N_CROSS_SECTION};
@@ -370,6 +374,12 @@ function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
             keep.push(maxIdx);
             stack.push([start, maxIdx]);
             stack.push([maxIdx, end]);
+        } else if (end - start > LOD_MAX_SKIP) {
+            // Force midpoint split to preserve color resolution
+            const mid = (start + end) >> 1;
+            keep.push(mid);
+            stack.push([start, mid]);
+            stack.push([mid, end]);
         }
     }
     keep.sort((a, b) => a - b);
@@ -781,6 +791,11 @@ function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
                 keep[maxIdx] = 1;
                 stack.push([start, maxIdx]);
                 stack.push([maxIdx, end]);
+            } else if (end - start > LOD_MAX_SKIP) {
+                const mid = (start + end) >> 1;
+                keep[mid] = 1;
+                stack.push([start, mid]);
+                stack.push([mid, end]);
             }
         }
     }
