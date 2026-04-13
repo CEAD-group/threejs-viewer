@@ -103,9 +103,9 @@ tp = Toolpath.from_points(
     duration=duration,
 )
 
-# Bead (parametric tube — elliptical cross-section, built client-side)
+# Bead (parametric tube — chamfered hex cross-section, built client-side)
 tp.colorize("viridis")
-v.add_toolpath("path_tube", tp, roughness=0.4, metalness=0.15, wireframe_color=0x000000)
+v.add_toolpath("path_tube", tp, roughness=0.4, metalness=0.15)
 
 # Nozzle: tapered cylinder hovering above the path tip
 bead_width = HEIGHT / N_TURNS * 4

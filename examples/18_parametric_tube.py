@@ -76,6 +76,7 @@ v.add_parametric_tube(
     widths=widths,
     heights=heights,
     colors=layer_colors,
+    wireframe_color=0x000000,
 )
 
 
