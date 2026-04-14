@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ViewerControls } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
@@ -1662,6 +1662,9 @@ export class ThreeJSViewer {
         this._baselineVisibility = new Map();
         this._speedIndex = 6; // starts at 1x
 
+        // Wireframe display mode: 0 = normal, 1 = wireframe-only, 2 = combined overlay
+        this._wireframeMode = 0;
+
         // Clipping state
         this._clipEnabled = false;
         this._clipHelperVisible = true;
@@ -1722,6 +1725,7 @@ export class ThreeJSViewer {
         this._statusDot = q('.tjsv-status-dot');
         this._statusText = q('.tjsv-status-text');
         this._btnOrtho = q('.tjsv-btn-ortho');
+        this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
         this._btnClip = q('.tjsv-btn-clip');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
@@ -1761,6 +1765,7 @@ export class ThreeJSViewer {
         this._perspCamera = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
         this._perspCamera.position.set(5, -5, 5);
         this._perspCamera.up.set(0, 0, 1);
+        this._perspCamera.lookAt(0, 0, 0);
 
         const aspect = w / h;
         this._orthoCamera = new THREE.OrthographicCamera(
@@ -1769,6 +1774,7 @@ export class ThreeJSViewer {
         );
         this._orthoCamera.position.copy(this._perspCamera.position);
         this._orthoCamera.up.set(0, 0, 1);
+        this._orthoCamera.lookAt(0, 0, 0);
 
         this._camera = this._perspCamera;
 
@@ -1784,9 +1790,20 @@ export class ThreeJSViewer {
         // Environment cubemap
         this._loadCubemap();
 
-        // Controls
-        this._controls = new OrbitControls(this._camera, this._renderer.domElement);
-        this._controls.enableDamping = true;
+        // Controls: bespoke ViewerControls (one implementation, two modes).
+        // - turntable: yaw around world-Z, pitch around camera-right (clamped near pole)
+        // - free: yaw around camera-up, pitch around camera-right (no world-up lock)
+        // Toggle via toolbar orbit-mode button or R; persisted to localStorage.
+        // Click-to-pivot moves the orbit pivot to the raycast hit without view shift.
+        this._orbitMode = localStorage.getItem('tjsv.orbitMode') || 'turntable';
+        this._controls = new ViewerControls(this._camera, this._renderer.domElement);
+        this._controls.setMode(this._orbitMode);
+        this._controls.setRaycastObjects(() => {
+            const arr = [];
+            for (const o of this._objects.values()) if (o && o.visible) arr.push(o);
+            return arr;
+        });
+        this._controls.addEventListener('change', () => { this._lodDirty = true; });
 
         // LOD: Web Worker for async RDP computation
         this._lodThrottleMs = 500;
@@ -1852,10 +1869,6 @@ export class ThreeJSViewer {
                 if (md) md.ringColors = redRc;
             }
         };
-        this._controls.addEventListener('change', () => {
-            this._lodDirty = true;
-        });
-
         // ViewHelper
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
@@ -2181,6 +2194,57 @@ export class ThreeJSViewer {
         this._clipGizmoHelper.visible = showGizmo;
     }
 
+    _cycleWireframeMode() {
+        this._wireframeMode = (this._wireframeMode + 1) % 3;
+        this._applyWireframeMode();
+    }
+
+    _applyWireframeMode() {
+        const mode = this._wireframeMode;
+        const wantOverlay = mode === 2;
+        const wantWire = mode === 1;
+        this._scene.traverse((obj) => {
+            if (!obj.isMesh) return;
+            if (obj.userData.isWireOverlay) return;
+            if (!obj.material) return;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            for (const m of mats) {
+                if ('wireframe' in m) m.wireframe = wantWire;
+            }
+            let overlay = obj.userData.wireframeOverlay;
+            if (wantOverlay) {
+                if (!overlay) {
+                    overlay = this._createWireOverlay(obj);
+                    obj.userData.wireframeOverlay = overlay;
+                    obj.add(overlay);
+                } else {
+                    overlay.material.clippingPlanes = this._clipEnabled ? this._clipPlanes : [];
+                    overlay.material.needsUpdate = true;
+                }
+                overlay.visible = true;
+            } else if (overlay) {
+                overlay.visible = false;
+            }
+        });
+    }
+
+    _createWireOverlay(parentMesh) {
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            wireframe: true,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1,
+            side: THREE.DoubleSide,
+            clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+        });
+        const overlay = new THREE.Mesh(parentMesh.geometry, mat);
+        overlay.userData.isWireOverlay = true;
+        overlay.raycast = () => {};
+        overlay.name = (parentMesh.name || 'mesh') + '_wireOverlay';
+        return overlay;
+    }
+
     _toggleClipPanel() {
         this._clipEnabled = !this._clipEnabled;
         if (this._clipEnabled && this._clipDefaults) {
@@ -2222,14 +2286,35 @@ export class ThreeJSViewer {
 
     // ========== Camera ==========
 
+    _setOrbitMode(mode) {
+        if (mode !== 'turntable' && mode !== 'free') return;
+        this._orbitMode = mode;
+        try { localStorage.setItem('tjsv.orbitMode', mode); } catch (e) { /* ignore */ }
+        this._controls.setMode(mode);
+        this._updateOrbitModeButton();
+    }
+
+    _updateOrbitModeButton() {
+        if (!this._btnOrbitMode) return;
+        const isFree = this._orbitMode === 'free';
+        this._btnOrbitMode.classList.toggle('active', isFree);
+        this._btnOrbitMode.textContent = '\u27F3 R';
+        this._btnOrbitMode.title = isFree
+            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable.'
+            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free.';
+    }
+
     _switchCamera(toOrtho) {
         if (toOrtho === this._isOrtho) return;
         const w = this.container.clientWidth;
         const h = this.container.clientHeight;
         const aspect = w / h;
 
+        const tgt = this._tmpSwitchTarget || (this._tmpSwitchTarget = new THREE.Vector3());
+        tgt.copy(this._controls.target);
+
         if (toOrtho) {
-            const dist = this._perspCamera.position.distanceTo(this._controls.target);
+            const dist = this._perspCamera.position.distanceTo(tgt);
             const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(this._perspCamera.fov / 2));
             this._orthoCamera.zoom = ORTHO_FRUSTUM / halfHeight;
             this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
@@ -2243,8 +2328,8 @@ export class ThreeJSViewer {
         } else {
             const halfHeight = ORTHO_FRUSTUM / this._orthoCamera.zoom;
             const dist = halfHeight / Math.tan(THREE.MathUtils.degToRad(this._perspCamera.fov / 2));
-            const dir = this._orthoCamera.position.clone().sub(this._controls.target).normalize();
-            this._perspCamera.position.copy(this._controls.target).addScaledVector(dir, dist);
+            const dir = this._orthoCamera.position.clone().sub(tgt).normalize();
+            this._perspCamera.position.copy(tgt).addScaledVector(dir, dist);
             this._perspCamera.quaternion.copy(this._orthoCamera.quaternion);
             this._perspCamera.aspect = aspect;
             this._perspCamera.updateProjectionMatrix();
@@ -2252,11 +2337,14 @@ export class ThreeJSViewer {
         }
 
         this._isOrtho = toOrtho;
-        this._controls.object = this._camera;
+        // ViewerControls is camera-agnostic — just reassign and re-update.
+        this._controls.camera = this._camera;
+        this._controls.target.copy(tgt);
+        this._controls.update();
         this._clipGizmo.camera = this._camera;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
-        this._btnOrtho.textContent = this._isOrtho ? 'O' : 'P';
+        this._btnOrtho.textContent = '\u2B1A O';
         this._btnOrtho.classList.toggle('active', this._isOrtho);
     }
 
@@ -2303,6 +2391,7 @@ export class ThreeJSViewer {
             this._scene.add(obj);
         }
         this._sceneBoundsDirty = true;
+        if (this._wireframeMode !== 0) this._applyWireframeMode();
     }
 
     _applyTransform(obj, transform) {
@@ -2788,18 +2877,16 @@ export class ThreeJSViewer {
                 const interp = t > 0 && frameIndexNext !== frameIndex;
                 if (ctCh) {
                     const base = frameIndex * 3;
+                    let tx, ty, tz;
                     if (interp && ctCh.interpolation === 'linear') {
                         const bN = frameIndexNext * 3;
-                        this._controls.target.set(
-                            ctCh.data[base]     * (1 - t) + ctCh.data[bN]     * t,
-                            ctCh.data[base + 1] * (1 - t) + ctCh.data[bN + 1] * t,
-                            ctCh.data[base + 2] * (1 - t) + ctCh.data[bN + 2] * t
-                        );
+                        tx = ctCh.data[base]     * (1 - t) + ctCh.data[bN]     * t;
+                        ty = ctCh.data[base + 1] * (1 - t) + ctCh.data[bN + 1] * t;
+                        tz = ctCh.data[base + 2] * (1 - t) + ctCh.data[bN + 2] * t;
                     } else {
-                        this._controls.target.set(
-                            ctCh.data[base], ctCh.data[base + 1], ctCh.data[base + 2]
-                        );
+                        tx = ctCh.data[base]; ty = ctCh.data[base + 1]; tz = ctCh.data[base + 2];
                     }
+                    this._controls.target.set(tx, ty, tz);
                 }
                 if (cpCh) {
                     const base = frameIndex * 3;
@@ -2829,14 +2916,18 @@ export class ThreeJSViewer {
         const targetPos = this._tmpTrackPos;
         targetPos.setFromMatrixPosition(obj.matrixWorld);
 
+        const curTgt = this._tmpTrackTarget || (this._tmpTrackTarget = new THREE.Vector3());
+        curTgt.copy(this._controls.target);
+
         if (this._trackMode === 'follow') {
             if (this._trackHasLastPos) {
                 const delta = this._tmpTrackDelta.copy(targetPos).sub(this._trackLastPos);
-                this._controls.target.add(delta);
+                curTgt.add(delta);
+                this._controls.target.copy(curTgt);
                 this._camera.position.add(delta);
             } else {
                 // First frame: snap orbit target, keep camera offset
-                const offset = this._tmpTrackDelta.copy(this._camera.position).sub(this._controls.target);
+                const offset = this._tmpTrackDelta.copy(this._camera.position).sub(curTgt);
                 this._controls.target.copy(targetPos);
                 this._camera.position.copy(targetPos).add(offset);
             }
@@ -2949,6 +3040,12 @@ export class ThreeJSViewer {
     _bindEvents() {
         // Ortho button
         this._btnOrtho.addEventListener('click', () => this._switchCamera(!this._isOrtho));
+
+        // Orbit-mode toggle (Turntable <-> Free)
+        this._updateOrbitModeButton();
+        this._btnOrbitMode.addEventListener('click', () => {
+            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+        });
 
         // Clip button
         this._btnClip.addEventListener('click', () => this._toggleClipPanel());
@@ -3063,6 +3160,14 @@ export class ThreeJSViewer {
             }
             if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey) {
                 this._toggleClipPanel();
+                return;
+            }
+            if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
+                this._cycleWireframeMode();
+                return;
+            }
+            if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
+                this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
                 return;
             }
 
@@ -3700,30 +3805,17 @@ export class ThreeJSViewer {
                                     buildOrientations, upVector, buildRingColors, heightOffset,
                                 );
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
-                                const material = data.wireframe
-                                    ? new THREE.MeshBasicMaterial({
-                                        color: data.color || 0x7ab8cc,
-                                        opacity,
-                                        transparent: opacity < 1,
-                                        depthWrite: opacity >= 1,
-                                        side: THREE.DoubleSide,
-                                        wireframe: true,
-                                        polygonOffset: true,
-                                        polygonOffsetFactor: -1,
-                                        polygonOffsetUnits: -1,
-                                        clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
-                                    })
-                                    : new THREE.MeshStandardMaterial({
-                                        color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
-                                        metalness: data.metalness !== undefined ? data.metalness : 0.1,
-                                        roughness: data.roughness !== undefined ? data.roughness : 0.8,
-                                        opacity,
-                                        transparent: opacity < 1,
-                                        depthWrite: opacity >= 1,
-                                        side: THREE.DoubleSide,
-                                        vertexColors: hasColors,
-                                        clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
-                                    });
+                                const material = new THREE.MeshStandardMaterial({
+                                    color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
+                                    metalness: data.metalness !== undefined ? data.metalness : 0.1,
+                                    roughness: data.roughness !== undefined ? data.roughness : 0.8,
+                                    opacity,
+                                    transparent: opacity < 1,
+                                    depthWrite: opacity >= 1,
+                                    side: THREE.DoubleSide,
+                                    vertexColors: hasColors,
+                                    clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+                                });
                                 const mesh = new THREE.Mesh(geometry, material);
                                 mesh.name = data.id;
                                 mesh.userData.id = data.id;
@@ -3768,22 +3860,6 @@ export class ThreeJSViewer {
                                         nPoints: tubeLOD.originalCount,
                                         heightOffset: heightOffset,
                                     });
-                                }
-                                // Wireframe overlay: child mesh sharing the same geometry
-                                if (data.wireframeColor != null) {
-                                    const wireMat = new THREE.MeshBasicMaterial({
-                                        color: data.wireframeColor,
-                                        wireframe: true,
-                                        polygonOffset: true,
-                                        polygonOffsetFactor: -1,
-                                        polygonOffsetUnits: -1,
-                                        side: THREE.DoubleSide,
-                                        clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
-                                    });
-                                    const wireOverlay = new THREE.Mesh(geometry, wireMat);
-                                    wireOverlay.name = data.id + '_wireframe';
-                                    mesh.add(wireOverlay);
-                                    mesh.userData.wireframeOverlay = wireOverlay;
                                 }
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
@@ -4199,6 +4275,8 @@ export class ThreeJSViewer {
         const maxDim = Math.max(size.x, size.y, size.z);
 
         this._controls.target.copy(center);
+        const ctTgt = this._tmpFrameAllTgt || (this._tmpFrameAllTgt = new THREE.Vector3());
+        ctTgt.copy(center);
 
         if (this._isOrtho) {
             const w = this.container.clientWidth;
@@ -4214,7 +4292,7 @@ export class ThreeJSViewer {
             this._orthoCamera.top = ORTHO_FRUSTUM;
             this._orthoCamera.bottom = -ORTHO_FRUSTUM;
             this._orthoCamera.updateProjectionMatrix();
-            const dir = this._camera.position.clone().sub(this._controls.target);
+            const dir = this._camera.position.clone().sub(ctTgt);
             if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
             else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
@@ -4225,7 +4303,7 @@ export class ThreeJSViewer {
             const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
             const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
             const dist = Math.max(distV, distH) * 1.2;
-            const dir = this._camera.position.clone().sub(this._controls.target);
+            const dir = this._camera.position.clone().sub(ctTgt);
             if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
             else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, dist);

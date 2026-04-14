@@ -679,8 +679,6 @@ class ViewerClient:
         opacity: float = 1.0,
         metalness: float = 0.1,
         roughness: float = 0.8,
-        wireframe: bool = False,
-        wireframe_color: Optional[int] = None,
         anchor: str = "center",
         parent: Optional[str] = None,
         position: Optional[list] = None,
@@ -712,11 +710,6 @@ class ViewerClient:
                 ``update_parametric_tube_colors`` for cheap color-mode swaps.
             color: Fallback color when ``colors`` is not provided.
             opacity, metalness, roughness: Standard material properties.
-            wireframe: Render the mesh as wireframe only (no solid faces).
-            wireframe_color: When set (e.g. ``0x000000``), adds a flat-color
-                wireframe overlay on top of the solid mesh. The overlay
-                shares the same geometry, so draw_range and LOD updates
-                apply to both automatically.
             anchor: Cross-section anchor point. ``"center"`` (default) centers
                 the bead on the spine. ``"top"`` places the spine at the top
                 surface so the bead extends downward.
@@ -776,8 +769,6 @@ class ViewerClient:
             "opacity": opacity,
             "metalness": metalness,
             "roughness": roughness,
-            "wireframe": wireframe,
-            "wireframeColor": wireframe_color,
         }
         if anchor == "top":
             header["heightOffset"] = 0.5
