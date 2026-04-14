@@ -329,6 +329,30 @@ function sampleChamferedRect(out, width, height) {
     }
 }
 
+// Per-vertex 2D outward normals for a CCW cross-section (chamfered hex).
+// Computed as the bisector of the two adjacent edge normals, giving smooth
+// shading that depends ONLY on the cross-section shape — independent of
+// spine spacing. This is the key to killing LOD-induced normal artifacts:
+// face-area-weighted vertex normals skew heavily when adjacent ring-to-ring
+// quads have wildly different sizes (common after distance-weighted RDP).
+function computeSectionNormals(section, nCs, out) {
+    for (let j = 0; j < nCs; j++) {
+        const jPrev = (j - 1 + nCs) % nCs;
+        const jNext = (j + 1) % nCs;
+        const ptx = section[j * 2]     - section[jPrev * 2];
+        const pty = section[j * 2 + 1] - section[jPrev * 2 + 1];
+        const ntx = section[jNext * 2] - section[j * 2];
+        const nty = section[jNext * 2 + 1] - section[j * 2 + 1];
+        // Outward normal of a CCW edge with tangent (tx,ty) is (ty, -tx).
+        let nu = pty + nty;
+        let nv = -(ptx + ntx);
+        const len = Math.hypot(nu, nv);
+        if (len > 1e-12) { nu /= len; nv /= len; }
+        out[j * 2] = nu;
+        out[j * 2 + 1] = nv;
+    }
+}
+
 // ========== LOD: Distance-Weighted RDP ==========
 //
 // The RDP algorithm runs in a Web Worker to avoid blocking the render loop.
@@ -403,6 +427,22 @@ function sampleChamferedRect(out, width, height) {
         out[0]=+hw;       out[1]=-(hh-c); out[2]=+hw;     out[3]=+(hh-c);
         out[4]=0;         out[5]=+hh;     out[6]=-hw;     out[7]=+(hh-c);
         out[8]=-hw;       out[9]=-(hh-c); out[10]=0;      out[11]=-hh;
+    }
+}
+
+function computeSectionNormals(section, nCs, out) {
+    for (let j = 0; j < nCs; j++) {
+        const jPrev = (j - 1 + nCs) % nCs;
+        const jNext = (j + 1) % nCs;
+        const ptx = section[j*2]     - section[jPrev*2];
+        const pty = section[j*2+1]   - section[jPrev*2+1];
+        const ntx = section[jNext*2] - section[j*2];
+        const nty = section[jNext*2+1] - section[j*2+1];
+        let nu = pty + nty;
+        let nv = -(ptx + ntx);
+        const len = Math.hypot(nu, nv);
+        if (len > 1e-12) { nu /= len; nv /= len; }
+        out[j*2] = nu; out[j*2+1] = nv;
     }
 }
 
@@ -575,6 +615,23 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
         const x = normals[i*3], y = normals[i*3+1], z = normals[i*3+2];
         const len = Math.hypot(x, y, z);
         if (len > 1e-12) { normals[i*3]/=len; normals[i*3+1]/=len; normals[i*3+2]/=len; }
+    }
+    // Overwrite tube-side ring normals with analytic radial-bisector values.
+    // This makes shading independent of ring spacing (LOD-invariant). Caps
+    // keep area-weighted normals — their revolution geometry has uniform rings.
+    const sectionNormals = new Float32Array(N_CS * 2);
+    for (let i = 0; i < nSpine; i++) {
+        sampleChamferedRect(section, widths[i], heights[i]);
+        computeSectionNormals(section, N_CS, sectionNormals);
+        const Ux = localFrames[i*6],   Uy = localFrames[i*6+1], Uz = localFrames[i*6+2];
+        const Vx = localFrames[i*6+3], Vy = localFrames[i*6+4], Vz = localFrames[i*6+5];
+        const rb = i * N_CS * 3;
+        for (let j = 0; j < N_CS; j++) {
+            const nu = sectionNormals[j*2], nv = sectionNormals[j*2+1];
+            normals[rb + j*3]     = nu*Ux + nv*Vx;
+            normals[rb + j*3 + 1] = nu*Uy + nv*Vy;
+            normals[rb + j*3 + 2] = nu*Uz + nv*Vz;
+        }
     }
 
     return { positions, normals, colors, indices, localFrames, capAngles, endCapPattern,
@@ -1055,6 +1112,24 @@ function buildParametricTubeGeometry(
     if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeVertexNormals();
+    // Overwrite tube-side ring normals with analytic radial-bisector values.
+    // Caps keep their area-weighted normals (revolution, uniform ring spacing).
+    const normalArr = geometry.attributes.normal.array;
+    const sectionNormals = new Float32Array(nCs * 2);
+    for (let i = 0; i < nSpine; i++) {
+        sampleChamferedRect(section, widths[i], heights[i]);
+        computeSectionNormals(section, nCs, sectionNormals);
+        const Ux = localFrames[i * 6],     Uy = localFrames[i * 6 + 1], Uz = localFrames[i * 6 + 2];
+        const Vx = localFrames[i * 6 + 3], Vy = localFrames[i * 6 + 4], Vz = localFrames[i * 6 + 5];
+        const rb = i * nCs * 3;
+        for (let j = 0; j < nCs; j++) {
+            const nu = sectionNormals[j * 2], nv = sectionNormals[j * 2 + 1];
+            normalArr[rb + j * 3]     = nu * Ux + nv * Vx;
+            normalArr[rb + j * 3 + 1] = nu * Uy + nv * Vy;
+            normalArr[rb + j * 3 + 2] = nu * Uz + nv * Vz;
+        }
+    }
+    geometry.attributes.normal.needsUpdate = true;
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
@@ -1292,6 +1367,23 @@ function morphFrontierRing(obj, fracRingPairs) {
     const rangeCount = nCs * 3;
     posAttr.addUpdateRange(ringBase, rangeCount);
     posAttr.needsUpdate = true;
+
+    // Analytic normals at the morphed cross-section (radial bisector in UV).
+    const norAttr = obj.geometry.getAttribute('normal');
+    if (norAttr) {
+        if (!md._morphSectionNormals) md._morphSectionNormals = new Float32Array(nCs * 2);
+        computeSectionNormals(md.section, nCs, md._morphSectionNormals);
+        const nor = norAttr.array;
+        for (let j = 0; j < nCs; j++) {
+            const nu = md._morphSectionNormals[j * 2];
+            const nv = md._morphSectionNormals[j * 2 + 1];
+            nor[ringBase + j * 3]     = nu * ux + nv * vx;
+            nor[ringBase + j * 3 + 1] = nu * uy + nv * vy;
+            nor[ringBase + j * 3 + 2] = nu * uz + nv * vz;
+        }
+        norAttr.addUpdateRange(ringBase, rangeCount);
+        norAttr.needsUpdate = true;
+    }
 
     // Lerp colors if present
     if (ud.tubeHasColors && md.ringColors) {
@@ -1805,6 +1897,34 @@ export class ThreeJSViewer {
         });
         this._controls.addEventListener('change', () => { this._lodDirty = true; });
 
+        // Pivot marker: small screen-space-sized yellow sphere + ring shown
+        // briefly when a click sets a new orbit pivot. Lives in the scene only
+        // (NOT in this._objects) so it can't be raycast-picked or treated as
+        // a public object — the raycast getter above iterates this._objects.
+        this._pivotMarker = new THREE.Group();
+        const pivotSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.1, 16, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffd76b, depthTest: false, transparent: true, opacity: 0.95 })
+        );
+        pivotSphere.renderOrder = 999;
+        const pivotRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.14, 0.18, 32),
+            new THREE.MeshBasicMaterial({ color: 0xffd76b, depthTest: false, transparent: true, opacity: 0.7, side: THREE.DoubleSide })
+        );
+        pivotRing.renderOrder = 999;
+        this._pivotMarker.add(pivotSphere);
+        this._pivotMarker.add(pivotRing);
+        this._pivotMarker.visible = false;
+        this._pivotMarkerRing = pivotRing;
+        this._pivotShownAt = 0;
+        this._scene.add(this._pivotMarker);
+
+        this._controls.addEventListener('pivot', (e) => {
+            this._pivotMarker.position.copy(e.point);
+            this._pivotMarker.visible = true;
+            this._pivotShownAt = performance.now();
+        });
+
         // LOD: Web Worker for async RDP computation
         this._lodThrottleMs = 500;
         this._lodLastRunTime = 0;
@@ -1876,6 +1996,30 @@ export class ThreeJSViewer {
             if (this._viewHelper.handleClick(e)) {
                 this._controls.target.copy(this._viewHelper.center);
             }
+        });
+        // Double-click an object to frame it; double-click empty space to reset.
+        this._dblclickRaycaster = new THREE.Raycaster();
+        this._dblclickRaycaster.params.Line.threshold = 0.05;
+        this._dblclickRaycaster.params.Points.threshold = 0.05;
+        this._renderer.domElement.addEventListener('dblclick', (e) => {
+            const rect = this._renderer.domElement.getBoundingClientRect();
+            const ndc = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1,
+            );
+            this._dblclickRaycaster.setFromCamera(ndc, this._camera);
+            const candidates = [];
+            for (const obj of this._objects.values()) {
+                if (obj && obj.visible) candidates.push(obj);
+            }
+            const hits = this._dblclickRaycaster.intersectObjects(candidates, true);
+            if (!hits.length) { this.resetView(); return; }
+            // Walk up to the top-level object the user added (a value of _objects).
+            const objSet = new Set(this._objects.values());
+            let target = hits[0].object;
+            while (target && !objSet.has(target)) target = target.parent;
+            if (!target) { this.resetView(); return; }
+            this.frameObject(target);
         });
 
         // Lighting
@@ -2300,8 +2444,8 @@ export class ThreeJSViewer {
         this._btnOrbitMode.classList.toggle('active', isFree);
         this._btnOrbitMode.textContent = '\u27F3 R';
         this._btnOrbitMode.title = isFree
-            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable.'
-            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free.';
+            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
+            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
     }
 
     _switchCamera(toOrtho) {
@@ -3168,6 +3312,15 @@ export class ThreeJSViewer {
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
                 this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+                return;
+            }
+            if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey) {
+                this.resetView();
+                return;
+            }
+            if (e.code === 'Home' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !this._animation) {
+                e.preventDefault();
+                this.resetView();
                 return;
             }
 
@@ -4195,11 +4348,46 @@ export class ThreeJSViewer {
         this._controls.update();
         this._updateNearFar();
 
+        // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
+        // hide 900ms after the pivot was set (but only once the user stops dragging).
+        if (this._pivotMarker && this._pivotMarker.visible) {
+            const cam = this._camera;
+            const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
+            let worldPerPixel;
+            if (cam.isPerspectiveCamera) {
+                const dist = cam.position.distanceTo(this._pivotMarker.position);
+                worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
+            } else {
+                worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
+            }
+            this._pivotMarker.scale.setScalar(worldPerPixel * 60);
+            this._pivotMarkerRing.quaternion.copy(cam.quaternion);
+            const elapsed = performance.now() - this._pivotShownAt;
+            if (elapsed > 900 && !this._controls.isDragging()) {
+                this._pivotMarker.visible = false;
+            }
+        }
+
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
         this._renderer.autoClear = true;
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
-        this._viewHelper.render(this._renderer);
+        // Lift the ViewHelper above the animation toolbar when it's visible.
+        // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
+        // call to add a Y offset matching the toolbar height.
+        const animEl = this._animControlsEl;
+        const lift = (animEl && animEl.classList.contains('visible'))
+            ? animEl.offsetHeight * window.devicePixelRatio
+            : 0;
+        if (lift > 0) {
+            const orig = this._renderer.setViewport.bind(this._renderer);
+            const r = this._renderer;
+            r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
+            this._viewHelper.render(this._renderer);
+            r.setViewport = orig;
+        } else {
+            this._viewHelper.render(this._renderer);
+        }
 
         // LOD: dispatch to Web Worker after render (non-blocking)
         if (this._lodDirty && !this._lodWorkerBusy && performance.now() - this._lodLastRunTime >= this._lodThrottleMs) {
@@ -4257,6 +4445,54 @@ export class ThreeJSViewer {
                 obj.material.resolution.set(width, height);
             }
         });
+    }
+
+    frameObject(object) {
+        const bbox = new THREE.Box3();
+        object.updateWorldMatrix(true, true);
+        bbox.expandByObject(object);
+        if (bbox.isEmpty()) return;
+        const center = bbox.getCenter(new THREE.Vector3());
+        const size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+        this._controls.target.copy(center);
+        const dir = this._camera.position.clone().sub(center);
+        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+        else dir.normalize();
+        if (this._isOrtho) {
+            const w = this.container.clientWidth;
+            const h = this.container.clientHeight;
+            const aspect = (w && h) ? (w / h) : 1;
+            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
+            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
+            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
+            this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
+            this._orthoCamera.updateProjectionMatrix();
+            this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
+        } else {
+            const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
+            const aspect = this._perspCamera.aspect || 1;
+            const hFov = Math.atan(Math.tan(vFov) * aspect);
+            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
+            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
+            const dist = Math.max(distV, distH) * 1.5;
+            this._camera.position.copy(center).addScaledVector(dir, dist);
+        }
+        this._controls.update();
+    }
+
+    resetView() {
+        // Hail-mary: reset camera up to world-Z, point at origin, then frame
+        // everything. Recovers from degenerate / inverted / lost states.
+        this._camera.up.set(0, 0, 1);
+        const dir = this._camera.position.clone().sub(this._controls.target);
+        if (dir.lengthSq() < 1e-10) {
+            this._camera.position.set(5, -5, 5);
+        }
+        this._controls.target.set(0, 0, 0);
+        this._camera.lookAt(0, 0, 0);
+        this._controls.update();
+        this.frameAll();
     }
 
     frameAll() {
