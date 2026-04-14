@@ -11,6 +11,7 @@ import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+import { VertexNormalsHelper } from 'three/addons/helpers/VertexNormalsHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
@@ -353,6 +354,42 @@ function computeSectionNormals(section, nCs, out) {
     }
 }
 
+// Analytic normals for a revolution cap's (nCapRings * nCs) vertices.
+// At angle θ: n(θ) = normalize( cos(θ)·(nu·U + nv·V) + sin(θ)·tSign·T ).
+// This matches the tube-side section normal at θ=0 (no shading seam) and
+// points along ±T at θ=90° (correct axial normal at the dome tip).
+function writeAnalyticCapNormals(normalArr, capBaseVert, nCs, nCapRings, capAngles,
+                                 width, height, localFrames, spineIdx, tSign) {
+    const Ux = localFrames[spineIdx * 6],     Uy = localFrames[spineIdx * 6 + 1], Uz = localFrames[spineIdx * 6 + 2];
+    const Vx = localFrames[spineIdx * 6 + 3], Vy = localFrames[spineIdx * 6 + 4], Vz = localFrames[spineIdx * 6 + 5];
+    const Tx = Uy * Vz - Uz * Vy;
+    const Ty = Uz * Vx - Ux * Vz;
+    const Tz = Ux * Vy - Uy * Vx;
+    const section = _capScratchSection;
+    sampleChamferedRect(section, width, height);
+    const sectionNormals = _capScratchSectionNormals;
+    computeSectionNormals(section, nCs, sectionNormals);
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = capAngles[k];
+        const c = Math.cos(theta);
+        const s = Math.sin(theta) * tSign;
+        for (let j = 0; j < nCs; j++) {
+            const nu = sectionNormals[j * 2], nv = sectionNormals[j * 2 + 1];
+            let nx = c * (nu * Ux + nv * Vx) + s * Tx;
+            let ny = c * (nu * Uy + nv * Vy) + s * Ty;
+            let nz = c * (nu * Uz + nv * Vz) + s * Tz;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+            const dst = (capBaseVert + k * nCs + j) * 3;
+            normalArr[dst] = nx;
+            normalArr[dst + 1] = ny;
+            normalArr[dst + 2] = nz;
+        }
+    }
+}
+const _capScratchSection = new Float32Array(N_CROSS_SECTION * 2);
+const _capScratchSectionNormals = new Float32Array(N_CROSS_SECTION * 2);
+
 // ========== LOD: Distance-Weighted RDP ==========
 //
 // The RDP algorithm runs in a Web Worker to avoid blocking the render loop.
@@ -443,6 +480,31 @@ function computeSectionNormals(section, nCs, out) {
         const len = Math.hypot(nu, nv);
         if (len > 1e-12) { nu /= len; nv /= len; }
         out[j*2] = nu; out[j*2+1] = nv;
+    }
+}
+
+function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
+                                  width, height, localFrames, spineIdx, tSign,
+                                  sectionScratch, sectionNormalsScratch) {
+    const Ux = localFrames[spineIdx*6],   Uy = localFrames[spineIdx*6+1], Uz = localFrames[spineIdx*6+2];
+    const Vx = localFrames[spineIdx*6+3], Vy = localFrames[spineIdx*6+4], Vz = localFrames[spineIdx*6+5];
+    const Tx = Uy*Vz - Uz*Vy, Ty = Uz*Vx - Ux*Vz, Tz = Ux*Vy - Uy*Vx;
+    sampleChamferedRect(sectionScratch, width, height);
+    computeSectionNormals(sectionScratch, N_CS, sectionNormalsScratch);
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = capAngles[k];
+        const c = Math.cos(theta);
+        const s = Math.sin(theta) * tSign;
+        for (let j = 0; j < N_CS; j++) {
+            const nu = sectionNormalsScratch[j*2], nv = sectionNormalsScratch[j*2+1];
+            let nx = c*(nu*Ux + nv*Vx) + s*Tx;
+            let ny = c*(nu*Uy + nv*Vy) + s*Ty;
+            let nz = c*(nu*Uz + nv*Vz) + s*Tz;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+            const dst = (capBaseVert + k*N_CS + j) * 3;
+            normalArr[dst] = nx; normalArr[dst+1] = ny; normalArr[dst+2] = nz;
+        }
     }
 }
 
@@ -599,26 +661,8 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
     buildCapIdx((nSpine-1)*N_CS, endCapBase, false);
     const endCapPattern = indices.slice(endCapOff, endCapOff + capIndicesPerCap);
 
-    // Compute face-area-weighted vertex normals (same as Three.js computeVertexNormals)
+    // Analytic normals throughout — LOD-invariant, no face-area weighting.
     const normals = new Float32Array(totalVerts * 3);
-    for (let i = 0; i < totalIdx; i += 3) {
-        const ia = indices[i], ib = indices[i+1], ic = indices[i+2];
-        const ax = positions[ia*3], ay = positions[ia*3+1], az = positions[ia*3+2];
-        const bx = positions[ib*3]-ax, by = positions[ib*3+1]-ay, bz = positions[ib*3+2]-az;
-        const cx = positions[ic*3]-ax, cy = positions[ic*3+1]-ay, cz = positions[ic*3+2]-az;
-        const nx = by*cz-bz*cy, ny = bz*cx-bx*cz, nz = bx*cy-by*cx;
-        normals[ia*3]+=nx; normals[ia*3+1]+=ny; normals[ia*3+2]+=nz;
-        normals[ib*3]+=nx; normals[ib*3+1]+=ny; normals[ib*3+2]+=nz;
-        normals[ic*3]+=nx; normals[ic*3+1]+=ny; normals[ic*3+2]+=nz;
-    }
-    for (let i = 0; i < totalVerts; i++) {
-        const x = normals[i*3], y = normals[i*3+1], z = normals[i*3+2];
-        const len = Math.hypot(x, y, z);
-        if (len > 1e-12) { normals[i*3]/=len; normals[i*3+1]/=len; normals[i*3+2]/=len; }
-    }
-    // Overwrite tube-side ring normals with analytic radial-bisector values.
-    // This makes shading independent of ring spacing (LOD-invariant). Caps
-    // keep area-weighted normals — their revolution geometry has uniform rings.
     const sectionNormals = new Float32Array(N_CS * 2);
     for (let i = 0; i < nSpine; i++) {
         sampleChamferedRect(section, widths[i], heights[i]);
@@ -633,6 +677,10 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
             normals[rb + j*3 + 2] = nu*Uz + nv*Vz;
         }
     }
+    writeAnalyticCapNormalsW(normals, startCapBase, N_CAP_RINGS, capAngles,
+        widths[0], heights[0], localFrames, 0, -1, section, sectionNormals);
+    writeAnalyticCapNormalsW(normals, endCapBase, N_CAP_RINGS, capAngles,
+        widths[nSpine - 1], heights[nSpine - 1], localFrames, nSpine - 1, +1, section, sectionNormals);
 
     return { positions, normals, colors, indices, localFrames, capAngles, endCapPattern,
              ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
@@ -1111,10 +1159,11 @@ function buildParametricTubeGeometry(
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    geometry.computeVertexNormals();
-    // Overwrite tube-side ring normals with analytic radial-bisector values.
-    // Caps keep their area-weighted normals (revolution, uniform ring spacing).
-    const normalArr = geometry.attributes.normal.array;
+    // Analytic normals everywhere — no reliance on face-area accumulation.
+    // Tube-side rings use the cross-section bisector normal (pure UV radial).
+    // Revolution caps use cos(θ)·radial + sin(θ)·T, which equals the tube-side
+    // normal at θ=0 (smooth seam) and pure axial T at θ=90°.
+    const normalArr = new Float32Array(totalVerts * 3);
     const sectionNormals = new Float32Array(nCs * 2);
     for (let i = 0; i < nSpine; i++) {
         sampleChamferedRect(section, widths[i], heights[i]);
@@ -1129,7 +1178,11 @@ function buildParametricTubeGeometry(
             normalArr[rb + j * 3 + 2] = nu * Uz + nv * Vz;
         }
     }
-    geometry.attributes.normal.needsUpdate = true;
+    writeAnalyticCapNormals(normalArr, startCapBase, nCs, nCapRings, capAngles,
+        widths[0], heights[0], localFrames, 0, -1);
+    writeAnalyticCapNormals(normalArr, endCapBase, nCs, nCapRings, capAngles,
+        widths[nSpine - 1], heights[nSpine - 1], localFrames, nSpine - 1, +1);
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normalArr, 3));
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
@@ -1368,23 +1421,6 @@ function morphFrontierRing(obj, fracRingPairs) {
     posAttr.addUpdateRange(ringBase, rangeCount);
     posAttr.needsUpdate = true;
 
-    // Analytic normals at the morphed cross-section (radial bisector in UV).
-    const norAttr = obj.geometry.getAttribute('normal');
-    if (norAttr) {
-        if (!md._morphSectionNormals) md._morphSectionNormals = new Float32Array(nCs * 2);
-        computeSectionNormals(md.section, nCs, md._morphSectionNormals);
-        const nor = norAttr.array;
-        for (let j = 0; j < nCs; j++) {
-            const nu = md._morphSectionNormals[j * 2];
-            const nv = md._morphSectionNormals[j * 2 + 1];
-            nor[ringBase + j * 3]     = nu * ux + nv * vx;
-            nor[ringBase + j * 3 + 1] = nu * uy + nv * vy;
-            nor[ringBase + j * 3 + 2] = nu * uz + nv * vz;
-        }
-        norAttr.addUpdateRange(ringBase, rangeCount);
-        norAttr.needsUpdate = true;
-    }
-
     // Lerp colors if present
     if (ud.tubeHasColors && md.ringColors) {
         const colAttr = obj.geometry.getAttribute('color');
@@ -1478,9 +1514,10 @@ function updateEndCap(obj, lastVisibleRing) {
     }
 }
 
-// Recompute vertex normals for the frontier ring and end cap by accumulating
-// face normals from adjacent triangles.  Only touches the affected vertices
-// (frontier ring + end cap), leaving the rest of the geometry untouched.
+// Write analytic normals for the frontier ring + end cap during animation.
+// Frontier ring gets the pure cross-section bisector (pure UV radial). The
+// end cap uses cos(θ)·radial + sin(θ)·T so the seam at the frontier matches
+// and the dome tip points along +T.
 function updateMorphedNormals(obj, visiblePairs) {
     const ud = obj.userData;
     const md = ud.tubeMorphData;
@@ -1489,71 +1526,63 @@ function updateMorphedNormals(obj, visiblePairs) {
     const nCs = ud.tubeNCs;
     const nCapRings = md.capAngles.length;
     const ecBase = ud.tubeEndCapBase;
-
-    const pos = obj.geometry.getAttribute('position').array;
     const norAttr = obj.geometry.getAttribute('normal');
     if (!norAttr) return;
     const nor = norAttr.array;
 
+    // Shape/frame of the frontier (morphed if mid-interpolation, else raw ring).
+    let w, h, ux, uy, uz, vx, vy, vz;
+    if (md.morphedState) {
+        const ms = md.morphedState;
+        w = ms.w; h = ms.h;
+        ux = ms.ux; uy = ms.uy; uz = ms.uz;
+        vx = ms.vx; vy = ms.vy; vz = ms.vz;
+    } else {
+        const i = visiblePairs;
+        w = md.widths[i]; h = md.heights[i];
+        ux = md.localFrames[i * 6];     uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
+        vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
+    }
+    const tx = uy * vz - uz * vy;
+    const ty = uz * vx - ux * vz;
+    const tz = ux * vy - uy * vx;
+
+    sampleChamferedRect(md.section, w, h);
+    if (!md._sectionNormalsScratch) md._sectionNormalsScratch = new Float32Array(nCs * 2);
+    const sn = md._sectionNormalsScratch;
+    computeSectionNormals(md.section, nCs, sn);
+
+    // Frontier ring: pure UV radial.
     const fBase = visiblePairs * nCs;
-    const capEnd = ecBase + nCapRings * nCs;
-
-    // Zero normals for frontier ring and end cap vertices
-    for (let i = fBase * 3, e = (fBase + nCs) * 3; i < e; i++) nor[i] = 0;
-    for (let i = ecBase * 3, e = capEnd * 3; i < e; i++) nor[i] = 0;
-
-    // Accumulate a single face normal at vertices in the affected set.
-    function accumFace(ia, ib, ic) {
-        const ax = pos[ia * 3], ay = pos[ia * 3 + 1], az = pos[ia * 3 + 2];
-        const e1x = pos[ib * 3] - ax, e1y = pos[ib * 3 + 1] - ay, e1z = pos[ib * 3 + 2] - az;
-        const e2x = pos[ic * 3] - ax, e2y = pos[ic * 3 + 1] - ay, e2z = pos[ic * 3 + 2] - az;
-        const nx = e1y * e2z - e1z * e2y;
-        const ny = e1z * e2x - e1x * e2z;
-        const nz = e1x * e2y - e1y * e2x;
-        if ((ia >= fBase && ia < fBase + nCs) || (ia >= ecBase && ia < capEnd)) {
-            nor[ia * 3] += nx; nor[ia * 3 + 1] += ny; nor[ia * 3 + 2] += nz;
-        }
-        if ((ib >= fBase && ib < fBase + nCs) || (ib >= ecBase && ib < capEnd)) {
-            nor[ib * 3] += nx; nor[ib * 3 + 1] += ny; nor[ib * 3 + 2] += nz;
-        }
-        if ((ic >= fBase && ic < fBase + nCs) || (ic >= ecBase && ic < capEnd)) {
-            nor[ic * 3] += nx; nor[ic * 3 + 1] += ny; nor[ic * 3 + 2] += nz;
-        }
+    for (let j = 0; j < nCs; j++) {
+        const nu = sn[j * 2], nv = sn[j * 2 + 1];
+        const dst = (fBase + j) * 3;
+        nor[dst]     = nu * ux + nv * vx;
+        nor[dst + 1] = nu * uy + nv * vy;
+        nor[dst + 2] = nu * uz + nv * vz;
     }
 
-    // Ring pair (prevRing → frontier): tube body quads
-    if (visiblePairs > 0) {
-        const pBase = (visiblePairs - 1) * nCs;
-        for (let j = 0; j < nCs; j++) {
-            const jN = (j + 1) % nCs;
-            accumFace(pBase + j, pBase + jN, fBase + jN);
-            accumFace(pBase + j, fBase + jN, fBase + j);
-        }
-    }
-
-    // End cap strips (frontier → cap ring 0 → cap ring 1 → …)
+    // End cap rings: cos(θ)·radial + sin(θ)·T.
     for (let k = 0; k < nCapRings; k++) {
-        const inner = k === 0 ? fBase : ecBase + (k - 1) * nCs;
-        const outer = ecBase + k * nCs;
+        const theta = md.capAngles[k];
+        const c = Math.cos(theta);
+        const s = Math.sin(theta);
         for (let j = 0; j < nCs; j++) {
-            const jN = (j + 1) % nCs;
-            accumFace(inner + j, inner + jN, outer + j);
-            accumFace(inner + jN, outer + jN, outer + j);
+            const nu = sn[j * 2], nv = sn[j * 2 + 1];
+            let nx = c * (nu * ux + nv * vx) + s * tx;
+            let ny = c * (nu * uy + nv * vy) + s * ty;
+            let nz = c * (nu * uz + nv * vz) + s * tz;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+            const dst = (ecBase + k * nCs + j) * 3;
+            nor[dst] = nx;
+            nor[dst + 1] = ny;
+            nor[dst + 2] = nz;
         }
-    }
-
-    // Normalize affected vertices
-    for (let v = fBase; v < fBase + nCs; v++) {
-        const len = Math.hypot(nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]);
-        if (len > 1e-12) { nor[v * 3] /= len; nor[v * 3 + 1] /= len; nor[v * 3 + 2] /= len; }
-    }
-    for (let v = ecBase; v < capEnd; v++) {
-        const len = Math.hypot(nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]);
-        if (len > 1e-12) { nor[v * 3] /= len; nor[v * 3 + 1] /= len; nor[v * 3 + 2] /= len; }
     }
 
     norAttr.addUpdateRange(fBase * 3, nCs * 3);
-    norAttr.addUpdateRange(ecBase * 3, (capEnd - ecBase) * 3);
+    norAttr.addUpdateRange(ecBase * 3, nCapRings * nCs * 3);
     norAttr.needsUpdate = true;
 }
 
@@ -1756,6 +1785,12 @@ export class ThreeJSViewer {
 
         // Wireframe display mode: 0 = normal, 1 = wireframe-only, 2 = combined overlay
         this._wireframeMode = 0;
+
+        // Shading debug mode: 0 = off, 1 = normals-as-color, 2 = UV checker, 3 = vertex-normals helper
+        this._shadingMode = 0;
+        this._uvCheckerTexture = null;
+        this._shadingNormalMaterial = null;
+        this._shadingUvMaterial = null;
 
         // Clipping state
         this._clipEnabled = false;
@@ -2389,6 +2424,137 @@ export class ThreeJSViewer {
         return overlay;
     }
 
+    _cycleShadingMode() {
+        this._shadingMode = (this._shadingMode + 1) % 4;
+        this._applyShadingMode();
+    }
+
+    _getUvCheckerTexture() {
+        if (this._uvCheckerTexture) return this._uvCheckerTexture;
+        const size = 256;
+        const cells = 8;
+        const cell = size / cells;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        for (let y = 0; y < cells; y++) {
+            for (let x = 0; x < cells; x++) {
+                const dark = (x + y) % 2 === 0;
+                ctx.fillStyle = dark ? '#202020' : '#e0e0e0';
+                ctx.fillRect(x * cell, y * cell, cell, cell);
+            }
+        }
+        // Colored axis bands so U/V orientation is legible.
+        ctx.fillStyle = '#d03030';
+        ctx.fillRect(0, 0, size, 2);
+        ctx.fillStyle = '#30a030';
+        ctx.fillRect(0, 0, 2, size);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestMipMapLinearFilter;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this._uvCheckerTexture = tex;
+        return tex;
+    }
+
+    _getShadingMaterial(mode) {
+        const clip = this._clipEnabled ? this._clipPlanes : [];
+        if (mode === 1) {
+            if (!this._shadingNormalMaterial) {
+                this._shadingNormalMaterial = new THREE.MeshNormalMaterial({
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._shadingNormalMaterial.clippingPlanes = clip;
+                this._shadingNormalMaterial.needsUpdate = true;
+            }
+            return this._shadingNormalMaterial;
+        }
+        if (mode === 2) {
+            if (!this._shadingUvMaterial) {
+                this._shadingUvMaterial = new THREE.MeshBasicMaterial({
+                    map: this._getUvCheckerTexture(),
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._shadingUvMaterial.clippingPlanes = clip;
+                this._shadingUvMaterial.needsUpdate = true;
+            }
+            return this._shadingUvMaterial;
+        }
+        return null;
+    }
+
+    _applyShadingMaterial(obj, mode) {
+        const debugMat = this._getShadingMaterial(mode);
+        if (!debugMat) return;
+        if (obj.userData.originalMaterial === undefined) {
+            obj.userData.originalMaterial = obj.material;
+        }
+        obj.material = debugMat;
+    }
+
+    _restoreShadingMaterial(obj) {
+        if (obj.userData.originalMaterial === undefined) return;
+        obj.material = obj.userData.originalMaterial;
+        delete obj.userData.originalMaterial;
+        // Original material's clippingPlanes may be stale if clipping was toggled
+        // while the debug material was active. Re-sync from current clip state.
+        const planes = this._clipEnabled ? this._clipPlanes : [];
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+            if (!m) continue;
+            m.clippingPlanes = planes;
+            m.needsUpdate = true;
+        }
+    }
+
+    _applyShadingMode() {
+        const mode = this._shadingMode;
+        this._scene.traverse((obj) => {
+            if (!obj.isMesh) return;
+            if (obj.userData.isWireOverlay) return;
+            if (obj.userData.isDebugHelper) return;
+
+            if (mode === 1 || mode === 2) {
+                this._applyShadingMaterial(obj, mode);
+            } else {
+                this._restoreShadingMaterial(obj);
+            }
+
+            let helper = obj.userData.vertexNormalsHelper;
+            if (mode === 3) {
+                if (!helper && obj.geometry && obj.geometry.attributes && obj.geometry.attributes.normal) {
+                    const size = this._estimateNormalHelperSize(obj);
+                    helper = new VertexNormalsHelper(obj, size, 0x00ffff);
+                    helper.userData.isDebugHelper = true;
+                    helper.raycast = () => {};
+                    obj.userData.vertexNormalsHelper = helper;
+                    this._scene.add(helper);
+                }
+                if (helper) {
+                    helper.visible = true;
+                    helper.update();
+                }
+            } else if (helper) {
+                helper.visible = false;
+            }
+        });
+    }
+
+    _estimateNormalHelperSize(obj) {
+        const geo = obj.geometry;
+        if (!geo) return 0.1;
+        if (!geo.boundingSphere) geo.computeBoundingSphere();
+        const r = geo.boundingSphere ? geo.boundingSphere.radius : 1;
+        return Math.max(r * 0.03, 1e-3);
+    }
+
     _toggleClipPanel() {
         this._clipEnabled = !this._clipEnabled;
         if (this._clipEnabled && this._clipDefaults) {
@@ -2687,6 +2853,16 @@ export class ThreeJSViewer {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
+                }
+                if (child.userData.vertexNormalsHelper) {
+                    const h = child.userData.vertexNormalsHelper;
+                    if (h.parent) h.parent.remove(h);
+                    if (h.geometry) h.geometry.dispose();
+                    if (h.material) h.material.dispose();
+                    delete child.userData.vertexNormalsHelper;
+                }
+                if (child.userData.originalMaterial !== undefined) {
+                    delete child.userData.originalMaterial;
                 }
                 if (child.geometry) child.geometry.dispose();
                 if (child.material) {
@@ -3308,6 +3484,10 @@ export class ThreeJSViewer {
             }
             if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
                 this._cycleWireframeMode();
+                return;
+            }
+            if (e.code === 'KeyN' && !e.ctrlKey && !e.metaKey) {
+                this._cycleShadingMode();
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
