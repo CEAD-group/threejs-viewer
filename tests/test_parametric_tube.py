@@ -84,6 +84,18 @@ def test_add_parametric_tube_validates_heights_finite():
         c.add_parametric_tube("t", spine, widths, heights)
 
 
+def test_add_parametric_tube_anchor_rejects_invalid():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="anchor"):
+        c.add_parametric_tube("t", spine, widths, heights, anchor="bottom")
+
+
 # --- Browser integration tests ---
 
 

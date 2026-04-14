@@ -770,10 +770,13 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
-        if anchor == "top":
-            header["heightOffset"] = 0.5
-        elif anchor != "center":
-            raise ValueError(f"anchor must be 'center' or 'top', got {anchor!r}")
+        anchor_offsets = {"center": 0.0, "top": 0.5}
+        if anchor not in anchor_offsets:
+            raise ValueError(
+                f"anchor must be one of {sorted(anchor_offsets)}, got {anchor!r}"
+            )
+        if anchor_offsets[anchor]:
+            header["heightOffset"] = anchor_offsets[anchor]
         if up_vector is not None:
             header["upVector"] = [
                 float(up_vector[0]),

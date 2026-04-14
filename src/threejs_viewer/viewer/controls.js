@@ -46,6 +46,10 @@ const MAX_DISTANCE = 1e6;
 const MIN_ZOOM = 1e-4;
 const MAX_ZOOM = 1e6;
 const POLE_EPS = THREE.MathUtils.degToRad(5); // turntable pitch clamp
+// Reject floor-fallback pivots whose hit point is absurdly far from the camera
+// (happens when the click ray is nearly parallel to the floor — intersection
+// point shoots off to "infinity"). Keeps pivot relocation sensible.
+const FLOOR_PIVOT_MAX_DISTANCE = 1e4;
 const _changeEvent = { type: 'change' };
 
 class ViewerControls extends THREE.EventDispatcher {
@@ -86,6 +90,7 @@ class ViewerControls extends THREE.EventDispatcher {
         this._tmpV1 = new THREE.Vector3();
         this._tmpV2 = new THREE.Vector3();
         this._tmpV3 = new THREE.Vector3();
+        this._tmpV4 = new THREE.Vector3();
         this._tmpQ1 = new THREE.Quaternion();
         this._tmpQ2 = new THREE.Quaternion();
         this._tmpQ3 = new THREE.Quaternion();
@@ -150,6 +155,9 @@ class ViewerControls extends THREE.EventDispatcher {
     }
 
     _onKeyUp(e) {
+        // Clear on actual Alt release, and also self-heal if any keyup event
+        // reports altKey as false (covers cases where we missed the Alt keyup
+        // due to focus loss / window switch while Alt was held).
         if (e.key === 'Alt' || !e.altKey) this._altHeld = false;
     }
 
@@ -287,7 +295,7 @@ class ViewerControls extends THREE.EventDispatcher {
         const floorPt = this._raycaster.ray.intersectPlane(this._floorPlane, this._floorHit);
         if (!floorPt) return;
         // Reject "at infinity" hits when the camera is nearly parallel to the floor.
-        if (this._tmpV1.copy(floorPt).sub(this.camera.position).length() > 10000) return;
+        if (this._tmpV1.copy(floorPt).sub(this.camera.position).length() > FLOOR_PIVOT_MAX_DISTANCE) return;
         this.target.copy(floorPt);
         this.dispatchEvent({ type: 'pivot', point: floorPt.clone(), hit: false });
         this.dispatchEvent(_changeEvent);
@@ -359,30 +367,28 @@ class ViewerControls extends THREE.EventDispatcher {
         const qPitch = this._tmpQ2.setFromAxisAngle(camRight, -dPhi);
         const q = this._tmpQ3.copy(qYaw).multiply(qPitch);
 
-        // Provisional apply
-        const offset = this._tmpV3.copy(cam.position).sub(this.target);
-        offset.applyQuaternion(q);
-        const newPos = offset.clone().add(this.target);
-        const newQuat = cam.quaternion.clone().premultiply(q).normalize();
+        // Provisional rotated offset (target -> camera) in scratch.
+        const offset = this._tmpV3.copy(cam.position).sub(this.target).applyQuaternion(q);
 
         if (activeMode === 'turntable') {
-            // After rotation, where does the camera look (-Z in cam space, world)?
-            const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(newQuat);
+            // Prospective forward after rotation = q * cam.quaternion * (0,0,-1).
+            const fwd = this._tmpV4.set(0, 0, -1)
+                .applyQuaternion(cam.quaternion)
+                .applyQuaternion(q);
             const dotZ = Math.abs(fwd.dot(this._worldZ));
             // If forward is within POLE_EPS of ±worldZ, reject the pitch component
-            // and re-apply only the yaw.
+            // and re-apply only the yaw (reclaiming _tmpQ3 since q is no longer needed).
             if (dotZ > Math.cos(POLE_EPS)) {
-                const qYawOnly = this._tmpQ3.copy(qYaw); // reuse
-                const offset2 = cam.position.clone().sub(this.target);
-                offset2.applyQuaternion(qYawOnly);
-                cam.position.copy(this.target).add(offset2);
+                const qYawOnly = this._tmpQ3.copy(qYaw);
+                offset.copy(cam.position).sub(this.target).applyQuaternion(qYawOnly);
+                cam.position.copy(this.target).add(offset);
                 cam.quaternion.premultiply(qYawOnly).normalize();
                 return;
             }
         }
 
-        cam.position.copy(newPos);
-        cam.quaternion.copy(newQuat);
+        cam.position.copy(this.target).add(offset);
+        cam.quaternion.premultiply(q).normalize();
     }
 
     _applyPan(dx, dy) {
