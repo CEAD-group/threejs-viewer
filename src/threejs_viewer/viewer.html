@@ -882,6 +882,7 @@ import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+import { VertexNormalsHelper } from 'three/addons/helpers/VertexNormalsHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
@@ -2656,6 +2657,12 @@ class ThreeJSViewer {
         // Wireframe display mode: 0 = normal, 1 = wireframe-only, 2 = combined overlay
         this._wireframeMode = 0;
 
+        // Shading debug mode: 0 = off, 1 = normals-as-color, 2 = UV checker, 3 = vertex-normals helper
+        this._shadingMode = 0;
+        this._uvCheckerTexture = null;
+        this._shadingNormalMaterial = null;
+        this._shadingUvMaterial = null;
+
         // Clipping state
         this._clipEnabled = false;
         this._clipHelperVisible = true;
@@ -3288,6 +3295,162 @@ class ThreeJSViewer {
         return overlay;
     }
 
+    _cycleShadingMode() {
+        this._shadingMode = (this._shadingMode + 1) % 4;
+        this._applyShadingMode();
+    }
+
+    _getUvCheckerTexture() {
+        if (this._uvCheckerTexture) return this._uvCheckerTexture;
+        const size = 256;
+        const cells = 8;
+        const cell = size / cells;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        for (let y = 0; y < cells; y++) {
+            for (let x = 0; x < cells; x++) {
+                const dark = (x + y) % 2 === 0;
+                ctx.fillStyle = dark ? '#202020' : '#e0e0e0';
+                ctx.fillRect(x * cell, y * cell, cell, cell);
+            }
+        }
+        // Colored axis bands so U/V orientation is legible.
+        ctx.fillStyle = '#d03030';
+        ctx.fillRect(0, 0, size, 2);
+        ctx.fillStyle = '#30a030';
+        ctx.fillRect(0, 0, 2, size);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestMipMapLinearFilter;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this._uvCheckerTexture = tex;
+        return tex;
+    }
+
+    _getShadingMaterial(mode) {
+        const clip = this._clipEnabled ? this._clipPlanes : [];
+        if (mode === 1) {
+            if (!this._shadingNormalMaterial) {
+                this._shadingNormalMaterial = new THREE.MeshNormalMaterial({
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._shadingNormalMaterial.clippingPlanes = clip;
+                this._shadingNormalMaterial.needsUpdate = true;
+            }
+            return this._shadingNormalMaterial;
+        }
+        if (mode === 2) {
+            if (!this._shadingUvMaterial) {
+                this._shadingUvMaterial = new THREE.MeshBasicMaterial({
+                    map: this._getUvCheckerTexture(),
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._shadingUvMaterial.clippingPlanes = clip;
+                this._shadingUvMaterial.needsUpdate = true;
+            }
+            return this._shadingUvMaterial;
+        }
+        return null;
+    }
+
+    _applyShadingMaterial(obj, mode) {
+        const debugMat = this._getShadingMaterial(mode);
+        if (!debugMat) return;
+        if (obj.userData.originalMaterial === undefined) {
+            obj.userData.originalMaterial = obj.material;
+        }
+        obj.material = debugMat;
+    }
+
+    _restoreShadingMaterial(obj) {
+        if (obj.userData.originalMaterial === undefined) return;
+        obj.material = obj.userData.originalMaterial;
+        delete obj.userData.originalMaterial;
+        // Original material's clippingPlanes may be stale if clipping was toggled
+        // while the debug material was active. Re-sync from current clip state.
+        const planes = this._clipEnabled ? this._clipPlanes : [];
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+            if (!m) continue;
+            m.clippingPlanes = planes;
+            m.needsUpdate = true;
+        }
+    }
+
+    _forEachUserMesh(cb) {
+        // Only visit user-registered objects and their descendants — skips
+        // viewer furniture (TransformControls gizmo, ViewHelper, grid, pivot
+        // marker, clip anchor) whose materials often lack the fields our
+        // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
+        for (const root of this._objects.values()) {
+            root.traverse((obj) => {
+                if (!obj.isMesh) return;
+                if (obj.userData.isWireOverlay) return;
+                if (obj.userData.isDebugHelper) return;
+                cb(obj);
+            });
+        }
+    }
+
+    _applyShadingMode() {
+        const mode = this._shadingMode;
+        this._forEachUserMesh((obj) => {
+
+            if (mode === 1 || mode === 2) {
+                this._applyShadingMaterial(obj, mode);
+            } else {
+                this._restoreShadingMaterial(obj);
+            }
+
+            let helper = obj.userData.vertexNormalsHelper;
+            if (mode === 3) {
+                if (!helper && obj.geometry && obj.geometry.attributes && obj.geometry.attributes.normal) {
+                    helper = new VertexNormalsHelper(obj, this._cameraRelativeNormalSize(obj), 0x00ffff);
+                    helper.userData.isDebugHelper = true;
+                    helper.raycast = () => {};
+                    obj.userData.vertexNormalsHelper = helper;
+                    this._scene.add(helper);
+                }
+                if (helper) {
+                    helper.visible = true;
+                    helper.size = this._cameraRelativeNormalSize(obj);
+                    helper.update();
+                }
+            } else if (helper) {
+                helper.visible = false;
+            }
+        });
+    }
+
+    _cameraRelativeNormalSize(obj) {
+        // Target ~30 pixels on screen regardless of zoom.
+        const cam = this._camera;
+        const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
+        const targetPx = 30;
+        if (!obj.geometry) return 0.1;
+        if (!obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
+        obj.updateWorldMatrix(true, false);
+        const center = obj.geometry.boundingSphere
+            ? obj.geometry.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld)
+            : obj.getWorldPosition(new THREE.Vector3());
+        let worldPerPixel;
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(center);
+            worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
+        } else {
+            worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
+        }
+        return Math.max(worldPerPixel * targetPx, 1e-6);
+    }
+
     _toggleClipPanel() {
         this._clipEnabled = !this._clipEnabled;
         if (this._clipEnabled && this._clipDefaults) {
@@ -3586,6 +3749,16 @@ class ThreeJSViewer {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
+                }
+                if (child.userData.vertexNormalsHelper) {
+                    const h = child.userData.vertexNormalsHelper;
+                    if (h.parent) h.parent.remove(h);
+                    if (h.geometry) h.geometry.dispose();
+                    if (h.material) h.material.dispose();
+                    delete child.userData.vertexNormalsHelper;
+                }
+                if (child.userData.originalMaterial !== undefined) {
+                    delete child.userData.originalMaterial;
                 }
                 if (child.geometry) child.geometry.dispose();
                 if (child.material) {
@@ -4207,6 +4380,10 @@ class ThreeJSViewer {
             }
             if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
                 this._cycleWireframeMode();
+                return;
+            }
+            if (e.code === 'KeyN' && !e.ctrlKey && !e.metaKey) {
+                this._cycleShadingMode();
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
@@ -5268,6 +5445,14 @@ class ThreeJSViewer {
         }
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
+        if (this._shadingMode === 3) {
+            this._scene.traverse((obj) => {
+                const h = obj.userData && obj.userData.vertexNormalsHelper;
+                if (!h || !h.visible) return;
+                h.size = this._cameraRelativeNormalSize(obj);
+                h.update();
+            });
+        }
         this._renderer.autoClear = true;
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
@@ -5279,11 +5464,20 @@ class ThreeJSViewer {
             ? animEl.offsetHeight * window.devicePixelRatio
             : 0;
         if (lift > 0) {
-            const orig = this._renderer.setViewport.bind(this._renderer);
+            // Cache the true original once so we don't re-wrap the wrapped
+            // setViewport each frame (which would deepen the call chain by
+            // one level per frame and eventually blow the stack).
+            if (!this._rendererSetViewportOriginal) {
+                this._rendererSetViewportOriginal = this._renderer.setViewport.bind(this._renderer);
+            }
+            const orig = this._rendererSetViewportOriginal;
             const r = this._renderer;
             r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
-            this._viewHelper.render(this._renderer);
-            r.setViewport = orig;
+            try {
+                this._viewHelper.render(this._renderer);
+            } finally {
+                r.setViewport = orig;
+            }
         } else {
             this._viewHelper.render(this._renderer);
         }

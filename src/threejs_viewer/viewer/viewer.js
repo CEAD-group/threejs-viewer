@@ -2514,12 +2514,24 @@ export class ThreeJSViewer {
         }
     }
 
+    _forEachUserMesh(cb) {
+        // Only visit user-registered objects and their descendants — skips
+        // viewer furniture (TransformControls gizmo, ViewHelper, grid, pivot
+        // marker, clip anchor) whose materials often lack the fields our
+        // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
+        for (const root of this._objects.values()) {
+            root.traverse((obj) => {
+                if (!obj.isMesh) return;
+                if (obj.userData.isWireOverlay) return;
+                if (obj.userData.isDebugHelper) return;
+                cb(obj);
+            });
+        }
+    }
+
     _applyShadingMode() {
         const mode = this._shadingMode;
-        this._scene.traverse((obj) => {
-            if (!obj.isMesh) return;
-            if (obj.userData.isWireOverlay) return;
-            if (obj.userData.isDebugHelper) return;
+        this._forEachUserMesh((obj) => {
 
             if (mode === 1 || mode === 2) {
                 this._applyShadingMaterial(obj, mode);
@@ -2530,8 +2542,7 @@ export class ThreeJSViewer {
             let helper = obj.userData.vertexNormalsHelper;
             if (mode === 3) {
                 if (!helper && obj.geometry && obj.geometry.attributes && obj.geometry.attributes.normal) {
-                    const size = this._estimateNormalHelperSize(obj);
-                    helper = new VertexNormalsHelper(obj, size, 0x00ffff);
+                    helper = new VertexNormalsHelper(obj, this._cameraRelativeNormalSize(obj), 0x00ffff);
                     helper.userData.isDebugHelper = true;
                     helper.raycast = () => {};
                     obj.userData.vertexNormalsHelper = helper;
@@ -2539,6 +2550,7 @@ export class ThreeJSViewer {
                 }
                 if (helper) {
                     helper.visible = true;
+                    helper.size = this._cameraRelativeNormalSize(obj);
                     helper.update();
                 }
             } else if (helper) {
@@ -2547,12 +2559,25 @@ export class ThreeJSViewer {
         });
     }
 
-    _estimateNormalHelperSize(obj) {
-        const geo = obj.geometry;
-        if (!geo) return 0.1;
-        if (!geo.boundingSphere) geo.computeBoundingSphere();
-        const r = geo.boundingSphere ? geo.boundingSphere.radius : 1;
-        return Math.max(r * 0.03, 1e-3);
+    _cameraRelativeNormalSize(obj) {
+        // Target ~30 pixels on screen regardless of zoom.
+        const cam = this._camera;
+        const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
+        const targetPx = 30;
+        if (!obj.geometry) return 0.1;
+        if (!obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
+        obj.updateWorldMatrix(true, false);
+        const center = obj.geometry.boundingSphere
+            ? obj.geometry.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld)
+            : obj.getWorldPosition(new THREE.Vector3());
+        let worldPerPixel;
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(center);
+            worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
+        } else {
+            worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
+        }
+        return Math.max(worldPerPixel * targetPx, 1e-6);
     }
 
     _toggleClipPanel() {
@@ -4549,6 +4574,14 @@ export class ThreeJSViewer {
         }
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
+        if (this._shadingMode === 3) {
+            this._scene.traverse((obj) => {
+                const h = obj.userData && obj.userData.vertexNormalsHelper;
+                if (!h || !h.visible) return;
+                h.size = this._cameraRelativeNormalSize(obj);
+                h.update();
+            });
+        }
         this._renderer.autoClear = true;
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
@@ -4560,11 +4593,20 @@ export class ThreeJSViewer {
             ? animEl.offsetHeight * window.devicePixelRatio
             : 0;
         if (lift > 0) {
-            const orig = this._renderer.setViewport.bind(this._renderer);
+            // Cache the true original once so we don't re-wrap the wrapped
+            // setViewport each frame (which would deepen the call chain by
+            // one level per frame and eventually blow the stack).
+            if (!this._rendererSetViewportOriginal) {
+                this._rendererSetViewportOriginal = this._renderer.setViewport.bind(this._renderer);
+            }
+            const orig = this._rendererSetViewportOriginal;
             const r = this._renderer;
             r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
-            this._viewHelper.render(this._renderer);
-            r.setViewport = orig;
+            try {
+                this._viewHelper.render(this._renderer);
+            } finally {
+                r.setViewport = orig;
+            }
         } else {
             this._viewHelper.render(this._renderer);
         }

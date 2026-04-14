@@ -81,6 +81,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - 3D models: GLTF/GLB, STL, OBJ, FBX, DAE, PLY, 3DS
 - **draw_range**: polylines, meshes, and parametric tubes support `set_draw_range(id, 0.0-1.0)` to control visible fraction, and `draw_ranges` channel in animation frames
 - **Wireframe display**: press `M` to cycle scene display modes globally: normal → wireframe-only → combined (solid + black wireframe overlay) → normal. Purely a viewer-side toggle; no Python API.
+- **Shading debug**: press `N` to cycle shading debug modes globally: off → normals-as-color (`MeshNormalMaterial` swap) → UV checker (procedural checkerboard with red U / green V axis bands) → vertex-normals helper (cyan line segments per vertex). Independent of `M` — they compose (wireframe overlays draw on top of swapped materials). Viewer-side toggle; no Python API.
 - **Clipping plane**: interactive cross-section plane with GUI panel (press C to toggle). Supports single plane and slab (dual-plane) modes. Rotation gizmo for orienting the plane; arrow keys nudge position. V key snaps ortho camera to clip normal for slice inspection. Programmatic control via `set_clipping_plane(normal, distance, show_helper)` / `set_clipping_slab(normal, center, thickness, show_helper)` / `disable_clipping_plane()` / `set_clipping_defaults(normal, distance)`
 
 ### Animation: Two Approaches
