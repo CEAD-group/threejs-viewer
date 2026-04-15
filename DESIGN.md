@@ -232,16 +232,33 @@ threejs-viewer/
 │   ├── animation.py     # Animation, AnimationChannel, Frame, Marker classes
 │   ├── viewer.html      # Generated standalone viewer (do not edit)
 │   └── viewer/          # Viewer source files (edit these)
-│       ├── viewer.js    # ES module: ThreeJSViewer class
+│       ├── viewer.js    # ES module: ThreeJSViewer + ParametricTube, CameraController, ShadingDebugController
 │       ├── viewer.css   # Scoped CSS (.threejs-viewer)
 │       ├── template.html # UI controls template
 │       ├── build.py     # Inlines sources → viewer.html
 │       └── static/      # Cubemap JPEG images
+├── plans/              # Decision-making artifacts for undecided future work (NOT landed architecture)
 ├── pyproject.toml
 ├── DESIGN.md
 ├── EXAMPLES.md
 └── README.md
 ```
+
+`plans/` holds working documents for refactors or features that have been analyzed but not committed to. Each file describes its own status. These are *not* architecture documentation — they describe paths-not-yet-taken. Delete each file once its decision is resolved (landed or formally declined). If you're an agent looking for landed architecture, skip this directory.
+
+### Viewer internal structure
+
+`viewer.js` is a single concat-built ES module (no bundler). It is organized as `ThreeJSViewer` plus a small set of in-file controller classes, each owning its own state and helpers:
+
+- `ParametricTube` — per-tube geometry build, draw-range frontier morph, LOD worker dispatch, color-attribute updates.
+- `CameraController` — perspective/ortho cameras, framing helpers (`_fitCameraToBox`), scene bounds, near/far updates.
+- `ShadingDebugController` — `M`-key wireframe cycle and `N`-key shading-debug cycle, plus cached normal / UV materials.
+
+Clipping and animation are intentionally kept as banner-grouped methods on `ThreeJSViewer` rather than classes (`// ========== Clipping ==========` / `// ========== Animation ==========`). Both subsystems cross-cut enough shared viewer state and DOM refs that a naive class extraction would be pure prefix churn; a proper extraction is tracked as a future decision in `plans/viewer-refactor-pass-two.md`.
+
+Ring/color helpers used by parametric tubes (`writeRingVerts`, `writeCapRingVerts`, `fillRGBBlock`, `sampleChamferedRect`, `distanceWeightedRDP`) live as free functions at the top of the file. The LOD worker is embedded as a template-literal source string; shared helpers are duplicated into the worker string at build time because Web Workers can't access the main thread's module scope.
+
+JSDoc + `// @ts-check` surface type errors in-editor. Type check: `npx tsc --noEmit -p jsconfig.json`.
 
 ## Usage Patterns
 

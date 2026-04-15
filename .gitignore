@@ -27,3 +27,8 @@ tmp/
 dist/
 build/
 *.egg-info/
+
+# JS dev-only types (no runtime deps — build.py is the real build)
+node_modules/
+package-lock.json
+
