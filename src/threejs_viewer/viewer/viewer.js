@@ -1,3 +1,4 @@
+// @ts-check
 import * as THREE from 'three';
 import { ViewerControls } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -858,7 +859,10 @@ function _perpDistSq(spine, iP, iA, iB) {
 
 function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
     if (nPoints <= 2) {
-        return { indices: new Uint32Array(nPoints < 1 ? 0 : nPoints === 1 ? [0] : [0, 1]), minDist: 0, maxDist: 0 };
+        const indices = nPoints < 1 ? new Uint32Array(0)
+            : nPoints === 1 ? Uint32Array.of(0)
+            : Uint32Array.of(0, 1);
+        return { indices, minDist: 0, maxDist: 0 };
     }
     const epsSq = new Float32Array(nPoints);
     let minDist = Infinity, maxDist = 0;
@@ -2170,7 +2174,6 @@ export class ThreeJSViewer {
         this._clipGizmo = new TransformControls(this._camera, this._renderer.domElement);
         this._clipGizmo.attach(this._clipAnchor);
         this._clipGizmo.setMode('rotate');
-        this._clipGizmo.visible = false;
         this._clipGizmo.enabled = false;
         this._clipGizmoHelper = this._clipGizmo.getHelper();
         this._clipGizmoHelper.visible = false;
@@ -2311,7 +2314,7 @@ export class ThreeJSViewer {
 
     _updateClipSliderRange() {
         this._bbox.makeEmpty();
-        this._scene.traverse(child => {
+        this._scene.traverse(/** @param {any} child */ child => {
             if (!child.geometry) return;
             if (this._isClipHelper(child)) return;
             if (child === this._gridHelper) return;
@@ -2349,7 +2352,7 @@ export class ThreeJSViewer {
     }
 
     _updateClipMaterials() {
-        this._scene.traverse(child => {
+        this._scene.traverse(/** @param {any} child */ child => {
             if (!child.material) return;
             if (this._isClipHelper(child)) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
@@ -2368,7 +2371,6 @@ export class ThreeJSViewer {
         });
         this._clipAnchor.visible = this._clipEnabled && this._clipHelperVisible;
         const showGizmo = this._clipEnabled && this._clipHelperVisible;
-        this._clipGizmo.visible = showGizmo;
         this._clipGizmo.enabled = showGizmo;
         this._clipGizmoHelper.visible = showGizmo;
     }
@@ -2382,7 +2384,7 @@ export class ThreeJSViewer {
         const mode = this._wireframeMode;
         const wantOverlay = mode === 2;
         const wantWire = mode === 1;
-        this._scene.traverse((obj) => {
+        this._scene.traverse(/** @param {any} obj */ (obj) => {
             if (!obj.isMesh) return;
             if (obj.userData.isWireOverlay) return;
             if (!obj.material) return;
@@ -2561,7 +2563,7 @@ export class ThreeJSViewer {
 
     _cameraRelativeNormalSize(obj) {
         // Target ~30 pixels on screen regardless of zoom.
-        const cam = this._camera;
+        const cam = /** @type {any} */ (this._camera);
         const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
         const targetPx = 30;
         if (!obj.geometry) return 0.1;
@@ -4200,7 +4202,7 @@ export class ThreeJSViewer {
                                     savedRingIndex: null,
                                     morphedState: null,
                                     endCapPattern,
-                                    savedCapIndices: new endCapPattern.constructor(endCapPattern.length),
+                                    savedCapIndices: new (/** @type {any} */ (endCapPattern.constructor))(endCapPattern.length),
                                     savedCapOffset: -1,
                                     heightOffset,
                                 };
@@ -4556,7 +4558,7 @@ export class ThreeJSViewer {
         // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
         // hide 900ms after the pivot was set (but only once the user stops dragging).
         if (this._pivotMarker && this._pivotMarker.visible) {
-            const cam = this._camera;
+            const cam = /** @type {any} */ (this._camera);
             const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
             let worldPerPixel;
             if (cam.isPerspectiveCamera) {
@@ -4722,7 +4724,7 @@ export class ThreeJSViewer {
 
     frameAll() {
         const bbox = new THREE.Box3();
-        this._scene.traverse(child => {
+        this._scene.traverse(/** @param {any} child */ child => {
             if (!child.geometry) return;
             if (child === this._gridHelper) return;
             if (this._isClipHelper(child)) return;

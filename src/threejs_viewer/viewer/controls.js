@@ -1,3 +1,4 @@
+// @ts-check
 // Bespoke camera controls for ThreeJSViewer.
 //
 // One implementation, two modes:

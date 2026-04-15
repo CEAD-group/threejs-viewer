@@ -1,0 +1,9 @@
+{
+  "name": "threejs-viewer-dev",
+  "private": true,
+  "description": "Dev-only: TypeScript + three.js types for IDE IntelliSense on viewer/*.js. No runtime deps; build.py is the real build. Run `npm install` once; then `npx tsc --noEmit -p jsconfig.json` to type-check.",
+  "devDependencies": {
+    "@types/three": "^0.180.0",
+    "typescript": "^5.6.0"
+  }
+}
