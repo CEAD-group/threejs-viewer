@@ -1180,22 +1180,26 @@ class ViewerClient:
         colors, visibility, etc.) with JSON for sparse per-frame metadata
         (clip_times, or any channel without a binary version).
 
-        First load (no animation currently loaded) starts playback at t=0
-        with camera-tracking installed from the new animation's metadata.
-        Subsequent loads (an animation is already loaded) preserve the
-        current playhead time (clamped to the new duration), play state,
-        and camera-tracking — only the underlying frame data is swapped.
-        Pass ``restart=True`` to force the first-load behavior on a swap.
+        First load (no animation currently loaded) sets the playhead to
+        t=0 and installs camera-tracking from the new animation's metadata;
+        whether playback starts immediately is governed by ``autoplay``
+        (default ``True``). Subsequent loads (an animation is already
+        loaded) preserve the current playhead time (clamped to the new
+        duration), play state, and camera-tracking — only the underlying
+        frame data is swapped. Pass ``restart=True`` to force the
+        first-load behavior on a swap; ``autoplay`` still controls
+        play/paused on restart.
 
         Args:
             animation: Animation object with pre-computed frames
-            restart: If True, reset to t=0, force-play, and re-install
-                camera-tracking from the animation's metadata, even when
-                an animation is already loaded.
-            autoplay: If False, load paused on first-load (or on a
-                restart) instead of starting playback immediately. Has
-                no effect on a swap (the prior play state is preserved
-                regardless).
+            restart: If True, reset to t=0 and re-install camera-tracking
+                from the animation's metadata, even when an animation is
+                already loaded. Play/paused state on restart is governed
+                by ``autoplay``.
+            autoplay: Controls whether playback starts immediately or the
+                animation loads paused on first-load and on a restart.
+                Has no effect on a swap without ``restart`` (the prior
+                play state is preserved regardless).
 
         Example:
             frames = []
