@@ -2748,16 +2748,6 @@ export class ThreeJSViewer {
         this._clipGizmoHelper.visible = showGizmo;
     }
 
-    _cycleWireframeMode() { this._shading.cycleWireframe(); }
-    _applyWireframeMode() { this._shading.applyWireframe(); }
-    _cycleShadingMode() { this._shading.cycleShading(); }
-    _applyShadingMode() { this._shading.applyShading(); }
-
-    // Tests and the render loop read these as if they still lived on the
-    // viewer — delegate to the controller.
-    get _wireframeMode() { return this._shading.wireframeMode; }
-    get _shadingMode() { return this._shading.shadingMode; }
-
     _toggleClipPanel() {
         this._clipEnabled = !this._clipEnabled;
         if (this._clipEnabled && this._clipDefaults) {
@@ -2862,7 +2852,7 @@ export class ThreeJSViewer {
             this._scene.add(obj);
         }
         this._sceneBoundsDirty = true;
-        if (this._wireframeMode !== 0) this._applyWireframeMode();
+        if (this._shading.wireframeMode !== 0) this._shading.applyWireframe();
     }
 
     _applyTransform(obj, transform) {
@@ -3645,11 +3635,11 @@ export class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
-                this._cycleWireframeMode();
+                this._shading.cycleWireframe();
                 return;
             }
             if (e.code === 'KeyN' && !e.ctrlKey && !e.metaKey) {
-                this._cycleShadingMode();
+                this._shading.cycleShading();
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
@@ -4682,7 +4672,7 @@ export class ThreeJSViewer {
         }
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
-        if (this._shadingMode === 3) {
+        if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
                 if (!h || !h.visible) return;

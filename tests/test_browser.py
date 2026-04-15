@@ -165,7 +165,7 @@ def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
     """M key cycles wireframe mode 0 → 1 → 2 → 0 across the whole scene."""
     viewer_client.add_box("wbox")
     time.sleep(0.1)
-    get_mode = "() => window.threejsViewer._wireframeMode"
+    get_mode = "() => window.threejsViewer._shading.wireframeMode"
     assert viewer_page.evaluate(get_mode) == 0
 
     expected = [1, 2, 0]
@@ -193,7 +193,7 @@ def test_n_key_cycles_shading_mode(viewer_client, viewer_page):
     """N key cycles shading debug mode 0 → 1 → 2 → 3 → 0."""
     viewer_client.add_sphere("sdebug")
     time.sleep(0.1)
-    get_mode = "() => window.threejsViewer._shadingMode"
+    get_mode = "() => window.threejsViewer._shading.shadingMode"
     assert viewer_page.evaluate(get_mode) == 0
 
     for want in [1, 2, 3, 0]:
@@ -211,7 +211,7 @@ def test_m_and_n_compose(viewer_client, viewer_page):
     _press_key(viewer_page, "KeyN")  # shading = 1
     time.sleep(0.05)
     state = viewer_page.evaluate(
-        "() => ({w: window.threejsViewer._wireframeMode, s: window.threejsViewer._shadingMode})"
+        "() => ({w: window.threejsViewer._shading.wireframeMode, s: window.threejsViewer._shading.shadingMode})"
     )
     assert state == {"w": 1, "s": 1}
 
