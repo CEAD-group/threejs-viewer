@@ -2860,13 +2860,25 @@ class ShadingDebugController {
         if (obj.userData.originalMaterial === undefined) return;
         obj.material = obj.userData.originalMaterial;
         delete obj.userData.originalMaterial;
-        // Original material's clippingPlanes may be stale if clipping was toggled
-        // while the debug material was active. Re-sync from current clip state.
+        // Clipping state may have changed while the debug material was active.
+        // Re-sync clippingPlanes + side + clipShadows to match what
+        // _updateClipMaterials would set right now, so toggling N-key off
+        // while clipping is enabled doesn't leave the restored material with
+        // stale sidedness/clip flags.
         const planes = this.v._activeClippingPlanes();
+        const clipEnabled = this.v._clipEnabled;
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
         for (const m of mats) {
             if (!m) continue;
             m.clippingPlanes = planes;
+            m.clipShadows = true;
+            if (clipEnabled) {
+                if (m.userData.originalSide === undefined) m.userData.originalSide = m.side;
+                m.side = THREE.DoubleSide;
+            } else if (m.userData.originalSide !== undefined) {
+                m.side = m.userData.originalSide;
+                delete m.userData.originalSide;
+            }
             m.needsUpdate = true;
         }
     }
@@ -3892,6 +3904,11 @@ class ThreeJSViewer {
     }
 
     _deleteObject(id) {
+        // Invalidate any in-flight async add/fetch for this id so a late
+        // completion can't re-add an object that was explicitly deleted or
+        // cleared. Safe to call unconditionally — the load handlers'
+        // post-delete insert path has already passed its own token check.
+        this._claimLoadToken(id);
         const obj = this._objects.get(id);
         if (obj) {
             const childIds = [];
