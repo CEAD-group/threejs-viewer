@@ -143,3 +143,161 @@ def test_show_grid(viewer_client, viewer_page):
     time.sleep(0.1)
     meta = viewer_client.query_scene()["meta"]
     assert meta["grid"]["visible"] is False
+
+
+# --- Debug display cycles (M / N keys) ---
+
+
+def _press_key(page, code):
+    """Dispatch a keydown event on the viewer container."""
+    page.evaluate(
+        """(code) => {
+            const el = window.threejsViewer.container;
+            const evt = new KeyboardEvent('keydown', { code, bubbles: true });
+            el.dispatchEvent(evt);
+        }""",
+        code,
+    )
+
+
+@pytest.mark.browser
+def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
+    """M key cycles wireframe mode 0 → 1 → 2 → 0 across the whole scene."""
+    viewer_client.add_box("wbox")
+    time.sleep(0.1)
+    get_mode = "() => window.threejsViewer._wireframeMode"
+    assert viewer_page.evaluate(get_mode) == 0
+
+    expected = [1, 2, 0]
+    for want in expected:
+        _press_key(viewer_page, "KeyM")
+        time.sleep(0.05)
+        assert viewer_page.evaluate(get_mode) == want
+
+    # In combined mode (2), the box should have a wireframe overlay child.
+    _press_key(viewer_page, "KeyM")  # back to 1
+    _press_key(viewer_page, "KeyM")  # to 2
+    time.sleep(0.05)
+    has_overlay = viewer_page.evaluate(
+        """() => {
+            const obj = window.threejsViewer._objects.get('wbox');
+            const ov = obj.userData.wireframeOverlay;
+            return !!(ov && ov.visible);
+        }"""
+    )
+    assert has_overlay
+
+
+@pytest.mark.browser
+def test_n_key_cycles_shading_mode(viewer_client, viewer_page):
+    """N key cycles shading debug mode 0 → 1 → 2 → 3 → 0."""
+    viewer_client.add_sphere("sdebug")
+    time.sleep(0.1)
+    get_mode = "() => window.threejsViewer._shadingMode"
+    assert viewer_page.evaluate(get_mode) == 0
+
+    for want in [1, 2, 3, 0]:
+        _press_key(viewer_page, "KeyN")
+        time.sleep(0.05)
+        assert viewer_page.evaluate(get_mode) == want
+
+
+@pytest.mark.browser
+def test_m_and_n_compose(viewer_client, viewer_page):
+    """M and N modes are independent and compose."""
+    viewer_client.add_box("compose_box")
+    time.sleep(0.1)
+    _press_key(viewer_page, "KeyM")  # wireframe = 1
+    _press_key(viewer_page, "KeyN")  # shading = 1
+    time.sleep(0.05)
+    state = viewer_page.evaluate(
+        "() => ({w: window.threejsViewer._wireframeMode, s: window.threejsViewer._shadingMode})"
+    )
+    assert state == {"w": 1, "s": 1}
+
+
+# --- ViewerControls ---
+
+
+@pytest.mark.browser
+def test_viewer_controls_installed(viewer_client, viewer_page):
+    """ViewerControls is wired up with a writable target Vector3."""
+    info = viewer_page.evaluate(
+        """() => {
+            const c = window.threejsViewer._controls;
+            if (!c) return null;
+            return {
+                hasTarget: c.target && typeof c.target.x === 'number',
+                hasUpdate: typeof c.update === 'function',
+                mode: c.mode,
+            };
+        }"""
+    )
+    assert info is not None, "ViewerControls not installed"
+    assert info["hasTarget"]
+    assert info["hasUpdate"]
+    assert info["mode"] in ("turntable", "free")
+
+
+@pytest.mark.browser
+def test_viewer_controls_target_move_does_not_move_camera(viewer_client, viewer_page):
+    """The no-view-shift guarantee: moving target alone leaves the camera pose unchanged."""
+    delta = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const c = v._controls;
+            const cam = v._camera;
+            const p0 = cam.position.clone();
+            const q0 = cam.quaternion.clone();
+            // Move the pivot target arbitrarily.
+            c.target.set(5, -3, 2);
+            c.update();
+            const dp = cam.position.distanceTo(p0);
+            const dq = Math.abs(1 - Math.abs(cam.quaternion.dot(q0)));
+            return { dp, dq };
+        }"""
+    )
+    assert delta["dp"] < 1e-6, delta
+    assert delta["dq"] < 1e-6, delta
+
+
+@pytest.mark.browser
+def test_viewer_controls_r_key_toggles_orbit_mode(viewer_client, viewer_page):
+    """R key toggles orbit mode between turntable and free."""
+    start = viewer_page.evaluate("() => window.threejsViewer._controls.mode")
+    _press_key(viewer_page, "KeyR")
+    time.sleep(0.05)
+    after = viewer_page.evaluate("() => window.threejsViewer._controls.mode")
+    assert after != start
+    assert {start, after} == {"turntable", "free"}
+
+
+# --- ViewHelper setViewport shim regression ---
+
+
+@pytest.mark.browser
+def test_view_helper_setviewport_shim_no_stack_overflow(viewer_client, viewer_page):
+    """Render many frames with the animation toolbar visible (lift > 0).
+    The shim must cache the original setViewport once and never re-wrap.
+
+    Regression for a prior bug where the shim re-wrapped the already-wrapped
+    setViewport every frame, deepening the call chain by one level per frame
+    until the stack blew."""
+    result = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            // Force toolbar visible so the lift > 0 branch runs.
+            v._animControlsEl.classList.add('visible');
+            // Trigger many render passes synchronously.
+            const origAnimate = v._animate.bind(v);
+            for (let i = 0; i < 200; i++) {
+                origAnimate();
+            }
+            return {
+                cached: !!v._rendererSetViewportOriginal,
+                restored: v._renderer.setViewport === v._rendererSetViewportOriginal,
+            };
+        }"""
+    )
+    assert result["cached"], "shim never cached the original setViewport"
+    assert result["restored"], "setViewport was not restored after _viewHelper.render()"

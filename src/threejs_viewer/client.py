@@ -679,7 +679,7 @@ class ViewerClient:
         opacity: float = 1.0,
         metalness: float = 0.1,
         roughness: float = 0.8,
-        wireframe: bool = False,
+        anchor: str = "center",
         parent: Optional[str] = None,
         position: Optional[list] = None,
         rotation: Optional[list] = None,
@@ -692,7 +692,7 @@ class ViewerClient:
         Geometry is built on the client from a packed bundle of parameter
         arrays (spine + widths + heights + optional orientations + optional
         colors) so the wire transfer stays O(N) instead of O(N * nCs). The
-        cross-section is a chamfered rectangle (45° chamfers, 6 vertices).
+        cross-section is a chamfered hexagon (6 vertices).
 
         Args:
             id: Unique identifier.
@@ -710,6 +710,9 @@ class ViewerClient:
                 ``update_parametric_tube_colors`` for cheap color-mode swaps.
             color: Fallback color when ``colors`` is not provided.
             opacity, metalness, roughness: Standard material properties.
+            anchor: Cross-section anchor point. ``"center"`` (default) centers
+                the bead on the spine. ``"top"`` places the spine at the top
+                surface so the bead extends downward.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
         """
@@ -766,8 +769,17 @@ class ViewerClient:
             "opacity": opacity,
             "metalness": metalness,
             "roughness": roughness,
-            "wireframe": wireframe,
         }
+        # The viewer applies heightOffset as a *shift* to section cv values,
+        # where +cv is the "up" direction (anchored to up_vector, default +Z).
+        # anchor="top" means spine at top of bead → bead extends down → subtract h/2.
+        anchor_offsets = {"center": 0.0, "top": -0.5}
+        if anchor not in anchor_offsets:
+            raise ValueError(
+                f"anchor must be one of {sorted(anchor_offsets)}, got {anchor!r}"
+            )
+        if anchor_offsets[anchor]:
+            header["heightOffset"] = anchor_offsets[anchor]
         if up_vector is not None:
             header["upVector"] = [
                 float(up_vector[0]),
