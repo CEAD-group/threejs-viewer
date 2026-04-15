@@ -22,7 +22,20 @@
       "Bash(find . -name threejs-viewer -type d)",
       "Bash(kill %1)",
       "WebFetch(domain:discourse.threejs.org)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(lsof -ti:5667)",
+      "Bash(xargs -I {} kill {})",
+      "Bash(lsof -ti:5666)",
+      "Bash(gh api:*)",
+      "Bash(git fetch:*)",
+      "Bash(awk -F: '{print NR\": \"$0}')",
+      "Bash(awk -F: '{print $1\": \"$0}')",
+      "Bash(git pull:*)",
+      "Bash(npm --version)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(lsof -ti:5666,5667)",
+      "Bash(xargs -I {} kill -9 {})"
     ],
     "deny": [],
     "ask": []

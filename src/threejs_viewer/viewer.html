@@ -2574,6 +2574,234 @@ function restoreFrontierRing(obj) {
 }
 
 /**
+ * Owns the M-key wireframe cycle and N-key shading-debug cycle.
+ * Holds cached debug materials + per-mesh helpers.
+ */
+class ShadingDebugController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        this.wireframeMode = 0;
+        this.shadingMode = 0;
+        this._normalMat = null;
+        this._uvMat = null;
+        this._uvTex = null;
+    }
+
+    cycleWireframe() {
+        this.wireframeMode = (this.wireframeMode + 1) % 3;
+        this.applyWireframe();
+    }
+
+    applyWireframe() {
+        const mode = this.wireframeMode;
+        const wantOverlay = mode === 2;
+        const wantWire = mode === 1;
+        this.v._scene.traverse(/** @param {any} obj */ (obj) => {
+            if (!obj.isMesh) return;
+            if (obj.userData.isWireOverlay) return;
+            if (!obj.material) return;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            for (const m of mats) {
+                if ('wireframe' in m) m.wireframe = wantWire;
+            }
+            let overlay = obj.userData.wireframeOverlay;
+            if (wantOverlay) {
+                if (!overlay) {
+                    overlay = this._createWireOverlay(obj);
+                    obj.userData.wireframeOverlay = overlay;
+                    obj.add(overlay);
+                } else {
+                    overlay.material.clippingPlanes = this.v._activeClippingPlanes();
+                    overlay.material.needsUpdate = true;
+                }
+                overlay.visible = true;
+            } else if (overlay) {
+                overlay.visible = false;
+            }
+        });
+    }
+
+    /** @param {any} parentMesh */
+    _createWireOverlay(parentMesh) {
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            wireframe: true,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1,
+            side: THREE.DoubleSide,
+            clippingPlanes: this.v._activeClippingPlanes(),
+        });
+        const overlay = new THREE.Mesh(parentMesh.geometry, mat);
+        overlay.userData.isWireOverlay = true;
+        overlay.raycast = () => {};
+        overlay.name = (parentMesh.name || 'mesh') + '_wireOverlay';
+        return overlay;
+    }
+
+    cycleShading() {
+        this.shadingMode = (this.shadingMode + 1) % 4;
+        this.applyShading();
+    }
+
+    _getUvCheckerTexture() {
+        if (this._uvTex) return this._uvTex;
+        const size = 256;
+        const cells = 8;
+        const cell = size / cells;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = /** @type {any} */ (canvas.getContext('2d'));
+        for (let y = 0; y < cells; y++) {
+            for (let x = 0; x < cells; x++) {
+                const dark = (x + y) % 2 === 0;
+                ctx.fillStyle = dark ? '#202020' : '#e0e0e0';
+                ctx.fillRect(x * cell, y * cell, cell, cell);
+            }
+        }
+        // Colored axis bands so U/V orientation is legible.
+        ctx.fillStyle = '#d03030';
+        ctx.fillRect(0, 0, size, 2);
+        ctx.fillStyle = '#30a030';
+        ctx.fillRect(0, 0, 2, size);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestMipMapLinearFilter;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this._uvTex = tex;
+        return tex;
+    }
+
+    /** @param {number} mode */
+    _getDebugMaterial(mode) {
+        const clip = this.v._activeClippingPlanes();
+        if (mode === 1) {
+            if (!this._normalMat) {
+                this._normalMat = new THREE.MeshNormalMaterial({
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._normalMat.clippingPlanes = clip;
+                this._normalMat.needsUpdate = true;
+            }
+            return this._normalMat;
+        }
+        if (mode === 2) {
+            if (!this._uvMat) {
+                this._uvMat = new THREE.MeshBasicMaterial({
+                    map: this._getUvCheckerTexture(),
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._uvMat.clippingPlanes = clip;
+                this._uvMat.needsUpdate = true;
+            }
+            return this._uvMat;
+        }
+        return null;
+    }
+
+    /** @param {any} obj @param {number} mode */
+    _applyDebugMaterial(obj, mode) {
+        const debugMat = this._getDebugMaterial(mode);
+        if (!debugMat) return;
+        if (obj.userData.originalMaterial === undefined) {
+            obj.userData.originalMaterial = obj.material;
+        }
+        obj.material = debugMat;
+    }
+
+    /** @param {any} obj */
+    _restoreOriginalMaterial(obj) {
+        if (obj.userData.originalMaterial === undefined) return;
+        obj.material = obj.userData.originalMaterial;
+        delete obj.userData.originalMaterial;
+        // Original material's clippingPlanes may be stale if clipping was toggled
+        // while the debug material was active. Re-sync from current clip state.
+        const planes = this.v._activeClippingPlanes();
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+            if (!m) continue;
+            m.clippingPlanes = planes;
+            m.needsUpdate = true;
+        }
+    }
+
+    /** @param {(obj: any) => void} cb */
+    _forEachUserMesh(cb) {
+        // Only visit user-registered objects and their descendants — skips
+        // viewer furniture (TransformControls gizmo, ViewHelper, grid, pivot
+        // marker, clip anchor) whose materials often lack the fields our
+        // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
+        for (const root of this.v._objects.values()) {
+            root.traverse((/** @type {any} */ obj) => {
+                if (!obj.isMesh) return;
+                if (obj.userData.isWireOverlay) return;
+                if (obj.userData.isDebugHelper) return;
+                cb(obj);
+            });
+        }
+    }
+
+    applyShading() {
+        const mode = this.shadingMode;
+        this._forEachUserMesh((obj) => {
+            if (mode === 1 || mode === 2) {
+                this._applyDebugMaterial(obj, mode);
+            } else {
+                this._restoreOriginalMaterial(obj);
+            }
+
+            let helper = obj.userData.vertexNormalsHelper;
+            if (mode === 3) {
+                if (!helper && obj.geometry && obj.geometry.attributes && obj.geometry.attributes.normal) {
+                    helper = new VertexNormalsHelper(obj, this.cameraRelativeNormalSize(obj), 0x00ffff);
+                    helper.userData.isDebugHelper = true;
+                    helper.raycast = () => {};
+                    obj.userData.vertexNormalsHelper = helper;
+                    this.v._scene.add(helper);
+                }
+                if (helper) {
+                    helper.visible = true;
+                    helper.size = this.cameraRelativeNormalSize(obj);
+                    helper.update();
+                }
+            } else if (helper) {
+                helper.visible = false;
+            }
+        });
+    }
+
+    /** @param {any} obj */
+    cameraRelativeNormalSize(obj) {
+        // Target ~30 pixels on screen regardless of zoom.
+        const cam = /** @type {any} */ (this.v._camera);
+        const canvasH = Math.max(1, this.v._renderer.domElement.clientHeight);
+        const targetPx = 30;
+        if (!obj.geometry) return 0.1;
+        if (!obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
+        obj.updateWorldMatrix(true, false);
+        const center = obj.geometry.boundingSphere
+            ? obj.geometry.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld)
+            : obj.getWorldPosition(new THREE.Vector3());
+        let worldPerPixel;
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(center);
+            worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
+        } else {
+            worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
+        }
+        return Math.max(worldPerPixel * targetPx, 1e-6);
+    }
+}
+
+/**
  * Distribute a [0,1] draw_range fraction to children of a toolpath group.
  * Each child segment knows its (start, end) position in the overall toolpath.
  * Segments fully before the current position get 1.0, the active segment gets
@@ -2670,14 +2898,9 @@ class ThreeJSViewer {
         this._baselineVisibility = new Map();
         this._speedIndex = 6; // starts at 1x
 
-        // Wireframe display mode: 0 = normal, 1 = wireframe-only, 2 = combined overlay
-        this._wireframeMode = 0;
-
-        // Shading debug mode: 0 = off, 1 = normals-as-color, 2 = UV checker, 3 = vertex-normals helper
-        this._shadingMode = 0;
-        this._uvCheckerTexture = null;
-        this._shadingNormalMaterial = null;
-        this._shadingUvMaterial = null;
+        // M-key wireframe cycle + N-key shading-debug cycle. Owns cached
+        // debug materials and per-mesh vertex-normals helpers.
+        this._shading = new ShadingDebugController(this);
 
         // Clipping state
         this._clipEnabled = false;
@@ -3263,212 +3486,15 @@ class ThreeJSViewer {
         this._clipGizmoHelper.visible = showGizmo;
     }
 
-    _cycleWireframeMode() {
-        this._wireframeMode = (this._wireframeMode + 1) % 3;
-        this._applyWireframeMode();
-    }
+    _cycleWireframeMode() { this._shading.cycleWireframe(); }
+    _applyWireframeMode() { this._shading.applyWireframe(); }
+    _cycleShadingMode() { this._shading.cycleShading(); }
+    _applyShadingMode() { this._shading.applyShading(); }
 
-    _applyWireframeMode() {
-        const mode = this._wireframeMode;
-        const wantOverlay = mode === 2;
-        const wantWire = mode === 1;
-        this._scene.traverse(/** @param {any} obj */ (obj) => {
-            if (!obj.isMesh) return;
-            if (obj.userData.isWireOverlay) return;
-            if (!obj.material) return;
-            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-            for (const m of mats) {
-                if ('wireframe' in m) m.wireframe = wantWire;
-            }
-            let overlay = obj.userData.wireframeOverlay;
-            if (wantOverlay) {
-                if (!overlay) {
-                    overlay = this._createWireOverlay(obj);
-                    obj.userData.wireframeOverlay = overlay;
-                    obj.add(overlay);
-                } else {
-                    overlay.material.clippingPlanes = this._activeClippingPlanes();
-                    overlay.material.needsUpdate = true;
-                }
-                overlay.visible = true;
-            } else if (overlay) {
-                overlay.visible = false;
-            }
-        });
-    }
-
-    _createWireOverlay(parentMesh) {
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0x000000,
-            wireframe: true,
-            polygonOffset: true,
-            polygonOffsetFactor: -1,
-            polygonOffsetUnits: -1,
-            side: THREE.DoubleSide,
-            clippingPlanes: this._activeClippingPlanes(),
-        });
-        const overlay = new THREE.Mesh(parentMesh.geometry, mat);
-        overlay.userData.isWireOverlay = true;
-        overlay.raycast = () => {};
-        overlay.name = (parentMesh.name || 'mesh') + '_wireOverlay';
-        return overlay;
-    }
-
-    _cycleShadingMode() {
-        this._shadingMode = (this._shadingMode + 1) % 4;
-        this._applyShadingMode();
-    }
-
-    _getUvCheckerTexture() {
-        if (this._uvCheckerTexture) return this._uvCheckerTexture;
-        const size = 256;
-        const cells = 8;
-        const cell = size / cells;
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        for (let y = 0; y < cells; y++) {
-            for (let x = 0; x < cells; x++) {
-                const dark = (x + y) % 2 === 0;
-                ctx.fillStyle = dark ? '#202020' : '#e0e0e0';
-                ctx.fillRect(x * cell, y * cell, cell, cell);
-            }
-        }
-        // Colored axis bands so U/V orientation is legible.
-        ctx.fillStyle = '#d03030';
-        ctx.fillRect(0, 0, size, 2);
-        ctx.fillStyle = '#30a030';
-        ctx.fillRect(0, 0, 2, size);
-        const tex = new THREE.CanvasTexture(canvas);
-        tex.wrapS = THREE.RepeatWrapping;
-        tex.wrapT = THREE.RepeatWrapping;
-        tex.magFilter = THREE.NearestFilter;
-        tex.minFilter = THREE.NearestMipMapLinearFilter;
-        tex.colorSpace = THREE.SRGBColorSpace;
-        this._uvCheckerTexture = tex;
-        return tex;
-    }
-
-    _getShadingMaterial(mode) {
-        const clip = this._activeClippingPlanes();
-        if (mode === 1) {
-            if (!this._shadingNormalMaterial) {
-                this._shadingNormalMaterial = new THREE.MeshNormalMaterial({
-                    side: THREE.DoubleSide,
-                    clippingPlanes: clip,
-                });
-            } else {
-                this._shadingNormalMaterial.clippingPlanes = clip;
-                this._shadingNormalMaterial.needsUpdate = true;
-            }
-            return this._shadingNormalMaterial;
-        }
-        if (mode === 2) {
-            if (!this._shadingUvMaterial) {
-                this._shadingUvMaterial = new THREE.MeshBasicMaterial({
-                    map: this._getUvCheckerTexture(),
-                    side: THREE.DoubleSide,
-                    clippingPlanes: clip,
-                });
-            } else {
-                this._shadingUvMaterial.clippingPlanes = clip;
-                this._shadingUvMaterial.needsUpdate = true;
-            }
-            return this._shadingUvMaterial;
-        }
-        return null;
-    }
-
-    _applyShadingMaterial(obj, mode) {
-        const debugMat = this._getShadingMaterial(mode);
-        if (!debugMat) return;
-        if (obj.userData.originalMaterial === undefined) {
-            obj.userData.originalMaterial = obj.material;
-        }
-        obj.material = debugMat;
-    }
-
-    _restoreShadingMaterial(obj) {
-        if (obj.userData.originalMaterial === undefined) return;
-        obj.material = obj.userData.originalMaterial;
-        delete obj.userData.originalMaterial;
-        // Original material's clippingPlanes may be stale if clipping was toggled
-        // while the debug material was active. Re-sync from current clip state.
-        const planes = this._activeClippingPlanes();
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of mats) {
-            if (!m) continue;
-            m.clippingPlanes = planes;
-            m.needsUpdate = true;
-        }
-    }
-
-    _forEachUserMesh(cb) {
-        // Only visit user-registered objects and their descendants — skips
-        // viewer furniture (TransformControls gizmo, ViewHelper, grid, pivot
-        // marker, clip anchor) whose materials often lack the fields our
-        // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
-        for (const root of this._objects.values()) {
-            root.traverse((obj) => {
-                if (!obj.isMesh) return;
-                if (obj.userData.isWireOverlay) return;
-                if (obj.userData.isDebugHelper) return;
-                cb(obj);
-            });
-        }
-    }
-
-    _applyShadingMode() {
-        const mode = this._shadingMode;
-        this._forEachUserMesh((obj) => {
-
-            if (mode === 1 || mode === 2) {
-                this._applyShadingMaterial(obj, mode);
-            } else {
-                this._restoreShadingMaterial(obj);
-            }
-
-            let helper = obj.userData.vertexNormalsHelper;
-            if (mode === 3) {
-                if (!helper && obj.geometry && obj.geometry.attributes && obj.geometry.attributes.normal) {
-                    helper = new VertexNormalsHelper(obj, this._cameraRelativeNormalSize(obj), 0x00ffff);
-                    helper.userData.isDebugHelper = true;
-                    helper.raycast = () => {};
-                    obj.userData.vertexNormalsHelper = helper;
-                    this._scene.add(helper);
-                }
-                if (helper) {
-                    helper.visible = true;
-                    helper.size = this._cameraRelativeNormalSize(obj);
-                    helper.update();
-                }
-            } else if (helper) {
-                helper.visible = false;
-            }
-        });
-    }
-
-    _cameraRelativeNormalSize(obj) {
-        // Target ~30 pixels on screen regardless of zoom.
-        const cam = /** @type {any} */ (this._camera);
-        const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
-        const targetPx = 30;
-        if (!obj.geometry) return 0.1;
-        if (!obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
-        obj.updateWorldMatrix(true, false);
-        const center = obj.geometry.boundingSphere
-            ? obj.geometry.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld)
-            : obj.getWorldPosition(new THREE.Vector3());
-        let worldPerPixel;
-        if (cam.isPerspectiveCamera) {
-            const dist = cam.position.distanceTo(center);
-            worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
-        } else {
-            worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
-        }
-        return Math.max(worldPerPixel * targetPx, 1e-6);
-    }
+    // Tests and the render loop read these as if they still lived on the
+    // viewer — delegate to the controller.
+    get _wireframeMode() { return this._shading.wireframeMode; }
+    get _shadingMode() { return this._shading.shadingMode; }
 
     _toggleClipPanel() {
         this._clipEnabled = !this._clipEnabled;
@@ -5469,7 +5495,7 @@ class ThreeJSViewer {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
                 if (!h || !h.visible) return;
-                h.size = this._cameraRelativeNormalSize(obj);
+                h.size = this._shading.cameraRelativeNormalSize(obj);
                 h.update();
             });
         }
