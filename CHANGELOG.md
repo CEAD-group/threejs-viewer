@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.21
+
+### Fixes
+
+- **Camera-tracking no longer drifts across `load_animation` swaps.** The swap path (added in 0.0.20) preserved `_trackHasLastPos` across loads, causing the next tracking tick to compute a delta between the old trajectory's last position and the new trajectory's first-frame position — producing a small camera slide on every swap, which accumulated into visible framing drift when a caller swapped repeatedly (e.g. ribweaver nudging a spline-smoothness slider and rebuilding the tracked bead each time). The post-swap tick now snaps the orbit target and keeps the camera offset, as a fresh load does. Playhead, play state, track mode, target id, and interactive override are still preserved.
+
 ## 0.0.20
 
 ### Animation lifecycle
