@@ -52,13 +52,14 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - `src/threejs_viewer/animation.py` - Animation classes (Frame, Animation, AnimationChannel, Marker)
 - `src/threejs_viewer/viewer.html` - Standalone viewer (**generated** — do not edit, run `uv run python src/threejs_viewer/viewer/build.py` to regenerate)
 - `src/threejs_viewer/viewer/` - Viewer source files (edit these):
-  - `viewer.js` - ES module exporting `ThreeJSViewer(container, options)` class
+  - `viewer.js` - ES module exporting `ThreeJSViewer(container, options)`. Internal structure: `ThreeJSViewer` orchestrates several in-file controller classes — `ParametricTube` (per-tube geometry + LOD + morph state), `CameraController` (perspective/ortho cameras, framing, scene bounds), `ShadingDebugController` (M/N debug cycles). Clipping and animation subsystems are grouped under banner comments (`// ========== Clipping ==========` / `// ========== Animation ==========`) rather than classes. All controllers live in a single file on purpose: `build.py` is concat-only and the viewer ships as one `<script>` block. Ring/color helpers for parametric tubes are free functions at the top of the file (`writeRing`, `fillRingColor`, `sampleChamferedRect`, `distanceWeightedRDP`) — shared between the main thread and the inlined LOD worker source. Typed via JSDoc + `// @ts-check`; run `npx tsc --noEmit -p jsconfig.json` to type-check.
   - `viewer.css` - Scoped CSS under `.threejs-viewer` class
   - `template.html` - HTML template for toolbar, clipping panel, animation controls
   - `build.py` - Build script that inlines all sources into standalone `viewer.html`
   - `static/*.jpg` - Cubemap face images for PBR environment
 - `examples/` - Demo scripts showcasing library capabilities
 - `tests/` - Unit tests + Playwright browser integration tests (browser tests auto-skip without pytest-playwright)
+- `plans/` - Decision-making artifacts for undecided future work (NOT landed architecture). Each file documents its own status. Skip when looking for current architecture; consult only when picking up an open decision.
 
 ### Communication Model
 - **Direct connection**: Python runs WebSocket server on port 5666 (default), browser connects to it. Port is overridable via `?ws_port=` query param in viewer URL.
