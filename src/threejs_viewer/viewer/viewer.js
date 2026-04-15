@@ -3108,11 +3108,13 @@ export class ThreeJSViewer {
     // ========== Animation ==========
 
     _loadAnimation(animData, opts = {}) {
-        // First load (no animation yet) or explicit restart resets playback to t=0,
-        // installs camera-tracking from the new metadata, and force-plays. A
+        // First load (no animation yet) or explicit restart resets the playhead
+        // to t=0 and installs camera-tracking from the new metadata; whether
+        // playback starts immediately is controlled by the caller's autoplay
+        // setting (applied by client.py before sending the load message). A
         // subsequent load (animation already loaded, restart not set) preserves
         // playhead time, play state, and camera-tracking — only the underlying
-        // frame data is swapped. See plans/soft-snacking-deer.md for rationale.
+        // frame data is swapped.
         const isSwap = this._animation != null && !opts.restart;
         const prevTime = this._animationTime;
         const prevPlaying = this._animationPlaying;

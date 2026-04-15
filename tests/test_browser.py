@@ -100,6 +100,140 @@ def test_unload_animation_resets_draw_range(viewer_client, viewer_page):
     assert result["objects"]["m1"]["drawRange"] == 1.0
 
 
+def _wait_for_animation_loaded(viewer_client, timeout_s=2.0):
+    """Poll query_scene until the viewer reports an animation is loaded."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        result = viewer_client.query_scene()
+        if result["meta"]["animation"].get("playing") is not None:
+            if result["meta"]["animation"]["playing"] is True:
+                return result
+        time.sleep(0.05)
+    return viewer_client.query_scene()
+
+
+def _get_animation_time(page):
+    return page.evaluate("() => window.threejsViewer._animationTime")
+
+
+def _is_playing(page):
+    return page.evaluate("() => window.threejsViewer._animationPlaying")
+
+
+def _has_animation(page):
+    return page.evaluate("() => window.threejsViewer._animation != null")
+
+
+@pytest.mark.browser
+def test_swap_preserves_playhead_and_play_state(viewer_client, viewer_page):
+    """Swapping animations preserves playhead time and play state."""
+    viewer_client.add_box("sbox")
+    time.sleep(0.1)
+    anim_a = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=5, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim_a)
+    _wait_for_animation_loaded(viewer_client)
+    # Pause first so the playhead doesn't drift between seek and swap.
+    viewer_client.pause_animation()
+    time.sleep(0.1)
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(2.5)")
+    assert _is_playing(viewer_page) is False
+    assert abs(_get_animation_time(viewer_page) - 2.5) < 1e-6
+
+    anim_b = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=10, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim_b)
+    for _ in range(20):
+        time.sleep(0.05)
+        if viewer_page.evaluate(
+            "() => window.threejsViewer._animation && window.threejsViewer._animation.duration === 10"
+        ):
+            break
+    assert _is_playing(viewer_page) is False, "paused state not preserved on swap"
+    assert abs(_get_animation_time(viewer_page) - 2.5) < 1e-6, (
+        "playhead not preserved on swap"
+    )
+
+    # Resume, swap again, and verify playing state is preserved too.
+    viewer_client.resume_animation()
+    time.sleep(0.1)
+    assert _is_playing(viewer_page) is True
+    viewer_client.load_animation(anim_a)
+    for _ in range(20):
+        time.sleep(0.05)
+        if viewer_page.evaluate(
+            "() => window.threejsViewer._animation && window.threejsViewer._animation.duration === 5"
+        ):
+            break
+    assert _is_playing(viewer_page) is True, "playing state not preserved on swap"
+
+
+@pytest.mark.browser
+def test_restart_resets_to_zero(viewer_client, viewer_page):
+    """load_animation(restart=True) resets playhead to 0 on a swap."""
+    viewer_client.add_box("rbox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=5, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim)
+    _wait_for_animation_loaded(viewer_client)
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(3.0)")
+    assert abs(_get_animation_time(viewer_page) - 3.0) < 1e-6
+
+    viewer_client.load_animation(anim, restart=True)
+    for _ in range(20):
+        time.sleep(0.05)
+        if _get_animation_time(viewer_page) < 0.1:
+            break
+    assert abs(_get_animation_time(viewer_page)) < 0.1, "restart did not reset playhead"
+
+
+@pytest.mark.browser
+def test_autoplay_false_loads_paused(viewer_client, viewer_page):
+    """load_animation(autoplay=False) loads paused on first-load."""
+    viewer_client.add_box("abox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=1, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False)
+    for _ in range(20):
+        time.sleep(0.05)
+        if _has_animation(viewer_page):
+            break
+    assert _has_animation(viewer_page), "animation did not load"
+    assert _is_playing(viewer_page) is False, "autoplay=False still started playing"
+
+
+@pytest.mark.browser
+def test_pause_and_resume_animation(viewer_client, viewer_page):
+    """pause_animation() / resume_animation() toggle meta.animation.playing."""
+    viewer_client.add_box("pbox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=1, transforms={})],
+        loop=True,
+    )
+    viewer_client.load_animation(anim)
+    _wait_for_animation_loaded(viewer_client)
+    assert viewer_client.query_scene()["meta"]["animation"]["playing"] is True
+
+    viewer_client.pause_animation()
+    time.sleep(0.1)
+    assert viewer_client.query_scene()["meta"]["animation"]["playing"] is False
+
+    viewer_client.resume_animation()
+    time.sleep(0.1)
+    assert viewer_client.query_scene()["meta"]["animation"]["playing"] is True
+
+
 @pytest.mark.browser
 def test_clear_resets_animation_state(viewer_client, viewer_page):
     """clear() resets animation state."""

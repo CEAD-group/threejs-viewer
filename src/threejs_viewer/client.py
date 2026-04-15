@@ -1189,13 +1189,14 @@ class ViewerClient:
 
         Args:
             animation: Animation object with pre-computed frames
-            restart: If True, reset to t=0, force-play, and re-install
-                camera-tracking from the animation's metadata, even when
-                an animation is already loaded.
-            autoplay: If False, load paused on first-load (or on a
-                restart) instead of starting playback immediately. Has
-                no effect on a swap (the prior play state is preserved
-                regardless).
+            restart: If True, reset to t=0 and re-install camera-tracking
+                from the animation's metadata, even when an animation is
+                already loaded. Play/paused state on restart is governed
+                by ``autoplay``.
+            autoplay: Controls whether playback starts immediately or the
+                animation loads paused on first-load and on a restart.
+                Has no effect on a swap without ``restart`` (the prior
+                play state is preserved regardless).
 
         Example:
             frames = []
