@@ -1807,8 +1807,10 @@ class CameraController {
         if (v._isOrtho) {
             const w = v.container.clientWidth;
             const h = v.container.clientHeight;
-            if (w === 0 || h === 0) return;
-            const aspect = w / h;
+            // Preserve pre-refactor behavior: if the container isn't laid out
+            // yet (e.g. frameObject called while hidden), fall back to aspect=1
+            // instead of silently no-opping.
+            const aspect = (w > 0 && h > 0) ? (w / h) : 1;
             const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
             const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
             const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
@@ -2140,6 +2142,12 @@ export class ThreeJSViewer {
         this._mixerGeneration = 0;
         this._pendingFetches = 0;
         this._sceneGeneration = 0;
+        // Per-id load token: each add/fetch for a given id bumps the counter.
+        // Async completions check their captured token against this map and
+        // bail if a newer add has started — prevents out-of-order fetches
+        // from letting stale data replace newer geometry when the same id
+        // is re-added rapidly.
+        this._loadTokens = new Map();
         this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
@@ -2872,6 +2880,7 @@ export class ThreeJSViewer {
 
     async _addObject(id, objData, parentId) {
         let obj;
+        const token = this._claimLoadToken(id);
 
         if (objData.primitive) {
             const geometry = PRIMITIVES[objData.primitive](objData.params || {});
@@ -2886,6 +2895,10 @@ export class ThreeJSViewer {
             }
             try {
                 const result = await this._loadModel(loader, objData.model, format, objData.yUp === true);
+                if (!this._isLoadTokenCurrent(id, token)) {
+                    console.log(`Discarding stale model load for '${id}'`);
+                    return;
+                }
                 obj = result.obj;
                 if (result.animations.length > 0) {
                     const mixerRoot = obj.userData.gltfScene || obj;
@@ -2981,6 +2994,23 @@ export class ThreeJSViewer {
     _updateTransform(id, transform) {
         const obj = this._objects.get(id);
         if (obj) this._applyTransform(obj, transform);
+    }
+
+    /**
+     * Bump the load token for `id` and return the new value. Capture this
+     * synchronously at the start of an async add/fetch; after each `await`,
+     * check with `_isLoadTokenCurrent(id, token)` and bail on mismatch.
+     * @param {string} id
+     */
+    _claimLoadToken(id) {
+        const next = (this._loadTokens.get(id) || 0) + 1;
+        this._loadTokens.set(id, next);
+        return next;
+    }
+
+    /** @param {string} id @param {number} token */
+    _isLoadTokenCurrent(id, token) {
+        return this._loadTokens.get(id) === token;
     }
 
     _deleteObject(id) {
@@ -4048,12 +4078,17 @@ export class ThreeJSViewer {
                     case 'add_polyline_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
+                        const loadToken = this._claimLoadToken(data.id);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale polyline fetch');
+                                    return;
+                                }
+                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                                    console.log(`Discarding stale polyline fetch for '${data.id}'`);
                                     return;
                                 }
                                 const rawData = new Uint8Array(buffer);
@@ -4116,12 +4151,17 @@ export class ThreeJSViewer {
                     case 'add_mesh_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
+                        const loadToken = this._claimLoadToken(data.id);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale mesh fetch');
+                                    return;
+                                }
+                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                                    console.log(`Discarding stale mesh fetch for '${data.id}'`);
                                     return;
                                 }
                                 const nv = data.numVertices;
@@ -4192,12 +4232,17 @@ export class ThreeJSViewer {
                     case 'add_parametric_tube_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
+                        const loadToken = this._claimLoadToken(data.id);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale parametric tube fetch');
+                                    return;
+                                }
+                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                                    console.log(`Discarding stale parametric tube fetch for '${data.id}'`);
                                     return;
                                 }
                                 const n = data.numSpinePoints;

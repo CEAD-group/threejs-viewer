@@ -256,7 +256,7 @@ threejs-viewer/
 
 Clipping and animation are intentionally kept as banner-grouped methods on `ThreeJSViewer` rather than classes (`// ========== Clipping ==========` / `// ========== Animation ==========`). Both subsystems cross-cut enough shared viewer state and DOM refs that a naive class extraction would be pure prefix churn; a proper extraction is tracked as a future decision in `plans/viewer-refactor-pass-two.md`.
 
-Ring/color helpers used by parametric tubes (`writeRing`, `fillRingColor`, `sampleChamferedRect`, `distanceWeightedRDP`) live as free functions at the top of the file. The LOD worker is embedded as a template-literal source string; shared helpers are duplicated into the worker string at build time because Web Workers can't access the main thread's module scope.
+Ring/color helpers used by parametric tubes (`writeRingVerts`, `writeCapRingVerts`, `fillRGBBlock`, `sampleChamferedRect`, `distanceWeightedRDP`) live as free functions at the top of the file. The LOD worker is embedded as a template-literal source string; shared helpers are duplicated into the worker string at build time because Web Workers can't access the main thread's module scope.
 
 JSDoc + `// @ts-check` surface type errors in-editor. Type check: `npx tsc --noEmit -p jsconfig.json`.
 
