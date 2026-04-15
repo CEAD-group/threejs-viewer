@@ -4681,37 +4681,7 @@ export class ThreeJSViewer {
         const bbox = new THREE.Box3();
         object.updateWorldMatrix(true, true);
         bbox.expandByObject(object);
-        if (bbox.isEmpty()) return;
-        const center = bbox.getCenter(new THREE.Vector3());
-        const size = bbox.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-        this._controls.target.copy(center);
-        const dir = this._camera.position.clone().sub(center);
-        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
-        else dir.normalize();
-        if (this._isOrtho) {
-            const w = this.container.clientWidth;
-            const h = this.container.clientHeight;
-            const aspect = (w && h) ? (w / h) : 1;
-            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
-            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
-            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
-            this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
-            this._orthoCamera.updateProjectionMatrix();
-            this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
-        } else {
-            const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
-            const aspect = this._perspCamera.aspect || 1;
-            const hFov = Math.atan(Math.tan(vFov) * aspect);
-            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
-            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
-            const dist = Math.max(distV, distH) * 1.5;
-            this._camera.position.copy(center).addScaledVector(dir, dist);
-        }
-        // ViewerControls never calls camera.lookAt, so explicitly re-orient
-        // to actually frame the object (not just translate along old view ray).
-        this._camera.lookAt(center);
-        this._controls.update();
+        this._fitCameraToBox(bbox, 1.5);
     }
 
     resetView() {
@@ -4737,16 +4707,25 @@ export class ThreeJSViewer {
             child.updateWorldMatrix(true, false);
             bbox.expandByObject(child);
         });
-        if (bbox.isEmpty()) return;
+        this._fitCameraToBox(bbox, 1.2);
+    }
 
+    /**
+     * Aim the active camera at `bbox` with `perspMargin` extra distance multiplier
+     * (ortho always uses a 1.2 half-extent padding; perspMargin applies to perspective).
+     * Shared by frameObject / frameAll.
+     * @param {any} bbox
+     * @param {number} perspMargin
+     */
+    _fitCameraToBox(bbox, perspMargin) {
+        if (bbox.isEmpty()) return;
         const center = bbox.getCenter(new THREE.Vector3());
         const size = bbox.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z);
-
+        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
         this._controls.target.copy(center);
-        const ctTgt = this._tmpFrameAllTgt || (this._tmpFrameAllTgt = new THREE.Vector3());
-        ctTgt.copy(center);
-
+        const dir = this._camera.position.clone().sub(center);
+        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+        else dir.normalize();
         if (this._isOrtho) {
             const w = this.container.clientWidth;
             const h = this.container.clientHeight;
@@ -4756,14 +4735,7 @@ export class ThreeJSViewer {
             const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
             const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
             this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
-            this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.top = ORTHO_FRUSTUM;
-            this._orthoCamera.bottom = -ORTHO_FRUSTUM;
             this._orthoCamera.updateProjectionMatrix();
-            const dir = this._camera.position.clone().sub(ctTgt);
-            if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
-            else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
         } else {
             const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
@@ -4771,14 +4743,11 @@ export class ThreeJSViewer {
             const hFov = Math.atan(Math.tan(vFov) * aspect);
             const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
             const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
-            const dist = Math.max(distV, distH) * 1.2;
-            const dir = this._camera.position.clone().sub(ctTgt);
-            if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
-            else dir.normalize();
+            const dist = Math.max(distV, distH) * perspMargin;
             this._camera.position.copy(center).addScaledVector(dir, dist);
         }
-
-        // ViewerControls never calls camera.lookAt, so explicitly re-orient.
+        // ViewerControls never calls camera.lookAt, so explicitly re-orient
+        // to actually frame the object (not just translate along old view ray).
         this._camera.lookAt(center);
         this._controls.update();
     }
