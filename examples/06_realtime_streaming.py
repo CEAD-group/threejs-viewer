@@ -16,7 +16,7 @@ from threejs_viewer import viewer
 
 v = viewer()
 v.clear()
-v.stop_animation()  # Clear any previous animation UI
+v.unload_animation()  # Clear any previous animation UI
 
 # Ground
 v.add_box(

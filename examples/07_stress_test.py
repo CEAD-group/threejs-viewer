@@ -95,7 +95,7 @@ print(f"Generated in {time.time() - start:.2f}s ({points.nbytes / 1024 / 1024:.1
 # Connect and send
 v = viewer()
 v.clear()
-v.stop_animation()
+v.unload_animation()
 
 print("Sending polyline to viewer...")
 start = time.time()

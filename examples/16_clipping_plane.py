@@ -21,7 +21,7 @@ from threejs_viewer import Toolpath, viewer
 
 v = viewer()
 v.clear()
-v.stop_animation()
+v.unload_animation()
 
 # Build a dense scene to clip through
 
