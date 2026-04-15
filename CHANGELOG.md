@@ -1,17 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.0.20
 
 ### Animation lifecycle
 
-- **`load_animation` preserves playback state on subsequent loads.** The first call to `load_animation` (when no animation is loaded) still starts at t=0 and force-plays, just like before. But a *subsequent* call (one already loaded) now preserves the current playhead time (clamped to the new duration), play state, and camera-tracking — only the underlying frame data is swapped. This makes the "swap mid-playback" pattern (reconcilers, tab switches between related animations) flicker-free without any caller bookkeeping. Pass `load_animation(anim, restart=True)` to force the old "snap to t=0 and force-play" behavior on a swap.
-- **`load_animation(autoplay=False)`** — load the animation paused on first-load (or on a restart) instead of starting playback immediately. No effect on a swap, where the prior play state is preserved.
+- **`load_animation` preserves playback state on subsequent loads.** The first call to `load_animation` (when no animation is loaded) still starts at t=0, with playback controlled by `autoplay` (default `True`; pass `autoplay=False` to load paused). But a *subsequent* call (one already loaded) now preserves the current playhead time (clamped to the new duration), play state, and camera-tracking — only the underlying frame data is swapped. This makes the "swap mid-playback" pattern (reconcilers, tab switches between related animations) flicker-free without any caller bookkeeping. Pass `load_animation(anim, restart=True)` to force the old "snap to t=0" behavior on a swap.
+- **`load_animation(autoplay=False)`** — load the animation paused on first-load (or on a restart) instead of starting playback immediately. No effect on a swap without `restart`, where the prior play state is preserved.
 - **`pause_animation()` / `resume_animation()`** — new Python API for pause/resume from a script. Previously pause/resume was browser-only (spacebar / play button).
 - **Renamed `stop_animation()` / `clear_animation()` → `unload_animation(restore_visibility=True)`.** The old name implied "pause," but the method actually exits animation mode entirely (re-enables `matrixAutoUpdate`, resets draw ranges, optionally restores baseline visibility, hides controls). The rename makes the contract honest, and the two old methods collapse into one with a parameter (`restore_visibility=False` matches the old `clear_animation` semantic). **Breaking**: external callers of `stop_animation()` / `clear_animation()` must rename. No shim.
+
+### Parametric tube improvements
+
+- **Analytic normals** for tube body and caps — replaces computed-from-geometry normals, eliminates shading artifacts at the frontier ring during `draw_range` animation.
+- **`anchor` parameter** — `"center"` (default) or `"top"` controls whether the bead is centered on the spine or extends downward from the top surface (useful when the spine is a nozzle-tip toolpath).
+- **Smoother end caps** — `N_CAP_RINGS` 3 → 8 for a better top-down look on revolution caps.
+- **Buffer-upload optimization** — `addUpdateRange()` on position/normal/color/index buffers instead of `needsUpdate = true`; ~1500× smaller per-frame GPU upload bandwidth.
+- **LOD fixes** — preserve color resolution on straight segments via `LOD_MAX_SKIP`; color version tracking eliminates a race between color updates and worker geometry rebuilds; frontier-ring restore no longer overwrites a color swap mid-animation.
+
+### Viewer display and controls
+
+- **Replaced `OrbitControls` with a custom `ViewerControls`** — middle-click re-pivots without a camera jump (a long-standing `OrbitControls` annoyance). Press `R` to toggle turntable ⇄ free orbit mode.
+- **Global wireframe cycle (`M` key)** — cycle scene display: normal → wireframe-only → combined (solid + black wireframe overlay) → normal. Removed the per-tube `wireframe_color` API in favor of this scene-wide toggle.
+- **Shading debug cycle (`N` key)** — cycle off → normals-as-color → UV checker → vertex-normals helper. Independent of `M` — they compose. Vertex-normals helper size is camera-relative (~30 px regardless of zoom).
+- **Stack-overflow fix in the `ViewHelper` `setViewport` shim** — a pre-existing bug re-wrapped the already-wrapped `setViewport` every frame, deepening the call chain by one level per frame until the stack blew. The shim now caches the true original once and restores inside `try/finally`.
 
 ### Internal
 
 - Decompose `viewer.js` god-class into in-file controller classes (`ParametricTube`, `CameraController`, `ShadingDebugController`) plus shared ring/color helpers as free functions. Viewer now type-checked via JSDoc + `// @ts-check` (run `npx tsc --noEmit -p jsconfig.json`). No behavior change.
+
+## 0.0.19
 
 ### New features
 
@@ -19,7 +36,15 @@
 - **Behavior change**: animations relying on exact frame-accurate playback (where each frame's transforms/colors/etc. were previously pinned to the nearest keyframe) must now pass `interpolation="hold"` explicitly to the relevant `add_channel` / `set_*_data` call. Examples 03/04/05 were downsampled to 10 Hz to demonstrate the smaller payloads.
 - **`parametric_tube` primitive** — variable-cross-section extruded tube built on the client from per-spine-point parameter arrays (spine + widths + heights + optional colors). Chamfered hexagonal cross-section (6 vertices/ring). Supports `draw_range` with smooth frontier-ring morphing and the `draw_ranges` animation channel. Wire transfer is O(N) instead of O(N × nCs), ~6× smaller than a baked mesh. See `examples/18_parametric_tube.py`.
 - **`update_parametric_tube_colors(id, colors)`** — replace a tube's per-ring color attribute without rebuilding geometry. Intended for interactive color-mode switching (layer → feed rate → curvature → …) in toolpath previews.
-- **Automatic LOD for parametric tubes** — tubes with ≥200 spine points get distance-weighted RDP simplification running in a Web Worker. The full geometry build (tangents, frames, vertices, indices) also runs off the main thread, so the render loop is never blocked. Per-chunk results are cached and reused when the camera distance changes less than 50%. Handles 1M+ point toolpaths at 60 fps. See `examples/11_toolpath.py`.
+- **Automatic LOD for parametric tubes** — tubes with ≥25k spine points get distance-weighted RDP simplification running in a Web Worker. The full geometry build (tangents, frames, vertices, indices) also runs off the main thread, so the render loop is never blocked. Per-chunk results are cached and reused when the camera distance changes less than 50%. Handles 1M+ point toolpaths at 60 fps. See `examples/11_toolpath.py`.
+- **`set_scene_visibility({id: bool, ...})`** — batch visibility updates that always persist to the animation baseline, so visibility set before `load_animation` is preserved across animation teardown.
+- **`add_toolpath()` / `Toolpath` convenience wrapper** — builds a parametric tube from a `Toolpath` with optional `colorize()` (viridis/plasma/turbo/hex/RGB/per-point scalar). Zero-width segments collapse for natural taper transitions on travel moves.
+- **Custom triangle meshes** — `add_mesh()` example with a procedural terrain heightmap, vertex colors, analytical normals, and draw_range row-by-row reveal. See `examples/19_custom_mesh.py`.
+
+### Other
+
+- Unknown WebSocket message types now log a warning instead of being silently ignored.
+- Viewer source files excluded from the wheel (only the built `viewer.html` ships).
 
 ## 0.0.18
 
