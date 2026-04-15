@@ -183,6 +183,9 @@ def test_restart_resets_to_zero(viewer_client, viewer_page):
     )
     viewer_client.load_animation(anim)
     _wait_for_animation_loaded(viewer_client)
+    # Pause so the playhead doesn't drift between seek and the restart swap.
+    viewer_client.pause_animation()
+    time.sleep(0.1)
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(3.0)")
     assert abs(_get_animation_time(viewer_page) - 3.0) < 1e-6
 
