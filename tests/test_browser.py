@@ -100,18 +100,6 @@ def test_unload_animation_resets_draw_range(viewer_client, viewer_page):
     assert result["objects"]["m1"]["drawRange"] == 1.0
 
 
-def _wait_for_animation_loaded(viewer_client, timeout_s=2.0):
-    """Poll query_scene until the viewer reports an animation is loaded."""
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        result = viewer_client.query_scene()
-        if result["meta"]["animation"].get("playing") is not None:
-            if result["meta"]["animation"]["playing"] is True:
-                return result
-        time.sleep(0.05)
-    return viewer_client.query_scene()
-
-
 def _get_animation_time(page):
     return page.evaluate("() => window.threejsViewer._animationTime")
 
@@ -124,6 +112,39 @@ def _has_animation(page):
     return page.evaluate("() => window.threejsViewer._animation != null")
 
 
+def _get_animation_duration(page):
+    return page.evaluate(
+        "() => window.threejsViewer._animation ? window.threejsViewer._animation.duration : null"
+    )
+
+
+def _wait_for_animation_loaded(page, timeout_s=2.0):
+    """Block until the viewer has an animation attached; raise on timeout.
+
+    Works for both autoplay=True and autoplay=False, since it only checks
+    for animation presence — not whether it's playing.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _has_animation(page):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"animation did not load within {timeout_s:.2f}s")
+
+
+def _wait_for_animation_duration(page, expected, timeout_s=2.0):
+    """Block until the loaded animation reports the expected duration."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _get_animation_duration(page) == expected:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"animation swap to duration={expected} did not land within "
+        f"{timeout_s:.2f}s (saw duration={_get_animation_duration(page)})"
+    )
+
+
 @pytest.mark.browser
 def test_swap_preserves_playhead_and_play_state(viewer_client, viewer_page):
     """Swapping animations preserves playhead time and play state."""
@@ -134,7 +155,7 @@ def test_swap_preserves_playhead_and_play_state(viewer_client, viewer_page):
         loop=False,
     )
     viewer_client.load_animation(anim_a)
-    _wait_for_animation_loaded(viewer_client)
+    _wait_for_animation_loaded(viewer_page)
     # Pause first so the playhead doesn't drift between seek and swap.
     viewer_client.pause_animation()
     time.sleep(0.1)
@@ -147,12 +168,7 @@ def test_swap_preserves_playhead_and_play_state(viewer_client, viewer_page):
         loop=False,
     )
     viewer_client.load_animation(anim_b)
-    for _ in range(20):
-        time.sleep(0.05)
-        if viewer_page.evaluate(
-            "() => window.threejsViewer._animation && window.threejsViewer._animation.duration === 10"
-        ):
-            break
+    _wait_for_animation_duration(viewer_page, 10)
     assert _is_playing(viewer_page) is False, "paused state not preserved on swap"
     assert abs(_get_animation_time(viewer_page) - 2.5) < 1e-6, (
         "playhead not preserved on swap"
@@ -163,12 +179,7 @@ def test_swap_preserves_playhead_and_play_state(viewer_client, viewer_page):
     time.sleep(0.1)
     assert _is_playing(viewer_page) is True
     viewer_client.load_animation(anim_a)
-    for _ in range(20):
-        time.sleep(0.05)
-        if viewer_page.evaluate(
-            "() => window.threejsViewer._animation && window.threejsViewer._animation.duration === 5"
-        ):
-            break
+    _wait_for_animation_duration(viewer_page, 5)
     assert _is_playing(viewer_page) is True, "playing state not preserved on swap"
 
 
@@ -182,19 +193,29 @@ def test_restart_resets_to_zero(viewer_client, viewer_page):
         loop=False,
     )
     viewer_client.load_animation(anim)
-    _wait_for_animation_loaded(viewer_client)
+    _wait_for_animation_loaded(viewer_page)
     # Pause so the playhead doesn't drift between seek and the restart swap.
     viewer_client.pause_animation()
     time.sleep(0.1)
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(3.0)")
     assert abs(_get_animation_time(viewer_page) - 3.0) < 1e-6
 
-    viewer_client.load_animation(anim, restart=True)
-    for _ in range(20):
-        time.sleep(0.05)
-        if _get_animation_time(viewer_page) < 0.1:
+    # autoplay=False keeps the restart deterministic — playhead sits at 0.0
+    # instead of advancing from 0 the moment the animation reloads.
+    viewer_client.load_animation(anim, restart=True, autoplay=False)
+    # Wait for the restart to land (playhead snaps back to 0, still paused).
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if (
+            _is_playing(viewer_page) is False
+            and _get_animation_time(viewer_page) == 0.0
+        ):
             break
-    assert abs(_get_animation_time(viewer_page)) < 0.1, "restart did not reset playhead"
+        time.sleep(0.05)
+    assert _is_playing(viewer_page) is False, (
+        "autoplay=False should keep restart paused"
+    )
+    assert _get_animation_time(viewer_page) == 0.0, "restart did not reset playhead"
 
 
 @pytest.mark.browser
@@ -207,11 +228,7 @@ def test_autoplay_false_loads_paused(viewer_client, viewer_page):
         loop=False,
     )
     viewer_client.load_animation(anim, autoplay=False)
-    for _ in range(20):
-        time.sleep(0.05)
-        if _has_animation(viewer_page):
-            break
-    assert _has_animation(viewer_page), "animation did not load"
+    _wait_for_animation_loaded(viewer_page)
     assert _is_playing(viewer_page) is False, "autoplay=False still started playing"
 
 
@@ -225,7 +242,11 @@ def test_pause_and_resume_animation(viewer_client, viewer_page):
         loop=True,
     )
     viewer_client.load_animation(anim)
-    _wait_for_animation_loaded(viewer_client)
+    _wait_for_animation_loaded(viewer_page)
+    # Autoplay default is True, so the animation should be playing after load.
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not _is_playing(viewer_page):
+        time.sleep(0.05)
     assert viewer_client.query_scene()["meta"]["animation"]["playing"] is True
 
     viewer_client.pause_animation()

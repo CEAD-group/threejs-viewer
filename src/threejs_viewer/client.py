@@ -1180,12 +1180,15 @@ class ViewerClient:
         colors, visibility, etc.) with JSON for sparse per-frame metadata
         (clip_times, or any channel without a binary version).
 
-        First load (no animation currently loaded) starts playback at t=0
-        with camera-tracking installed from the new animation's metadata.
-        Subsequent loads (an animation is already loaded) preserve the
-        current playhead time (clamped to the new duration), play state,
-        and camera-tracking — only the underlying frame data is swapped.
-        Pass ``restart=True`` to force the first-load behavior on a swap.
+        First load (no animation currently loaded) sets the playhead to
+        t=0 and installs camera-tracking from the new animation's metadata;
+        whether playback starts immediately is governed by ``autoplay``
+        (default ``True``). Subsequent loads (an animation is already
+        loaded) preserve the current playhead time (clamped to the new
+        duration), play state, and camera-tracking — only the underlying
+        frame data is swapped. Pass ``restart=True`` to force the
+        first-load behavior on a swap; ``autoplay`` still controls
+        play/paused on restart.
 
         Args:
             animation: Animation object with pre-computed frames
