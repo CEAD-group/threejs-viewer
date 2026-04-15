@@ -3121,7 +3121,6 @@ export class ThreeJSViewer {
         const prevTrackMode = this._trackMode;
         const prevTrackTargetId = this._trackTargetId;
         const prevTrackInteractive = this._trackInteractive;
-        const prevTrackHasLastPos = this._trackHasLastPos;
 
         this._animGeneration++;
         this._animation = animData;
@@ -3185,7 +3184,10 @@ export class ThreeJSViewer {
             this._trackMode = prevTrackMode;
             this._trackTargetId = prevTrackTargetId;
             this._trackInteractive = prevTrackInteractive;
-            this._trackHasLastPos = prevTrackHasLastPos;
+            // Trajectory is replaced — treat the next tracking tick as a first
+            // frame (snap orbit target, keep camera offset) rather than
+            // computing a delta against the old bead's last position.
+            this._trackHasLastPos = false;
             this._updateTrackingUI();
             this._seekToTime(this._animationTime);
         } else {
