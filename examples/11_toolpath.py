@@ -144,7 +144,6 @@ animation.set_frame_times(frame_times)
 animation.set_transform_data(["path_tube", "nozzle"], transforms)
 animation.set_draw_range_data(["path_tube"], draw_fracs[:, None])
 
-
 animation.add_marker(0.0, "Start", color=0x00FF00)
 animation.add_marker(duration / 2, "50%", color=0xFFFF00)
 animation.add_marker(duration * 0.99, "Done", color=0xFF0000)

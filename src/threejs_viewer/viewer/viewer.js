@@ -4700,6 +4700,9 @@ export class ThreeJSViewer {
             const dist = Math.max(distV, distH) * 1.5;
             this._camera.position.copy(center).addScaledVector(dir, dist);
         }
+        // ViewerControls never calls camera.lookAt, so explicitly re-orient
+        // to actually frame the object (not just translate along old view ray).
+        this._camera.lookAt(center);
         this._controls.update();
     }
 
@@ -4767,6 +4770,8 @@ export class ThreeJSViewer {
             this._camera.position.copy(center).addScaledVector(dir, dist);
         }
 
+        // ViewerControls never calls camera.lookAt, so explicitly re-orient.
+        this._camera.lookAt(center);
         this._controls.update();
     }
 

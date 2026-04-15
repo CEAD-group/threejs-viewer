@@ -770,7 +770,10 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
-        anchor_offsets = {"center": 0.0, "top": 0.5}
+        # The viewer applies heightOffset as a *shift* to section cv values,
+        # where +cv is the "up" direction (anchored to up_vector, default +Z).
+        # anchor="top" means spine at top of bead → bead extends down → subtract h/2.
+        anchor_offsets = {"center": 0.0, "top": -0.5}
         if anchor not in anchor_offsets:
             raise ValueError(
                 f"anchor must be one of {sorted(anchor_offsets)}, got {anchor!r}"

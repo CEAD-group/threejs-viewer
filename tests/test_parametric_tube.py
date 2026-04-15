@@ -96,6 +96,29 @@ def test_add_parametric_tube_anchor_rejects_invalid():
         c.add_parametric_tube("t", spine, widths, heights, anchor="bottom")
 
 
+def test_add_parametric_tube_anchor_forwards_height_offset():
+    """anchor="top" must send heightOffset=-0.5 so the spine sits at the top
+    surface (+cv is up, so a negative shift moves the bead downward)."""
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    c._binary_messages = []
+    c._send_binary = lambda h, p: c._binary_messages.append((h, p))
+
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+
+    c.add_parametric_tube("t_center", spine, widths, heights)
+    header_center, _ = c._binary_messages[-1]
+    assert "heightOffset" not in header_center  # default centered → omitted
+
+    c.add_parametric_tube("t_top", spine, widths, heights, anchor="top")
+    header_top, _ = c._binary_messages[-1]
+    assert header_top["heightOffset"] == -0.5
+
+
 # --- Browser integration tests ---
 
 
@@ -549,7 +572,7 @@ def test_parametric_tube_color_swap_during_looping_animation(
         """() => {
             const v = window.threejsViewer;
             // Stop animation playback
-            v._animPlaying = false;
+            v._animationPlaying = false;
         }"""
     )
     viewer_client.set_draw_range("tube_loop", 1.0)
