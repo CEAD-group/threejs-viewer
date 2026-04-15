@@ -1238,64 +1238,6 @@ function remapDrawRangeToReducedPairs(lod, value) {
     return Math.min(lo + frac, nRed - 1);
 }
 
-// Apply pre-built geometry from LOD worker to a parametric tube mesh.
-// msg: worker message containing typed arrays + metadata.
-function applyWorkerGeometry(mesh, msg) {
-    const lod = mesh.userData.tubeLOD;
-    const nRed = msg.nSpine;
-    const nCs = N_CROSS_SECTION;
-
-    // Build Three.js geometry from worker arrays
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
-    geometry.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
-    if (msg.colors) geometry.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
-    geometry.setIndex(new THREE.BufferAttribute(msg.indices, 1));
-
-    // Dispose old, assign new
-    mesh.geometry.dispose();
-    mesh.geometry = geometry;
-    // Sync wireframe overlay if present
-    if (mesh.userData.wireframeOverlay) {
-        mesh.userData.wireframeOverlay.geometry = geometry;
-    }
-
-    // Update userData
-    const ud = mesh.userData;
-    ud.tubeNumSpinePoints = nRed;
-    ud.tubeRingPairs = msg.ringPairs;
-    ud.tubeIndicesPerRingPair = msg.indicesPerRingPair;
-    ud.totalIndexCount = msg.capIndicesPerCap + msg.ringPairs * msg.indicesPerRingPair + msg.capIndicesPerCap;
-    ud.tubeCapIndicesPerCap = msg.capIndicesPerCap;
-    ud.tubeEndCapBase = msg.endCapBase;
-
-    // Rebuild morphData for frontier morphing
-    ud.tubeMorphData = {
-        spine: msg.reducedSpine,
-        widths: msg.reducedWidths,
-        heights: msg.reducedHeights,
-        localFrames: msg.localFrames,
-        capAngles: msg.capAngles,
-        ringColors: msg.reducedColors,
-        section: new Float32Array(nCs * 2),
-        savedRing: new Float32Array(nCs * 3),
-        savedRingNormals: null,
-        savedRingColors: null,
-        savedRingIndex: null,
-        morphedState: null,
-        endCapPattern: msg.endCapPattern,
-        savedCapIndices: new msg.endCapPattern.constructor(msg.endCapPattern.length),
-        savedCapOffset: -1,
-        heightOffset: ud.tubeHeightOffset || 0,
-    };
-
-    // Update LOD state
-    lod.keptIndices = msg.keptIndices;
-
-    // Re-apply draw range with arc-length remapping
-    applyParametricTubeDrawRange(mesh, lod.currentDrawRange);
-}
-
 // Decode N packed uint32 RGB values (0x00RRGGBB) into a ring-major Float32 RGB
 // attribute of length nSpine*nCs*3, replicating each ring color across its nCs
 // vertices. Writes into `out` if provided (must be pre-sized) to avoid
@@ -1320,375 +1262,437 @@ function expandRingColors(packedColors, nSpine, nCs, out) {
     return out;
 }
 
-// Restore previously morphed frontier ring to its original positions (and
-// colors if applicable).  Called when the frontier advances past a ring or
-// when draw_range reaches an exact ring boundary.
-function restoreFrontierRing(obj) {
-    const md = obj.userData.tubeMorphData;
-    if (!md || md.savedRingIndex == null) return;
-    const nCs = obj.userData.tubeNCs;
-    const ringBase = md.savedRingIndex * nCs * 3;
-    const posAttr = obj.geometry.getAttribute('position');
-    const rangeCount = nCs * 3;
-    posAttr.array.set(md.savedRing, ringBase);
-    posAttr.addUpdateRange(ringBase, rangeCount);
-    posAttr.needsUpdate = true;
-    if (md.savedRingNormals) {
-        const norAttr = obj.geometry.getAttribute('normal');
-        if (norAttr) {
-            norAttr.array.set(md.savedRingNormals, ringBase);
-            norAttr.addUpdateRange(ringBase, rangeCount);
-            norAttr.needsUpdate = true;
-        }
-    }
-    if (md.savedRingColors) {
-        const colAttr = obj.geometry.getAttribute('color');
-        if (colAttr) {
-            colAttr.array.set(md.savedRingColors, ringBase);
-            colAttr.addUpdateRange(ringBase, rangeCount);
-            colAttr.needsUpdate = true;
-        }
-    }
-    md.savedRingIndex = null;
-    md.morphedState = null;
-}
-
-// Morph the frontier ring of a parametric tube to the interpolated spine
-// position.  Returns the number of ring pairs that should be visible
-// (complete pairs + the morphed frontier).
-function morphFrontierRing(obj, fracRingPairs) {
-    const ud = obj.userData;
-    const md = ud.tubeMorphData;
-    if (!md) return Math.floor(fracRingPairs);
-
-    const nCs = ud.tubeNCs;
-    const ringPairs = ud.tubeRingPairs;
-    const completePairs = Math.floor(fracRingPairs);
-    const frac = fracRingPairs - completePairs;
-
-    if (frac < 1e-6 || completePairs >= ringPairs) {
-        restoreFrontierRing(obj);
-        return completePairs;
+// ParametricTube — namespaces the operations that read / mutate a tube mesh
+// built by `buildParametricTubeGeometry`. State continues to live on
+// `mesh.userData.tube*` so stream-mode code, tests, and the LOD worker can
+// keep using it; this class is the single place where tube-specific methods
+// live. One instance per tube mesh, stored at `mesh.userData.parametricTube`.
+class ParametricTube {
+    /** @param {any} mesh */
+    constructor(mesh) {
+        this._mesh = mesh;
     }
 
-    const iA = completePairs;      // lerp FROM
-    const iB = completePairs + 1;  // ring we overwrite (lerp TO)
+    // Apply pre-built geometry from LOD worker.
+    // msg: worker message containing typed arrays + metadata.
+    applyWorkerGeometry(msg) {
+        const mesh = this._mesh;
+        const lod = mesh.userData.tubeLOD;
+        const nCs = N_CROSS_SECTION;
 
-    // If the frontier moved to a different ring, restore the old one first
-    // and save the new ring's original data.
-    if (md.savedRingIndex !== iB) {
-        restoreFrontierRing(obj);
-        const posArr = obj.geometry.getAttribute('position').array;
-        const ringBase = iB * nCs * 3;
-        md.savedRing.set(posArr.subarray(ringBase, ringBase + nCs * 3));
-        // Save normals
-        const norAttr = obj.geometry.getAttribute('normal');
-        if (norAttr) {
-            if (!md.savedRingNormals) md.savedRingNormals = new Float32Array(nCs * 3);
-            md.savedRingNormals.set(norAttr.array.subarray(ringBase, ringBase + nCs * 3));
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
+        geometry.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
+        if (msg.colors) geometry.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
+        geometry.setIndex(new THREE.BufferAttribute(msg.indices, 1));
+
+        mesh.geometry.dispose();
+        mesh.geometry = geometry;
+        if (mesh.userData.wireframeOverlay) {
+            mesh.userData.wireframeOverlay.geometry = geometry;
         }
-        // Save colors if applicable
-        if (ud.tubeHasColors) {
-            const colAttr = obj.geometry.getAttribute('color');
-            if (colAttr) {
-                if (!md.savedRingColors) md.savedRingColors = new Float32Array(nCs * 3);
-                md.savedRingColors.set(colAttr.array.subarray(ringBase, ringBase + nCs * 3));
+
+        const ud = mesh.userData;
+        ud.tubeNumSpinePoints = msg.nSpine;
+        ud.tubeRingPairs = msg.ringPairs;
+        ud.tubeIndicesPerRingPair = msg.indicesPerRingPair;
+        ud.totalIndexCount = msg.capIndicesPerCap + msg.ringPairs * msg.indicesPerRingPair + msg.capIndicesPerCap;
+        ud.tubeCapIndicesPerCap = msg.capIndicesPerCap;
+        ud.tubeEndCapBase = msg.endCapBase;
+
+        ud.tubeMorphData = {
+            spine: msg.reducedSpine,
+            widths: msg.reducedWidths,
+            heights: msg.reducedHeights,
+            localFrames: msg.localFrames,
+            capAngles: msg.capAngles,
+            ringColors: msg.reducedColors,
+            section: new Float32Array(nCs * 2),
+            savedRing: new Float32Array(nCs * 3),
+            savedRingNormals: null,
+            savedRingColors: null,
+            savedRingIndex: null,
+            morphedState: null,
+            endCapPattern: msg.endCapPattern,
+            savedCapIndices: new (/** @type {any} */ (msg.endCapPattern.constructor))(msg.endCapPattern.length),
+            savedCapOffset: -1,
+            heightOffset: ud.tubeHeightOffset || 0,
+        };
+
+        lod.keptIndices = msg.keptIndices;
+        this.setDrawRange(lod.currentDrawRange);
+    }
+
+    // Restore a previously-morphed frontier ring to its original positions
+    // (and normals / colors if saved). Called when the frontier advances
+    // past a ring or when draw_range reaches an exact ring boundary.
+    restoreFrontierRing() {
+        const obj = this._mesh;
+        const md = obj.userData.tubeMorphData;
+        if (!md || md.savedRingIndex == null) return;
+        const nCs = obj.userData.tubeNCs;
+        const ringBase = md.savedRingIndex * nCs * 3;
+        const posAttr = obj.geometry.getAttribute('position');
+        const rangeCount = nCs * 3;
+        posAttr.array.set(md.savedRing, ringBase);
+        posAttr.addUpdateRange(ringBase, rangeCount);
+        posAttr.needsUpdate = true;
+        if (md.savedRingNormals) {
+            const norAttr = obj.geometry.getAttribute('normal');
+            if (norAttr) {
+                norAttr.array.set(md.savedRingNormals, ringBase);
+                norAttr.addUpdateRange(ringBase, rangeCount);
+                norAttr.needsUpdate = true;
             }
         }
-        md.savedRingIndex = iB;
+        if (md.savedRingColors) {
+            const colAttr = obj.geometry.getAttribute('color');
+            if (colAttr) {
+                colAttr.array.set(md.savedRingColors, ringBase);
+                colAttr.addUpdateRange(ringBase, rangeCount);
+                colAttr.needsUpdate = true;
+            }
+        }
+        md.savedRingIndex = null;
+        md.morphedState = null;
     }
 
-    // Lerp spine position
-    const sx = md.spine[iA * 3]     * (1 - frac) + md.spine[iB * 3]     * frac;
-    const sy = md.spine[iA * 3 + 1] * (1 - frac) + md.spine[iB * 3 + 1] * frac;
-    const sz = md.spine[iA * 3 + 2] * (1 - frac) + md.spine[iB * 3 + 2] * frac;
+    // Morph the frontier ring to the interpolated spine position. Returns
+    // the number of ring pairs that should be visible (complete pairs + the
+    // morphed frontier).
+    morphFrontierRing(fracRingPairs) {
+        const obj = this._mesh;
+        const ud = obj.userData;
+        const md = ud.tubeMorphData;
+        if (!md) return Math.floor(fracRingPairs);
 
-    // Lerp width & height
-    const w = md.widths[iA] * (1 - frac) + md.widths[iB] * frac;
-    const h = md.heights[iA] * (1 - frac) + md.heights[iB] * frac;
+        const nCs = ud.tubeNCs;
+        const ringPairs = ud.tubeRingPairs;
+        const completePairs = Math.floor(fracRingPairs);
+        const frac = fracRingPairs - completePairs;
 
-    // Lerp local frame vectors (U, V) — component-wise + normalize
-    let ux = md.localFrames[iA * 6]     * (1 - frac) + md.localFrames[iB * 6]     * frac;
-    let uy = md.localFrames[iA * 6 + 1] * (1 - frac) + md.localFrames[iB * 6 + 1] * frac;
-    let uz = md.localFrames[iA * 6 + 2] * (1 - frac) + md.localFrames[iB * 6 + 2] * frac;
-    let uLen = Math.hypot(ux, uy, uz);
-    if (uLen > 1e-12) { ux /= uLen; uy /= uLen; uz /= uLen; }
+        if (frac < 1e-6 || completePairs >= ringPairs) {
+            this.restoreFrontierRing();
+            return completePairs;
+        }
 
-    let vx = md.localFrames[iA * 6 + 3] * (1 - frac) + md.localFrames[iB * 6 + 3] * frac;
-    let vy = md.localFrames[iA * 6 + 4] * (1 - frac) + md.localFrames[iB * 6 + 4] * frac;
-    let vz = md.localFrames[iA * 6 + 5] * (1 - frac) + md.localFrames[iB * 6 + 5] * frac;
-    let vLen = Math.hypot(vx, vy, vz);
-    if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
+        const iA = completePairs;      // lerp FROM
+        const iB = completePairs + 1;  // ring we overwrite (lerp TO)
 
-    // Store morphed state for updateEndCap to use
-    md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz };
+        // Frontier moved to a different ring — restore the old one first, then
+        // snapshot the new ring's original data.
+        if (md.savedRingIndex !== iB) {
+            this.restoreFrontierRing();
+            const posArr = obj.geometry.getAttribute('position').array;
+            const ringBase = iB * nCs * 3;
+            md.savedRing.set(posArr.subarray(ringBase, ringBase + nCs * 3));
+            const norAttr = obj.geometry.getAttribute('normal');
+            if (norAttr) {
+                if (!md.savedRingNormals) md.savedRingNormals = new Float32Array(nCs * 3);
+                md.savedRingNormals.set(norAttr.array.subarray(ringBase, ringBase + nCs * 3));
+            }
+            if (ud.tubeHasColors) {
+                const colAttr = obj.geometry.getAttribute('color');
+                if (colAttr) {
+                    if (!md.savedRingColors) md.savedRingColors = new Float32Array(nCs * 3);
+                    md.savedRingColors.set(colAttr.array.subarray(ringBase, ringBase + nCs * 3));
+                }
+            }
+            md.savedRingIndex = iB;
+        }
 
-    // Sample cross-section at interpolated width/height
-    sampleChamferedRect(md.section, w, h);
-    const vOff = md.heightOffset ? md.heightOffset * h : 0;
+        const sx = md.spine[iA * 3]     * (1 - frac) + md.spine[iB * 3]     * frac;
+        const sy = md.spine[iA * 3 + 1] * (1 - frac) + md.spine[iB * 3 + 1] * frac;
+        const sz = md.spine[iA * 3 + 2] * (1 - frac) + md.spine[iB * 3 + 2] * frac;
 
-    // Write morphed vertices into the position buffer at ring iB
-    const posAttr = obj.geometry.getAttribute('position');
-    const pos = posAttr.array;
-    const ringBase = iB * nCs * 3;
-    writeRingVerts(pos, ringBase, md.section, nCs,
-                   ux, uy, uz, vx, vy, vz, sx, sy, sz, vOff);
-    const rangeCount = nCs * 3;
-    posAttr.addUpdateRange(ringBase, rangeCount);
-    posAttr.needsUpdate = true;
+        const w = md.widths[iA] * (1 - frac) + md.widths[iB] * frac;
+        const h = md.heights[iA] * (1 - frac) + md.heights[iB] * frac;
 
-    // Lerp colors if present
-    if (ud.tubeHasColors && md.ringColors) {
-        const colAttr = obj.geometry.getAttribute('color');
-        if (colAttr) {
-            const cols = colAttr.array;
-            const rA = md.ringColors[iA * 3], gA = md.ringColors[iA * 3 + 1], bA = md.ringColors[iA * 3 + 2];
-            const rB = md.ringColors[iB * 3], gB = md.ringColors[iB * 3 + 1], bB = md.ringColors[iB * 3 + 2];
-            const cr = rA * (1 - frac) + rB * frac;
-            const cg = gA * (1 - frac) + gB * frac;
-            const cb = bA * (1 - frac) + bB * frac;
-            fillRGBBlock(cols, ringBase, nCs, cr, cg, cb);
-            colAttr.addUpdateRange(ringBase, rangeCount);
-            colAttr.needsUpdate = true;
+        // Lerp local frame vectors (U, V) — component-wise + normalize.
+        let ux = md.localFrames[iA * 6]     * (1 - frac) + md.localFrames[iB * 6]     * frac;
+        let uy = md.localFrames[iA * 6 + 1] * (1 - frac) + md.localFrames[iB * 6 + 1] * frac;
+        let uz = md.localFrames[iA * 6 + 2] * (1 - frac) + md.localFrames[iB * 6 + 2] * frac;
+        let uLen = Math.hypot(ux, uy, uz);
+        if (uLen > 1e-12) { ux /= uLen; uy /= uLen; uz /= uLen; }
+
+        let vx = md.localFrames[iA * 6 + 3] * (1 - frac) + md.localFrames[iB * 6 + 3] * frac;
+        let vy = md.localFrames[iA * 6 + 4] * (1 - frac) + md.localFrames[iB * 6 + 4] * frac;
+        let vz = md.localFrames[iA * 6 + 5] * (1 - frac) + md.localFrames[iB * 6 + 5] * frac;
+        let vLen = Math.hypot(vx, vy, vz);
+        if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
+
+        md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz };
+
+        sampleChamferedRect(md.section, w, h);
+        const vOff = md.heightOffset ? md.heightOffset * h : 0;
+
+        const posAttr = obj.geometry.getAttribute('position');
+        const pos = posAttr.array;
+        const ringBase = iB * nCs * 3;
+        writeRingVerts(pos, ringBase, md.section, nCs,
+                       ux, uy, uz, vx, vy, vz, sx, sy, sz, vOff);
+        const rangeCount = nCs * 3;
+        posAttr.addUpdateRange(ringBase, rangeCount);
+        posAttr.needsUpdate = true;
+
+        if (ud.tubeHasColors && md.ringColors) {
+            const colAttr = obj.geometry.getAttribute('color');
+            if (colAttr) {
+                const cols = colAttr.array;
+                const rA = md.ringColors[iA * 3], gA = md.ringColors[iA * 3 + 1], bA = md.ringColors[iA * 3 + 2];
+                const rB = md.ringColors[iB * 3], gB = md.ringColors[iB * 3 + 1], bB = md.ringColors[iB * 3 + 2];
+                const cr = rA * (1 - frac) + rB * frac;
+                const cg = gA * (1 - frac) + gB * frac;
+                const cb = bA * (1 - frac) + bB * frac;
+                fillRGBBlock(cols, ringBase, nCs, cr, cg, cb);
+                colAttr.addUpdateRange(ringBase, rangeCount);
+                colAttr.needsUpdate = true;
+            }
+        }
+
+        return completePairs + 1;
+    }
+
+    // Update the end cap revolution surface to match the last visible ring.
+    // Uses morphed spine/frame/width/height stored by morphFrontierRing, or
+    // reads original data for un-morphed rings.
+    updateEndCap(lastVisibleRing) {
+        const obj = this._mesh;
+        const ud = obj.userData;
+        const md = ud.tubeMorphData;
+        if (!md) return;
+        const nCs = ud.tubeNCs;
+        const nCapRings = md.capAngles.length;
+        const posAttr = obj.geometry.getAttribute('position');
+        const pos = posAttr.array;
+
+        let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz;
+        if (md.morphedState) {
+            const ms = md.morphedState;
+            sx = ms.sx; sy = ms.sy; sz = ms.sz;
+            w = ms.w; h = ms.h;
+            ux = ms.ux; uy = ms.uy; uz = ms.uz;
+            vx = ms.vx; vy = ms.vy; vz = ms.vz;
+        } else {
+            const i = lastVisibleRing;
+            sx = md.spine[i * 3]; sy = md.spine[i * 3 + 1]; sz = md.spine[i * 3 + 2];
+            w = md.widths[i]; h = md.heights[i];
+            ux = md.localFrames[i * 6]; uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
+            vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
+        }
+        const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
+
+        sampleChamferedRect(md.section, w, h);
+        const vOff = md.heightOffset ? md.heightOffset * h : 0;
+        const ecBase = ud.tubeEndCapBase;
+        for (let k = 0; k < nCapRings; k++) {
+            const theta = md.capAngles[k];
+            const cosT = Math.cos(theta);
+            const sinT = Math.sin(theta);
+            const ringBase = (ecBase + k * nCs) * 3;
+            writeCapRingVerts(pos, ringBase, md.section, nCs,
+                              ux, uy, uz, vx, vy, vz, tx, ty, tz,
+                              sx, sy, sz, cosT, sinT, vOff);
+        }
+        const capRangeStart = ecBase * 3;
+        const capRangeCount = nCapRings * nCs * 3;
+        posAttr.addUpdateRange(capRangeStart, capRangeCount);
+        posAttr.needsUpdate = true;
+
+        if (ud.tubeHasColors && md.ringColors) {
+            const colAttr = obj.geometry.getAttribute('color');
+            if (colAttr) {
+                const cols = colAttr.array;
+                const colSrcBase = lastVisibleRing * nCs * 3;
+                const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
+                const capVerts = nCapRings * nCs;
+                fillRGBBlock(cols, ecBase * 3, capVerts, cr, cg, cb);
+                colAttr.addUpdateRange(capRangeStart, capRangeCount);
+                colAttr.needsUpdate = true;
+            }
         }
     }
 
-    return completePairs + 1;
-}
+    // Write analytic normals for the frontier ring + end cap during animation.
+    // Frontier ring gets the pure cross-section bisector (pure UV radial); the
+    // end cap uses cos(θ)·radial + sin(θ)·T so the seam at the frontier
+    // matches and the dome tip points along +T.
+    updateMorphedNormals(visiblePairs) {
+        const obj = this._mesh;
+        const ud = obj.userData;
+        const md = ud.tubeMorphData;
+        if (!md) return;
 
-// Update the end cap revolution surface to match the last visible ring.
-// Uses morphed spine/frame/width/height stored by morphFrontierRing, or reads
-// original data for un-morphed rings.
-function updateEndCap(obj, lastVisibleRing) {
-    const ud = obj.userData;
-    const md = ud.tubeMorphData;
-    if (!md) return;
-    const nCs = ud.tubeNCs;
-    const nCapRings = md.capAngles.length;
-    const posAttr = obj.geometry.getAttribute('position');
-    const pos = posAttr.array;
+        const nCs = ud.tubeNCs;
+        const nCapRings = md.capAngles.length;
+        const ecBase = ud.tubeEndCapBase;
+        const norAttr = obj.geometry.getAttribute('normal');
+        if (!norAttr) return;
+        const nor = norAttr.array;
 
-    // Determine spine pos, width, height, frame at the frontier ring
-    let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz;
-    if (md.morphedState) {
-        const ms = md.morphedState;
-        sx = ms.sx; sy = ms.sy; sz = ms.sz;
-        w = ms.w; h = ms.h;
-        ux = ms.ux; uy = ms.uy; uz = ms.uz;
-        vx = ms.vx; vy = ms.vy; vz = ms.vz;
-    } else {
-        const i = lastVisibleRing;
-        sx = md.spine[i * 3]; sy = md.spine[i * 3 + 1]; sz = md.spine[i * 3 + 2];
-        w = md.widths[i]; h = md.heights[i];
-        ux = md.localFrames[i * 6]; uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
-        vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
-    }
-    // Tangent = U × V
-    const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
-
-    // Revolution around V: each vertex sweeps by |cu| along T
-    sampleChamferedRect(md.section, w, h);
-    const vOff = md.heightOffset ? md.heightOffset * h : 0;
-    const ecBase = ud.tubeEndCapBase;
-    for (let k = 0; k < nCapRings; k++) {
-        const theta = md.capAngles[k];
-        const cosT = Math.cos(theta);
-        const sinT = Math.sin(theta);
-        const ringBase = (ecBase + k * nCs) * 3;
-        writeCapRingVerts(pos, ringBase, md.section, nCs,
-                          ux, uy, uz, vx, vy, vz, tx, ty, tz,
-                          sx, sy, sz, cosT, sinT, vOff);
-    }
-    const capRangeStart = ecBase * 3;
-    const capRangeCount = nCapRings * nCs * 3;
-    posAttr.addUpdateRange(capRangeStart, capRangeCount);
-    posAttr.needsUpdate = true;
-
-    // Update end cap colors if applicable
-    if (ud.tubeHasColors && md.ringColors) {
-        const colAttr = obj.geometry.getAttribute('color');
-        if (colAttr) {
-            const cols = colAttr.array;
-            const colSrcBase = lastVisibleRing * nCs * 3;
-            const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
-            const capVerts = nCapRings * nCs;
-            fillRGBBlock(cols, ecBase * 3, capVerts, cr, cg, cb);
-            colAttr.addUpdateRange(capRangeStart, capRangeCount);
-            colAttr.needsUpdate = true;
+        let w, h, ux, uy, uz, vx, vy, vz;
+        if (md.morphedState) {
+            const ms = md.morphedState;
+            w = ms.w; h = ms.h;
+            ux = ms.ux; uy = ms.uy; uz = ms.uz;
+            vx = ms.vx; vy = ms.vy; vz = ms.vz;
+        } else {
+            const i = visiblePairs;
+            w = md.widths[i]; h = md.heights[i];
+            ux = md.localFrames[i * 6];     uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
+            vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
         }
-    }
-}
+        const tx = uy * vz - uz * vy;
+        const ty = uz * vx - ux * vz;
+        const tz = ux * vy - uy * vx;
 
-// Write analytic normals for the frontier ring + end cap during animation.
-// Frontier ring gets the pure cross-section bisector (pure UV radial). The
-// end cap uses cos(θ)·radial + sin(θ)·T so the seam at the frontier matches
-// and the dome tip points along +T.
-function updateMorphedNormals(obj, visiblePairs) {
-    const ud = obj.userData;
-    const md = ud.tubeMorphData;
-    if (!md) return;
+        sampleChamferedRect(md.section, w, h);
+        if (!md._sectionNormalsScratch) md._sectionNormalsScratch = new Float32Array(nCs * 2);
+        const sn = md._sectionNormalsScratch;
+        computeSectionNormals(md.section, nCs, sn);
 
-    const nCs = ud.tubeNCs;
-    const nCapRings = md.capAngles.length;
-    const ecBase = ud.tubeEndCapBase;
-    const norAttr = obj.geometry.getAttribute('normal');
-    if (!norAttr) return;
-    const nor = norAttr.array;
-
-    // Shape/frame of the frontier (morphed if mid-interpolation, else raw ring).
-    let w, h, ux, uy, uz, vx, vy, vz;
-    if (md.morphedState) {
-        const ms = md.morphedState;
-        w = ms.w; h = ms.h;
-        ux = ms.ux; uy = ms.uy; uz = ms.uz;
-        vx = ms.vx; vy = ms.vy; vz = ms.vz;
-    } else {
-        const i = visiblePairs;
-        w = md.widths[i]; h = md.heights[i];
-        ux = md.localFrames[i * 6];     uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
-        vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
-    }
-    const tx = uy * vz - uz * vy;
-    const ty = uz * vx - ux * vz;
-    const tz = ux * vy - uy * vx;
-
-    sampleChamferedRect(md.section, w, h);
-    if (!md._sectionNormalsScratch) md._sectionNormalsScratch = new Float32Array(nCs * 2);
-    const sn = md._sectionNormalsScratch;
-    computeSectionNormals(md.section, nCs, sn);
-
-    // Frontier ring: pure UV radial.
-    const fBase = visiblePairs * nCs;
-    for (let j = 0; j < nCs; j++) {
-        const nu = sn[j * 2], nv = sn[j * 2 + 1];
-        const dst = (fBase + j) * 3;
-        nor[dst]     = nu * ux + nv * vx;
-        nor[dst + 1] = nu * uy + nv * vy;
-        nor[dst + 2] = nu * uz + nv * vz;
-    }
-
-    // End cap rings: cos(θ)·radial + sin(θ)·T.
-    for (let k = 0; k < nCapRings; k++) {
-        const theta = md.capAngles[k];
-        const c = Math.cos(theta);
-        const s = Math.sin(theta);
+        const fBase = visiblePairs * nCs;
         for (let j = 0; j < nCs; j++) {
             const nu = sn[j * 2], nv = sn[j * 2 + 1];
-            let nx = c * (nu * ux + nv * vx) + s * tx;
-            let ny = c * (nu * uy + nv * vy) + s * ty;
-            let nz = c * (nu * uz + nv * vz) + s * tz;
-            const len = Math.hypot(nx, ny, nz);
-            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
-            const dst = (ecBase + k * nCs + j) * 3;
-            nor[dst] = nx;
-            nor[dst + 1] = ny;
-            nor[dst + 2] = nz;
+            const dst = (fBase + j) * 3;
+            nor[dst]     = nu * ux + nv * vx;
+            nor[dst + 1] = nu * uy + nv * vy;
+            nor[dst + 2] = nu * uz + nv * vz;
         }
+
+        for (let k = 0; k < nCapRings; k++) {
+            const theta = md.capAngles[k];
+            const c = Math.cos(theta);
+            const s = Math.sin(theta);
+            for (let j = 0; j < nCs; j++) {
+                const nu = sn[j * 2], nv = sn[j * 2 + 1];
+                let nx = c * (nu * ux + nv * vx) + s * tx;
+                let ny = c * (nu * uy + nv * vy) + s * ty;
+                let nz = c * (nu * uz + nv * vz) + s * tz;
+                const len = Math.hypot(nx, ny, nz);
+                if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+                const dst = (ecBase + k * nCs + j) * 3;
+                nor[dst] = nx;
+                nor[dst + 1] = ny;
+                nor[dst + 2] = nz;
+            }
+        }
+
+        norAttr.addUpdateRange(fBase * 3, nCs * 3);
+        norAttr.addUpdateRange(ecBase * 3, nCapRings * nCs * 3);
+        norAttr.needsUpdate = true;
     }
 
-    norAttr.addUpdateRange(fBase * 3, nCs * 3);
-    norAttr.addUpdateRange(ecBase * 3, nCapRings * nCs * 3);
-    norAttr.needsUpdate = true;
-}
+    // Restore end cap indices that were relocated by a previous relocateEndCap.
+    restoreRelocatedEndCap() {
+        const obj = this._mesh;
+        const md = obj.userData.tubeMorphData;
+        if (!md || md.savedCapOffset < 0) return;
+        const capPer = obj.userData.tubeCapIndicesPerCap;
+        const indexAttr = obj.geometry.getIndex();
+        indexAttr.array.set(md.savedCapIndices, md.savedCapOffset);
+        indexAttr.addUpdateRange(md.savedCapOffset, capPer);
+        md.savedCapOffset = -1;
+        indexAttr.needsUpdate = true;
+    }
 
-// Restore end cap indices that were relocated by a previous relocateEndCap call.
-function restoreRelocatedEndCap(obj) {
-    const md = obj.userData.tubeMorphData;
-    if (!md || md.savedCapOffset < 0) return;
-    const capPer = obj.userData.tubeCapIndicesPerCap;
-    const indexAttr = obj.geometry.getIndex();
-    indexAttr.array.set(md.savedCapIndices, md.savedCapOffset);
-    indexAttr.addUpdateRange(md.savedCapOffset, capPer);
-    md.savedCapOffset = -1;
-    indexAttr.needsUpdate = true;
-}
+    // Move end cap fan indices to sit right after the visible ring pairs so
+    // setDrawRange(0, startCap + visiblePairs + endCap) draws them correctly.
+    relocateEndCap(visiblePairs) {
+        const obj = this._mesh;
+        const ud = obj.userData;
+        const md = ud.tubeMorphData;
+        const capPer = ud.tubeCapIndicesPerCap;
+        const perPair = ud.tubeIndicesPerRingPair;
+        const indexAttr = obj.geometry.getIndex();
+        const idx = indexAttr.array;
 
-// Move end cap fan indices to sit right after the visible ring pairs so
-// setDrawRange(0, startCap + visiblePairs + endCap) draws them correctly.
-function relocateEndCap(obj, visiblePairs) {
-    const ud = obj.userData;
-    const md = ud.tubeMorphData;
-    const capPer = ud.tubeCapIndicesPerCap;
-    const perPair = ud.tubeIndicesPerRingPair;
-    const indexAttr = obj.geometry.getIndex();
-    const idx = indexAttr.array;
+        this.restoreRelocatedEndCap();
 
-    // Restore previously relocated end cap indices
-    restoreRelocatedEndCap(obj);
+        const offset = capPer + visiblePairs * perPair;
+        md.savedCapIndices.set(idx.subarray(offset, offset + capPer));
+        md.savedCapOffset = offset;
+        // Write end cap pattern, adjusting tube ring references from the
+        // original last ring to the current frontier ring.
+        const nCs = ud.tubeNCs;
+        const origRingBase = (ud.tubeNumSpinePoints - 1) * nCs;
+        const frontierRingBase = visiblePairs * nCs;
+        for (let i = 0; i < capPer; i++) {
+            const v = md.endCapPattern[i];
+            if (v >= origRingBase && v < origRingBase + nCs) {
+                idx[offset + i] = v - origRingBase + frontierRingBase;
+            } else {
+                idx[offset + i] = v;
+            }
+        }
+        indexAttr.addUpdateRange(offset, capPer);
+        indexAttr.needsUpdate = true;
+    }
 
-    // Place end cap right after start_cap + visible ring pairs
-    const offset = capPer + visiblePairs * perPair;
-    // Save the indices we're about to overwrite
-    md.savedCapIndices.set(idx.subarray(offset, offset + capPer));
-    md.savedCapOffset = offset;
-    // Write end cap pattern, adjusting tube ring references from the
-    // original last ring to the current frontier ring.
-    const nCs = ud.tubeNCs;
-    const origRingBase = (ud.tubeNumSpinePoints - 1) * nCs;
-    const frontierRingBase = visiblePairs * nCs;
-    for (let i = 0; i < capPer; i++) {
-        const v = md.endCapPattern[i];
-        if (v >= origRingBase && v < origRingBase + nCs) {
-            idx[offset + i] = v - origRingBase + frontierRingBase;
+    setDrawRange(value) {
+        const obj = this._mesh;
+        const ud = obj.userData;
+        const ringPairs = ud.tubeRingPairs;
+        const perPair = ud.tubeIndicesPerRingPair;
+        const capPer = ud.tubeCapIndicesPerCap || 0;
+        const clamped = Math.max(0, Math.min(1, value));
+
+        if (ud.tubeLOD) ud.tubeLOD.currentDrawRange = value;
+
+        // LOD active: preserve original point-index pacing.
+        let fracRingPairs;
+        if (ud.tubeLOD && ud.tubeLOD.keptIndices) {
+            fracRingPairs = remapDrawRangeToReducedPairs(ud.tubeLOD, clamped);
         } else {
-            idx[offset + i] = v;
+            fracRingPairs = clamped * ringPairs;
+        }
+
+        if (!ud.tubeMorphData) {
+            const pairs = Math.floor(fracRingPairs);
+            obj.geometry.setDrawRange(0, capPer + pairs * perPair + capPer);
+            return;
+        }
+
+        if (clamped < 1e-6) {
+            this.restoreFrontierRing();
+            this.restoreRelocatedEndCap();
+            obj.geometry.setDrawRange(0, 0);
+            return;
+        }
+
+        const visiblePairs = this.morphFrontierRing(fracRingPairs);
+        this.updateEndCap(visiblePairs);
+        this.updateMorphedNormals(visiblePairs);
+        this.relocateEndCap(visiblePairs);
+        obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
+
+        // After a full color rewrite (_colorFullUploadNeeded), the morph path
+        // may have added partial addUpdateRange calls on the color attribute.
+        // With pending ranges, Three.js only uploads those ranges — not the
+        // full buffer. Clear them so needsUpdate triggers a complete upload
+        // on the next render.
+        if (ud._colorFullUploadNeeded) {
+            const colAttr = obj.geometry.getAttribute('color');
+            if (colAttr) {
+                colAttr.clearUpdateRanges();
+                colAttr.needsUpdate = true;
+            }
+            ud._colorFullUploadNeeded = false;
         }
     }
-    indexAttr.addUpdateRange(offset, capPer);
-    indexAttr.needsUpdate = true;
 }
 
+// Back-compat free-function shims — these keep existing call sites simple
+// while the ParametricTube class is the source of truth.
 function applyParametricTubeDrawRange(obj, value) {
-    const ud = obj.userData;
-    const ringPairs = ud.tubeRingPairs;
-    const perPair = ud.tubeIndicesPerRingPair;
-    const capPer = ud.tubeCapIndicesPerCap || 0;
-    const clamped = Math.max(0, Math.min(1, value));
-
-    // Track draw_range for LOD rebuilds
-    if (ud.tubeLOD) ud.tubeLOD.currentDrawRange = value;
-
-    // Remap when LOD is active: preserve original point-index pacing
-    let fracRingPairs;
-    if (ud.tubeLOD && ud.tubeLOD.keptIndices) {
-        fracRingPairs = remapDrawRangeToReducedPairs(ud.tubeLOD, clamped);
-    } else {
-        fracRingPairs = clamped * ringPairs;
-    }
-
-    if (!ud.tubeMorphData) {
-        const pairs = Math.floor(fracRingPairs);
-        obj.geometry.setDrawRange(0, capPer + pairs * perPair + capPer);
-        return;
-    }
-
-    if (clamped < 1e-6) {
-        restoreFrontierRing(obj);
-        restoreRelocatedEndCap(obj);
-        obj.geometry.setDrawRange(0, 0);
-        return;
-    }
-
-    const visiblePairs = morphFrontierRing(obj, fracRingPairs);
-    updateEndCap(obj, visiblePairs);
-    updateMorphedNormals(obj, visiblePairs);
-    relocateEndCap(obj, visiblePairs);
-    // start_cap + ring_pairs + end_cap (end cap now sits right after visible pairs)
-    obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
-
-    // After a full color rewrite (_colorFullUploadNeeded), morphFrontierRing,
-    // restoreFrontierRing, and updateEndCap may have added partial addUpdateRange
-    // calls on the color attribute.  With pending ranges, Three.js only uploads
-    // those ranges — not the full buffer.  Clear them so needsUpdate triggers a
-    // complete upload of the rewritten color buffer on the next render.
-    if (ud._colorFullUploadNeeded) {
-        const colAttr = obj.geometry.getAttribute('color');
-        if (colAttr) {
-            colAttr.clearUpdateRanges();
-            colAttr.needsUpdate = true;
-        }
-        ud._colorFullUploadNeeded = false;
-    }
+    obj.userData.parametricTube.setDrawRange(value);
+}
+function applyWorkerGeometry(mesh, msg) {
+    mesh.userData.parametricTube.applyWorkerGeometry(msg);
+}
+function restoreFrontierRing(obj) {
+    const t = obj.userData.parametricTube;
+    if (t) t.restoreFrontierRing();
 }
 
 /**
@@ -4181,6 +4185,7 @@ export class ThreeJSViewer {
                                 mesh.name = data.id;
                                 mesh.userData.id = data.id;
                                 mesh.userData.isParametricTube = true;
+                                mesh.userData.parametricTube = new ParametricTube(mesh);
                                 mesh.userData.tubeNumSpinePoints = buildN;
                                 mesh.userData.tubeNCs = nCs;
                                 mesh.userData.tubeRingPairs = ringPairs;
