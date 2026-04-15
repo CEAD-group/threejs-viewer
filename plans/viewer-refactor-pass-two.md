@@ -68,7 +68,7 @@ Project is early; backward-compat on internal JS field names is not a goal. Two 
 | `v._getFrameAtTime(t)` | `v._anim.getFrameAtTime(t)` |
 | `v._applyFrame(i, t)` | `v._anim.applyFrame(i, t)` |
 
-The WS-message API (`set_clipping_plane` / `set_clipping_slab` / `disable_clipping_plane` / `set_clipping_defaults` / `load_animation` / `stop_animation`) is external and MUST keep working — that's a dispatcher concern (`_onMessage` still routes those names to the right controller methods), not a field-name concern.
+The WS-message API (`set_clipping_plane` / `set_clipping_slab` / `disable_clipping_plane` / `set_clipping_defaults` / `load_animation` / `unload_animation`) is external and MUST keep working — that's a dispatcher concern (`_onMessage` still routes those names to the right controller methods), not a field-name concern.
 
 Also remove any compat getters left over from pass one (e.g., `_wireframeMode`) — grep confirms they're not used by tests.
 

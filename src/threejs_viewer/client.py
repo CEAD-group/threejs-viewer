@@ -1170,7 +1170,9 @@ class ViewerClient:
 
     # === Animation ===
 
-    def load_animation(self, animation) -> None:
+    def load_animation(
+        self, animation, *, restart: bool = False, autoplay: bool = True
+    ) -> None:
         """
         Load an animation for playback in the viewer.
 
@@ -1178,8 +1180,22 @@ class ViewerClient:
         colors, visibility, etc.) with JSON for sparse per-frame metadata
         (clip_times, or any channel without a binary version).
 
+        First load (no animation currently loaded) starts playback at t=0
+        with camera-tracking installed from the new animation's metadata.
+        Subsequent loads (an animation is already loaded) preserve the
+        current playhead time (clamped to the new duration), play state,
+        and camera-tracking — only the underlying frame data is swapped.
+        Pass ``restart=True`` to force the first-load behavior on a swap.
+
         Args:
             animation: Animation object with pre-computed frames
+            restart: If True, reset to t=0, force-play, and re-install
+                camera-tracking from the animation's metadata, even when
+                an animation is already loaded.
+            autoplay: If False, load paused on first-load (or on a
+                restart) instead of starting playback immediately. Has
+                no effect on a swap (the prior play state is preserved
+                regardless).
 
         Example:
             frames = []
@@ -1353,21 +1369,50 @@ class ViewerClient:
             header["camera_follow"] = animation.camera_follow
         if animation.camera_lookat is not None:
             header["camera_lookat"] = animation.camera_lookat
+        if restart:
+            header["restart"] = True
+        if not autoplay:
+            header["autoplay"] = False
         self._send(header)
 
-    def stop_animation(self) -> None:
-        """Stop animation playback, reset draw ranges, and return to real-time mode."""
-        self._current_animation = None
-        self._send({"type": "stop_animation"})
+    def unload_animation(self, *, restore_visibility: bool = True) -> None:
+        """Exit animation mode and return to real-time control.
 
-    def clear_animation(self) -> None:
-        """Stop animation without restoring baseline visibility.
+        Re-enables matrixAutoUpdate on every object (animation pins it off
+        so its 4x4 channel writes aren't clobbered), resets every draw
+        range to 1.0, optionally restores the visibility state captured
+        when the animation was loaded, and hides the animation controls.
 
-        Unlike stop_animation(), this leaves the current visibility state as-is
-        instead of restoring baseline visibility.
+        This is not a pause — for that, use ``pause_animation()``.
+
+        Args:
+            restore_visibility: If True (default), restore each object's
+                visibility to the value it had when the animation was
+                loaded. If False, leave current visibility as-is (useful
+                when the animation's final visibility state is what you
+                want to keep).
         """
         self._current_animation = None
-        self._send({"type": "clear_animation"})
+        self._send(
+            {
+                "type": "unload_animation",
+                "restore_visibility": restore_visibility,
+            }
+        )
+
+    def pause_animation(self) -> None:
+        """Pause animation playback at the current playhead position.
+
+        No-op if no animation is loaded. Resume with ``resume_animation()``.
+        """
+        self._send({"type": "pause_animation"})
+
+    def resume_animation(self) -> None:
+        """Resume paused animation playback from the current playhead position.
+
+        No-op if no animation is loaded.
+        """
+        self._send({"type": "resume_animation"})
 
     def list_objects(self, timeout: float = 5.0) -> List[str]:
         """Get list of object IDs currently in the viewer."""

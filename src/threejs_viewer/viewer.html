@@ -3985,7 +3985,20 @@ class ThreeJSViewer {
 
     // ========== Animation ==========
 
-    _loadAnimation(animData) {
+    _loadAnimation(animData, opts = {}) {
+        // First load (no animation yet) or explicit restart resets playback to t=0,
+        // installs camera-tracking from the new metadata, and force-plays. A
+        // subsequent load (animation already loaded, restart not set) preserves
+        // playhead time, play state, and camera-tracking — only the underlying
+        // frame data is swapped. See plans/soft-snacking-deer.md for rationale.
+        const isSwap = this._animation != null && !opts.restart;
+        const prevTime = this._animationTime;
+        const prevPlaying = this._animationPlaying;
+        const prevTrackMode = this._trackMode;
+        const prevTrackTargetId = this._trackTargetId;
+        const prevTrackInteractive = this._trackInteractive;
+        const prevTrackHasLastPos = this._trackHasLastPos;
+
         this._animGeneration++;
         this._animation = animData;
         this._animationTime = 0;
@@ -4041,29 +4054,41 @@ class ThreeJSViewer {
             }
         }
 
-        this._applyFrame(0);
-
-        // Camera tracking from animation metadata
-        this._trackHasLastPos = false;
-        this._trackInteractive = false;
-        if (animData.camera_follow) {
-            this._trackTargetId = animData.camera_follow;
-            this._trackMode = 'follow';
-        } else if (animData.camera_lookat) {
-            this._trackTargetId = animData.camera_lookat;
-            this._trackMode = 'lookat';
-        } else if (animData.channels?.camera_target || animData.channels?.camera_position) {
-            this._trackMode = 'scripted';
-            this._trackTargetId = null;
+        if (isSwap) {
+            // Preserve playback continuity across the swap.
+            this._animationTime = animData.duration > 0 ? Math.min(prevTime, animData.duration) : 0;
+            this._animationPlaying = prevPlaying;
+            this._trackMode = prevTrackMode;
+            this._trackTargetId = prevTrackTargetId;
+            this._trackInteractive = prevTrackInteractive;
+            this._trackHasLastPos = prevTrackHasLastPos;
+            this._updateTrackingUI();
+            this._seekToTime(this._animationTime);
         } else {
-            this._trackMode = 'off';
-            this._trackTargetId = null;
-        }
-        this._updateTrackingUI();
+            this._applyFrame(0);
 
-        this._animationPlaying = true;
+            // Camera tracking from animation metadata
+            this._trackHasLastPos = false;
+            this._trackInteractive = false;
+            if (animData.camera_follow) {
+                this._trackTargetId = animData.camera_follow;
+                this._trackMode = 'follow';
+            } else if (animData.camera_lookat) {
+                this._trackTargetId = animData.camera_lookat;
+                this._trackMode = 'lookat';
+            } else if (animData.channels?.camera_target || animData.channels?.camera_position) {
+                this._trackMode = 'scripted';
+                this._trackTargetId = null;
+            } else {
+                this._trackMode = 'off';
+                this._trackTargetId = null;
+            }
+            this._updateTrackingUI();
+
+            this._animationPlaying = opts.autoplay !== false;
+        }
         this._lastAnimationUpdate = performance.now();
-        console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s`);
+        console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s${isSwap ? ' (swap)' : ''}`);
     }
 
     _resetAnimationState() {
@@ -4078,7 +4103,7 @@ class ThreeJSViewer {
         this._updateTrackingUI();
     }
 
-    _stopAnimation(restoreVisibility = true) {
+    _unloadAnimation(restoreVisibility = true) {
         this._animGeneration++;
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
         if (restoreVisibility) {
@@ -4840,7 +4865,10 @@ class ThreeJSViewer {
                         break;
                     }
                     case 'load_animation':
-                        this._loadAnimation(data.animation);
+                        this._loadAnimation(data.animation, {
+                            restart: !!data.restart,
+                            autoplay: data.autoplay !== false,
+                        });
                         break;
                     case 'load_animation_http': {
                         this._onFetchStart();
@@ -4928,6 +4956,9 @@ class ThreeJSViewer {
                                     channels: channels,
                                     camera_follow: data.camera_follow || null,
                                     camera_lookat: data.camera_lookat || null,
+                                }, {
+                                    restart: !!data.restart,
+                                    autoplay: data.autoplay !== false,
                                 });
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {
@@ -5452,11 +5483,21 @@ class ThreeJSViewer {
                         }
                         break;
                     }
-                    case 'stop_animation':
-                        this._stopAnimation();
+                    case 'unload_animation':
+                        this._unloadAnimation(data.restore_visibility !== false);
                         break;
-                    case 'clear_animation':
-                        this._stopAnimation(false);
+                    case 'pause_animation':
+                        if (this._animation) {
+                            this._animationPlaying = false;
+                            this._updateAnimationUI();
+                        }
+                        break;
+                    case 'resume_animation':
+                        if (this._animation) {
+                            this._animationPlaying = true;
+                            this._lastAnimationUpdate = performance.now();
+                            this._updateAnimationUI();
+                        }
                         break;
                     case 'set_clip_time':
                         this._setClipTime(data.id, data.time);

@@ -13,7 +13,7 @@ import math
 # Connect to viewer (starts WebSocket server, waits for browser)
 v = viewer()
 v.clear()
-v.stop_animation()
+v.unload_animation()
 
 # Add a ground plane (flat box)
 v.add_box(

@@ -72,8 +72,8 @@ def test_clear_scene(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_stop_animation_resets_draw_range(viewer_client, viewer_page):
-    """stop_animation() resets draw ranges to full."""
+def test_unload_animation_resets_draw_range(viewer_client, viewer_page):
+    """unload_animation() resets draw ranges to full."""
     # Use a real mesh so draw_range metadata (userData.isMesh, totalIndexCount) is set
     positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
     indices = np.array([0, 1, 2], dtype=np.uint32)
@@ -94,7 +94,7 @@ def test_stop_animation_resets_draw_range(viewer_client, viewer_page):
         if result["meta"]["animation"]["playing"]:
             break
     assert result["meta"]["animation"]["playing"] is True, "Animation did not start"
-    viewer_client.stop_animation()
+    viewer_client.unload_animation()
     time.sleep(0.1)
     result = viewer_client.query_scene()
     assert result["objects"]["m1"]["drawRange"] == 1.0

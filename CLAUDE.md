@@ -72,6 +72,11 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - **Streaming mode**: Real-time updates from Python (`batch_update()`, `set_matrix()`)
 - **Looping mode**: Pre-computed frames with interactive playback (`load_animation()`)
 
+### Animation lifecycle
+- **`load_animation(anim)`** — first call (no animation loaded yet) starts at t=0 and force-plays. Subsequent calls preserve the current playhead time (clamped to the new duration), play state, and camera-tracking — only the underlying frame data is swapped. Pass `restart=True` to force the first-load behavior on a swap. Pass `autoplay=False` to load paused on first-load (no effect on a swap, where prior play state is preserved).
+- **`pause_animation()` / `resume_animation()`** — pause/resume at the current playhead. No-op if no animation loaded.
+- **`unload_animation(restore_visibility=True)`** — exit animation mode entirely: re-enables `matrixAutoUpdate` on every object (animation pins it off), resets every draw range to 1.0, optionally restores baseline visibility, hides the controls UI. This is **not** a pause. Replaces the older `stop_animation()` / `clear_animation()` (use `restore_visibility=False` for the old `clear_animation` semantic).
+
 ### Supported Object Types
 - **Groups**: `add_group(id, parent=...)` — empty transform nodes for parent-child hierarchies. Children inherit parent transforms. All `add_*` methods accept an optional `parent` parameter.
 - Primitives: box, sphere, cylinder, capsule (with optional roughness/metalness)

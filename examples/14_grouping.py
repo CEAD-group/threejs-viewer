@@ -28,7 +28,7 @@ def mat_ry(tx, ty, tz, angle):
 
 v = viewer()
 v.clear()
-v.stop_animation()
+v.unload_animation()
 
 # Ground plane
 v.add_box(
