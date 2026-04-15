@@ -2574,6 +2574,142 @@ function restoreFrontierRing(obj) {
 }
 
 /**
+ * Groups camera-related methods (persp/ortho switch, dynamic near/far,
+ * frame-to-bbox). Camera objects themselves remain on the viewer.
+ */
+class CameraController {
+    /** @param {any} viewer */
+    constructor(viewer) { this.v = viewer; }
+
+    /** @param {boolean} toOrtho */
+    switch(toOrtho) {
+        const v = this.v;
+        if (toOrtho === v._isOrtho) return;
+        const w = v.container.clientWidth;
+        const h = v.container.clientHeight;
+        const aspect = w / h;
+
+        const tgt = v._tmpSwitchTarget || (v._tmpSwitchTarget = new THREE.Vector3());
+        tgt.copy(v._controls.target);
+
+        if (toOrtho) {
+            const dist = v._perspCamera.position.distanceTo(tgt);
+            const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(v._perspCamera.fov / 2));
+            v._orthoCamera.zoom = ORTHO_FRUSTUM / halfHeight;
+            v._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
+            v._orthoCamera.right = ORTHO_FRUSTUM * aspect;
+            v._orthoCamera.top = ORTHO_FRUSTUM;
+            v._orthoCamera.bottom = -ORTHO_FRUSTUM;
+            v._orthoCamera.position.copy(v._perspCamera.position);
+            v._orthoCamera.quaternion.copy(v._perspCamera.quaternion);
+            v._orthoCamera.updateProjectionMatrix();
+            v._camera = v._orthoCamera;
+        } else {
+            const halfHeight = ORTHO_FRUSTUM / v._orthoCamera.zoom;
+            const dist = halfHeight / Math.tan(THREE.MathUtils.degToRad(v._perspCamera.fov / 2));
+            const dir = v._orthoCamera.position.clone().sub(tgt).normalize();
+            v._perspCamera.position.copy(tgt).addScaledVector(dir, dist);
+            v._perspCamera.quaternion.copy(v._orthoCamera.quaternion);
+            v._perspCamera.aspect = aspect;
+            v._perspCamera.updateProjectionMatrix();
+            v._camera = v._perspCamera;
+        }
+
+        v._isOrtho = toOrtho;
+        // ViewerControls is camera-agnostic — just reassign and re-update.
+        v._controls.camera = v._camera;
+        v._controls.target.copy(tgt);
+        v._controls.update();
+        v._clipGizmo.camera = v._camera;
+        v._viewHelper = new ViewHelper(v._camera, v._renderer.domElement);
+        v._viewHelper.center = v._controls.target;
+        v._btnOrtho.textContent = '\u2B1A O';
+        v._btnOrtho.classList.toggle('active', v._isOrtho);
+    }
+
+    updateSceneBounds() {
+        const v = this.v;
+        const box = new THREE.Box3();
+        for (const obj of v._objects.values()) {
+            obj.updateWorldMatrix(true, true);
+            box.expandByObject(obj);
+        }
+        if (box.isEmpty()) {
+            v._sceneSphere.set(new THREE.Vector3(), 0);
+        } else {
+            box.getBoundingSphere(v._sceneSphere);
+        }
+        v._sceneBoundsDirty = false;
+    }
+
+    updateNearFar() {
+        const v = this.v;
+        if (v._isOrtho) return;
+        // Recompute bounds on dirty flag or every 30 frames (~0.5s) to catch transform changes
+        v._boundsFrameCounter++;
+        if (v._sceneBoundsDirty || v._boundsFrameCounter >= 30) {
+            this.updateSceneBounds();
+            v._boundsFrameCounter = 0;
+        }
+        const radius = v._sceneSphere.radius;
+        if (radius === 0) return;
+        const dist = v._perspCamera.position.distanceTo(v._sceneSphere.center);
+        const nextNear = Math.max(0.001, (dist - radius * 1.5) * 0.5);
+        const nextFar = Math.max(dist + radius * 1.5, 100);
+        if (
+            Math.abs(v._perspCamera.near - nextNear) < 1e-6 &&
+            Math.abs(v._perspCamera.far - nextFar) < 1e-6
+        ) return;
+        v._perspCamera.near = nextNear;
+        v._perspCamera.far = nextFar;
+        v._perspCamera.updateProjectionMatrix();
+    }
+
+    /**
+     * Aim the active camera at `bbox` with `perspMargin` extra distance multiplier
+     * (ortho always uses a 1.2 half-extent padding; perspMargin applies to perspective).
+     * Shared by frameObject / frameAll.
+     * @param {any} bbox
+     * @param {number} perspMargin
+     */
+    fitToBox(bbox, perspMargin) {
+        const v = this.v;
+        if (bbox.isEmpty()) return;
+        const center = bbox.getCenter(new THREE.Vector3());
+        const size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+        v._controls.target.copy(center);
+        const dir = v._camera.position.clone().sub(center);
+        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+        else dir.normalize();
+        if (v._isOrtho) {
+            const w = v.container.clientWidth;
+            const h = v.container.clientHeight;
+            if (w === 0 || h === 0) return;
+            const aspect = w / h;
+            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
+            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
+            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
+            v._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
+            v._orthoCamera.updateProjectionMatrix();
+            v._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
+        } else {
+            const vFov = THREE.MathUtils.degToRad(v._perspCamera.fov / 2);
+            const aspect = v._perspCamera.aspect || 1;
+            const hFov = Math.atan(Math.tan(vFov) * aspect);
+            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
+            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
+            const dist = Math.max(distV, distH) * perspMargin;
+            v._camera.position.copy(center).addScaledVector(dir, dist);
+        }
+        // ViewerControls never calls camera.lookAt, so explicitly re-orient
+        // to actually frame the object (not just translate along old view ray).
+        v._camera.lookAt(center);
+        v._controls.update();
+    }
+}
+
+/**
  * Owns the M-key wireframe cycle and N-key shading-debug cycle.
  * Holds cached debug materials + per-mesh helpers.
  */
@@ -2901,6 +3037,10 @@ class ThreeJSViewer {
         // M-key wireframe cycle + N-key shading-debug cycle. Owns cached
         // debug materials and per-mesh vertex-normals helpers.
         this._shading = new ShadingDebugController(this);
+
+        // Camera methods (persp/ortho switch, near/far, frame-to-bbox).
+        // Camera objects themselves live on the viewer.
+        this._camController = new CameraController(this);
 
         // Clipping state
         this._clipEnabled = false;
@@ -3555,49 +3695,7 @@ class ThreeJSViewer {
             : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
     }
 
-    _switchCamera(toOrtho) {
-        if (toOrtho === this._isOrtho) return;
-        const w = this.container.clientWidth;
-        const h = this.container.clientHeight;
-        const aspect = w / h;
-
-        const tgt = this._tmpSwitchTarget || (this._tmpSwitchTarget = new THREE.Vector3());
-        tgt.copy(this._controls.target);
-
-        if (toOrtho) {
-            const dist = this._perspCamera.position.distanceTo(tgt);
-            const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(this._perspCamera.fov / 2));
-            this._orthoCamera.zoom = ORTHO_FRUSTUM / halfHeight;
-            this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
-            this._orthoCamera.top = ORTHO_FRUSTUM;
-            this._orthoCamera.bottom = -ORTHO_FRUSTUM;
-            this._orthoCamera.position.copy(this._perspCamera.position);
-            this._orthoCamera.quaternion.copy(this._perspCamera.quaternion);
-            this._orthoCamera.updateProjectionMatrix();
-            this._camera = this._orthoCamera;
-        } else {
-            const halfHeight = ORTHO_FRUSTUM / this._orthoCamera.zoom;
-            const dist = halfHeight / Math.tan(THREE.MathUtils.degToRad(this._perspCamera.fov / 2));
-            const dir = this._orthoCamera.position.clone().sub(tgt).normalize();
-            this._perspCamera.position.copy(tgt).addScaledVector(dir, dist);
-            this._perspCamera.quaternion.copy(this._orthoCamera.quaternion);
-            this._perspCamera.aspect = aspect;
-            this._perspCamera.updateProjectionMatrix();
-            this._camera = this._perspCamera;
-        }
-
-        this._isOrtho = toOrtho;
-        // ViewerControls is camera-agnostic — just reassign and re-update.
-        this._controls.camera = this._camera;
-        this._controls.target.copy(tgt);
-        this._controls.update();
-        this._clipGizmo.camera = this._camera;
-        this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
-        this._viewHelper.center = this._controls.target;
-        this._btnOrtho.textContent = '\u2B1A O';
-        this._btnOrtho.classList.toggle('active', this._isOrtho);
-    }
+    _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
 
     // ========== Object Management ==========
 
@@ -5398,41 +5496,8 @@ class ThreeJSViewer {
 
     // ========== Dynamic Near/Far ==========
 
-    _updateSceneBounds() {
-        const box = new THREE.Box3();
-        for (const obj of this._objects.values()) {
-            obj.updateWorldMatrix(true, true);
-            box.expandByObject(obj);
-        }
-        if (box.isEmpty()) {
-            this._sceneSphere.set(new THREE.Vector3(), 0);
-        } else {
-            box.getBoundingSphere(this._sceneSphere);
-        }
-        this._sceneBoundsDirty = false;
-    }
-
-    _updateNearFar() {
-        if (this._isOrtho) return;
-        // Recompute bounds on dirty flag or every 30 frames (~0.5s) to catch transform changes
-        this._boundsFrameCounter++;
-        if (this._sceneBoundsDirty || this._boundsFrameCounter >= 30) {
-            this._updateSceneBounds();
-            this._boundsFrameCounter = 0;
-        }
-        const radius = this._sceneSphere.radius;
-        if (radius === 0) return;
-        const dist = this._perspCamera.position.distanceTo(this._sceneSphere.center);
-        const nextNear = Math.max(0.001, (dist - radius * 1.5) * 0.5);
-        const nextFar = Math.max(dist + radius * 1.5, 100);
-        if (
-            Math.abs(this._perspCamera.near - nextNear) < 1e-6 &&
-            Math.abs(this._perspCamera.far - nextFar) < 1e-6
-        ) return;
-        this._perspCamera.near = nextNear;
-        this._perspCamera.far = nextFar;
-        this._perspCamera.updateProjectionMatrix();
-    }
+    _updateSceneBounds() { this._camController.updateSceneBounds(); }
+    _updateNearFar() { this._camController.updateNearFar(); }
 
     // ========== Render Loop ==========
 
@@ -5619,47 +5684,7 @@ class ThreeJSViewer {
         this._fitCameraToBox(bbox, 1.2);
     }
 
-    /**
-     * Aim the active camera at `bbox` with `perspMargin` extra distance multiplier
-     * (ortho always uses a 1.2 half-extent padding; perspMargin applies to perspective).
-     * Shared by frameObject / frameAll.
-     * @param {any} bbox
-     * @param {number} perspMargin
-     */
-    _fitCameraToBox(bbox, perspMargin) {
-        if (bbox.isEmpty()) return;
-        const center = bbox.getCenter(new THREE.Vector3());
-        const size = bbox.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-        this._controls.target.copy(center);
-        const dir = this._camera.position.clone().sub(center);
-        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
-        else dir.normalize();
-        if (this._isOrtho) {
-            const w = this.container.clientWidth;
-            const h = this.container.clientHeight;
-            if (w === 0 || h === 0) return;
-            const aspect = w / h;
-            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
-            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
-            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
-            this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
-            this._orthoCamera.updateProjectionMatrix();
-            this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
-        } else {
-            const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
-            const aspect = this._perspCamera.aspect || 1;
-            const hFov = Math.atan(Math.tan(vFov) * aspect);
-            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
-            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
-            const dist = Math.max(distV, distH) * perspMargin;
-            this._camera.position.copy(center).addScaledVector(dir, dist);
-        }
-        // ViewerControls never calls camera.lookAt, so explicitly re-orient
-        // to actually frame the object (not just translate along old view ray).
-        this._camera.lookAt(center);
-        this._controls.update();
-    }
+    _fitCameraToBox(bbox, perspMargin) { this._camController.fitToBox(bbox, perspMargin); }
 
     // ========== Destroy ==========
 
