@@ -1269,6 +1269,43 @@ function writeAnalyticCapNormals(normalArr, capBaseVert, nCs, nCapRings, capAngl
 const _capScratchSection = new Float32Array(N_CROSS_SECTION * 2);
 const _capScratchSectionNormals = new Float32Array(N_CROSS_SECTION * 2);
 
+// Write one tube ring: `nCs` cross-section samples laid out around spine
+// point (sx,sy,sz) using local frame (U,V). `vOff` shifts along V for the
+// anchor offset (see the `heightOffset` / anchor parameter).
+function writeRingVerts(positions, ringBase, section, nCs,
+                        Ux, Uy, Uz, Vx, Vy, Vz, sx, sy, sz, vOff) {
+    for (let j = 0; j < nCs; j++) {
+        const u = section[j * 2];
+        const v = section[j * 2 + 1] + vOff;
+        positions[ringBase + j * 3]     = sx + u * Ux + v * Vx;
+        positions[ringBase + j * 3 + 1] = sy + u * Uy + v * Vy;
+        positions[ringBase + j * 3 + 2] = sz + u * Uz + v * Vz;
+    }
+}
+
+// Write one revolution-cap ring at angle (cosT, sinT). Each vertex j sweeps
+// along the tangent T by |cu|·sinT, so the ring collapses to a line at θ=90°.
+function writeCapRingVerts(positions, ringBase, section, nCs,
+                           Ux, Uy, Uz, Vx, Vy, Vz, Tx, Ty, Tz,
+                           sx, sy, sz, cosT, sinT, vOff) {
+    for (let j = 0; j < nCs; j++) {
+        const cu = section[j * 2];
+        const cv = section[j * 2 + 1] + vOff;
+        const tOff = Math.abs(cu) * sinT;
+        positions[ringBase + j * 3]     = sx + cu * cosT * Ux + cv * Vx + tOff * Tx;
+        positions[ringBase + j * 3 + 1] = sy + cu * cosT * Uy + cv * Vy + tOff * Ty;
+        positions[ringBase + j * 3 + 2] = sz + cu * cosT * Uz + cv * Vz + tOff * Tz;
+    }
+}
+
+// Fill `count` RGB triplets starting at float offset `floatBase`.
+function fillRGBBlock(colors, floatBase, count, r, g, b) {
+    for (let v = 0; v < count; v++) {
+        const dst = floatBase + v * 3;
+        colors[dst] = r; colors[dst + 1] = g; colors[dst + 2] = b;
+    }
+}
+
 // ========== LOD: Distance-Weighted RDP ==========
 //
 // The RDP algorithm runs in a Web Worker to avoid blocking the render loop.
@@ -1915,22 +1952,11 @@ function buildParametricTubeGeometry(
         const sy = spine[i * 3 + 1];
         const sz = spine[i * 3 + 2];
         const ringBase = i * nCs * 3;
-        for (let j = 0; j < nCs; j++) {
-            const u = section[j * 2];
-            const v = section[j * 2 + 1] + vOff;
-            positions[ringBase + j * 3] = sx + u * _U.x + v * _V.x;
-            positions[ringBase + j * 3 + 1] = sy + u * _U.y + v * _V.y;
-            positions[ringBase + j * 3 + 2] = sz + u * _U.z + v * _V.z;
-        }
+        writeRingVerts(positions, ringBase, section, nCs,
+                       _U.x, _U.y, _U.z, _V.x, _V.y, _V.z, sx, sy, sz, vOff);
         if (colors) {
-            const r = ringColors[i * 3];
-            const g = ringColors[i * 3 + 1];
-            const b = ringColors[i * 3 + 2];
-            for (let j = 0; j < nCs; j++) {
-                colors[ringBase + j * 3] = r;
-                colors[ringBase + j * 3 + 1] = g;
-                colors[ringBase + j * 3 + 2] = b;
-            }
+            fillRGBBlock(colors, ringBase, nCs,
+                         ringColors[i * 3], ringColors[i * 3 + 1], ringColors[i * 3 + 2]);
         }
     }
 
@@ -1952,13 +1978,9 @@ function buildParametricTubeGeometry(
             const cosT = Math.cos(theta);
             const sinT = Math.sin(theta) * tangentSign;
             const ringBase = (capBaseVert + k * nCs) * 3;
-            for (let j = 0; j < nCs; j++) {
-                const cu = section[j * 2], cv = section[j * 2 + 1] + capVOff;
-                const tOff = Math.abs(cu) * sinT;
-                positions[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
-                positions[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
-                positions[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
-            }
+            writeCapRingVerts(positions, ringBase, section, nCs,
+                              ux, uy, uz, vx, vy, vz, tx, ty, tz,
+                              sx, sy, sz, cosT, sinT, capVOff);
         }
     }
     buildRevolutionCap(0, startCapBase, -1);
@@ -1966,16 +1988,11 @@ function buildParametricTubeGeometry(
     // Cap colors (replicate ring color to all cap vertices)
     if (colors) {
         const capVertsPerCap = nCapRings * nCs;
-        const r0 = ringColors[0], g0 = ringColors[1], b0 = ringColors[2];
-        for (let v = 0; v < capVertsPerCap; v++) {
-            const dst = (startCapBase + v) * 3;
-            colors[dst] = r0; colors[dst + 1] = g0; colors[dst + 2] = b0;
-        }
-        const rN = ringColors[(nSpine - 1) * 3], gN = ringColors[(nSpine - 1) * 3 + 1], bN = ringColors[(nSpine - 1) * 3 + 2];
-        for (let v = 0; v < capVertsPerCap; v++) {
-            const dst = (endCapBase + v) * 3;
-            colors[dst] = rN; colors[dst + 1] = gN; colors[dst + 2] = bN;
-        }
+        fillRGBBlock(colors, startCapBase * 3, capVertsPerCap,
+                     ringColors[0], ringColors[1], ringColors[2]);
+        const iN = nSpine - 1;
+        fillRGBBlock(colors, endCapBase * 3, capVertsPerCap,
+                     ringColors[iN * 3], ringColors[iN * 3 + 1], ringColors[iN * 3 + 2]);
     }
 
     // --- Index buffer: [start_cap_dome | ring_pairs | end_cap_dome] ---
@@ -2292,13 +2309,8 @@ function morphFrontierRing(obj, fracRingPairs) {
     const posAttr = obj.geometry.getAttribute('position');
     const pos = posAttr.array;
     const ringBase = iB * nCs * 3;
-    for (let j = 0; j < nCs; j++) {
-        const lu = md.section[j * 2];
-        const lv = md.section[j * 2 + 1] + vOff;
-        pos[ringBase + j * 3]     = sx + lu * ux + lv * vx;
-        pos[ringBase + j * 3 + 1] = sy + lu * uy + lv * vy;
-        pos[ringBase + j * 3 + 2] = sz + lu * uz + lv * vz;
-    }
+    writeRingVerts(pos, ringBase, md.section, nCs,
+                   ux, uy, uz, vx, vy, vz, sx, sy, sz, vOff);
     const rangeCount = nCs * 3;
     posAttr.addUpdateRange(ringBase, rangeCount);
     posAttr.needsUpdate = true;
@@ -2313,11 +2325,7 @@ function morphFrontierRing(obj, fracRingPairs) {
             const cr = rA * (1 - frac) + rB * frac;
             const cg = gA * (1 - frac) + gB * frac;
             const cb = bA * (1 - frac) + bB * frac;
-            for (let j = 0; j < nCs; j++) {
-                cols[ringBase + j * 3]     = cr;
-                cols[ringBase + j * 3 + 1] = cg;
-                cols[ringBase + j * 3 + 2] = cb;
-            }
+            fillRGBBlock(cols, ringBase, nCs, cr, cg, cb);
             colAttr.addUpdateRange(ringBase, rangeCount);
             colAttr.needsUpdate = true;
         }
@@ -2365,13 +2373,9 @@ function updateEndCap(obj, lastVisibleRing) {
         const cosT = Math.cos(theta);
         const sinT = Math.sin(theta);
         const ringBase = (ecBase + k * nCs) * 3;
-        for (let j = 0; j < nCs; j++) {
-            const cu = md.section[j * 2], cv = md.section[j * 2 + 1] + vOff;
-            const tOff = Math.abs(cu) * sinT;
-            pos[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
-            pos[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
-            pos[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
-        }
+        writeCapRingVerts(pos, ringBase, md.section, nCs,
+                          ux, uy, uz, vx, vy, vz, tx, ty, tz,
+                          sx, sy, sz, cosT, sinT, vOff);
     }
     const capRangeStart = ecBase * 3;
     const capRangeCount = nCapRings * nCs * 3;
@@ -2386,10 +2390,7 @@ function updateEndCap(obj, lastVisibleRing) {
             const colSrcBase = lastVisibleRing * nCs * 3;
             const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
             const capVerts = nCapRings * nCs;
-            for (let v = 0; v < capVerts; v++) {
-                const dst = (ecBase + v) * 3;
-                cols[dst] = cr; cols[dst + 1] = cg; cols[dst + 2] = cb;
-            }
+            fillRGBBlock(cols, ecBase * 3, capVerts, cr, cg, cb);
             colAttr.addUpdateRange(capRangeStart, capRangeCount);
             colAttr.needsUpdate = true;
         }
