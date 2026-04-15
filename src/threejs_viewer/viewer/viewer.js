@@ -2288,8 +2288,13 @@ export class ThreeJSViewer {
         this._syncAnchorFromPlane();
     }
 
+    /** Planes array to stamp on material.clippingPlanes — empty when clipping is off. */
+    _activeClippingPlanes() {
+        return this._clipEnabled ? this._clipPlanes : [];
+    }
+
     _applyClipToObject(obj) {
-        const planes = this._clipEnabled ? this._clipPlanes : [];
+        const planes = this._activeClippingPlanes();
         obj.traverse(child => {
             if (!child.material) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
@@ -2362,7 +2367,7 @@ export class ThreeJSViewer {
             if (this._isClipHelper(child)) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
-                mat.clippingPlanes = this._clipEnabled ? this._clipPlanes : [];
+                mat.clippingPlanes = this._activeClippingPlanes();
                 mat.clipShadows = true;
                 if (this._clipEnabled) {
                     if (mat.userData.originalSide === undefined) mat.userData.originalSide = mat.side;
@@ -2404,7 +2409,7 @@ export class ThreeJSViewer {
                     obj.userData.wireframeOverlay = overlay;
                     obj.add(overlay);
                 } else {
-                    overlay.material.clippingPlanes = this._clipEnabled ? this._clipPlanes : [];
+                    overlay.material.clippingPlanes = this._activeClippingPlanes();
                     overlay.material.needsUpdate = true;
                 }
                 overlay.visible = true;
@@ -2422,7 +2427,7 @@ export class ThreeJSViewer {
             polygonOffsetFactor: -1,
             polygonOffsetUnits: -1,
             side: THREE.DoubleSide,
-            clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+            clippingPlanes: this._activeClippingPlanes(),
         });
         const overlay = new THREE.Mesh(parentMesh.geometry, mat);
         overlay.userData.isWireOverlay = true;
@@ -2468,7 +2473,7 @@ export class ThreeJSViewer {
     }
 
     _getShadingMaterial(mode) {
-        const clip = this._clipEnabled ? this._clipPlanes : [];
+        const clip = this._activeClippingPlanes();
         if (mode === 1) {
             if (!this._shadingNormalMaterial) {
                 this._shadingNormalMaterial = new THREE.MeshNormalMaterial({
@@ -2512,7 +2517,7 @@ export class ThreeJSViewer {
         delete obj.userData.originalMaterial;
         // Original material's clippingPlanes may be stale if clipping was toggled
         // while the debug material was active. Re-sync from current clip state.
-        const planes = this._clipEnabled ? this._clipPlanes : [];
+        const planes = this._activeClippingPlanes();
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
         for (const m of mats) {
             if (!m) continue;
@@ -2697,7 +2702,7 @@ export class ThreeJSViewer {
         const materialType = params.materialType || 'standard';
         const opacity = params.opacity != null ? params.opacity : 1;
         const transparent = opacity < 1;
-        const clip = this._clipEnabled ? this._clipPlanes : [];
+        const clip = this._activeClippingPlanes();
 
         switch (materialType) {
             case 'basic':
@@ -4046,7 +4051,7 @@ export class ThreeJSViewer {
                                     depthWrite: meshOpacity >= 1,
                                     side: THREE.DoubleSide,
                                     vertexColors: !!colors,
-                                    clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+                                    clippingPlanes: this._activeClippingPlanes(),
                                 });
 
                                 const mesh = new THREE.Mesh(geometry, meshMaterial);
@@ -4179,7 +4184,7 @@ export class ThreeJSViewer {
                                     depthWrite: opacity >= 1,
                                     side: THREE.DoubleSide,
                                     vertexColors: hasColors,
-                                    clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+                                    clippingPlanes: this._activeClippingPlanes(),
                                 });
                                 const mesh = new THREE.Mesh(geometry, material);
                                 mesh.name = data.id;
