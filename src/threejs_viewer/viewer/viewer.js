@@ -2920,6 +2920,7 @@ export class ThreeJSViewer {
             obj.userData.id = id;
             this._applyTransform(obj, objData.transform);
             if (objData.visible === false) obj.visible = false;
+            this._deleteObject(id);
             this._addToParentOrScene(obj, parentId);
             this._objects.set(id, obj);
             this._objGeneration++;
@@ -4110,6 +4111,7 @@ export class ThreeJSViewer {
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
                                 line.userData.maxInstanceCount = numPoints - 1;
+                                this._deleteObject(data.id);
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
                                 this._objGeneration++;
@@ -4183,6 +4185,7 @@ export class ThreeJSViewer {
                                 mesh.userData.id = data.id;
                                 mesh.userData.isMesh = true;
                                 mesh.userData.totalIndexCount = ni;
+                                this._deleteObject(data.id);
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
@@ -4356,6 +4359,7 @@ export class ThreeJSViewer {
                                         heightOffset: heightOffset,
                                     });
                                 }
+                                this._deleteObject(data.id);
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
