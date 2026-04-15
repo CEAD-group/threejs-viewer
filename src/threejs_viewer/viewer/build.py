@@ -37,14 +37,43 @@ def _read_cubemap_b64() -> dict:
 
 def build():
     js_content = (VIEWER_DIR / "viewer.js").read_text(encoding="utf-8")
+    controls_content = (VIEWER_DIR / "controls.js").read_text(encoding="utf-8")
     css_content = (VIEWER_DIR / "viewer.css").read_text(encoding="utf-8")
     html_template = (VIEWER_DIR / "template.html").read_text(encoding="utf-8")
     cubemap_data = _read_cubemap_b64()
+
+    # Strip the local controls.js import from viewer.js (we inline it instead).
+    js_content = re.sub(
+        r"^\s*import\s+\{\s*ViewerControls\s*\}\s+from\s+['\"]\./controls\.js['\"];?\s*$\n?",
+        "",
+        js_content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+    # Strip the `export { ... }` line from controls.js so it inlines as plain code.
+    controls_inlined = re.sub(
+        r"^\s*export\s*\{[^}]*\};?\s*$\n?",
+        "",
+        controls_content,
+        flags=re.MULTILINE,
+    )
+    # Also drop its `import * as THREE from 'three';` — the outer module already imports THREE.
+    controls_inlined = re.sub(
+        r"^\s*import\s+\*\s+as\s+THREE\s+from\s+['\"]three['\"];?\s*$\n?",
+        "",
+        controls_inlined,
+        count=1,
+        flags=re.MULTILINE,
+    )
 
     # Remove the 'export' keyword from 'export class ThreeJSViewer'
     js_inlined = re.sub(
         r"^export class ", "class ", js_content, count=1, flags=re.MULTILINE
     )
+
+    # Prepend controls.js source so ViewerControls is in scope when ThreeJSViewer runs.
+    js_inlined = controls_inlined + "\n" + js_inlined
 
     # Build the cubemap data as a JS object literal
     cubemap_js_entries = []

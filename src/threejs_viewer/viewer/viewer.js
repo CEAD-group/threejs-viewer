@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ViewerControls } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
@@ -11,6 +11,7 @@ import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+import { VertexNormalsHelper } from 'three/addons/helpers/VertexNormalsHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
@@ -291,6 +292,9 @@ const N_CROSS_SECTION = 6;
 // LOD: epsilon = camera_distance / LOD_EPSILON_DIVISOR.
 // Higher → more points kept (finer detail). Lower → more aggressive simplification.
 const LOD_EPSILON_DIVISOR = 2500;
+// Max original points that can be skipped between two kept points.
+// Prevents color banding on geometrically straight segments.
+const LOD_MAX_SKIP = 100;
 function sampleChamferedRect(out, width, height) {
     if (!Number.isFinite(width) || width < 0) {
         throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
@@ -307,10 +311,9 @@ function sampleChamferedRect(out, width, height) {
     const c = Math.min(hw, hh); // chamfer depth (45°)
 
     // 6 corners CCW.  Which edges are flat depends on aspect ratio:
-    //   w >= h: flat top & bottom, pointed left & right
-    //   h > w:  flat left & right, pointed top & bottom
+    //   w >= h: flat top/bottom, pointed right/left
+    //   h > w:  flat left/right, pointed top/bottom
     if (width >= height) {
-        // flat top/bottom, pointed right/left
         out[0]  = +hw;        out[1]  = 0;            // right tip
         out[2]  = +(hw - c);  out[3]  = +hh;          // top-right
         out[4]  = -(hw - c);  out[5]  = +hh;          // top-left
@@ -318,7 +321,6 @@ function sampleChamferedRect(out, width, height) {
         out[8]  = -(hw - c);  out[9]  = -hh;          // bottom-left
         out[10] = +(hw - c);  out[11] = -hh;           // bottom-right
     } else {
-        // flat left/right, pointed top/bottom
         out[0]  = +hw;        out[1]  = -(hh - c);    // right-bottom
         out[2]  = +hw;        out[3]  = +(hh - c);    // right-top
         out[4]  = 0;          out[5]  = +hh;           // top tip
@@ -327,6 +329,66 @@ function sampleChamferedRect(out, width, height) {
         out[10] = 0;          out[11] = -hh;            // bottom tip
     }
 }
+
+// Per-vertex 2D outward normals for a CCW cross-section (chamfered hex).
+// Computed as the bisector of the two adjacent edge normals, giving smooth
+// shading that depends ONLY on the cross-section shape — independent of
+// spine spacing. This is the key to killing LOD-induced normal artifacts:
+// face-area-weighted vertex normals skew heavily when adjacent ring-to-ring
+// quads have wildly different sizes (common after distance-weighted RDP).
+function computeSectionNormals(section, nCs, out) {
+    for (let j = 0; j < nCs; j++) {
+        const jPrev = (j - 1 + nCs) % nCs;
+        const jNext = (j + 1) % nCs;
+        const ptx = section[j * 2]     - section[jPrev * 2];
+        const pty = section[j * 2 + 1] - section[jPrev * 2 + 1];
+        const ntx = section[jNext * 2] - section[j * 2];
+        const nty = section[jNext * 2 + 1] - section[j * 2 + 1];
+        // Outward normal of a CCW edge with tangent (tx,ty) is (ty, -tx).
+        let nu = pty + nty;
+        let nv = -(ptx + ntx);
+        const len = Math.hypot(nu, nv);
+        if (len > 1e-12) { nu /= len; nv /= len; }
+        out[j * 2] = nu;
+        out[j * 2 + 1] = nv;
+    }
+}
+
+// Analytic normals for a revolution cap's (nCapRings * nCs) vertices.
+// At angle θ: n(θ) = normalize( cos(θ)·(nu·U + nv·V) + sin(θ)·tSign·T ).
+// This matches the tube-side section normal at θ=0 (no shading seam) and
+// points along ±T at θ=90° (correct axial normal at the dome tip).
+function writeAnalyticCapNormals(normalArr, capBaseVert, nCs, nCapRings, capAngles,
+                                 width, height, localFrames, spineIdx, tSign) {
+    const Ux = localFrames[spineIdx * 6],     Uy = localFrames[spineIdx * 6 + 1], Uz = localFrames[spineIdx * 6 + 2];
+    const Vx = localFrames[spineIdx * 6 + 3], Vy = localFrames[spineIdx * 6 + 4], Vz = localFrames[spineIdx * 6 + 5];
+    const Tx = Uy * Vz - Uz * Vy;
+    const Ty = Uz * Vx - Ux * Vz;
+    const Tz = Ux * Vy - Uy * Vx;
+    const section = _capScratchSection;
+    sampleChamferedRect(section, width, height);
+    const sectionNormals = _capScratchSectionNormals;
+    computeSectionNormals(section, nCs, sectionNormals);
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = capAngles[k];
+        const c = Math.cos(theta);
+        const s = Math.sin(theta) * tSign;
+        for (let j = 0; j < nCs; j++) {
+            const nu = sectionNormals[j * 2], nv = sectionNormals[j * 2 + 1];
+            let nx = c * (nu * Ux + nv * Vx) + s * Tx;
+            let ny = c * (nu * Uy + nv * Vy) + s * Ty;
+            let nz = c * (nu * Uz + nv * Vz) + s * Tz;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+            const dst = (capBaseVert + k * nCs + j) * 3;
+            normalArr[dst] = nx;
+            normalArr[dst + 1] = ny;
+            normalArr[dst + 2] = nz;
+        }
+    }
+}
+const _capScratchSection = new Float32Array(N_CROSS_SECTION * 2);
+const _capScratchSectionNormals = new Float32Array(N_CROSS_SECTION * 2);
 
 // ========== LOD: Distance-Weighted RDP ==========
 //
@@ -337,10 +399,11 @@ function sampleChamferedRect(out, width, height) {
 
 const _LOD_WORKER_CODE = `
 const LOD_EPSILON_DIVISOR = ${LOD_EPSILON_DIVISOR};
+const LOD_MAX_SKIP = ${LOD_MAX_SKIP};
 const LOD_CHUNK_SIZE = 5000;
 const LOD_CHUNK_REUSE_RATIO = 1.5;
 const N_CS = ${N_CROSS_SECTION};
-const N_CAP_RINGS = 3;
+const N_CAP_RINGS = 8;
 
 // ---- RDP helpers ----
 
@@ -372,6 +435,12 @@ function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
             keep.push(maxIdx);
             stack.push([start, maxIdx]);
             stack.push([maxIdx, end]);
+        } else if (end - start > LOD_MAX_SKIP) {
+            // Force midpoint split to preserve color resolution
+            const mid = (start + end) >> 1;
+            keep.push(mid);
+            stack.push([start, mid]);
+            stack.push([mid, end]);
         }
     }
     keep.sort((a, b) => a - b);
@@ -398,9 +467,50 @@ function sampleChamferedRect(out, width, height) {
     }
 }
 
+function computeSectionNormals(section, nCs, out) {
+    for (let j = 0; j < nCs; j++) {
+        const jPrev = (j - 1 + nCs) % nCs;
+        const jNext = (j + 1) % nCs;
+        const ptx = section[j*2]     - section[jPrev*2];
+        const pty = section[j*2+1]   - section[jPrev*2+1];
+        const ntx = section[jNext*2] - section[j*2];
+        const nty = section[jNext*2+1] - section[j*2+1];
+        let nu = pty + nty;
+        let nv = -(ptx + ntx);
+        const len = Math.hypot(nu, nv);
+        if (len > 1e-12) { nu /= len; nv /= len; }
+        out[j*2] = nu; out[j*2+1] = nv;
+    }
+}
+
+function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
+                                  width, height, localFrames, spineIdx, tSign,
+                                  sectionScratch, sectionNormalsScratch) {
+    const Ux = localFrames[spineIdx*6],   Uy = localFrames[spineIdx*6+1], Uz = localFrames[spineIdx*6+2];
+    const Vx = localFrames[spineIdx*6+3], Vy = localFrames[spineIdx*6+4], Vz = localFrames[spineIdx*6+5];
+    const Tx = Uy*Vz - Uz*Vy, Ty = Uz*Vx - Ux*Vz, Tz = Ux*Vy - Uy*Vx;
+    sampleChamferedRect(sectionScratch, width, height);
+    computeSectionNormals(sectionScratch, N_CS, sectionNormalsScratch);
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = capAngles[k];
+        const c = Math.cos(theta);
+        const s = Math.sin(theta) * tSign;
+        for (let j = 0; j < N_CS; j++) {
+            const nu = sectionNormalsScratch[j*2], nv = sectionNormalsScratch[j*2+1];
+            let nx = c*(nu*Ux + nv*Vx) + s*Tx;
+            let ny = c*(nu*Uy + nv*Vy) + s*Ty;
+            let nz = c*(nu*Uz + nv*Vz) + s*Tz;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+            const dst = (capBaseVert + k*N_CS + j) * 3;
+            normalArr[dst] = nx; normalArr[dst+1] = ny; normalArr[dst+2] = nz;
+        }
+    }
+}
+
 // ---- Geometry build (plain math, no Three.js) ----
 
-function buildGeometry(spine, widths, heights, upVec, ringColors) {
+function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) {
     const nSpine = spine.length / 3;
     const capAngles = new Float32Array(N_CAP_RINGS);
     for (let k = 0; k < N_CAP_RINGS; k++) capAngles[k] = ((k + 1) / N_CAP_RINGS) * (Math.PI * 0.5);
@@ -461,10 +571,11 @@ function buildGeometry(spine, widths, heights, upVec, ringColors) {
         localFrames[i*6+3]=vx; localFrames[i*6+4]=vy; localFrames[i*6+5]=vz;
 
         sampleChamferedRect(section, widths[i], heights[i]);
+        const vOff = heightOffset ? heightOffset * heights[i] : 0;
         const px = spine[i*3], py = spine[i*3+1], pz = spine[i*3+2];
         const rb = i * N_CS * 3;
         for (let j = 0; j < N_CS; j++) {
-            const cu = section[j*2], cv = section[j*2+1];
+            const cu = section[j*2], cv = section[j*2+1] + vOff;
             positions[rb+j*3]   = px + cu*Ux + cv*vx;
             positions[rb+j*3+1] = py + cu*Uy + cv*vy;
             positions[rb+j*3+2] = pz + cu*Uz + cv*vz;
@@ -484,12 +595,13 @@ function buildGeometry(spine, widths, heights, upVec, ringColors) {
         const vx = localFrames[spineIdx*6+3], vy = localFrames[spineIdx*6+4], vz = localFrames[spineIdx*6+5];
         const Tx = Uy*vz-Uz*vy, Ty = Uz*vx-Ux*vz, Tz = Ux*vy-Uy*vx;
         sampleChamferedRect(section, widths[spineIdx], heights[spineIdx]);
+        const capVOff = heightOffset ? heightOffset * heights[spineIdx] : 0;
         for (let k = 0; k < N_CAP_RINGS; k++) {
             const cosT = Math.cos(capAngles[k]);
             const sinT = Math.sin(capAngles[k]) * tSign;
             const rb = (capBase + k * N_CS) * 3;
             for (let j = 0; j < N_CS; j++) {
-                const cu = section[j*2], cv = section[j*2+1];
+                const cu = section[j*2], cv = section[j*2+1] + capVOff;
                 const tOff = Math.abs(cu) * sinT;
                 positions[rb+j*3]   = px + cu*cosT*Ux + cv*vx + tOff*Tx;
                 positions[rb+j*3+1] = py + cu*cosT*Uy + cv*vy + tOff*Ty;
@@ -549,23 +661,26 @@ function buildGeometry(spine, widths, heights, upVec, ringColors) {
     buildCapIdx((nSpine-1)*N_CS, endCapBase, false);
     const endCapPattern = indices.slice(endCapOff, endCapOff + capIndicesPerCap);
 
-    // Compute face-area-weighted vertex normals (same as Three.js computeVertexNormals)
+    // Analytic normals throughout — LOD-invariant, no face-area weighting.
     const normals = new Float32Array(totalVerts * 3);
-    for (let i = 0; i < totalIdx; i += 3) {
-        const ia = indices[i], ib = indices[i+1], ic = indices[i+2];
-        const ax = positions[ia*3], ay = positions[ia*3+1], az = positions[ia*3+2];
-        const bx = positions[ib*3]-ax, by = positions[ib*3+1]-ay, bz = positions[ib*3+2]-az;
-        const cx = positions[ic*3]-ax, cy = positions[ic*3+1]-ay, cz = positions[ic*3+2]-az;
-        const nx = by*cz-bz*cy, ny = bz*cx-bx*cz, nz = bx*cy-by*cx;
-        normals[ia*3]+=nx; normals[ia*3+1]+=ny; normals[ia*3+2]+=nz;
-        normals[ib*3]+=nx; normals[ib*3+1]+=ny; normals[ib*3+2]+=nz;
-        normals[ic*3]+=nx; normals[ic*3+1]+=ny; normals[ic*3+2]+=nz;
+    const sectionNormals = new Float32Array(N_CS * 2);
+    for (let i = 0; i < nSpine; i++) {
+        sampleChamferedRect(section, widths[i], heights[i]);
+        computeSectionNormals(section, N_CS, sectionNormals);
+        const Ux = localFrames[i*6],   Uy = localFrames[i*6+1], Uz = localFrames[i*6+2];
+        const Vx = localFrames[i*6+3], Vy = localFrames[i*6+4], Vz = localFrames[i*6+5];
+        const rb = i * N_CS * 3;
+        for (let j = 0; j < N_CS; j++) {
+            const nu = sectionNormals[j*2], nv = sectionNormals[j*2+1];
+            normals[rb + j*3]     = nu*Ux + nv*Vx;
+            normals[rb + j*3 + 1] = nu*Uy + nv*Vy;
+            normals[rb + j*3 + 2] = nu*Uz + nv*Vz;
+        }
     }
-    for (let i = 0; i < totalVerts; i++) {
-        const x = normals[i*3], y = normals[i*3+1], z = normals[i*3+2];
-        const len = Math.hypot(x, y, z);
-        if (len > 1e-12) { normals[i*3]/=len; normals[i*3+1]/=len; normals[i*3+2]/=len; }
-    }
+    writeAnalyticCapNormalsW(normals, startCapBase, N_CAP_RINGS, capAngles,
+        widths[0], heights[0], localFrames, 0, -1, section, sectionNormals);
+    writeAnalyticCapNormalsW(normals, endCapBase, N_CAP_RINGS, capAngles,
+        widths[nSpine - 1], heights[nSpine - 1], localFrames, nSpine - 1, +1, section, sectionNormals);
 
     return { positions, normals, colors, indices, localFrames, capAngles, endCapPattern,
              ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
@@ -588,6 +703,7 @@ self.onmessage = function(e) {
             ringColors: msg.ringColors,
             upVec: msg.upVec,
             nPoints: msg.nPoints,
+            heightOffset: msg.heightOffset || 0,
         });
         _rdpCache.delete(msg.tubeId);
         return;
@@ -611,7 +727,7 @@ self.onmessage = function(e) {
     const { tubeId, camX, camY, camZ } = msg;
     const tube = _tubes.get(tubeId);
     if (!tube) return;
-    const { spine, widths, heights, ringColors, upVec, nPoints } = tube;
+    const { spine, widths, heights, ringColors, upVec, nPoints, heightOffset } = tube;
 
     if (nPoints <= 2) {
         self.postMessage({ tubeId, allReused: true, nReduced: nPoints });
@@ -691,7 +807,7 @@ self.onmessage = function(e) {
     }
 
     // Build geometry in worker
-    const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors);
+    const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, heightOffset);
 
     // Transfer ownership of large buffers
     const transfer = [geo.positions.buffer, geo.normals.buffer, geo.indices.buffer, geo.localFrames.buffer,
@@ -780,6 +896,11 @@ function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
                 keep[maxIdx] = 1;
                 stack.push([start, maxIdx]);
                 stack.push([maxIdx, end]);
+            } else if (end - start > LOD_MAX_SKIP) {
+                const mid = (start + end) >> 1;
+                keep[mid] = 1;
+                stack.push([start, mid]);
+                stack.push([mid, end]);
             }
         }
     }
@@ -806,7 +927,7 @@ function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
 function buildParametricTubeGeometry(
     spine, widths, heights,
-    orientations, upVector, ringColors,
+    orientations, upVector, ringColors, heightOffset,
 ) {
     const nCs = N_CROSS_SECTION;
     const nSpine = spine.length / 3;
@@ -827,7 +948,7 @@ function buildParametricTubeGeometry(
     // vertex sweeps by its own cu: pos = spine + cu*cos(θ)*U + cv*V + cu*sin(θ)*T.
     // At θ=90° the ring collapses to a vertical line segment (cu→0), closing
     // the cap without a pole vertex.
-    const nCapRings = 3;
+    const nCapRings = 8;
     const capAngles = new Float32Array(nCapRings);
     for (let k = 0; k < nCapRings; k++) {
         capAngles[k] = ((k + 1) / nCapRings) * (Math.PI * 0.5);
@@ -905,13 +1026,16 @@ function buildParametricTubeGeometry(
         const w = widths[i];
         const h = heights[i];
         sampleChamferedRect(section, w, h);
+        // Apply height anchor offset: shift cross-section along V axis
+        // so that "top" anchor places the spine at the top surface.
+        const vOff = heightOffset ? heightOffset * h : 0;
         const sx = spine[i * 3];
         const sy = spine[i * 3 + 1];
         const sz = spine[i * 3 + 2];
         const ringBase = i * nCs * 3;
         for (let j = 0; j < nCs; j++) {
             const u = section[j * 2];
-            const v = section[j * 2 + 1];
+            const v = section[j * 2 + 1] + vOff;
             positions[ringBase + j * 3] = sx + u * _U.x + v * _V.x;
             positions[ringBase + j * 3 + 1] = sy + u * _U.y + v * _V.y;
             positions[ringBase + j * 3 + 2] = sz + u * _U.z + v * _V.z;
@@ -940,13 +1064,14 @@ function buildParametricTubeGeometry(
         const vx = localFrames[spineIdx * 6 + 3], vy = localFrames[spineIdx * 6 + 4], vz = localFrames[spineIdx * 6 + 5];
         const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
         sampleChamferedRect(section, w, h);
+        const capVOff = heightOffset ? heightOffset * h : 0;
         for (let k = 0; k < nCapRings; k++) {
             const theta = capAngles[k];
             const cosT = Math.cos(theta);
             const sinT = Math.sin(theta) * tangentSign;
             const ringBase = (capBaseVert + k * nCs) * 3;
             for (let j = 0; j < nCs; j++) {
-                const cu = section[j * 2], cv = section[j * 2 + 1];
+                const cu = section[j * 2], cv = section[j * 2 + 1] + capVOff;
                 const tOff = Math.abs(cu) * sinT;
                 positions[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
                 positions[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
@@ -1034,7 +1159,30 @@ function buildParametricTubeGeometry(
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    geometry.computeVertexNormals();
+    // Analytic normals everywhere — no reliance on face-area accumulation.
+    // Tube-side rings use the cross-section bisector normal (pure UV radial).
+    // Revolution caps use cos(θ)·radial + sin(θ)·T, which equals the tube-side
+    // normal at θ=0 (smooth seam) and pure axial T at θ=90°.
+    const normalArr = new Float32Array(totalVerts * 3);
+    const sectionNormals = new Float32Array(nCs * 2);
+    for (let i = 0; i < nSpine; i++) {
+        sampleChamferedRect(section, widths[i], heights[i]);
+        computeSectionNormals(section, nCs, sectionNormals);
+        const Ux = localFrames[i * 6],     Uy = localFrames[i * 6 + 1], Uz = localFrames[i * 6 + 2];
+        const Vx = localFrames[i * 6 + 3], Vy = localFrames[i * 6 + 4], Vz = localFrames[i * 6 + 5];
+        const rb = i * nCs * 3;
+        for (let j = 0; j < nCs; j++) {
+            const nu = sectionNormals[j * 2], nv = sectionNormals[j * 2 + 1];
+            normalArr[rb + j * 3]     = nu * Ux + nv * Vx;
+            normalArr[rb + j * 3 + 1] = nu * Uy + nv * Vy;
+            normalArr[rb + j * 3 + 2] = nu * Uz + nv * Vz;
+        }
+    }
+    writeAnalyticCapNormals(normalArr, startCapBase, nCs, nCapRings, capAngles,
+        widths[0], heights[0], localFrames, 0, -1);
+    writeAnalyticCapNormals(normalArr, endCapBase, nCs, nCapRings, capAngles,
+        widths[nSpine - 1], heights[nSpine - 1], localFrames, nSpine - 1, +1);
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normalArr, 3));
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
@@ -1086,6 +1234,10 @@ function applyWorkerGeometry(mesh, msg) {
     // Dispose old, assign new
     mesh.geometry.dispose();
     mesh.geometry = geometry;
+    // Sync wireframe overlay if present
+    if (mesh.userData.wireframeOverlay) {
+        mesh.userData.wireframeOverlay.geometry = geometry;
+    }
 
     // Update userData
     const ud = mesh.userData;
@@ -1106,12 +1258,14 @@ function applyWorkerGeometry(mesh, msg) {
         ringColors: msg.reducedColors,
         section: new Float32Array(nCs * 2),
         savedRing: new Float32Array(nCs * 3),
+        savedRingNormals: null,
         savedRingColors: null,
         savedRingIndex: null,
         morphedState: null,
         endCapPattern: msg.endCapPattern,
         savedCapIndices: new msg.endCapPattern.constructor(msg.endCapPattern.length),
         savedCapOffset: -1,
+        heightOffset: ud.tubeHeightOffset || 0,
     };
 
     // Update LOD state
@@ -1154,12 +1308,23 @@ function restoreFrontierRing(obj) {
     const nCs = obj.userData.tubeNCs;
     const ringBase = md.savedRingIndex * nCs * 3;
     const posAttr = obj.geometry.getAttribute('position');
+    const rangeCount = nCs * 3;
     posAttr.array.set(md.savedRing, ringBase);
+    posAttr.addUpdateRange(ringBase, rangeCount);
     posAttr.needsUpdate = true;
+    if (md.savedRingNormals) {
+        const norAttr = obj.geometry.getAttribute('normal');
+        if (norAttr) {
+            norAttr.array.set(md.savedRingNormals, ringBase);
+            norAttr.addUpdateRange(ringBase, rangeCount);
+            norAttr.needsUpdate = true;
+        }
+    }
     if (md.savedRingColors) {
         const colAttr = obj.geometry.getAttribute('color');
         if (colAttr) {
             colAttr.array.set(md.savedRingColors, ringBase);
+            colAttr.addUpdateRange(ringBase, rangeCount);
             colAttr.needsUpdate = true;
         }
     }
@@ -1195,6 +1360,12 @@ function morphFrontierRing(obj, fracRingPairs) {
         const posArr = obj.geometry.getAttribute('position').array;
         const ringBase = iB * nCs * 3;
         md.savedRing.set(posArr.subarray(ringBase, ringBase + nCs * 3));
+        // Save normals
+        const norAttr = obj.geometry.getAttribute('normal');
+        if (norAttr) {
+            if (!md.savedRingNormals) md.savedRingNormals = new Float32Array(nCs * 3);
+            md.savedRingNormals.set(norAttr.array.subarray(ringBase, ringBase + nCs * 3));
+        }
         // Save colors if applicable
         if (ud.tubeHasColors) {
             const colAttr = obj.geometry.getAttribute('color');
@@ -1233,6 +1404,7 @@ function morphFrontierRing(obj, fracRingPairs) {
 
     // Sample cross-section at interpolated width/height
     sampleChamferedRect(md.section, w, h);
+    const vOff = md.heightOffset ? md.heightOffset * h : 0;
 
     // Write morphed vertices into the position buffer at ring iB
     const posAttr = obj.geometry.getAttribute('position');
@@ -1240,11 +1412,13 @@ function morphFrontierRing(obj, fracRingPairs) {
     const ringBase = iB * nCs * 3;
     for (let j = 0; j < nCs; j++) {
         const lu = md.section[j * 2];
-        const lv = md.section[j * 2 + 1];
+        const lv = md.section[j * 2 + 1] + vOff;
         pos[ringBase + j * 3]     = sx + lu * ux + lv * vx;
         pos[ringBase + j * 3 + 1] = sy + lu * uy + lv * vy;
         pos[ringBase + j * 3 + 2] = sz + lu * uz + lv * vz;
     }
+    const rangeCount = nCs * 3;
+    posAttr.addUpdateRange(ringBase, rangeCount);
     posAttr.needsUpdate = true;
 
     // Lerp colors if present
@@ -1262,6 +1436,7 @@ function morphFrontierRing(obj, fracRingPairs) {
                 cols[ringBase + j * 3 + 1] = cg;
                 cols[ringBase + j * 3 + 2] = cb;
             }
+            colAttr.addUpdateRange(ringBase, rangeCount);
             colAttr.needsUpdate = true;
         }
     }
@@ -1301,6 +1476,7 @@ function updateEndCap(obj, lastVisibleRing) {
 
     // Revolution around V: each vertex sweeps by |cu| along T
     sampleChamferedRect(md.section, w, h);
+    const vOff = md.heightOffset ? md.heightOffset * h : 0;
     const ecBase = ud.tubeEndCapBase;
     for (let k = 0; k < nCapRings; k++) {
         const theta = md.capAngles[k];
@@ -1308,13 +1484,16 @@ function updateEndCap(obj, lastVisibleRing) {
         const sinT = Math.sin(theta);
         const ringBase = (ecBase + k * nCs) * 3;
         for (let j = 0; j < nCs; j++) {
-            const cu = md.section[j * 2], cv = md.section[j * 2 + 1];
+            const cu = md.section[j * 2], cv = md.section[j * 2 + 1] + vOff;
             const tOff = Math.abs(cu) * sinT;
             pos[ringBase + j * 3]     = sx + cu * cosT * ux + cv * vx + tOff * tx;
             pos[ringBase + j * 3 + 1] = sy + cu * cosT * uy + cv * vy + tOff * ty;
             pos[ringBase + j * 3 + 2] = sz + cu * cosT * uz + cv * vz + tOff * tz;
         }
     }
+    const capRangeStart = ecBase * 3;
+    const capRangeCount = nCapRings * nCs * 3;
+    posAttr.addUpdateRange(capRangeStart, capRangeCount);
     posAttr.needsUpdate = true;
 
     // Update end cap colors if applicable
@@ -1329,17 +1508,92 @@ function updateEndCap(obj, lastVisibleRing) {
                 const dst = (ecBase + v) * 3;
                 cols[dst] = cr; cols[dst + 1] = cg; cols[dst + 2] = cb;
             }
+            colAttr.addUpdateRange(capRangeStart, capRangeCount);
             colAttr.needsUpdate = true;
         }
     }
+}
+
+// Write analytic normals for the frontier ring + end cap during animation.
+// Frontier ring gets the pure cross-section bisector (pure UV radial). The
+// end cap uses cos(θ)·radial + sin(θ)·T so the seam at the frontier matches
+// and the dome tip points along +T.
+function updateMorphedNormals(obj, visiblePairs) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    if (!md) return;
+
+    const nCs = ud.tubeNCs;
+    const nCapRings = md.capAngles.length;
+    const ecBase = ud.tubeEndCapBase;
+    const norAttr = obj.geometry.getAttribute('normal');
+    if (!norAttr) return;
+    const nor = norAttr.array;
+
+    // Shape/frame of the frontier (morphed if mid-interpolation, else raw ring).
+    let w, h, ux, uy, uz, vx, vy, vz;
+    if (md.morphedState) {
+        const ms = md.morphedState;
+        w = ms.w; h = ms.h;
+        ux = ms.ux; uy = ms.uy; uz = ms.uz;
+        vx = ms.vx; vy = ms.vy; vz = ms.vz;
+    } else {
+        const i = visiblePairs;
+        w = md.widths[i]; h = md.heights[i];
+        ux = md.localFrames[i * 6];     uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
+        vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
+    }
+    const tx = uy * vz - uz * vy;
+    const ty = uz * vx - ux * vz;
+    const tz = ux * vy - uy * vx;
+
+    sampleChamferedRect(md.section, w, h);
+    if (!md._sectionNormalsScratch) md._sectionNormalsScratch = new Float32Array(nCs * 2);
+    const sn = md._sectionNormalsScratch;
+    computeSectionNormals(md.section, nCs, sn);
+
+    // Frontier ring: pure UV radial.
+    const fBase = visiblePairs * nCs;
+    for (let j = 0; j < nCs; j++) {
+        const nu = sn[j * 2], nv = sn[j * 2 + 1];
+        const dst = (fBase + j) * 3;
+        nor[dst]     = nu * ux + nv * vx;
+        nor[dst + 1] = nu * uy + nv * vy;
+        nor[dst + 2] = nu * uz + nv * vz;
+    }
+
+    // End cap rings: cos(θ)·radial + sin(θ)·T.
+    for (let k = 0; k < nCapRings; k++) {
+        const theta = md.capAngles[k];
+        const c = Math.cos(theta);
+        const s = Math.sin(theta);
+        for (let j = 0; j < nCs; j++) {
+            const nu = sn[j * 2], nv = sn[j * 2 + 1];
+            let nx = c * (nu * ux + nv * vx) + s * tx;
+            let ny = c * (nu * uy + nv * vy) + s * ty;
+            let nz = c * (nu * uz + nv * vz) + s * tz;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+            const dst = (ecBase + k * nCs + j) * 3;
+            nor[dst] = nx;
+            nor[dst + 1] = ny;
+            nor[dst + 2] = nz;
+        }
+    }
+
+    norAttr.addUpdateRange(fBase * 3, nCs * 3);
+    norAttr.addUpdateRange(ecBase * 3, nCapRings * nCs * 3);
+    norAttr.needsUpdate = true;
 }
 
 // Restore end cap indices that were relocated by a previous relocateEndCap call.
 function restoreRelocatedEndCap(obj) {
     const md = obj.userData.tubeMorphData;
     if (!md || md.savedCapOffset < 0) return;
+    const capPer = obj.userData.tubeCapIndicesPerCap;
     const indexAttr = obj.geometry.getIndex();
     indexAttr.array.set(md.savedCapIndices, md.savedCapOffset);
+    indexAttr.addUpdateRange(md.savedCapOffset, capPer);
     md.savedCapOffset = -1;
     indexAttr.needsUpdate = true;
 }
@@ -1375,6 +1629,7 @@ function relocateEndCap(obj, visiblePairs) {
             idx[offset + i] = v;
         }
     }
+    indexAttr.addUpdateRange(offset, capPer);
     indexAttr.needsUpdate = true;
 }
 
@@ -1411,9 +1666,24 @@ function applyParametricTubeDrawRange(obj, value) {
 
     const visiblePairs = morphFrontierRing(obj, fracRingPairs);
     updateEndCap(obj, visiblePairs);
+    updateMorphedNormals(obj, visiblePairs);
     relocateEndCap(obj, visiblePairs);
     // start_cap + ring_pairs + end_cap (end cap now sits right after visible pairs)
     obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
+
+    // After a full color rewrite (_colorFullUploadNeeded), morphFrontierRing,
+    // restoreFrontierRing, and updateEndCap may have added partial addUpdateRange
+    // calls on the color attribute.  With pending ranges, Three.js only uploads
+    // those ranges — not the full buffer.  Clear them so needsUpdate triggers a
+    // complete upload of the rewritten color buffer on the next render.
+    if (ud._colorFullUploadNeeded) {
+        const colAttr = obj.geometry.getAttribute('color');
+        if (colAttr) {
+            colAttr.clearUpdateRanges();
+            colAttr.needsUpdate = true;
+        }
+        ud._colorFullUploadNeeded = false;
+    }
 }
 
 /**
@@ -1513,6 +1783,15 @@ export class ThreeJSViewer {
         this._baselineVisibility = new Map();
         this._speedIndex = 6; // starts at 1x
 
+        // Wireframe display mode: 0 = normal, 1 = wireframe-only, 2 = combined overlay
+        this._wireframeMode = 0;
+
+        // Shading debug mode: 0 = off, 1 = normals-as-color, 2 = UV checker, 3 = vertex-normals helper
+        this._shadingMode = 0;
+        this._uvCheckerTexture = null;
+        this._shadingNormalMaterial = null;
+        this._shadingUvMaterial = null;
+
         // Clipping state
         this._clipEnabled = false;
         this._clipHelperVisible = true;
@@ -1573,6 +1852,7 @@ export class ThreeJSViewer {
         this._statusDot = q('.tjsv-status-dot');
         this._statusText = q('.tjsv-status-text');
         this._btnOrtho = q('.tjsv-btn-ortho');
+        this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
         this._btnClip = q('.tjsv-btn-clip');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
@@ -1612,6 +1892,7 @@ export class ThreeJSViewer {
         this._perspCamera = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
         this._perspCamera.position.set(5, -5, 5);
         this._perspCamera.up.set(0, 0, 1);
+        this._perspCamera.lookAt(0, 0, 0);
 
         const aspect = w / h;
         this._orthoCamera = new THREE.OrthographicCamera(
@@ -1620,6 +1901,7 @@ export class ThreeJSViewer {
         );
         this._orthoCamera.position.copy(this._perspCamera.position);
         this._orthoCamera.up.set(0, 0, 1);
+        this._orthoCamera.lookAt(0, 0, 0);
 
         this._camera = this._perspCamera;
 
@@ -1635,9 +1917,48 @@ export class ThreeJSViewer {
         // Environment cubemap
         this._loadCubemap();
 
-        // Controls
-        this._controls = new OrbitControls(this._camera, this._renderer.domElement);
-        this._controls.enableDamping = true;
+        // Controls: bespoke ViewerControls (one implementation, two modes).
+        // - turntable: yaw around world-Z, pitch around camera-right (clamped near pole)
+        // - free: yaw around camera-up, pitch around camera-right (no world-up lock)
+        // Toggle via toolbar orbit-mode button or R; persisted to localStorage.
+        // Click-to-pivot moves the orbit pivot to the raycast hit without view shift.
+        this._orbitMode = localStorage.getItem('tjsv.orbitMode') || 'turntable';
+        this._controls = new ViewerControls(this._camera, this._renderer.domElement);
+        this._controls.setMode(this._orbitMode);
+        this._controls.setRaycastObjects(() => {
+            const arr = [];
+            for (const o of this._objects.values()) if (o && o.visible) arr.push(o);
+            return arr;
+        });
+        this._controls.addEventListener('change', () => { this._lodDirty = true; });
+
+        // Pivot marker: small screen-space-sized yellow sphere + ring shown
+        // briefly when a click sets a new orbit pivot. Lives in the scene only
+        // (NOT in this._objects) so it can't be raycast-picked or treated as
+        // a public object — the raycast getter above iterates this._objects.
+        this._pivotMarker = new THREE.Group();
+        const pivotSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.1, 16, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffd76b, depthTest: false, transparent: true, opacity: 0.95 })
+        );
+        pivotSphere.renderOrder = 999;
+        const pivotRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.14, 0.18, 32),
+            new THREE.MeshBasicMaterial({ color: 0xffd76b, depthTest: false, transparent: true, opacity: 0.7, side: THREE.DoubleSide })
+        );
+        pivotRing.renderOrder = 999;
+        this._pivotMarker.add(pivotSphere);
+        this._pivotMarker.add(pivotRing);
+        this._pivotMarker.visible = false;
+        this._pivotMarkerRing = pivotRing;
+        this._pivotShownAt = 0;
+        this._scene.add(this._pivotMarker);
+
+        this._controls.addEventListener('pivot', (e) => {
+            this._pivotMarker.position.copy(e.point);
+            this._pivotMarker.visible = true;
+            this._pivotShownAt = performance.now();
+        });
 
         // LOD: Web Worker for async RDP computation
         this._lodThrottleMs = 500;
@@ -1658,11 +1979,51 @@ export class ThreeJSViewer {
 
             // Worker built geometry — upload to GPU
             applyWorkerGeometry(obj, msg);
-        };
-        this._controls.addEventListener('change', () => {
-            this._lodDirty = true;
-        });
 
+            // Re-sync colors: the worker may have used stale colors if a
+            // color update arrived while it was busy rebuilding geometry.
+            const lod = obj.userData.tubeLOD;
+            if (lod.colorVersion > 0 && lod.originalRingColors) {
+                const nRed = lod.keptIndices.length;
+                const nCs = obj.userData.tubeNCs;
+                const rc = lod.originalRingColors;
+                // Restore frontier ring before writing new colors
+                const md = obj.userData.tubeMorphData;
+                if (md) restoreFrontierRing(obj);
+                // Extract reduced Float32 RGB from original colors at kept indices
+                const redRc = new Float32Array(nRed * 3);
+                for (let i = 0; i < nRed; i++) {
+                    const oi = lod.keptIndices[i];
+                    redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                }
+                const colAttr = obj.geometry.getAttribute('color');
+                if (colAttr) {
+                    const out = colAttr.array;
+                    // Expand per-ring colors to per-vertex
+                    for (let i = 0; i < nRed; i++) {
+                        const r = redRc[i * 3], g = redRc[i * 3 + 1], b = redRc[i * 3 + 2];
+                        const base = i * nCs * 3;
+                        for (let j = 0; j < nCs; j++) {
+                            out[base + j * 3] = r; out[base + j * 3 + 1] = g; out[base + j * 3 + 2] = b;
+                        }
+                    }
+                    // Fill cap colors (start cap = first ring color, end cap = last ring color)
+                    const posCount = colAttr.count;
+                    const capVertsPerCap = (posCount - nRed * nCs) / 2;
+                    const startCapBase = nRed * nCs;
+                    const endCapBase = startCapBase + capVertsPerCap;
+                    const lr = (nRed - 1) * 3;
+                    for (let j = 0; j < capVertsPerCap; j++) {
+                        out[(startCapBase + j) * 3]     = redRc[0]; out[(startCapBase + j) * 3 + 1] = redRc[1]; out[(startCapBase + j) * 3 + 2] = redRc[2];
+                        out[(endCapBase + j) * 3]       = redRc[lr]; out[(endCapBase + j) * 3 + 1] = redRc[lr + 1]; out[(endCapBase + j) * 3 + 2] = redRc[lr + 2];
+                    }
+                    colAttr.clearUpdateRanges();
+                    colAttr.needsUpdate = true;
+                }
+                obj.userData._colorFullUploadNeeded = true;
+                if (md) md.ringColors = redRc;
+            }
+        };
         // ViewHelper
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
@@ -1670,6 +2031,30 @@ export class ThreeJSViewer {
             if (this._viewHelper.handleClick(e)) {
                 this._controls.target.copy(this._viewHelper.center);
             }
+        });
+        // Double-click an object to frame it; double-click empty space to reset.
+        this._dblclickRaycaster = new THREE.Raycaster();
+        this._dblclickRaycaster.params.Line.threshold = 0.05;
+        this._dblclickRaycaster.params.Points.threshold = 0.05;
+        this._renderer.domElement.addEventListener('dblclick', (e) => {
+            const rect = this._renderer.domElement.getBoundingClientRect();
+            const ndc = new THREE.Vector2(
+                ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                -((e.clientY - rect.top) / rect.height) * 2 + 1,
+            );
+            this._dblclickRaycaster.setFromCamera(ndc, this._camera);
+            const candidates = [];
+            for (const obj of this._objects.values()) {
+                if (obj && obj.visible) candidates.push(obj);
+            }
+            const hits = this._dblclickRaycaster.intersectObjects(candidates, true);
+            if (!hits.length) { this.resetView(); return; }
+            // Walk up to the top-level object the user added (a value of _objects).
+            const objSet = new Set(this._objects.values());
+            let target = hits[0].object;
+            while (target && !objSet.has(target)) target = target.parent;
+            if (!target) { this.resetView(); return; }
+            this.frameObject(target);
         });
 
         // Lighting
@@ -1988,6 +2373,213 @@ export class ThreeJSViewer {
         this._clipGizmoHelper.visible = showGizmo;
     }
 
+    _cycleWireframeMode() {
+        this._wireframeMode = (this._wireframeMode + 1) % 3;
+        this._applyWireframeMode();
+    }
+
+    _applyWireframeMode() {
+        const mode = this._wireframeMode;
+        const wantOverlay = mode === 2;
+        const wantWire = mode === 1;
+        this._scene.traverse((obj) => {
+            if (!obj.isMesh) return;
+            if (obj.userData.isWireOverlay) return;
+            if (!obj.material) return;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            for (const m of mats) {
+                if ('wireframe' in m) m.wireframe = wantWire;
+            }
+            let overlay = obj.userData.wireframeOverlay;
+            if (wantOverlay) {
+                if (!overlay) {
+                    overlay = this._createWireOverlay(obj);
+                    obj.userData.wireframeOverlay = overlay;
+                    obj.add(overlay);
+                } else {
+                    overlay.material.clippingPlanes = this._clipEnabled ? this._clipPlanes : [];
+                    overlay.material.needsUpdate = true;
+                }
+                overlay.visible = true;
+            } else if (overlay) {
+                overlay.visible = false;
+            }
+        });
+    }
+
+    _createWireOverlay(parentMesh) {
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            wireframe: true,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1,
+            side: THREE.DoubleSide,
+            clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
+        });
+        const overlay = new THREE.Mesh(parentMesh.geometry, mat);
+        overlay.userData.isWireOverlay = true;
+        overlay.raycast = () => {};
+        overlay.name = (parentMesh.name || 'mesh') + '_wireOverlay';
+        return overlay;
+    }
+
+    _cycleShadingMode() {
+        this._shadingMode = (this._shadingMode + 1) % 4;
+        this._applyShadingMode();
+    }
+
+    _getUvCheckerTexture() {
+        if (this._uvCheckerTexture) return this._uvCheckerTexture;
+        const size = 256;
+        const cells = 8;
+        const cell = size / cells;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        for (let y = 0; y < cells; y++) {
+            for (let x = 0; x < cells; x++) {
+                const dark = (x + y) % 2 === 0;
+                ctx.fillStyle = dark ? '#202020' : '#e0e0e0';
+                ctx.fillRect(x * cell, y * cell, cell, cell);
+            }
+        }
+        // Colored axis bands so U/V orientation is legible.
+        ctx.fillStyle = '#d03030';
+        ctx.fillRect(0, 0, size, 2);
+        ctx.fillStyle = '#30a030';
+        ctx.fillRect(0, 0, 2, size);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestMipMapLinearFilter;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this._uvCheckerTexture = tex;
+        return tex;
+    }
+
+    _getShadingMaterial(mode) {
+        const clip = this._clipEnabled ? this._clipPlanes : [];
+        if (mode === 1) {
+            if (!this._shadingNormalMaterial) {
+                this._shadingNormalMaterial = new THREE.MeshNormalMaterial({
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._shadingNormalMaterial.clippingPlanes = clip;
+                this._shadingNormalMaterial.needsUpdate = true;
+            }
+            return this._shadingNormalMaterial;
+        }
+        if (mode === 2) {
+            if (!this._shadingUvMaterial) {
+                this._shadingUvMaterial = new THREE.MeshBasicMaterial({
+                    map: this._getUvCheckerTexture(),
+                    side: THREE.DoubleSide,
+                    clippingPlanes: clip,
+                });
+            } else {
+                this._shadingUvMaterial.clippingPlanes = clip;
+                this._shadingUvMaterial.needsUpdate = true;
+            }
+            return this._shadingUvMaterial;
+        }
+        return null;
+    }
+
+    _applyShadingMaterial(obj, mode) {
+        const debugMat = this._getShadingMaterial(mode);
+        if (!debugMat) return;
+        if (obj.userData.originalMaterial === undefined) {
+            obj.userData.originalMaterial = obj.material;
+        }
+        obj.material = debugMat;
+    }
+
+    _restoreShadingMaterial(obj) {
+        if (obj.userData.originalMaterial === undefined) return;
+        obj.material = obj.userData.originalMaterial;
+        delete obj.userData.originalMaterial;
+        // Original material's clippingPlanes may be stale if clipping was toggled
+        // while the debug material was active. Re-sync from current clip state.
+        const planes = this._clipEnabled ? this._clipPlanes : [];
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+            if (!m) continue;
+            m.clippingPlanes = planes;
+            m.needsUpdate = true;
+        }
+    }
+
+    _forEachUserMesh(cb) {
+        // Only visit user-registered objects and their descendants — skips
+        // viewer furniture (TransformControls gizmo, ViewHelper, grid, pivot
+        // marker, clip anchor) whose materials often lack the fields our
+        // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
+        for (const root of this._objects.values()) {
+            root.traverse((obj) => {
+                if (!obj.isMesh) return;
+                if (obj.userData.isWireOverlay) return;
+                if (obj.userData.isDebugHelper) return;
+                cb(obj);
+            });
+        }
+    }
+
+    _applyShadingMode() {
+        const mode = this._shadingMode;
+        this._forEachUserMesh((obj) => {
+
+            if (mode === 1 || mode === 2) {
+                this._applyShadingMaterial(obj, mode);
+            } else {
+                this._restoreShadingMaterial(obj);
+            }
+
+            let helper = obj.userData.vertexNormalsHelper;
+            if (mode === 3) {
+                if (!helper && obj.geometry && obj.geometry.attributes && obj.geometry.attributes.normal) {
+                    helper = new VertexNormalsHelper(obj, this._cameraRelativeNormalSize(obj), 0x00ffff);
+                    helper.userData.isDebugHelper = true;
+                    helper.raycast = () => {};
+                    obj.userData.vertexNormalsHelper = helper;
+                    this._scene.add(helper);
+                }
+                if (helper) {
+                    helper.visible = true;
+                    helper.size = this._cameraRelativeNormalSize(obj);
+                    helper.update();
+                }
+            } else if (helper) {
+                helper.visible = false;
+            }
+        });
+    }
+
+    _cameraRelativeNormalSize(obj) {
+        // Target ~30 pixels on screen regardless of zoom.
+        const cam = this._camera;
+        const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
+        const targetPx = 30;
+        if (!obj.geometry) return 0.1;
+        if (!obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
+        obj.updateWorldMatrix(true, false);
+        const center = obj.geometry.boundingSphere
+            ? obj.geometry.boundingSphere.center.clone().applyMatrix4(obj.matrixWorld)
+            : obj.getWorldPosition(new THREE.Vector3());
+        let worldPerPixel;
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(center);
+            worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
+        } else {
+            worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
+        }
+        return Math.max(worldPerPixel * targetPx, 1e-6);
+    }
+
     _toggleClipPanel() {
         this._clipEnabled = !this._clipEnabled;
         if (this._clipEnabled && this._clipDefaults) {
@@ -2029,14 +2621,35 @@ export class ThreeJSViewer {
 
     // ========== Camera ==========
 
+    _setOrbitMode(mode) {
+        if (mode !== 'turntable' && mode !== 'free') return;
+        this._orbitMode = mode;
+        try { localStorage.setItem('tjsv.orbitMode', mode); } catch (e) { /* ignore */ }
+        this._controls.setMode(mode);
+        this._updateOrbitModeButton();
+    }
+
+    _updateOrbitModeButton() {
+        if (!this._btnOrbitMode) return;
+        const isFree = this._orbitMode === 'free';
+        this._btnOrbitMode.classList.toggle('active', isFree);
+        this._btnOrbitMode.textContent = '\u27F3 R';
+        this._btnOrbitMode.title = isFree
+            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
+            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
+    }
+
     _switchCamera(toOrtho) {
         if (toOrtho === this._isOrtho) return;
         const w = this.container.clientWidth;
         const h = this.container.clientHeight;
         const aspect = w / h;
 
+        const tgt = this._tmpSwitchTarget || (this._tmpSwitchTarget = new THREE.Vector3());
+        tgt.copy(this._controls.target);
+
         if (toOrtho) {
-            const dist = this._perspCamera.position.distanceTo(this._controls.target);
+            const dist = this._perspCamera.position.distanceTo(tgt);
             const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(this._perspCamera.fov / 2));
             this._orthoCamera.zoom = ORTHO_FRUSTUM / halfHeight;
             this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
@@ -2050,8 +2663,8 @@ export class ThreeJSViewer {
         } else {
             const halfHeight = ORTHO_FRUSTUM / this._orthoCamera.zoom;
             const dist = halfHeight / Math.tan(THREE.MathUtils.degToRad(this._perspCamera.fov / 2));
-            const dir = this._orthoCamera.position.clone().sub(this._controls.target).normalize();
-            this._perspCamera.position.copy(this._controls.target).addScaledVector(dir, dist);
+            const dir = this._orthoCamera.position.clone().sub(tgt).normalize();
+            this._perspCamera.position.copy(tgt).addScaledVector(dir, dist);
             this._perspCamera.quaternion.copy(this._orthoCamera.quaternion);
             this._perspCamera.aspect = aspect;
             this._perspCamera.updateProjectionMatrix();
@@ -2059,11 +2672,14 @@ export class ThreeJSViewer {
         }
 
         this._isOrtho = toOrtho;
-        this._controls.object = this._camera;
+        // ViewerControls is camera-agnostic — just reassign and re-update.
+        this._controls.camera = this._camera;
+        this._controls.target.copy(tgt);
+        this._controls.update();
         this._clipGizmo.camera = this._camera;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
-        this._btnOrtho.textContent = this._isOrtho ? 'O' : 'P';
+        this._btnOrtho.textContent = '\u2B1A O';
         this._btnOrtho.classList.toggle('active', this._isOrtho);
     }
 
@@ -2110,6 +2726,7 @@ export class ThreeJSViewer {
             this._scene.add(obj);
         }
         this._sceneBoundsDirty = true;
+        if (this._wireframeMode !== 0) this._applyWireframeMode();
     }
 
     _applyTransform(obj, transform) {
@@ -2261,6 +2878,16 @@ export class ThreeJSViewer {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
+                }
+                if (child.userData.vertexNormalsHelper) {
+                    const h = child.userData.vertexNormalsHelper;
+                    if (h.parent) h.parent.remove(h);
+                    if (h.geometry) h.geometry.dispose();
+                    if (h.material) h.material.dispose();
+                    delete child.userData.vertexNormalsHelper;
+                }
+                if (child.userData.originalMaterial !== undefined) {
+                    delete child.userData.originalMaterial;
                 }
                 if (child.geometry) child.geometry.dispose();
                 if (child.material) {
@@ -2595,18 +3222,16 @@ export class ThreeJSViewer {
                 const interp = t > 0 && frameIndexNext !== frameIndex;
                 if (ctCh) {
                     const base = frameIndex * 3;
+                    let tx, ty, tz;
                     if (interp && ctCh.interpolation === 'linear') {
                         const bN = frameIndexNext * 3;
-                        this._controls.target.set(
-                            ctCh.data[base]     * (1 - t) + ctCh.data[bN]     * t,
-                            ctCh.data[base + 1] * (1 - t) + ctCh.data[bN + 1] * t,
-                            ctCh.data[base + 2] * (1 - t) + ctCh.data[bN + 2] * t
-                        );
+                        tx = ctCh.data[base]     * (1 - t) + ctCh.data[bN]     * t;
+                        ty = ctCh.data[base + 1] * (1 - t) + ctCh.data[bN + 1] * t;
+                        tz = ctCh.data[base + 2] * (1 - t) + ctCh.data[bN + 2] * t;
                     } else {
-                        this._controls.target.set(
-                            ctCh.data[base], ctCh.data[base + 1], ctCh.data[base + 2]
-                        );
+                        tx = ctCh.data[base]; ty = ctCh.data[base + 1]; tz = ctCh.data[base + 2];
                     }
+                    this._controls.target.set(tx, ty, tz);
                 }
                 if (cpCh) {
                     const base = frameIndex * 3;
@@ -2636,14 +3261,18 @@ export class ThreeJSViewer {
         const targetPos = this._tmpTrackPos;
         targetPos.setFromMatrixPosition(obj.matrixWorld);
 
+        const curTgt = this._tmpTrackTarget || (this._tmpTrackTarget = new THREE.Vector3());
+        curTgt.copy(this._controls.target);
+
         if (this._trackMode === 'follow') {
             if (this._trackHasLastPos) {
                 const delta = this._tmpTrackDelta.copy(targetPos).sub(this._trackLastPos);
-                this._controls.target.add(delta);
+                curTgt.add(delta);
+                this._controls.target.copy(curTgt);
                 this._camera.position.add(delta);
             } else {
                 // First frame: snap orbit target, keep camera offset
-                const offset = this._tmpTrackDelta.copy(this._camera.position).sub(this._controls.target);
+                const offset = this._tmpTrackDelta.copy(this._camera.position).sub(curTgt);
                 this._controls.target.copy(targetPos);
                 this._camera.position.copy(targetPos).add(offset);
             }
@@ -2756,6 +3385,12 @@ export class ThreeJSViewer {
     _bindEvents() {
         // Ortho button
         this._btnOrtho.addEventListener('click', () => this._switchCamera(!this._isOrtho));
+
+        // Orbit-mode toggle (Turntable <-> Free)
+        this._updateOrbitModeButton();
+        this._btnOrbitMode.addEventListener('click', () => {
+            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+        });
 
         // Clip button
         this._btnClip.addEventListener('click', () => this._toggleClipPanel());
@@ -2870,6 +3505,27 @@ export class ThreeJSViewer {
             }
             if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey) {
                 this._toggleClipPanel();
+                return;
+            }
+            if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
+                this._cycleWireframeMode();
+                return;
+            }
+            if (e.code === 'KeyN' && !e.ctrlKey && !e.metaKey) {
+                this._cycleShadingMode();
+                return;
+            }
+            if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
+                this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+                return;
+            }
+            if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey) {
+                this.resetView();
+                return;
+            }
+            if (e.code === 'Home' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !this._animation) {
+                e.preventDefault();
+                this.resetView();
                 return;
             }
 
@@ -3444,6 +4100,7 @@ export class ThreeJSViewer {
                                 const nCs = N_CROSS_SECTION;
                                 const hasColors = !!ringColors;
                                 const upVector = data.upVector || null;
+                                const heightOffset = data.heightOffset || 0;
 
                                 // LOD: for large tubes, reduce spine before building geometry
                                 let tubeLOD = null;
@@ -3496,13 +4153,14 @@ export class ThreeJSViewer {
                                         lastCameraPos: cam.position.clone(),
                                         boundingCenter: _center,
                                         boundingRadius,
+                                        colorVersion: 0,
                                     };
                                     // LOD initial reduction logged at debug level only
                                 }
 
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     buildSpine, buildWidths, buildHeights,
-                                    buildOrientations, upVector, buildRingColors,
+                                    buildOrientations, upVector, buildRingColors, heightOffset,
                                 );
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
                                 const material = new THREE.MeshStandardMaterial({
@@ -3514,7 +4172,6 @@ export class ThreeJSViewer {
                                     depthWrite: opacity >= 1,
                                     side: THREE.DoubleSide,
                                     vertexColors: hasColors,
-                                    wireframe: !!data.wireframe,
                                     clippingPlanes: this._clipEnabled ? this._clipPlanes : [],
                                 });
                                 const mesh = new THREE.Mesh(geometry, material);
@@ -3529,6 +4186,7 @@ export class ThreeJSViewer {
                                 mesh.userData.tubeHasColors = hasColors;
                                 mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
                                 mesh.userData.tubeEndCapBase = endCapBase;
+                                mesh.userData.tubeHeightOffset = heightOffset;
                                 mesh.userData.tubeMorphData = {
                                     spine: new Float32Array(buildSpine),
                                     widths: new Float32Array(buildWidths),
@@ -3537,12 +4195,14 @@ export class ThreeJSViewer {
                                     ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
                                     section: new Float32Array(nCs * 2),
                                     savedRing: new Float32Array(nCs * 3),
+                                    savedRingNormals: null,
                                     savedRingColors: null,
                                     savedRingIndex: null,
                                     morphedState: null,
                                     endCapPattern,
                                     savedCapIndices: new endCapPattern.constructor(endCapPattern.length),
                                     savedCapOffset: -1,
+                                    heightOffset,
                                 };
                                 if (tubeLOD) {
                                     mesh.userData.tubeLOD = tubeLOD;
@@ -3556,6 +4216,7 @@ export class ThreeJSViewer {
                                         ringColors: tubeLOD.originalRingColors,
                                         upVec: upVector,
                                         nPoints: tubeLOD.originalCount,
+                                        heightOffset: heightOffset,
                                     });
                                 }
                                 this._addToParentOrScene(mesh, data.parent);
@@ -3608,6 +4269,7 @@ export class ThreeJSViewer {
                                 // When LOD is active, store full colors and rebuild with reduced subset
                                 if (lod && lod.keptIndices) {
                                     lod.originalRingColors = new Float32Array(rc);
+                                    lod.colorVersion = (lod.colorVersion || 0) + 1;
                                     this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
                                     // Extract reduced colors for current LOD level
                                     const nRed = lod.keptIndices.length;
@@ -3620,6 +4282,9 @@ export class ThreeJSViewer {
                                     }
                                     // Update geometry colors for reduced mesh
                                     const n = nRed;
+                                    // Restore frontier ring BEFORE writing new colors
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) restoreFrontierRing(obj);
                                     // Fill cap dome vertices with a single color
                                     function fillCapColors(arr, baseVert, capVerts, r, g, b) {
                                         for (let j = 0; j < capVerts; j++) {
@@ -3638,6 +4303,7 @@ export class ThreeJSViewer {
                                         expandRingColors(redPacked, n, nCs, existing.array);
                                         fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
                                         fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                        existing.clearUpdateRanges();
                                         existing.needsUpdate = true;
                                     } else {
                                         const allColors = new Float32Array(posCount * 3);
@@ -3650,15 +4316,13 @@ export class ThreeJSViewer {
                                     obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                     obj.userData.tubeHasColors = true;
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) {
-                                        md.ringColors = redRc;
-                                        md.savedRingIndex = null;
-                                    }
+                                    obj.userData._colorFullUploadNeeded = true;
+                                    if (md) md.ringColors = redRc;
                                 } else {
                                     // No LOD active — original path
                                     if (lod) {
                                         lod.originalRingColors = new Float32Array(rc);
+                                        lod.colorVersion = (lod.colorVersion || 0) + 1;
                                         this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
                                     }
                                     const n = nOrig;
@@ -3675,11 +4339,16 @@ export class ThreeJSViewer {
                                     const startCapBaseVert = n * nCs;
                                     const endCapBaseVert = startCapBaseVert + capVertsPerCap;
                                     const lr = (n - 1) * 3;
+                                    // Restore frontier ring BEFORE writing new colors so
+                                    // the stale savedRingColors don't overwrite the update.
+                                    const md = obj.userData.tubeMorphData;
+                                    if (md) restoreFrontierRing(obj);
                                     const existing = obj.geometry.getAttribute('color');
                                     if (existing) {
                                         expandRingColors(packed, n, nCs, existing.array);
                                         fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
                                         fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                        existing.clearUpdateRanges();
                                         existing.needsUpdate = true;
                                     } else {
                                         const allColors = new Float32Array(posCount * 3);
@@ -3692,11 +4361,8 @@ export class ThreeJSViewer {
                                     obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                     obj.userData.tubeHasColors = true;
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) {
-                                        md.ringColors = rc;
-                                        md.savedRingIndex = null;
-                                    }
+                                    obj.userData._colorFullUploadNeeded = true;
+                                    if (md) md.ringColors = rc;
                                 }
                             } catch (e) {
                                 console.error(`Error updating parametric_tube colors:`, e);
@@ -3887,11 +4553,63 @@ export class ThreeJSViewer {
         this._controls.update();
         this._updateNearFar();
 
+        // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
+        // hide 900ms after the pivot was set (but only once the user stops dragging).
+        if (this._pivotMarker && this._pivotMarker.visible) {
+            const cam = this._camera;
+            const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
+            let worldPerPixel;
+            if (cam.isPerspectiveCamera) {
+                const dist = cam.position.distanceTo(this._pivotMarker.position);
+                worldPerPixel = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / canvasH;
+            } else {
+                worldPerPixel = (cam.top - cam.bottom) / cam.zoom / canvasH;
+            }
+            this._pivotMarker.scale.setScalar(worldPerPixel * 60);
+            this._pivotMarkerRing.quaternion.copy(cam.quaternion);
+            const elapsed = performance.now() - this._pivotShownAt;
+            if (elapsed > 900 && !this._controls.isDragging()) {
+                this._pivotMarker.visible = false;
+            }
+        }
+
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
+        if (this._shadingMode === 3) {
+            this._scene.traverse((obj) => {
+                const h = obj.userData && obj.userData.vertexNormalsHelper;
+                if (!h || !h.visible) return;
+                h.size = this._cameraRelativeNormalSize(obj);
+                h.update();
+            });
+        }
         this._renderer.autoClear = true;
         this._renderer.render(this._scene, this._camera);
         this._renderer.autoClear = false;
-        this._viewHelper.render(this._renderer);
+        // Lift the ViewHelper above the animation toolbar when it's visible.
+        // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
+        // call to add a Y offset matching the toolbar height.
+        const animEl = this._animControlsEl;
+        const lift = (animEl && animEl.classList.contains('visible'))
+            ? animEl.offsetHeight * window.devicePixelRatio
+            : 0;
+        if (lift > 0) {
+            // Cache the true original once so we don't re-wrap the wrapped
+            // setViewport each frame (which would deepen the call chain by
+            // one level per frame and eventually blow the stack).
+            if (!this._rendererSetViewportOriginal) {
+                this._rendererSetViewportOriginal = this._renderer.setViewport.bind(this._renderer);
+            }
+            const orig = this._rendererSetViewportOriginal;
+            const r = this._renderer;
+            r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
+            try {
+                this._viewHelper.render(this._renderer);
+            } finally {
+                r.setViewport = orig;
+            }
+        } else {
+            this._viewHelper.render(this._renderer);
+        }
 
         // LOD: dispatch to Web Worker after render (non-blocking)
         if (this._lodDirty && !this._lodWorkerBusy && performance.now() - this._lodLastRunTime >= this._lodThrottleMs) {
@@ -3951,6 +4669,57 @@ export class ThreeJSViewer {
         });
     }
 
+    frameObject(object) {
+        const bbox = new THREE.Box3();
+        object.updateWorldMatrix(true, true);
+        bbox.expandByObject(object);
+        if (bbox.isEmpty()) return;
+        const center = bbox.getCenter(new THREE.Vector3());
+        const size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+        this._controls.target.copy(center);
+        const dir = this._camera.position.clone().sub(center);
+        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
+        else dir.normalize();
+        if (this._isOrtho) {
+            const w = this.container.clientWidth;
+            const h = this.container.clientHeight;
+            const aspect = (w && h) ? (w / h) : 1;
+            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
+            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
+            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
+            this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
+            this._orthoCamera.updateProjectionMatrix();
+            this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
+        } else {
+            const vFov = THREE.MathUtils.degToRad(this._perspCamera.fov / 2);
+            const aspect = this._perspCamera.aspect || 1;
+            const hFov = Math.atan(Math.tan(vFov) * aspect);
+            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
+            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
+            const dist = Math.max(distV, distH) * 1.5;
+            this._camera.position.copy(center).addScaledVector(dir, dist);
+        }
+        // ViewerControls never calls camera.lookAt, so explicitly re-orient
+        // to actually frame the object (not just translate along old view ray).
+        this._camera.lookAt(center);
+        this._controls.update();
+    }
+
+    resetView() {
+        // Hail-mary: reset camera up to world-Z, point at origin, then frame
+        // everything. Recovers from degenerate / inverted / lost states.
+        this._camera.up.set(0, 0, 1);
+        const dir = this._camera.position.clone().sub(this._controls.target);
+        if (dir.lengthSq() < 1e-10) {
+            this._camera.position.set(5, -5, 5);
+        }
+        this._controls.target.set(0, 0, 0);
+        this._camera.lookAt(0, 0, 0);
+        this._controls.update();
+        this.frameAll();
+    }
+
     frameAll() {
         const bbox = new THREE.Box3();
         this._scene.traverse(child => {
@@ -3967,6 +4736,8 @@ export class ThreeJSViewer {
         const maxDim = Math.max(size.x, size.y, size.z);
 
         this._controls.target.copy(center);
+        const ctTgt = this._tmpFrameAllTgt || (this._tmpFrameAllTgt = new THREE.Vector3());
+        ctTgt.copy(center);
 
         if (this._isOrtho) {
             const w = this.container.clientWidth;
@@ -3982,7 +4753,7 @@ export class ThreeJSViewer {
             this._orthoCamera.top = ORTHO_FRUSTUM;
             this._orthoCamera.bottom = -ORTHO_FRUSTUM;
             this._orthoCamera.updateProjectionMatrix();
-            const dir = this._camera.position.clone().sub(this._controls.target);
+            const dir = this._camera.position.clone().sub(ctTgt);
             if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
             else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
@@ -3993,12 +4764,14 @@ export class ThreeJSViewer {
             const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
             const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
             const dist = Math.max(distV, distH) * 1.2;
-            const dir = this._camera.position.clone().sub(this._controls.target);
+            const dir = this._camera.position.clone().sub(ctTgt);
             if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
             else dir.normalize();
             this._camera.position.copy(center).addScaledVector(dir, dist);
         }
 
+        // ViewerControls never calls camera.lookAt, so explicitly re-orient.
+        this._camera.lookAt(center);
         this._controls.update();
     }
 

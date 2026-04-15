@@ -108,12 +108,13 @@ tp.colorize("viridis")
 v.add_toolpath("path_tube", tp, roughness=0.4, metalness=0.15)
 
 # Nozzle: tapered cylinder hovering above the path tip
-nozzle_height = 0.8
-nozzle_gap = 0.05  # gap between nozzle bottom and print surface
+bead_width = HEIGHT / N_TURNS * 4
+nozzle_height = bead_width * 3
+nozzle_gap = bead_width / 2  # gap between nozzle bottom and print surface
 v.add_cylinder(
     "nozzle",
-    radius_top=0.25,
-    radius_bottom=0.08,
+    radius_top=bead_width * 0.6,
+    radius_bottom=bead_width * 0.25,
     height=nozzle_height,
     color=0xCD7F32,
     roughness=0.3,
