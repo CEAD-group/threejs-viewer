@@ -174,7 +174,9 @@ All messages are JSON (text) or binary with JSON header.
 
 ```json
 {"type": "load_animation", "animation": {"duration": 10, "frames": [...], "markers": [...]}}
-{"type": "stop_animation"}
+{"type": "unload_animation", "restore_visibility": true}
+{"type": "pause_animation"}
+{"type": "resume_animation"}
 ```
 
 For binary-channel animations, the message is `load_animation_http` with a channel manifest:

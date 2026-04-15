@@ -13,7 +13,7 @@ from threejs_viewer import viewer
 
 v = viewer()
 v.clear()
-v.stop_animation()
+v.unload_animation()
 
 # Add a subtle ground reference
 v.add_box(

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Animation lifecycle
+
+- **`load_animation` preserves playback state on subsequent loads.** The first call to `load_animation` (when no animation is loaded) still starts at t=0 and force-plays, just like before. But a *subsequent* call (one already loaded) now preserves the current playhead time (clamped to the new duration), play state, and camera-tracking — only the underlying frame data is swapped. This makes the "swap mid-playback" pattern (reconcilers, tab switches between related animations) flicker-free without any caller bookkeeping. Pass `load_animation(anim, restart=True)` to force the old "snap to t=0 and force-play" behavior on a swap.
+- **`load_animation(autoplay=False)`** — load the animation paused on first-load (or on a restart) instead of starting playback immediately. No effect on a swap, where the prior play state is preserved.
+- **`pause_animation()` / `resume_animation()`** — new Python API for pause/resume from a script. Previously pause/resume was browser-only (spacebar / play button).
+- **Renamed `stop_animation()` / `clear_animation()` → `unload_animation(restore_visibility=True)`.** The old name implied "pause," but the method actually exits animation mode entirely (re-enables `matrixAutoUpdate`, resets draw ranges, optionally restores baseline visibility, hides controls). The rename makes the contract honest, and the two old methods collapse into one with a parameter (`restore_visibility=False` matches the old `clear_animation` semantic). **Breaking**: external callers of `stop_animation()` / `clear_animation()` must rename. No shim.
+
 ### Internal
 
 - Decompose `viewer.js` god-class into in-file controller classes (`ParametricTube`, `CameraController`, `ShadingDebugController`) plus shared ring/color helpers as free functions. Viewer now type-checked via JSDoc + `// @ts-check` (run `npx tsc --noEmit -p jsconfig.json`). No behavior change.
