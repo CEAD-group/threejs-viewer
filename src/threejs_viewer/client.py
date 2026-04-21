@@ -19,6 +19,11 @@ import numpy as np
 from websockets.sync.server import serve as sync_serve
 
 
+_ALLOWED_TONE_MAPPING_MODES = frozenset(
+    {"none", "linear", "reinhard", "cineon", "aces", "agx", "neutral"}
+)
+
+
 class _BlobHandler(BaseHTTPRequestHandler):
     """Serves binary blobs over HTTP for fast transfer to browser."""
 
@@ -52,6 +57,8 @@ class ViewerClient:
         open_browser: bool = True,
         tone_mapping_exposure: Optional[float] = None,
         environment_intensity: Optional[float] = None,
+        ambient_intensity: Optional[float] = None,
+        tone_mapping: Optional[str] = None,
     ):
         self.host = host
         self.port = port
@@ -62,6 +69,19 @@ class ViewerClient:
         # and wins over localStorage in the browser.
         self.tone_mapping_exposure = tone_mapping_exposure
         self.environment_intensity = environment_intensity
+        self.ambient_intensity = ambient_intensity
+        # Validate tone_mapping (case-insensitive, stored lowercase).  Matches
+        # the seven Three.js modes exposed in the viewer's lighting panel.
+        if tone_mapping is not None:
+            normalized = tone_mapping.lower()
+            if normalized not in _ALLOWED_TONE_MAPPING_MODES:
+                allowed = ", ".join(sorted(_ALLOWED_TONE_MAPPING_MODES))
+                raise ValueError(
+                    f"tone_mapping must be one of: {allowed} (got {tone_mapping!r})"
+                )
+            self.tone_mapping = normalized
+        else:
+            self.tone_mapping = None
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -138,16 +158,21 @@ class ViewerClient:
     def viewer_url(self) -> str:
         """Full file:// URL to the viewer.
 
-        Always includes `ws_port`. Appends `tone_mapping_exposure` and/or
-        `environment_intensity` query params when the caller passed explicit
+        Always includes `ws_port`. Appends `tone_mapping`,
+        `tone_mapping_exposure`, `environment_intensity`, and/or
+        `ambient_intensity` query params when the caller passed explicit
         lighting overrides — those act as authoritative defaults in the
         browser (they win over the panel's localStorage on reload).
         """
         url = self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
+        if self.tone_mapping is not None:
+            url += f"&tone_mapping={self.tone_mapping}"
         if self.tone_mapping_exposure is not None:
             url += f"&tone_mapping_exposure={self.tone_mapping_exposure}"
         if self.environment_intensity is not None:
             url += f"&environment_intensity={self.environment_intensity}"
+        if self.ambient_intensity is not None:
+            url += f"&ambient_intensity={self.ambient_intensity}"
         return url
 
     def _run_server(self):

@@ -57,6 +57,20 @@
 <div class="tjsv-lighting-panel">
     <h3>Lighting <button class="tjsv-lighting-close" title="Close (E)">&times;</button></h3>
     <div class="lighting-section">
+        <label>Tone mapping</label>
+        <div class="lighting-select-row">
+            <select class="tjsv-lighting-tone-mapping">
+                <option value="none">None</option>
+                <option value="linear">Linear</option>
+                <option value="reinhard">Reinhard</option>
+                <option value="cineon">Cineon</option>
+                <option value="aces" selected>ACES Filmic</option>
+                <option value="agx">AgX</option>
+                <option value="neutral">Neutral</option>
+            </select>
+        </div>
+    </div>
+    <div class="lighting-section">
         <label>Tone mapping exposure</label>
         <div class="lighting-slider-row">
             <input type="range" class="tjsv-lighting-exposure" min="0" max="3" step="0.05" value="1">
@@ -68,6 +82,13 @@
         <div class="lighting-slider-row">
             <input type="range" class="tjsv-lighting-env" min="0" max="4" step="0.05" value="2">
             <span class="lighting-value tjsv-lighting-env-value">2.00</span>
+        </div>
+    </div>
+    <div class="lighting-section">
+        <label>Ambient intensity</label>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-ambient" min="0" max="3" step="0.05" value="1.5">
+            <span class="lighting-value tjsv-lighting-ambient-value">1.50</span>
         </div>
     </div>
     <div class="lighting-actions">

@@ -242,27 +242,60 @@ function makeChannelApply(viewer) {
     };
 }
 
-// Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0.
+// Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
 const DEFAULT_TONE_MAPPING_EXPOSURE = 1.0;
 const DEFAULT_ENVIRONMENT_INTENSITY = 2.0;
+const DEFAULT_AMBIENT_INTENSITY = 1.5;
+const DEFAULT_TONE_MAPPING = 'aces';
 const LS_KEY_TONE_MAPPING_EXPOSURE = 'tjsv.toneMappingExposure';
 const LS_KEY_ENVIRONMENT_INTENSITY = 'tjsv.environmentIntensity';
+const LS_KEY_AMBIENT_INTENSITY = 'tjsv.ambientIntensity';
+const LS_KEY_TONE_MAPPING = 'tjsv.toneMapping';
+
+// Tone-mapping mode name -> THREE.* constant. Resolved lazily so THREE only
+// needs to be loaded when the viewer actually instantiates.
+/** @returns {Record<string, number>} */
+function toneMappingModes() {
+    return {
+        none: THREE.NoToneMapping,
+        linear: THREE.LinearToneMapping,
+        reinhard: THREE.ReinhardToneMapping,
+        cineon: THREE.CineonToneMapping,
+        aces: THREE.ACESFilmicToneMapping,
+        agx: THREE.AgXToneMapping,
+        neutral: THREE.NeutralToneMapping,
+    };
+}
+const TONE_MAPPING_MODE_NAMES = ['none', 'linear', 'reinhard', 'cineon', 'aces', 'agx', 'neutral'];
 
 /**
  * Resolve initial lighting values with precedence:
- *   URL param (`tone_mapping_exposure`, `environment_intensity`)
- *   > options (`toneMappingExposure`, `environmentIntensity`)
- *   > localStorage (`tjsv.toneMappingExposure`, `tjsv.environmentIntensity`)
+ *   URL param (`tone_mapping`, `tone_mapping_exposure`, `environment_intensity`, `ambient_intensity`)
+ *   > options (`toneMapping`, `toneMappingExposure`, `environmentIntensity`, `ambientIntensity`)
+ *   > localStorage (`tjsv.toneMapping`, `tjsv.toneMappingExposure`, `tjsv.environmentIntensity`, `tjsv.ambientIntensity`)
  *   > hard defaults.
  *
- * The returned object reports whether the effective value was *pinned* by the
- * URL/options layer — the panel's Reset button restores to that effective
- * initial value (not to localStorage), so URL-pinned values stick across
- * reloads even if the user has tweaked the panel on a previous visit.
+ * The returned object reports whether each effective value was *pinned* by
+ * the URL/options layer — the panel's Reset button restores to that
+ * effective initial value (not to localStorage), so URL-pinned values stick
+ * across reloads even if the user has tweaked the panel on a previous visit.
+ *
+ * Invalid tone-mapping strings (not one of the seven known modes) and
+ * non-finite numeric values silently fall through to the next level — we
+ * never throw in the browser here; Python already validates its kwargs.
  *
  * @param {Object} options
  * @param {URLSearchParams} urlParams
- * @returns {{exposure: number, envIntensity: number, exposurePinned: boolean, envIntensityPinned: boolean}}
+ * @returns {{
+ *     exposure: number,
+ *     envIntensity: number,
+ *     ambientIntensity: number,
+ *     toneMapping: string,
+ *     exposurePinned: boolean,
+ *     envIntensityPinned: boolean,
+ *     ambientIntensityPinned: boolean,
+ *     toneMappingPinned: boolean,
+ * }}
  */
 function resolveLightingDefaults(options, urlParams) {
     /** @type {(raw: (string|null|number|undefined)) => (number|null)} */
@@ -271,15 +304,29 @@ function resolveLightingDefaults(options, urlParams) {
         const n = typeof raw === 'number' ? raw : parseFloat(raw);
         return Number.isFinite(n) ? n : null;
     };
+    /** @type {(raw: (string|null|undefined)) => (string|null)} */
+    const parseToneMapping = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const s = String(raw).toLowerCase();
+        return TONE_MAPPING_MODE_NAMES.includes(s) ? s : null;
+    };
     const urlExp = parseFinite(urlParams.get('tone_mapping_exposure'));
     const urlEnv = parseFinite(urlParams.get('environment_intensity'));
+    const urlAmb = parseFinite(urlParams.get('ambient_intensity'));
+    const urlTm = parseToneMapping(urlParams.get('tone_mapping'));
     const optExp = parseFinite(options.toneMappingExposure);
     const optEnv = parseFinite(options.environmentIntensity);
+    const optAmb = parseFinite(options.ambientIntensity);
+    const optTm = parseToneMapping(options.toneMapping);
     let lsExp = null;
     let lsEnv = null;
+    let lsAmb = null;
+    let lsTm = null;
     try {
         lsExp = parseFinite(localStorage.getItem(LS_KEY_TONE_MAPPING_EXPOSURE));
         lsEnv = parseFinite(localStorage.getItem(LS_KEY_ENVIRONMENT_INTENSITY));
+        lsAmb = parseFinite(localStorage.getItem(LS_KEY_AMBIENT_INTENSITY));
+        lsTm = parseToneMapping(localStorage.getItem(LS_KEY_TONE_MAPPING));
     } catch (e) { /* ignore storage errors */ }
 
     const exposure = urlExp != null ? urlExp
@@ -290,11 +337,23 @@ function resolveLightingDefaults(options, urlParams) {
         : optEnv != null ? optEnv
         : lsEnv != null ? lsEnv
         : DEFAULT_ENVIRONMENT_INTENSITY;
+    const ambientIntensity = urlAmb != null ? urlAmb
+        : optAmb != null ? optAmb
+        : lsAmb != null ? lsAmb
+        : DEFAULT_AMBIENT_INTENSITY;
+    const toneMapping = urlTm != null ? urlTm
+        : optTm != null ? optTm
+        : lsTm != null ? lsTm
+        : DEFAULT_TONE_MAPPING;
     return {
         exposure,
         envIntensity,
+        ambientIntensity,
+        toneMapping,
         exposurePinned: urlExp != null || optExp != null,
         envIntensityPinned: urlEnv != null || optEnv != null,
+        ambientIntensityPinned: urlAmb != null || optAmb != null,
+        toneMappingPinned: urlTm != null || optTm != null,
     };
 }
 
@@ -2168,6 +2227,8 @@ export class ThreeJSViewer {
      * @param {Object}  [options.cubemapData]  - {px,nx,py,ny,pz,nz} base64 JPEG strings
      * @param {number}  [options.toneMappingExposure] - Override renderer tone-mapping exposure (default 1.0)
      * @param {number}  [options.environmentIntensity] - Override scene environment intensity (default 2.0)
+     * @param {number}  [options.ambientIntensity] - Override ambient-light intensity (default 1.5)
+     * @param {string}  [options.toneMapping] - Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
      */
     constructor(container, options = {}) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
@@ -2316,6 +2377,9 @@ export class ThreeJSViewer {
         this._lightingExposureValue = q('.tjsv-lighting-exposure-value');
         this._lightingEnvSlider = q('.tjsv-lighting-env');
         this._lightingEnvValue = q('.tjsv-lighting-env-value');
+        this._lightingAmbientSlider = q('.tjsv-lighting-ambient');
+        this._lightingAmbientValue = q('.tjsv-lighting-ambient-value');
+        this._lightingToneMappingSelect = q('.tjsv-lighting-tone-mapping');
         this._lightingResetBtn = q('.tjsv-lighting-reset');
         this._lightingCloseBtn = q('.tjsv-lighting-close');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
@@ -2372,7 +2436,9 @@ export class ThreeJSViewer {
         this._renderer = new THREE.WebGLRenderer({ antialias: true });
         this._renderer.setSize(w, h);
         this._renderer.setPixelRatio(window.devicePixelRatio);
-        this._renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this._renderer.toneMapping = /** @type {THREE.ToneMapping} */ (
+            toneMappingModes()[this._lightingDefaults.toneMapping]
+        );
         this._renderer.toneMappingExposure = this._lightingDefaults.exposure;
         this._renderer.localClippingEnabled = true;
         this.el.appendChild(this._renderer.domElement);
@@ -2520,9 +2586,9 @@ export class ThreeJSViewer {
             this.frameObject(target);
         });
 
-        // Lighting
-        const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
-        this._scene.add(ambientLight);
+        // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
+        this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
+        this._scene.add(this._ambientLight);
 
         // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
@@ -2893,6 +2959,38 @@ export class ThreeJSViewer {
         this._scene.environmentIntensity = value;
     }
 
+    _applyAmbientIntensity(value) {
+        if (this._ambientLight) this._ambientLight.intensity = value;
+    }
+
+    /**
+     * Set the renderer tone-mapping mode and flush every material's shader.
+     *
+     * Three.js bakes `renderer.toneMapping` into each material's shader at
+     * compile time, so changing the renderer value alone has no visible
+     * effect on already-compiled materials. Setting `material.needsUpdate =
+     * true` marks the program for recompilation on the next draw, which is
+     * the documented invalidation path in three.js 0.183.
+     *
+     * @param {string} mode - one of the keys in toneMappingModes().
+     */
+    _applyToneMapping(mode) {
+        const modes = toneMappingModes();
+        if (!(mode in modes)) return;
+        this._renderer.toneMapping = /** @type {THREE.ToneMapping} */ (modes[mode]);
+        // Flush shaders on every material currently in the scene so they
+        // recompile against the new tone-mapping constant.
+        this._scene.traverse((obj) => {
+            const mat = /** @type {any} */ (obj).material;
+            if (!mat) return;
+            if (Array.isArray(mat)) {
+                for (const m of mat) { if (m) m.needsUpdate = true; }
+            } else {
+                mat.needsUpdate = true;
+            }
+        });
+    }
+
     _writeLightingLocalStorage(key, value) {
         try { localStorage.setItem(key, String(value)); } catch (e) { /* ignore quota */ }
     }
@@ -2902,25 +3000,41 @@ export class ThreeJSViewer {
         // Clear localStorage so next reload (without URL params) picks up hard defaults.
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING_EXPOSURE); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_ENVIRONMENT_INTENSITY); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem(LS_KEY_AMBIENT_INTENSITY); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem(LS_KEY_TONE_MAPPING); } catch (e) { /* ignore */ }
+        this._applyToneMapping(d.toneMapping);
         this._applyToneMappingExposure(d.exposure);
         this._applyEnvironmentIntensity(d.envIntensity);
+        this._applyAmbientIntensity(d.ambientIntensity);
+        this._lightingToneMappingSelect.value = d.toneMapping;
         this._lightingExposureSlider.value = String(d.exposure);
         this._lightingExposureValue.textContent = d.exposure.toFixed(2);
         this._lightingEnvSlider.value = String(d.envIntensity);
         this._lightingEnvValue.textContent = d.envIntensity.toFixed(2);
+        this._lightingAmbientSlider.value = String(d.ambientIntensity);
+        this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
     }
 
     _initLightingPanelUI() {
         const d = this._lightingDefaults;
         // Seed sliders/readouts with the effective initial values.
+        this._lightingToneMappingSelect.value = d.toneMapping;
         this._lightingExposureSlider.value = String(d.exposure);
         this._lightingExposureValue.textContent = d.exposure.toFixed(2);
         this._lightingEnvSlider.value = String(d.envIntensity);
         this._lightingEnvValue.textContent = d.envIntensity.toFixed(2);
+        this._lightingAmbientSlider.value = String(d.ambientIntensity);
+        this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
         this._btnLighting.addEventListener('click', () => this._toggleLightingPanel());
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
 
+        this._lightingToneMappingSelect.addEventListener('change', () => {
+            const mode = this._lightingToneMappingSelect.value;
+            if (!TONE_MAPPING_MODE_NAMES.includes(mode)) return;
+            this._applyToneMapping(mode);
+            this._writeLightingLocalStorage(LS_KEY_TONE_MAPPING, mode);
+        });
         this._lightingExposureSlider.addEventListener('input', () => {
             const v = parseFloat(this._lightingExposureSlider.value);
             if (!Number.isFinite(v)) return;
@@ -2934,6 +3048,13 @@ export class ThreeJSViewer {
             this._applyEnvironmentIntensity(v);
             this._lightingEnvValue.textContent = v.toFixed(2);
             this._writeLightingLocalStorage(LS_KEY_ENVIRONMENT_INTENSITY, v);
+        });
+        this._lightingAmbientSlider.addEventListener('input', () => {
+            const v = parseFloat(this._lightingAmbientSlider.value);
+            if (!Number.isFinite(v)) return;
+            this._applyAmbientIntensity(v);
+            this._lightingAmbientValue.textContent = v.toFixed(2);
+            this._writeLightingLocalStorage(LS_KEY_AMBIENT_INTENSITY, v);
         });
         this._lightingResetBtn.addEventListener('click', () => this._resetLightingPanel());
     }
