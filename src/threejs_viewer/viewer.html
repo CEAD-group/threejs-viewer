@@ -3530,7 +3530,9 @@ class ThreeJSViewer {
         this._renderer = new THREE.WebGLRenderer({ antialias: true });
         this._renderer.setSize(w, h);
         this._renderer.setPixelRatio(window.devicePixelRatio);
-        this._renderer.toneMapping = toneMappingModes()[this._lightingDefaults.toneMapping];
+        this._renderer.toneMapping = /** @type {THREE.ToneMapping} */ (
+            toneMappingModes()[this._lightingDefaults.toneMapping]
+        );
         this._renderer.toneMappingExposure = this._lightingDefaults.exposure;
         this._renderer.localClippingEnabled = true;
         this.el.appendChild(this._renderer.domElement);
@@ -4069,7 +4071,7 @@ class ThreeJSViewer {
     _applyToneMapping(mode) {
         const modes = toneMappingModes();
         if (!(mode in modes)) return;
-        this._renderer.toneMapping = modes[mode];
+        this._renderer.toneMapping = /** @type {THREE.ToneMapping} */ (modes[mode]);
         // Flush shaders on every material currently in the scene so they
         // recompile against the new tone-mapping constant.
         this._scene.traverse((obj) => {
