@@ -910,6 +910,70 @@ const CLIP_AXIS_NORMALS = {
 };
 
 
+// ========== Typedefs ==========
+//
+// These describe recurring shapes used across viewer.js. They are intentionally
+// loose — WebSocket payloads come in as `unknown` and are validated at the call
+// site — but they document the expected fields well enough for editors to catch
+// typos and wrong property accesses.
+
+/**
+ * @typedef {Object} ThreeJSViewerOptions
+ * @property {string} [wsUrl]          WebSocket URL override (defaults to ws://host:port)
+ * @property {number} [wsPort]         WebSocket port (default 5666)
+ * @property {string} [htmlTemplate]   HTML template string for UI controls (required in practice)
+ * @property {Object<string, string>} [cubemapData]  Map of face name -> base64 JPEG
+ * @property {number} [exposure]       Tone-mapping exposure (default 1.0)
+ * @property {string} [toneMapping]    Tone-mapping name ("None", "Linear", "ACESFilmic", ...)
+ * @property {number} [ambientLight]   Ambient light intensity
+ * @property {boolean} [autoConnect]   Auto-connect on construction (default true)
+ */
+
+/**
+ * A binary animation channel once it has been materialised into a TypedArray
+ * view on the main thread. `refs` is a lazily-populated parallel array of the
+ * Three.js objects looked up by `ids`. `_objGen` / `_mixerGen` are cached
+ * generation counters used by the appliers to detect when the scene graph
+ * changed and refs need re-resolution.
+ *
+ * @typedef {Object} BinaryChannel
+ * @property {ArrayLike<number>} data                Flat typed array of length nFrames * ids.length * stride
+ * @property {string[]} ids                          Object ids addressed by this channel
+ * @property {number} stride                         Elements per (frame, object) tuple
+ * @property {Array<any>|null} refs                  Cached lookups for `ids` (null until first refresh)
+ * @property {number[]|null} [colormap]              Optional palette for indexed uint8 channels
+ * @property {'linear'|'hold'} interpolation         Per-channel interpolation mode
+ * @property {number} [_objGen]                      Cached viewer._objGeneration when refs were last resolved
+ * @property {number} [_mixerGen]                    Cached viewer._mixerGeneration (clip_times only)
+ */
+
+/**
+ * Minimal shape of a JSON animation frame. Fields beyond `time` are optional
+ * and only present when the producer emitted that channel; binary channels on
+ * the enclosing Animation supersede same-named frame fields.
+ *
+ * @typedef {Object} AnimationFrame
+ * @property {number} time
+ * @property {Record<string, number[]>} [transforms]
+ * @property {Record<string, number>}   [colors]
+ * @property {Record<string, boolean>}  [visibility]
+ * @property {Record<string, number>}   [opacity]
+ * @property {Record<string, number>}   [clip_times]
+ * @property {Record<string, number>}   [draw_ranges]
+ */
+
+/**
+ * Animation payload (either JSON-frame or binary-channel backed) received from
+ * Python. Frames and channels may coexist.
+ *
+ * @typedef {Object} AnimationData
+ * @property {number} duration
+ * @property {AnimationFrame[]} [frames]
+ * @property {Record<string, BinaryChannel>} [channels]
+ * @property {number} [generation]
+ */
+
+
 // Refresh cached refs array when the object/mixer map has changed.
 // Called at most once per frame per channel (guarded by generation check).
 /**
@@ -1005,11 +1069,16 @@ function sanitizeInterpolation(value, fallback) {
 // Channel apply functions — keyed by channel name. Signature is
 // (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
 // is null or t <= 0, all channels take the step path (current keyframe only).
+// TODO(types): `viewer` is ThreeJSViewer but its instance fields aren't all
+// declared up-front (many are attached inside methods), so a strict
+// ThreeJSViewer annotation surfaces noisy "property X does not exist" errors.
+// Leaving `any` until we either declare all fields in the constructor or
+// introduce a dedicated interface.
 /** @param {any} viewer */
 function makeChannelApply(viewer) {
     return {
         /**
-         * @param {any} ch
+         * @param {BinaryChannel} ch
          * @param {Array<any>} refs
          * @param {number} base
          * @param {number | null} baseNext
@@ -1043,7 +1112,7 @@ function makeChannelApply(viewer) {
         },
 
         /**
-         * @param {any} ch
+         * @param {BinaryChannel} ch
          * @param {Array<any>} refs
          * @param {number} base
          * @param {number | null} baseNext
@@ -1079,7 +1148,7 @@ function makeChannelApply(viewer) {
         },
 
         /**
-         * @param {any} ch
+         * @param {BinaryChannel} ch
          * @param {Array<any>} refs
          * @param {number} base
          */
@@ -1100,7 +1169,7 @@ function makeChannelApply(viewer) {
         },
 
         /**
-         * @param {any} ch
+         * @param {BinaryChannel} ch
          * @param {Array<any>} refs
          * @param {number} base
          * @param {number | null} baseNext
@@ -1133,7 +1202,7 @@ function makeChannelApply(viewer) {
         },
 
         /**
-         * @param {any} ch
+         * @param {BinaryChannel} ch
          * @param {Array<any>} refs
          * @param {number} base
          * @param {number | null} baseNext
@@ -1158,7 +1227,7 @@ function makeChannelApply(viewer) {
         },
 
         /**
-         * @param {any} ch
+         * @param {BinaryChannel} ch
          * @param {Array<any>} refs
          * @param {number} base
          * @param {number | null} baseNext
@@ -2810,20 +2879,20 @@ class ParametricTube {
 // Back-compat free-function shims — these keep existing call sites simple
 // while the ParametricTube class is the source of truth.
 /**
- * @param {any} obj
+ * @param {THREE.Object3D} obj
  * @param {number} value
  */
 function applyParametricTubeDrawRange(obj, value) {
     obj.userData.parametricTube.setDrawRange(value);
 }
 /**
- * @param {any} mesh
+ * @param {THREE.Mesh} mesh
  * @param {any} msg
  */
 function applyWorkerGeometry(mesh, msg) {
     mesh.userData.parametricTube.applyWorkerGeometry(msg);
 }
-/** @param {any} obj */
+/** @param {THREE.Object3D} obj */
 function restoreFrontierRing(obj) {
     const t = obj.userData.parametricTube;
     if (t) t.restoreFrontierRing();
@@ -2834,6 +2903,7 @@ function restoreFrontierRing(obj) {
  * frame-to-bbox). Camera objects themselves remain on the viewer.
  */
 class CameraController {
+    // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
     constructor(viewer) { this.v = viewer; }
 
@@ -2972,6 +3042,7 @@ class CameraController {
  * Holds cached debug materials + per-mesh helpers.
  */
 class ShadingDebugController {
+    // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
     constructor(viewer) {
         this.v = viewer;
@@ -3047,7 +3118,7 @@ class ShadingDebugController {
         const canvas = document.createElement('canvas');
         canvas.width = size;
         canvas.height = size;
-        const ctx = /** @type {any} */ (canvas.getContext('2d'));
+        const ctx = /** @type {CanvasRenderingContext2D} */ (canvas.getContext('2d'));
         for (let y = 0; y < cells; y++) {
             for (let x = 0; x < cells; x++) {
                 const dark = (x + y) % 2 === 0;
@@ -3187,7 +3258,7 @@ class ShadingDebugController {
     /** @param {any} obj */
     cameraRelativeNormalSize(obj) {
         // Target ~30 pixels on screen regardless of zoom.
-        const cam = /** @type {any} */ (this.v._camera);
+        const cam = /** @type {THREE.PerspectiveCamera & THREE.OrthographicCamera} */ (this.v._camera);
         const canvasH = Math.max(1, this.v._renderer.domElement.clientHeight);
         const targetPx = 30;
         if (!obj.geometry) return 0.1;
@@ -3212,7 +3283,7 @@ class ShadingDebugController {
  * Each child segment knows its (start, end) position in the overall toolpath.
  * Segments fully before the current position get 1.0, the active segment gets
  * a proportional fraction, and segments after get 0.0.
- * @param {any} grp
+ * @param {THREE.Object3D} grp
  * @param {number} value
  * @param {Map<string, any>} objects
  */
@@ -3241,12 +3312,7 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
 class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
-     * @param {Object} [options]
-     * @param {string}  [options.wsUrl]       - Full WebSocket URL (e.g., "ws://localhost:5666")
-     * @param {number}  [options.wsPort]      - Alternative: just specify port
-     * @param {boolean} [options.autoConnect=true] - Whether to connect WebSocket immediately
-     * @param {string}  [options.htmlTemplate] - HTML template string for UI controls
-     * @param {Object}  [options.cubemapData]  - {px,nx,py,ny,pz,nz} base64 JPEG strings
+     * @param {ThreeJSViewerOptions} [options]
      */
     constructor(container, options = {}) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
@@ -3624,8 +3690,7 @@ class ThreeJSViewer {
     }
 
     _loadCubemap() {
-        /** @type {Record<string, string> | undefined} */
-        const cubemapData = /** @type {any} */ (this._options.cubemapData);
+        const cubemapData = this._options.cubemapData;
         if (!cubemapData) {
             console.warn('ThreeJSViewer: no cubemapData provided, skipping environment map');
             return;
@@ -4041,6 +4106,10 @@ class ThreeJSViewer {
         }
     }
 
+    // TODO(types): objData is a highly polymorphic add_object payload
+    // (primitive | model | polyline | mesh | tube | group); tightening it
+    // requires splitting the dispatch into per-kind helpers or a tagged-union
+    // typedef. Out of scope for the drive-by type tighten.
     /** @param {string} id @param {any} objData @param {string} [parentId] */
     async _addObject(id, objData, parentId) {
         let obj;
@@ -4302,8 +4371,7 @@ class ThreeJSViewer {
 
         if (this._animation.channels) {
             for (const [name, chRaw] of Object.entries(this._animation.channels)) {
-                /** @type {any} */
-                const ch = chRaw;
+                const ch = /** @type {BinaryChannel} */ (chRaw);
                 ch.refs = ch.ids.map(/** @param {string} id */ id => {
                     const obj = this._objects.get(id);
                     if (obj && name === 'transforms') obj.matrixAutoUpdate = false;
@@ -5058,7 +5126,7 @@ class ThreeJSViewer {
 
             this._ws.onerror = () => {};
 
-            this._ws.onmessage = async (event) => {
+            this._ws.onmessage = /** @param {MessageEvent<string>} event */ async (event) => {
                 const tParse = performance.now();
                 const data = JSON.parse(event.data);
                 const parseMs = performance.now() - tParse;
@@ -5974,7 +6042,7 @@ class ThreeJSViewer {
         // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
         // hide 900ms after the pivot was set (but only once the user stops dragging).
         if (this._pivotMarker && this._pivotMarker.visible) {
-            const cam = /** @type {any} */ (this._camera);
+            const cam = /** @type {THREE.PerspectiveCamera & THREE.OrthographicCamera} */ (this._camera);
             const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
             let worldPerPixel;
             if (cam.isPerspectiveCamera) {
