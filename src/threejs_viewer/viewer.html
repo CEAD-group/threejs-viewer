@@ -1292,16 +1292,19 @@ function toneMappingModes() {
 const TONE_MAPPING_MODE_NAMES = ['none', 'linear', 'reinhard', 'cineon', 'aces', 'agx', 'neutral'];
 
 /**
- * Resolve initial lighting values with precedence:
- *   URL param (`tone_mapping`, `tone_mapping_exposure`, `environment_intensity`, `ambient_intensity`)
- *   > options (`toneMapping`, `toneMappingExposure`, `environmentIntensity`, `ambientIntensity`)
- *   > localStorage (`tjsv.toneMapping`, `tjsv.toneMappingExposure`, `tjsv.environmentIntensity`, `tjsv.ambientIntensity`)
- *   > hard defaults.
+ * Resolve lighting values with two layered views:
  *
- * The returned object reports whether each effective value was *pinned* by
- * the URL/options layer — the panel's Reset button restores to that
- * effective initial value (not to localStorage), so URL-pinned values stick
- * across reloads even if the user has tweaked the panel on a previous visit.
+ *   `reset`  — the baseline the panel's Reset button restores to. Uses
+ *              URL param > options > hard defaults (localStorage is ignored
+ *              here, because "Reset" means "go back to the developer default
+ *              for this page load", not "re-apply the last session's tweak").
+ *   top-level — the effective initial values applied at startup and used
+ *              to seed the panel UI. Uses URL param > options > localStorage
+ *              > hard defaults.
+ *
+ * URL-pinned / option-pinned values end up identical in both views, so
+ * reloading a URL with `tone_mapping_exposure=2.3` sticks across reloads
+ * even if the user previously tweaked the panel.
  *
  * Invalid tone-mapping strings (not one of the seven known modes) and
  * non-finite numeric values silently fall through to the next level — we
@@ -1314,10 +1317,12 @@ const TONE_MAPPING_MODE_NAMES = ['none', 'linear', 'reinhard', 'cineon', 'aces',
  *     envIntensity: number,
  *     ambientIntensity: number,
  *     toneMapping: string,
- *     exposurePinned: boolean,
- *     envIntensityPinned: boolean,
- *     ambientIntensityPinned: boolean,
- *     toneMappingPinned: boolean,
+ *     reset: {
+ *         exposure: number,
+ *         envIntensity: number,
+ *         ambientIntensity: number,
+ *         toneMapping: string,
+ *     },
  * }}
  */
 function resolveLightingDefaults(options, urlParams) {
@@ -1352,6 +1357,22 @@ function resolveLightingDefaults(options, urlParams) {
         lsTm = parseToneMapping(localStorage.getItem(LS_KEY_TONE_MAPPING));
     } catch (e) { /* ignore storage errors */ }
 
+    // Reset baseline: URL > options > hard defaults (no localStorage).
+    const resetExposure = urlExp != null ? urlExp
+        : optExp != null ? optExp
+        : DEFAULT_TONE_MAPPING_EXPOSURE;
+    const resetEnvIntensity = urlEnv != null ? urlEnv
+        : optEnv != null ? optEnv
+        : DEFAULT_ENVIRONMENT_INTENSITY;
+    const resetAmbientIntensity = urlAmb != null ? urlAmb
+        : optAmb != null ? optAmb
+        : DEFAULT_AMBIENT_INTENSITY;
+    const resetToneMapping = urlTm != null ? urlTm
+        : optTm != null ? optTm
+        : DEFAULT_TONE_MAPPING;
+
+    // Effective initial: localStorage overlays the reset baseline, but only
+    // when URL/options haven't already pinned the value.
     const exposure = urlExp != null ? urlExp
         : optExp != null ? optExp
         : lsExp != null ? lsExp
@@ -1373,10 +1394,12 @@ function resolveLightingDefaults(options, urlParams) {
         envIntensity,
         ambientIntensity,
         toneMapping,
-        exposurePinned: urlExp != null || optExp != null,
-        envIntensityPinned: urlEnv != null || optEnv != null,
-        ambientIntensityPinned: urlAmb != null || optAmb != null,
-        toneMappingPinned: urlTm != null || optTm != null,
+        reset: {
+            exposure: resetExposure,
+            envIntensity: resetEnvIntensity,
+            ambientIntensity: resetAmbientIntensity,
+            toneMapping: resetToneMapping,
+        },
     };
 }
 
@@ -4090,8 +4113,12 @@ class ThreeJSViewer {
     }
 
     _resetLightingPanel() {
-        const d = this._lightingDefaults;
-        // Clear localStorage so next reload (without URL params) picks up hard defaults.
+        // Reset target: the pre-localStorage baseline (URL > options > hard
+        // defaults). Using _lightingDefaults directly would be a no-op when
+        // the page was seeded from localStorage, because localStorage already
+        // participated in that resolution — Reset is meant to *escape* the
+        // user's persisted tweaks, not re-apply them.
+        const d = this._lightingDefaults.reset;
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING_EXPOSURE); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_ENVIRONMENT_INTENSITY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_AMBIENT_INTENSITY); } catch (e) { /* ignore */ }
