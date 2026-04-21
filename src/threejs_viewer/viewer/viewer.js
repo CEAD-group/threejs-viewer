@@ -242,6 +242,62 @@ function makeChannelApply(viewer) {
     };
 }
 
+// Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0.
+const DEFAULT_TONE_MAPPING_EXPOSURE = 1.0;
+const DEFAULT_ENVIRONMENT_INTENSITY = 2.0;
+const LS_KEY_TONE_MAPPING_EXPOSURE = 'tjsv.toneMappingExposure';
+const LS_KEY_ENVIRONMENT_INTENSITY = 'tjsv.environmentIntensity';
+
+/**
+ * Resolve initial lighting values with precedence:
+ *   URL param (`tone_mapping_exposure`, `environment_intensity`)
+ *   > options (`toneMappingExposure`, `environmentIntensity`)
+ *   > localStorage (`tjsv.toneMappingExposure`, `tjsv.environmentIntensity`)
+ *   > hard defaults.
+ *
+ * The returned object reports whether the effective value was *pinned* by the
+ * URL/options layer — the panel's Reset button restores to that effective
+ * initial value (not to localStorage), so URL-pinned values stick across
+ * reloads even if the user has tweaked the panel on a previous visit.
+ *
+ * @param {Object} options
+ * @param {URLSearchParams} urlParams
+ * @returns {{exposure: number, envIntensity: number, exposurePinned: boolean, envIntensityPinned: boolean}}
+ */
+function resolveLightingDefaults(options, urlParams) {
+    /** @type {(raw: (string|null|number|undefined)) => (number|null)} */
+    const parseFinite = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const n = typeof raw === 'number' ? raw : parseFloat(raw);
+        return Number.isFinite(n) ? n : null;
+    };
+    const urlExp = parseFinite(urlParams.get('tone_mapping_exposure'));
+    const urlEnv = parseFinite(urlParams.get('environment_intensity'));
+    const optExp = parseFinite(options.toneMappingExposure);
+    const optEnv = parseFinite(options.environmentIntensity);
+    let lsExp = null;
+    let lsEnv = null;
+    try {
+        lsExp = parseFinite(localStorage.getItem(LS_KEY_TONE_MAPPING_EXPOSURE));
+        lsEnv = parseFinite(localStorage.getItem(LS_KEY_ENVIRONMENT_INTENSITY));
+    } catch (e) { /* ignore storage errors */ }
+
+    const exposure = urlExp != null ? urlExp
+        : optExp != null ? optExp
+        : lsExp != null ? lsExp
+        : DEFAULT_TONE_MAPPING_EXPOSURE;
+    const envIntensity = urlEnv != null ? urlEnv
+        : optEnv != null ? optEnv
+        : lsEnv != null ? lsEnv
+        : DEFAULT_ENVIRONMENT_INTENSITY;
+    return {
+        exposure,
+        envIntensity,
+        exposurePinned: urlExp != null || optExp != null,
+        envIntensityPinned: urlEnv != null || optEnv != null,
+    };
+}
+
 function applyOpacity(obj, opacity) {
     obj.traverse(child => {
         if (!child.material) return;
@@ -2110,6 +2166,8 @@ export class ThreeJSViewer {
      * @param {boolean} [options.autoConnect=true] - Whether to connect WebSocket immediately
      * @param {string}  [options.htmlTemplate] - HTML template string for UI controls
      * @param {Object}  [options.cubemapData]  - {px,nx,py,ny,pz,nz} base64 JPEG strings
+     * @param {number}  [options.toneMappingExposure] - Override renderer tone-mapping exposure (default 1.0)
+     * @param {number}  [options.environmentIntensity] - Override scene environment intensity (default 2.0)
      */
     constructor(container, options = {}) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
@@ -2146,6 +2204,11 @@ export class ThreeJSViewer {
             const port = options.wsPort || parseInt(urlParams.get('ws_port')) || 5666;
             this._wsUrl = `ws://localhost:${port}`;
         }
+
+        // Resolve lighting defaults. Precedence: URL param > options > localStorage > hard default.
+        // URL param is always authoritative (developer's explicit choice) — panel edits go to
+        // localStorage but don't override a URL-provided value on reload.
+        this._lightingDefaults = resolveLightingDefaults(options, urlParams);
 
         // State
         this._objects = new Map();
@@ -2246,7 +2309,15 @@ export class ThreeJSViewer {
         this._btnOrtho = q('.tjsv-btn-ortho');
         this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
         this._btnClip = q('.tjsv-btn-clip');
+        this._btnLighting = q('.tjsv-btn-lighting');
         this._clipPanelEl = q('.tjsv-clipping-panel');
+        this._lightingPanelEl = q('.tjsv-lighting-panel');
+        this._lightingExposureSlider = q('.tjsv-lighting-exposure');
+        this._lightingExposureValue = q('.tjsv-lighting-exposure-value');
+        this._lightingEnvSlider = q('.tjsv-lighting-env');
+        this._lightingEnvValue = q('.tjsv-lighting-env-value');
+        this._lightingResetBtn = q('.tjsv-lighting-reset');
+        this._lightingCloseBtn = q('.tjsv-lighting-close');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
         this._clipDistanceValue = q('.tjsv-clip-distance-value');
         this._clipThicknessSlider = q('.tjsv-clip-thickness');
@@ -2302,7 +2373,7 @@ export class ThreeJSViewer {
         this._renderer.setSize(w, h);
         this._renderer.setPixelRatio(window.devicePixelRatio);
         this._renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this._renderer.toneMappingExposure = 1.5;
+        this._renderer.toneMappingExposure = this._lightingDefaults.exposure;
         this._renderer.localClippingEnabled = true;
         this.el.appendChild(this._renderer.domElement);
 
@@ -2507,7 +2578,7 @@ export class ThreeJSViewer {
                     cubeTexture.needsUpdate = true;
                     const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
                     scene.environment = envMap;
-                    scene.environmentIntensity = 2.0;
+                    scene.environmentIntensity = this._lightingDefaults.envIntensity;
                     cubeTexture.dispose();
                     pmremGenerator.dispose();
                 }
@@ -2805,6 +2876,66 @@ export class ThreeJSViewer {
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
             btn.classList.remove('active');
         });
+    }
+
+    // ========== Lighting Panel ==========
+
+    _toggleLightingPanel() {
+        const visible = this._lightingPanelEl.classList.toggle('visible');
+        this._btnLighting.classList.toggle('active', visible);
+    }
+
+    _applyToneMappingExposure(value) {
+        this._renderer.toneMappingExposure = value;
+    }
+
+    _applyEnvironmentIntensity(value) {
+        this._scene.environmentIntensity = value;
+    }
+
+    _writeLightingLocalStorage(key, value) {
+        try { localStorage.setItem(key, String(value)); } catch (e) { /* ignore quota */ }
+    }
+
+    _resetLightingPanel() {
+        const d = this._lightingDefaults;
+        // Clear localStorage so next reload (without URL params) picks up hard defaults.
+        try { localStorage.removeItem(LS_KEY_TONE_MAPPING_EXPOSURE); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem(LS_KEY_ENVIRONMENT_INTENSITY); } catch (e) { /* ignore */ }
+        this._applyToneMappingExposure(d.exposure);
+        this._applyEnvironmentIntensity(d.envIntensity);
+        this._lightingExposureSlider.value = String(d.exposure);
+        this._lightingExposureValue.textContent = d.exposure.toFixed(2);
+        this._lightingEnvSlider.value = String(d.envIntensity);
+        this._lightingEnvValue.textContent = d.envIntensity.toFixed(2);
+    }
+
+    _initLightingPanelUI() {
+        const d = this._lightingDefaults;
+        // Seed sliders/readouts with the effective initial values.
+        this._lightingExposureSlider.value = String(d.exposure);
+        this._lightingExposureValue.textContent = d.exposure.toFixed(2);
+        this._lightingEnvSlider.value = String(d.envIntensity);
+        this._lightingEnvValue.textContent = d.envIntensity.toFixed(2);
+
+        this._btnLighting.addEventListener('click', () => this._toggleLightingPanel());
+        this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
+
+        this._lightingExposureSlider.addEventListener('input', () => {
+            const v = parseFloat(this._lightingExposureSlider.value);
+            if (!Number.isFinite(v)) return;
+            this._applyToneMappingExposure(v);
+            this._lightingExposureValue.textContent = v.toFixed(2);
+            this._writeLightingLocalStorage(LS_KEY_TONE_MAPPING_EXPOSURE, v);
+        });
+        this._lightingEnvSlider.addEventListener('input', () => {
+            const v = parseFloat(this._lightingEnvSlider.value);
+            if (!Number.isFinite(v)) return;
+            this._applyEnvironmentIntensity(v);
+            this._lightingEnvValue.textContent = v.toFixed(2);
+            this._writeLightingLocalStorage(LS_KEY_ENVIRONMENT_INTENSITY, v);
+        });
+        this._lightingResetBtn.addEventListener('click', () => this._resetLightingPanel());
     }
 
     // ========== Camera ==========
@@ -3598,6 +3729,9 @@ export class ThreeJSViewer {
         // Clip button
         this._btnClip.addEventListener('click', () => this._toggleClipPanel());
 
+        // Lighting panel
+        this._initLightingPanelUI();
+
         // Clip axis buttons
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
             btn.addEventListener('click', () => this._setClipAxis(btn.dataset.axis));
@@ -3708,6 +3842,10 @@ export class ThreeJSViewer {
             }
             if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey) {
                 this._toggleClipPanel();
+                return;
+            }
+            if (e.code === 'KeyE' && !e.ctrlKey && !e.metaKey) {
+                this._toggleLightingPanel();
                 return;
             }
             if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {

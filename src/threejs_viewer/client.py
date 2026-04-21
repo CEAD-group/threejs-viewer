@@ -50,10 +50,18 @@ class ViewerClient:
         host: str = "localhost",
         port: int = 5666,
         open_browser: bool = True,
+        tone_mapping_exposure: Optional[float] = None,
+        environment_intensity: Optional[float] = None,
     ):
         self.host = host
         self.port = port
         self.open_browser = open_browser
+        # Lighting overrides — forwarded to the viewer via query string on launch.
+        # `None` means "not specified" (let the viewer pick its default or
+        # localStorage value). An explicit float (including 0.0) is authoritative
+        # and wins over localStorage in the browser.
+        self.tone_mapping_exposure = tone_mapping_exposure
+        self.environment_intensity = environment_intensity
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -128,8 +136,19 @@ class ViewerClient:
 
     @property
     def viewer_url(self) -> str:
-        """Full file:// URL to the viewer, including ws_port query param."""
-        return self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
+        """Full file:// URL to the viewer.
+
+        Always includes `ws_port`. Appends `tone_mapping_exposure` and/or
+        `environment_intensity` query params when the caller passed explicit
+        lighting overrides — those act as authoritative defaults in the
+        browser (they win over the panel's localStorage on reload).
+        """
+        url = self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
+        if self.tone_mapping_exposure is not None:
+            url += f"&tone_mapping_exposure={self.tone_mapping_exposure}"
+        if self.environment_intensity is not None:
+            url += f"&environment_intensity={self.environment_intensity}"
+        return url
 
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
