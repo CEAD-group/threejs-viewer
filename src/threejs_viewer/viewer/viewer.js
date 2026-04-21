@@ -2110,6 +2110,16 @@ export class ThreeJSViewer {
      * @param {boolean} [options.autoConnect=true] - Whether to connect WebSocket immediately
      * @param {string}  [options.htmlTemplate] - HTML template string for UI controls
      * @param {Object}  [options.cubemapData]  - {px,nx,py,ny,pz,nz} base64 JPEG strings
+     *
+     * Embedding contract: before opening each WebSocket, `connect()` issues a
+     * `mode: 'no-cors'` HTTP GET to the same host:port as `wsUrl` to suppress
+     * the browser's "WebSocket connection failed" console warning while the
+     * server is down. Any HTTP response (including 426 Upgrade Required)
+     * counts as "server is up" — only a TCP-level failure aborts the attempt.
+     * The standard `websockets` Python library satisfies this for free as part
+     * of the WS upgrade handshake. If your WS host sits behind a proxy that
+     * drops non-upgrade HTTP, make it answer *something* on plain GET, or the
+     * browser will never attempt the WebSocket.
      */
     constructor(container, options = {}) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
@@ -3842,7 +3852,15 @@ export class ThreeJSViewer {
         const doConnect = async () => {
             if (this._destroyed) return;
 
-            // Probe first to avoid browser console warnings on failed WS attempts
+            // Probe HTTP on the WS host:port before opening the WebSocket: a
+            // failed `new WebSocket()` always logs `WebSocket connection to
+            // '...' failed` to devtools and there's no way to silence it, so
+            // we only attempt the upgrade once we know something is listening.
+            // `mode: 'no-cors'` makes any HTTP response (200/404/426/...) count
+            // as success — only a TCP-level failure throws and triggers retry.
+            // The Python `websockets` server answers plain HTTP for free as part
+            // of the upgrade handshake; embedders pointing at a different WS host
+            // must ensure that host (or its proxy) returns *something* on GET.
             try {
                 await fetch(probeUrl, { mode: 'no-cors', signal: AbortSignal.timeout(400) });
             } catch {
