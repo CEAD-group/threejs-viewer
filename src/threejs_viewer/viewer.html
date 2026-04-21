@@ -1432,8 +1432,18 @@ const N_CROSS_SECTION = 6;
 // Higher → more points kept (finer detail). Lower → more aggressive simplification.
 const LOD_EPSILON_DIVISOR = 2500;
 // Max original points that can be skipped between two kept points.
-// Prevents color banding on geometrically straight segments.
+// Safety valve for pathological inputs; augmented-space RDP below already
+// catches attribute variation on geometrically straight segments.
 const LOD_MAX_SKIP = 100;
+// Augmented-RDP weights: convert each attribute delta into "world-equivalent
+// units" so the single camera-scaled epsilon bounds geometric and attribute
+// error together. Widths/heights are already in world units; their weights
+// scale the boundary shift they produce (delta-width of 1 moves each wall by
+// ~0.5). Color channels are unitless (0..1) and get multiplied by the tube's
+// bounding radius × LOD_COLOR_WEIGHT_FRAC at RDP time.
+const LOD_WIDTH_WEIGHT = 0.5;
+const LOD_HEIGHT_WEIGHT = 0.5;
+const LOD_COLOR_WEIGHT_FRAC = 0.05;
 function sampleChamferedRect(out, width, height) {
     if (!Number.isFinite(width) || width < 0) {
         throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
@@ -1566,36 +1576,71 @@ function fillRGBBlock(colors, floatBase, count, r, g, b) {
     }
 }
 
-// ========== LOD: Distance-Weighted RDP ==========
+// ========== LOD: Augmented-Space RDP ==========
 //
-// The RDP algorithm runs in a Web Worker to avoid blocking the render loop.
-// The worker code is defined as a string and loaded via Blob URL.
-// A synchronous fallback (distanceWeightedRDP) is kept for initial LOD at
-// tube creation time, before the worker is ready.
+// RDP runs in a Web Worker to avoid blocking the render loop. Perpendicular
+// distance is computed in an augmented space (xyz + weighted width + weighted
+// height + weighted color channels) so attribute variation on a geometrically
+// straight segment is preserved. All weights are camera-independent scalars;
+// the camera-distance-scaled epsilon applies uniformly because attribute
+// wiggles are sub-pixel at the same rate as geometric wiggles when the tube
+// is far from the camera.
+//
+// The worker code is defined as a string and loaded via Blob URL. A
+// synchronous fallback (distanceWeightedRDP) is kept for initial LOD at tube
+// creation time, before the worker is ready.
 
 const _LOD_WORKER_CODE = `
 const LOD_EPSILON_DIVISOR = ${LOD_EPSILON_DIVISOR};
 const LOD_MAX_SKIP = ${LOD_MAX_SKIP};
+const LOD_WIDTH_WEIGHT = ${LOD_WIDTH_WEIGHT};
+const LOD_HEIGHT_WEIGHT = ${LOD_HEIGHT_WEIGHT};
+const LOD_COLOR_WEIGHT_FRAC = ${LOD_COLOR_WEIGHT_FRAC};
 const LOD_CHUNK_SIZE = 5000;
 const LOD_CHUNK_REUSE_RATIO = 1.5;
 const N_CS = ${N_CROSS_SECTION};
 const N_CAP_RINGS = 8;
 
-// ---- RDP helpers ----
+// ---- Augmented-space RDP helpers ----
+//
+// Projection-based perpendicular distance (works in any dimension; equivalent
+// to the 3D cross-product form when only xyz terms are present):
+//   |perp|^2 = |AP|^2 - (AP . AB)^2 / |AB|^2
+// Each extra dimension adds one term to |AP|^2, (AP.AB), and |AB|^2.
 
-function _perpDistSq(spine, iP, iA, iB) {
-    const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
-    const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
-    const apx = spine[iP * 3] - ax, apy = spine[iP * 3 + 1] - ay, apz = spine[iP * 3 + 2] - az;
-    const cx = apy * abz - apz * aby;
-    const cy = apz * abx - apx * abz;
-    const cz = apx * aby - apy * abx;
-    const abLenSq = abx * abx + aby * aby + abz * abz;
-    if (abLenSq < 1e-24) return apx * apx + apy * apy + apz * apz;
-    return (cx * cx + cy * cy + cz * cz) / abLenSq;
+function _augPerpDistSq(spine, widths, heights, ringColors, iP, iA, iB, wColor) {
+    const ax = spine[iA*3], ay = spine[iA*3+1], az = spine[iA*3+2];
+    const abx = spine[iB*3] - ax, aby = spine[iB*3+1] - ay, abz = spine[iB*3+2] - az;
+    const apx = spine[iP*3] - ax, apy = spine[iP*3+1] - ay, apz = spine[iP*3+2] - az;
+    let apSq = apx*apx + apy*apy + apz*apz;
+    let abSq = abx*abx + aby*aby + abz*abz;
+    let apDot = apx*abx + apy*aby + apz*abz;
+    if (widths) {
+        const a = widths[iA];
+        const apW = (widths[iP] - a) * LOD_WIDTH_WEIGHT;
+        const abW = (widths[iB] - a) * LOD_WIDTH_WEIGHT;
+        apSq += apW*apW; abSq += abW*abW; apDot += apW*abW;
+    }
+    if (heights) {
+        const a = heights[iA];
+        const apH = (heights[iP] - a) * LOD_HEIGHT_WEIGHT;
+        const abH = (heights[iB] - a) * LOD_HEIGHT_WEIGHT;
+        apSq += apH*apH; abSq += abH*abH; apDot += apH*abH;
+    }
+    if (ringColors && wColor > 0) {
+        for (let c = 0; c < 3; c++) {
+            const aC = ringColors[iA*3 + c];
+            const apC = (ringColors[iP*3 + c] - aC) * wColor;
+            const abC = (ringColors[iB*3 + c] - aC) * wColor;
+            apSq += apC*apC; abSq += abC*abC; apDot += apC*abC;
+        }
+    }
+    if (abSq < 1e-24) return apSq;
+    // Clamp: fp cancellation can drive this slightly negative on near-colinear points.
+    return Math.max(0, apSq - (apDot * apDot) / abSq);
 }
 
-function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
+function rdpChunk(spine, widths, heights, ringColors, wColor, epsSq, chunkStart, chunkEnd) {
     const keep = [chunkStart];
     if (chunkEnd > chunkStart) keep.push(chunkEnd);
     const stack = [[chunkStart, chunkEnd]];
@@ -1604,7 +1649,7 @@ function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
         if (end - start < 2) continue;
         let maxPerpSq = 0, maxIdx = start;
         for (let i = start + 1; i < end; i++) {
-            const dSq = _perpDistSq(spine, i, start, end);
+            const dSq = _augPerpDistSq(spine, widths, heights, ringColors, i, start, end, wColor);
             if (dSq > maxPerpSq) { maxPerpSq = dSq; maxIdx = i; }
         }
         if (maxPerpSq > epsSq[maxIdx]) {
@@ -1612,7 +1657,6 @@ function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
             stack.push([start, maxIdx]);
             stack.push([maxIdx, end]);
         } else if (end - start > LOD_MAX_SKIP) {
-            // Force midpoint split to preserve color resolution
             const mid = (start + end) >> 1;
             keep.push(mid);
             stack.push([start, mid]);
@@ -1622,7 +1666,6 @@ function rdpChunk(spine, epsSq, chunkStart, chunkEnd) {
     keep.sort((a, b) => a - b);
     return keep;
 }
-
 // ---- Cross-section (chamfered hex) ----
 
 function sampleChamferedRect(out, width, height) {
@@ -1880,15 +1923,18 @@ self.onmessage = function(e) {
             upVec: msg.upVec,
             nPoints: msg.nPoints,
             heightOffset: msg.heightOffset || 0,
+            boundingRadius: msg.boundingRadius || 0,
         });
         _rdpCache.delete(msg.tubeId);
         return;
     }
 
-    // 'updateColors': update cached ring colors
+    // 'updateColors': update cached ring colors. Invalidate the RDP chunk
+    // cache — chunk splits depend on color deltas under augmented-space RDP.
     if (msg.type === 'updateColors') {
         const tube = _tubes.get(msg.tubeId);
         if (tube) tube.ringColors = msg.ringColors;
+        _rdpCache.delete(msg.tubeId);
         return;
     }
 
@@ -1903,7 +1949,7 @@ self.onmessage = function(e) {
     const { tubeId, camX, camY, camZ } = msg;
     const tube = _tubes.get(tubeId);
     if (!tube) return;
-    const { spine, widths, heights, ringColors, upVec, nPoints, heightOffset } = tube;
+    const { spine, widths, heights, ringColors, upVec, nPoints, heightOffset, boundingRadius } = tube;
 
     if (nPoints <= 2) {
         self.postMessage({ tubeId, allReused: true, nReduced: nPoints });
@@ -1921,6 +1967,8 @@ self.onmessage = function(e) {
         const ep = d / LOD_EPSILON_DIVISOR;
         epsSq[i] = ep * ep;
     }
+    // Color weight: full per-channel swing (delta=1) costs this many world units.
+    const wColor = LOD_COLOR_WEIGHT_FRAC * boundingRadius;
 
     // Chunked RDP with caching
     const nChunks = Math.ceil(Math.max(1, (nPoints - 1) / LOD_CHUNK_SIZE));
@@ -1946,7 +1994,7 @@ self.onmessage = function(e) {
                 continue;
             }
         }
-        const kept = rdpChunk(spine, epsSq, cs, ce);
+        const kept = rdpChunk(spine, widths, heights, ringColors, wColor, epsSq, cs, ce);
         cached.chunkDists[ci] = dist;
         cached.chunkIndices[ci] = kept;
         totalKept += kept.length;
@@ -2018,21 +2066,43 @@ function _getLodWorker() {
 }
 
 // Synchronous fallback for initial LOD at tube creation (before worker is ready).
+// Mirrors the worker's augmented-space RDP so first-render matches subsequent
+// worker-produced LOD levels.
 const LOD_CHUNK_SIZE = 5000;
 
-function _perpDistSq(spine, iP, iA, iB) {
+function _augPerpDistSqSync(spine, widths, heights, ringColors, iP, iA, iB, wColor) {
     const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
     const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
     const apx = spine[iP * 3] - ax, apy = spine[iP * 3 + 1] - ay, apz = spine[iP * 3 + 2] - az;
-    const cx = apy * abz - apz * aby;
-    const cy = apz * abx - apx * abz;
-    const cz = apx * aby - apy * abx;
-    const abLenSq = abx * abx + aby * aby + abz * abz;
-    if (abLenSq < 1e-24) return apx * apx + apy * apy + apz * apz;
-    return (cx * cx + cy * cy + cz * cz) / abLenSq;
+    let apSq = apx * apx + apy * apy + apz * apz;
+    let abSq = abx * abx + aby * aby + abz * abz;
+    let apDot = apx * abx + apy * aby + apz * abz;
+    if (widths) {
+        const a = widths[iA];
+        const apW = (widths[iP] - a) * LOD_WIDTH_WEIGHT;
+        const abW = (widths[iB] - a) * LOD_WIDTH_WEIGHT;
+        apSq += apW * apW; abSq += abW * abW; apDot += apW * abW;
+    }
+    if (heights) {
+        const a = heights[iA];
+        const apH = (heights[iP] - a) * LOD_HEIGHT_WEIGHT;
+        const abH = (heights[iB] - a) * LOD_HEIGHT_WEIGHT;
+        apSq += apH * apH; abSq += abH * abH; apDot += apH * abH;
+    }
+    if (ringColors && wColor > 0) {
+        for (let c = 0; c < 3; c++) {
+            const aC = ringColors[iA * 3 + c];
+            const apC = (ringColors[iP * 3 + c] - aC) * wColor;
+            const abC = (ringColors[iB * 3 + c] - aC) * wColor;
+            apSq += apC * apC; abSq += abC * abC; apDot += apC * abC;
+        }
+    }
+    if (abSq < 1e-24) return apSq;
+    // Clamp: fp cancellation can drive this slightly negative on near-colinear points.
+    return Math.max(0, apSq - (apDot * apDot) / abSq);
 }
 
-function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
+function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius, nPoints, camX, camY, camZ) {
     if (nPoints <= 2) {
         const indices = nPoints < 1 ? new Uint32Array(0)
             : nPoints === 1 ? Uint32Array.of(0)
@@ -2051,6 +2121,7 @@ function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
         const e = d / LOD_EPSILON_DIVISOR;
         epsSq[i] = e * e;
     }
+    const wColor = LOD_COLOR_WEIGHT_FRAC * boundingRadius;
     const keep = new Uint8Array(nPoints);
     keep[0] = 1;
     keep[nPoints - 1] = 1;
@@ -2065,7 +2136,7 @@ function distanceWeightedRDP(spine, nPoints, camX, camY, camZ) {
             let maxPerpSq = 0;
             let maxIdx = start;
             for (let i = start + 1; i < end; i++) {
-                const dSq = _perpDistSq(spine, i, start, end);
+                const dSq = _augPerpDistSqSync(spine, widths, heights, ringColors, i, start, end, wColor);
                 if (dSq > maxPerpSq) {
                     maxPerpSq = dSq;
                     maxIdx = i;
@@ -5614,7 +5685,9 @@ class ThreeJSViewer {
                                 let buildOrientations = orientations, buildRingColors = ringColors;
                                 let buildN = n;
                                 if (n >= 25000) {
-                                    // Bounding sphere from original spine (stable across LOD rebuilds)
+                                    // Bounding sphere from original spine (stable across LOD rebuilds).
+                                    // Includes cross-section extent so `boundingRadius` reflects the
+                                    // tube's actual on-screen size — color weight scales with it.
                                     const _center = new THREE.Vector3();
                                     for (let i = 0; i < n; i++) {
                                         _center.x += spine[i * 3]; _center.y += spine[i * 3 + 1]; _center.z += spine[i * 3 + 2];
@@ -5625,10 +5698,16 @@ class ThreeJSViewer {
                                         const dx = spine[i * 3] - _center.x, dy = spine[i * 3 + 1] - _center.y, dz = spine[i * 3 + 2] - _center.z;
                                         _maxR2 = Math.max(_maxR2, dx * dx + dy * dy + dz * dz);
                                     }
-                                    const boundingRadius = Math.sqrt(_maxR2);
+                                    let _maxHalfExtent = 0;
+                                    for (let i = 0; i < n; i++) {
+                                        const h = Math.max(widths[i], heights[i]) * 0.5;
+                                        if (h > _maxHalfExtent) _maxHalfExtent = h;
+                                    }
+                                    const boundingRadius = Math.sqrt(_maxR2) + _maxHalfExtent;
                                     const cam = this._camera;
                                     const { indices: keptIndices, minDist: _lodMinDist, maxDist: _lodMaxDist } = distanceWeightedRDP(
-                                        spine, n, cam.position.x, cam.position.y, cam.position.z,
+                                        spine, widths, heights, ringColors, boundingRadius, n,
+                                        cam.position.x, cam.position.y, cam.position.z,
                                     );
                                     const nRed = keptIndices.length;
                                     // Extract reduced arrays
@@ -5724,6 +5803,7 @@ class ThreeJSViewer {
                                         upVec: upVector,
                                         nPoints: tubeLOD.originalCount,
                                         heightOffset: heightOffset,
+                                        boundingRadius: tubeLOD.boundingRadius,
                                     });
                                 }
                                 this._deleteObject(data.id);
