@@ -333,6 +333,15 @@ def test_add_toolpath_passes_kwargs(client):
     assert header["metalness"] == 0.1
 
 
+def test_add_toolpath_forwards_lod_false(client):
+    """lod=False on add_toolpath passes through to add_parametric_tube header."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    client.add_toolpath("bd", tp, lod=False)
+    header, _ = client._binary_messages[0]
+    assert header["lod"] is False
+
+
 # === query_scene ===
 
 

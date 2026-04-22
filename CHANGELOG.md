@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.23
+
+### Parametric tube LOD
+
+- **Per-tube LOD configuration via `lod=` kwarg on `add_parametric_tube`** (and passthrough on `add_toolpath(**kwargs)`). Previously LOD was governed by two hardcoded globals — `epsilon = camera_distance / 2500` and a magic-number `n >= 25000` spine-length gate — with no way to override per tube. `lod=False` disables LOD entirely (use for inspection beads where every original spine point matters); `lod={"epsilon_divisor": N, "threshold": M}` tunes detail retention and the activation gate (`threshold=0` forces LOD on for short spines). Invalid shapes (`lod=True`, unknown keys, non-positive `epsilon_divisor`, negative `threshold`) raise `ValueError` client-side before the message is sent. Defaults are unchanged — omitting `lod` preserves the prior 2500/25000 behavior, so no existing caller needs updating. The wire format carries the per-tube config through to the worker, so ongoing 2 Hz LOD updates honor the override too (not just the initial synchronous reduction).
+
 ## 0.0.22
 
 ### Viewer display and controls
