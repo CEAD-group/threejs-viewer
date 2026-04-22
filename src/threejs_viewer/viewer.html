@@ -2097,6 +2097,28 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
         }
     }
 
+    // Hairpin fixup — mirror of the main-thread sweep. See
+    // buildParametricTubeGeometry for the rationale. Runs on the reduced spine
+    // so the LOD mesh matches the full-resolution one at reversals.
+    for (let i = 1; i < nSpine; i++) {
+        const pUx = localFrames[(i-1)*6],     pUy = localFrames[(i-1)*6+1], pUz = localFrames[(i-1)*6+2];
+        const Ux  = localFrames[i*6],         Uy  = localFrames[i*6+1],     Uz  = localFrames[i*6+2];
+        if (Ux*pUx + Uy*pUy + Uz*pUz >= -0.95) continue;
+        const nUx = -Ux, nUy = -Uy, nUz = -Uz;
+        localFrames[i*6] = nUx; localFrames[i*6+1] = nUy; localFrames[i*6+2] = nUz;
+        const vx = localFrames[i*6+3], vy = localFrames[i*6+4], vz = localFrames[i*6+5];
+        sampleChamferedRect(section, widths[i], heights[i]);
+        const vOff = heightOffset ? heightOffset * heights[i] : 0;
+        const px = spine[i*3], py = spine[i*3+1], pz = spine[i*3+2];
+        const rb = i * N_CS * 3;
+        for (let j = 0; j < N_CS; j++) {
+            const cu = section[j*2], cv = section[j*2+1] + vOff;
+            positions[rb+j*3]   = px + cu*nUx + cv*vx;
+            positions[rb+j*3+1] = py + cu*nUy + cv*vy;
+            positions[rb+j*3+2] = pz + cu*nUz + cv*vz;
+        }
+    }
+
     // Revolution caps
     function buildCap(spineIdx, capBase, tSign) {
         const px = spine[spineIdx*3], py = spine[spineIdx*3+1], pz = spine[spineIdx*3+2];
@@ -2610,6 +2632,41 @@ function buildParametricTubeGeometry(
         if (colors) {
             fillRGBBlock(colors, ringBase, nCs,
                          ringColors[i * 3], ringColors[i * 3 + 1], ringColors[i * 3 + 2]);
+        }
+    }
+
+    // --- Hairpin fixup: preserve ring-vertex-index continuity at 180° reversals ---
+    // At a true tangent reversal (retrace, zigzag infill hairpin), U = V × T
+    // flips sign even though V is unchanged. Adjacent rings then point their
+    // cross-section vertices at opposite physical points and the connecting
+    // quad twists into a figure-8. Sweep sequentially after the main loop:
+    // if U_i is anti-parallel to U_{i-1}, flip U_i (V stays — it's even in T)
+    // and rewrite ring i. The sweep is sticky: once a reversal kicks in, every
+    // ring on the return leg compares against the flipped previous U and stays
+    // aligned. Threshold stays near -1 so gradual curves and non-hairpin sharp
+    // corners are untouched. Skipped when the caller provides orientations —
+    // explicit frames own their own continuity.
+    if (!orientations) {
+        for (let i = 1; i < nSpine; i++) {
+            const pUx = localFrames[(i - 1) * 6];
+            const pUy = localFrames[(i - 1) * 6 + 1];
+            const pUz = localFrames[(i - 1) * 6 + 2];
+            const Ux = localFrames[i * 6];
+            const Uy = localFrames[i * 6 + 1];
+            const Uz = localFrames[i * 6 + 2];
+            if (Ux * pUx + Uy * pUy + Uz * pUz >= -0.95) continue;
+            localFrames[i * 6]     = -Ux;
+            localFrames[i * 6 + 1] = -Uy;
+            localFrames[i * 6 + 2] = -Uz;
+            const Vx = localFrames[i * 6 + 3];
+            const Vy = localFrames[i * 6 + 4];
+            const Vz = localFrames[i * 6 + 5];
+            sampleChamferedRect(section, widths[i], heights[i]);
+            const vOff = heightOffset ? heightOffset * heights[i] : 0;
+            const sx = spine[i * 3], sy = spine[i * 3 + 1], sz = spine[i * 3 + 2];
+            const ringBase = i * nCs * 3;
+            writeRingVerts(positions, ringBase, section, nCs,
+                           -Ux, -Uy, -Uz, Vx, Vy, Vz, sx, sy, sz, vOff);
         }
     }
 
