@@ -1596,7 +1596,11 @@ const PRIMITIVES = {
 const N_CROSS_SECTION = 6;
 // LOD: epsilon = camera_distance / LOD_EPSILON_DIVISOR.
 // Higher → more points kept (finer detail). Lower → more aggressive simplification.
+// Per-tube overrides: `lod` option on `add_parametric_tube` (see parseLodConfig).
 const LOD_EPSILON_DIVISOR = 2500;
+// Spine-length gate: tubes with fewer points skip LOD entirely (overridable
+// per-tube via `lod.threshold`).
+const LOD_DEFAULT_THRESHOLD = 25000;
 // Max original points that can be skipped between two kept points.
 // Safety valve for pathological inputs; augmented-space RDP below already
 // catches attribute variation on geometrically straight segments.
@@ -1610,6 +1614,28 @@ const LOD_MAX_SKIP = 100;
 const LOD_WIDTH_WEIGHT = 0.5;
 const LOD_HEIGHT_WEIGHT = 0.5;
 const LOD_COLOR_WEIGHT_FRAC = 0.05;
+
+/**
+ * Parse the optional per-tube `lod` payload sent from Python.
+ *
+ * Accepts `false` (disable), `undefined`/`null` (defaults), or a config
+ * object `{ epsilonDivisor?, threshold? }`. Uses `!== undefined` rather
+ * than `||` so `threshold: 0` survives as "force LOD on for short spines."
+ *
+ * @param {unknown} lod
+ * @returns {{enabled: boolean, epsilonDivisor: number, threshold: number}}
+ */
+function parseLodConfig(lod) {
+    if (lod === false) {
+        return { enabled: false, epsilonDivisor: LOD_EPSILON_DIVISOR, threshold: LOD_DEFAULT_THRESHOLD };
+    }
+    const cfg = (lod && typeof lod === 'object') ? /** @type {any} */ (lod) : {};
+    return {
+        enabled: true,
+        epsilonDivisor: cfg.epsilonDivisor !== undefined ? cfg.epsilonDivisor : LOD_EPSILON_DIVISOR,
+        threshold: cfg.threshold !== undefined ? cfg.threshold : LOD_DEFAULT_THRESHOLD,
+    };
+}
 /**
  * @param {Float32Array} out
  * @param {number} width
@@ -2123,7 +2149,7 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
 }
 
 // ---- Per-tube state cache ----
-const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints }
+const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints, epsilonDivisor }
 const _rdpCache = new Map(); // tubeId -> { chunkDists, chunkIndices }
 
 self.onmessage = function(e) {
@@ -2140,6 +2166,7 @@ self.onmessage = function(e) {
             nPoints: msg.nPoints,
             heightOffset: msg.heightOffset || 0,
             boundingRadius: msg.boundingRadius || 0,
+            epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
         });
         _rdpCache.delete(msg.tubeId);
         return;
@@ -2165,14 +2192,15 @@ self.onmessage = function(e) {
     const { tubeId, camX, camY, camZ } = msg;
     const tube = _tubes.get(tubeId);
     if (!tube) return;
-    const { spine, widths, heights, ringColors, upVec, nPoints, heightOffset, boundingRadius } = tube;
+    const { spine, widths, heights, ringColors, upVec, nPoints, heightOffset, boundingRadius, epsilonDivisor } = tube;
 
     if (nPoints <= 2) {
         self.postMessage({ tubeId, allReused: true, nReduced: nPoints });
         return;
     }
 
-    // Per-point epsilon²
+    // Per-point epsilon². Worker path — keep in sync with distanceWeightedRDP
+    // (the main-thread copy used for initial reduction).
     const epsSq = new Float32Array(nPoints);
     let minDist = Infinity, maxDist = 0;
     for (let i = 0; i < nPoints; i++) {
@@ -2180,7 +2208,7 @@ self.onmessage = function(e) {
         const d = Math.sqrt(dx*dx+dy*dy+dz*dz);
         if (d < minDist) minDist = d;
         if (d > maxDist) maxDist = d;
-        const ep = d / LOD_EPSILON_DIVISOR;
+        const ep = d / epsilonDivisor;
         epsSq[i] = ep * ep;
     }
     // Color weight: full per-channel swing (delta=1) costs this many world units.
@@ -2335,14 +2363,17 @@ function _augPerpDistSqSync(spine, widths, heights, ringColors, iP, iA, iB, wCol
  * @param {number} boundingRadius
  * @param {number} nPoints
  * @param {number} camX @param {number} camY @param {number} camZ
+ * @param {number} [epsilonDivisor] Optional override; defaults to LOD_EPSILON_DIVISOR.
  */
-function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius, nPoints, camX, camY, camZ) {
+function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius, nPoints, camX, camY, camZ, epsilonDivisor) {
     if (nPoints <= 2) {
         const indices = nPoints < 1 ? new Uint32Array(0)
             : nPoints === 1 ? Uint32Array.of(0)
             : Uint32Array.of(0, 1);
         return { indices, minDist: 0, maxDist: 0 };
     }
+    const divisor = epsilonDivisor !== undefined ? epsilonDivisor : LOD_EPSILON_DIVISOR;
+    // Main-thread path — keep in sync with the worker's chunked RDP above.
     const epsSq = new Float32Array(nPoints);
     let minDist = Infinity, maxDist = 0;
     for (let i = 0; i < nPoints; i++) {
@@ -2352,7 +2383,7 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (d < minDist) minDist = d;
         if (d > maxDist) maxDist = d;
-        const e = d / LOD_EPSILON_DIVISOR;
+        const e = d / divisor;
         epsSq[i] = e * e;
     }
     const wColor = LOD_COLOR_WEIGHT_FRAC * boundingRadius;
@@ -6039,12 +6070,14 @@ class ThreeJSViewer {
                                 const upVector = data.upVector || null;
                                 const heightOffset = data.heightOffset || 0;
 
-                                // LOD: for large tubes, reduce spine before building geometry
+                                // LOD: for large tubes, reduce spine before building geometry.
+                                // Per-tube config via `data.lod` (see parseLodConfig).
+                                const lodCfg = parseLodConfig(data.lod);
                                 let tubeLOD = null;
                                 let buildSpine = spine, buildWidths = widths, buildHeights = heights;
                                 let buildOrientations = orientations, buildRingColors = ringColors;
                                 let buildN = n;
-                                if (n >= 25000) {
+                                if (lodCfg.enabled && n >= lodCfg.threshold) {
                                     // Bounding sphere from original spine (stable across LOD rebuilds).
                                     // Includes cross-section extent so `boundingRadius` reflects the
                                     // tube's actual on-screen size — color weight scales with it.
@@ -6068,6 +6101,7 @@ class ThreeJSViewer {
                                     const { indices: keptIndices, minDist: _lodMinDist, maxDist: _lodMaxDist } = distanceWeightedRDP(
                                         spine, widths, heights, ringColors, boundingRadius, n,
                                         cam.position.x, cam.position.y, cam.position.z,
+                                        lodCfg.epsilonDivisor,
                                     );
                                     const nRed = keptIndices.length;
                                     // Extract reduced arrays
@@ -6099,6 +6133,7 @@ class ThreeJSViewer {
                                         boundingCenter: _center,
                                         boundingRadius,
                                         colorVersion: 0,
+                                        epsilonDivisor: lodCfg.epsilonDivisor,
                                     };
                                     // LOD initial reduction logged at debug level only
                                 }
@@ -6164,6 +6199,7 @@ class ThreeJSViewer {
                                         nPoints: tubeLOD.originalCount,
                                         heightOffset: heightOffset,
                                         boundingRadius: tubeLOD.boundingRadius,
+                                        epsilonDivisor: tubeLOD.epsilonDivisor,
                                     });
                                 }
                                 this._deleteObject(data.id);

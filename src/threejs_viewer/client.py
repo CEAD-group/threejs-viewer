@@ -8,6 +8,7 @@ Runs a WebSocket server that the browser connects to directly.
 import json
 import logging
 import math
+import numbers
 import threading
 import time
 import urllib.parse
@@ -34,6 +35,59 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number (got {value!r})")
     return f
+
+
+_LOD_DEFAULT = object()  # sentinel: header "lod" key omitted
+_LOD_ALLOWED_KEYS = {"epsilon_divisor", "threshold"}
+
+
+def _serialize_lod(lod):
+    """Validate the ``lod`` kwarg and convert it to the wire payload.
+
+    Returns the `_LOD_DEFAULT` sentinel to mean "omit the header key entirely",
+    `False` to mean "disable LOD for this tube", or a camelCase dict for the
+    viewer. Raises `ValueError` on any other shape (including `True`, which is
+    ambiguous with the default).
+    """
+    if lod is None:
+        return _LOD_DEFAULT
+    if lod is False:
+        return False
+    if lod is True or not isinstance(lod, dict):
+        raise ValueError(
+            "lod must be None, False, or a dict with keys "
+            f"{sorted(_LOD_ALLOWED_KEYS)} (got {lod!r})"
+        )
+    unknown = set(lod) - _LOD_ALLOWED_KEYS
+    if unknown:
+        raise ValueError(
+            f"lod has unknown keys {sorted(unknown)}; "
+            f"allowed: {sorted(_LOD_ALLOWED_KEYS)}"
+        )
+    out: Dict[str, float] = {}
+    if "epsilon_divisor" in lod:
+        div = lod["epsilon_divisor"]
+        if isinstance(div, bool) or not isinstance(div, numbers.Real):
+            raise ValueError(f"lod.epsilon_divisor must be a number (got {div!r})")
+        div = float(div)
+        if not math.isfinite(div) or div <= 0:
+            raise ValueError(
+                f"lod.epsilon_divisor must be a positive finite number (got {div!r})"
+            )
+        out["epsilonDivisor"] = div
+    if "threshold" in lod:
+        thr = lod["threshold"]
+        # Integer-only: docstring says "non-negative integer" and silent
+        # float→int truncation would be surprising (threshold=1.9 → 1).
+        if isinstance(thr, bool) or not isinstance(thr, numbers.Integral):
+            raise ValueError(f"lod.threshold must be an integer (got {thr!r})")
+        thr = int(thr)
+        if thr < 0:
+            raise ValueError(
+                f"lod.threshold must be a non-negative integer (got {thr!r})"
+            )
+        out["threshold"] = thr
+    return out
 
 
 class _BlobHandler(BaseHTTPRequestHandler):
@@ -775,6 +829,7 @@ class ViewerClient:
         rotation: Optional[list] = None,
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
+        lod: Optional[Union[bool, dict]] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -805,7 +860,28 @@ class ViewerClient:
                 surface so the bead extends downward.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
+            lod: Per-tube LOD (level-of-detail) configuration.
+
+                - ``None`` (default): LOD engages when ``len(spine) >= 25000``
+                  with ``epsilon = camera_distance / 2500``.
+                - ``False``: disable LOD entirely for this tube regardless
+                  of spine length (use for inspection beads where every
+                  original point matters).
+                - ``dict`` with optional keys ``epsilon_divisor`` (positive
+                  number; higher → more points kept, finer detail) and
+                  ``threshold`` (non-negative integer; spine length at which
+                  LOD activates). Pass ``threshold=0`` to force LOD on for
+                  short spines.
+
+                Example::
+
+                    v.add_parametric_tube("bead", spine, w, h, lod=False)
+                    v.add_parametric_tube(
+                        "hires", spine, w, h,
+                        lod={"epsilon_divisor": 10000},
+                    )
         """
+        lod_header = _serialize_lod(lod)
 
         spine_arr = np.ascontiguousarray(spine, dtype=np.float32).reshape(-1, 3)
         n = spine_arr.shape[0]
@@ -860,6 +936,8 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if lod_header is not _LOD_DEFAULT:
+            header["lod"] = lod_header
         # The viewer applies heightOffset as a *shift* to section cv values,
         # where +cv is the "up" direction (anchored to up_vector, default +Z).
         # anchor="top" means spine at top of bead → bead extends down → subtract h/2.

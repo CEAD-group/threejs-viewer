@@ -119,6 +119,130 @@ def test_add_parametric_tube_anchor_forwards_height_offset():
     assert header_top["heightOffset"] == -0.5
 
 
+def _capture_client():
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    c._binary_messages = []
+    c._send_binary = lambda h, p: c._binary_messages.append((h, p))
+    return c
+
+
+def _simple_tube_args():
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+    return spine, widths, heights
+
+
+def test_add_parametric_tube_lod_default_omits_header_key():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights)
+    header, _ = c._binary_messages[-1]
+    assert "lod" not in header
+
+
+def test_add_parametric_tube_lod_false_serializes_false():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, lod=False)
+    header, _ = c._binary_messages[-1]
+    assert header["lod"] is False
+
+
+def test_add_parametric_tube_lod_epsilon_divisor_only():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, lod={"epsilon_divisor": 10000})
+    header, _ = c._binary_messages[-1]
+    assert header["lod"] == {"epsilonDivisor": 10000.0}
+
+
+def test_add_parametric_tube_lod_both_keys_serialize_camel():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t",
+        spine,
+        widths,
+        heights,
+        lod={"epsilon_divisor": 5000, "threshold": 0},
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["lod"] == {"epsilonDivisor": 5000.0, "threshold": 0}
+
+
+def test_add_parametric_tube_lod_true_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="lod must be"):
+        c.add_parametric_tube("t", spine, widths, heights, lod=True)
+
+
+def test_add_parametric_tube_lod_non_dict_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="lod must be"):
+        c.add_parametric_tube("t", spine, widths, heights, lod="bogus")
+
+
+def test_add_parametric_tube_lod_unknown_key_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="unknown keys"):
+        c.add_parametric_tube("t", spine, widths, heights, lod={"foo": 1})
+
+
+def test_add_parametric_tube_lod_epsilon_divisor_zero_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="epsilon_divisor"):
+        c.add_parametric_tube("t", spine, widths, heights, lod={"epsilon_divisor": 0})
+
+
+def test_add_parametric_tube_lod_epsilon_divisor_negative_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="epsilon_divisor"):
+        c.add_parametric_tube("t", spine, widths, heights, lod={"epsilon_divisor": -1})
+
+
+def test_add_parametric_tube_lod_threshold_negative_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="threshold"):
+        c.add_parametric_tube("t", spine, widths, heights, lod={"threshold": -5})
+
+
+def test_add_parametric_tube_lod_threshold_float_rejected():
+    """threshold is documented as integer — reject floats to avoid silent
+    truncation (1.9 → 1)."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="threshold must be an integer"):
+        c.add_parametric_tube("t", spine, widths, heights, lod={"threshold": 1.9})
+
+
+def test_add_parametric_tube_lod_accepts_numpy_scalars():
+    """numpy scalar types (np.float32, np.int64, ...) must be accepted —
+    the rest of the client API accepts numpy-coercible numerics."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t",
+        spine,
+        widths,
+        heights,
+        lod={"epsilon_divisor": np.float32(7500), "threshold": np.int64(1000)},
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["lod"] == {"epsilonDivisor": 7500.0, "threshold": 1000}
+    assert isinstance(header["lod"]["threshold"], int)
+    assert isinstance(header["lod"]["epsilonDivisor"], float)
+
+
 # --- Browser integration tests ---
 
 
