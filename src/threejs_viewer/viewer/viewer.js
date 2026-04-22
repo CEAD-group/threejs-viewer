@@ -2574,6 +2574,20 @@ export class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
      * @param {ThreeJSViewerOptions} [options]
+     *
+     * Embedding contract: before opening each WebSocket, `connect()` issues a
+     * `mode: 'no-cors'` HTTP GET to the URL derived from `wsUrl` by swapping
+     * the scheme (`ws:` → `http:`, `wss:` → `https:`). Path and query are
+     * preserved, so the probe targets the *full* `wsUrl` with only the scheme
+     * changed — an embedder using `ws://host:port/my-path` must answer plain
+     * HTTP on `http://host:port/my-path`, not just on `/`. In `no-cors` mode,
+     * any HTTP response counts as "server is up" (different servers/proxies
+     * may return 200, 400, 404, or 426 for a plain GET to a WS URL — all fine);
+     * only a TCP-level failure aborts the attempt. The standard `websockets`
+     * Python library satisfies this for free as part of the WS upgrade
+     * handshake. If your WS host sits behind a proxy that drops non-upgrade
+     * HTTP on that path, make it answer *something*, or the browser will
+     * never attempt the WebSocket.
      */
     constructor(container, options = /** @type {ThreeJSViewerOptions} */ ({})) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
@@ -4491,13 +4505,26 @@ export class ThreeJSViewer {
     // ========== WebSocket ==========
 
     connect() {
-        // Derive HTTP probe URL from WS URL (same host/port)
+        // Derive the probe URL from the WS URL by swapping only the scheme
+        // (ws→http / wss→https). Path and query are preserved, so the probe
+        // targets the same endpoint as the eventual WebSocket upgrade.
         const probeUrl = this._wsUrl.replace(/^ws/, 'http');
 
         const doConnect = async () => {
             if (this._destroyed) return;
 
-            // Probe first to avoid browser console warnings on failed WS attempts
+            // Probe HTTP on the same URL (minus scheme) as the pending
+            // WebSocket: a failed `new WebSocket()` always logs `WebSocket
+            // connection to '...' failed` to devtools and there's no way to
+            // silence it, so we only attempt the upgrade once we know
+            // something is listening. `mode: 'no-cors'` makes *any* HTTP
+            // response count as success (200/400/404/426/... — the exact
+            // status varies by server/proxy, all of them satisfy the probe);
+            // only a TCP-level failure throws and triggers retry. The Python
+            // `websockets` server answers plain HTTP for free as part of the
+            // upgrade handshake; embedders pointing at a different WS host
+            // must ensure that host (or its proxy) returns *something* on GET
+            // for the same path/query as `wsUrl`, not just for `/`.
             try {
                 await fetch(probeUrl, { mode: 'no-cors', signal: AbortSignal.timeout(400) });
             } catch {
