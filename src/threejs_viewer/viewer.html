@@ -3864,8 +3864,16 @@ class ThreeJSViewer {
         // controls don't fit, so the lift is a function of viewport size, not
         // just show/hide state. Observe the toolbar and push its height into
         // the cache + CSS var whenever layout reports a new size. display:none
-        // reports 0 — matches the "not visible" state naturally.
-        this._animLiftObserver = new ResizeObserver(() => this._refreshAnimLift());
+        // reports 0 — matches the "not visible" state naturally. We pass the
+        // observer's own measurement (borderBoxSize, which matches offsetHeight
+        // semantics — includes padding+border) into _refreshAnimLift so the
+        // handler doesn't trigger a second synchronous layout read.
+        this._animLiftObserver = new ResizeObserver((entries) => {
+            const entry = entries[0];
+            const box = entry.borderBoxSize && entry.borderBoxSize[0];
+            const h = box ? box.blockSize : entry.contentRect.height;
+            this._refreshAnimLift(h);
+        });
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
@@ -6847,13 +6855,18 @@ class ThreeJSViewer {
     }
 
     /**
-     * Read the toolbar's current height and push it into both the cache
-     * (hit-test + render shim) and the --tjsv-anim-lift CSS var (Home
-     * button). display:none yields 0, which matches the "toolbar hidden"
-     * state. Called on show/hide and by the ResizeObserver.
+     * Push the toolbar's current height into both the cache (hit-test +
+     * render shim) and the --tjsv-anim-lift CSS var (Home button).
+     * display:none yields 0, which matches the "toolbar hidden" state.
+     * Called on show/hide (no arg → reads offsetHeight to flush layout and
+     * get the post-transition height synchronously) and from the
+     * ResizeObserver (arg → borderBoxSize, avoiding another layout read).
+     * @param {number} [measuredHeight]
      */
-    _refreshAnimLift() {
-        const h = this._animControlsEl.offsetHeight;
+    _refreshAnimLift(measuredHeight) {
+        const h = Number.isFinite(measuredHeight)
+            ? /** @type {number} */ (measuredHeight)
+            : this._animControlsEl.offsetHeight;
         if (h === this._animLiftCss) return;
         this._animLiftCss = h;
         this.el.style.setProperty('--tjsv-anim-lift', `${h}px`);
