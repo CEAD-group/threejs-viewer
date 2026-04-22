@@ -2239,8 +2239,10 @@ class CameraController {
         v._controls.target.copy(tgt);
         v._controls.update();
         v._clipGizmo.camera = v._camera;
+        v._setGizmoHoverSprite(null);
         v._viewHelper = new ViewHelper(v._camera, v._renderer.domElement);
         v._viewHelper.center = v._controls.target;
+        v._configureViewHelper(v._viewHelper);
         v._btnOrtho.textContent = '\u2B1A O';
         v._btnOrtho.classList.toggle('active', v._isOrtho);
     }
@@ -2786,6 +2788,7 @@ export class ThreeJSViewer {
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
         this._clipClose = q('.tjsv-clip-close');
         this._animControlsEl = q('.tjsv-animation-controls');
+        this._viewHomeBtn = q('.tjsv-view-home');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
         this._currentTimeEl = q('.tjsv-current-time');
@@ -2945,12 +2948,53 @@ export class ThreeJSViewer {
                 if (md) md.ringColors = redRc;
             }
         };
-        // ViewHelper
+        // ViewHelper — axis sprites are enlarged for easier hit-testing, and a
+        // custom hover raycast lights up the sprite under the cursor so users
+        // can see when a click will actually land. Pointerdown inside the gizmo
+        // rect is suppressed at capture to prevent click-to-pivot from firing
+        // on near-misses.
+        this._gizmoDim = 128;
+        this._gizmoBaseScale = 1.4;
+        this._gizmoHoverScale = 1.75;
+        this._gizmoHoverRaycaster = new THREE.Raycaster();
+        this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
+        this._gizmoHoverOrthoCam.position.set(0, 0, 2);
+        this._gizmoHoverOrthoCam.updateMatrixWorld();
+        this._gizmoHovered = null;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
+        this._configureViewHelper(this._viewHelper);
+
+        // Suppress click-to-pivot when the pointer is inside the gizmo rect.
+        // Runs at capture so it fires before ViewerControls' pointerdown listener.
+        this._renderer.domElement.addEventListener('pointerdown', (e) => {
+            if (this._gizmoHitTest(e).insideRect) {
+                e.stopImmediatePropagation();
+            }
+        }, true);
+
+        // Hover feedback: highlight the sprite under the cursor + pointer cursor.
+        this._renderer.domElement.addEventListener('pointermove', (e) => {
+            if (this._viewHelper.animating) return;
+            const { hit } = this._gizmoHitTest(e);
+            this._setGizmoHoverSprite(hit);
+            this._renderer.domElement.style.cursor = hit ? 'pointer' : '';
+        });
+        this._renderer.domElement.addEventListener('pointerleave', () => {
+            this._setGizmoHoverSprite(null);
+            this._renderer.domElement.style.cursor = '';
+        });
+
         this._renderer.domElement.addEventListener('click', (e) => {
-            if (this._viewHelper.handleClick(e)) {
+            if (this._viewHelper.animating) return;
+            // ViewHelper.handleClick assumes the gizmo sits at bottom:0, but we
+            // lift it above the animation toolbar when visible — shim clientY
+            // so handleClick's raycast maps to the rendered location.
+            const liftCss = this._gizmoLiftCss();
+            const shim = { clientX: e.clientX, clientY: e.clientY + liftCss };
+            if (this._viewHelper.handleClick(/** @type {any} */ (shim))) {
                 this._controls.target.copy(this._viewHelper.center);
+                this._setGizmoHoverSprite(null);
             }
         });
         // Double-click an object to frame it; double-click empty space to reset.
@@ -3841,6 +3885,9 @@ export class ThreeJSViewer {
         }
 
         this._animControlsEl.classList.add('visible');
+        // Reading offsetHeight forces layout so --tjsv-anim-lift reflects the
+        // now-visible toolbar; CSS uses it to shift the Home button up.
+        this.el.style.setProperty('--tjsv-anim-lift', `${this._animControlsEl.offsetHeight}px`);
         this._totalTimeEl.textContent = this._animation.duration.toFixed(2);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
@@ -3907,6 +3954,7 @@ export class ThreeJSViewer {
         this._animationPlaying = false;
         this._baselineVisibility.clear();
         this._animControlsEl.classList.remove('visible');
+        this.el.style.setProperty('--tjsv-anim-lift', '0px');
         this._trackMode = 'off';
         this._trackTargetId = null;
         this._trackHasLastPos = false;
@@ -4366,6 +4414,14 @@ export class ThreeJSViewer {
         this._btnTrack.addEventListener('click', () => this._cycleTrackMode());
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
+
+        // Home button: sits centered in the ViewHelper area and resets the view.
+        if (this._viewHomeBtn) {
+            this._viewHomeBtn.addEventListener('click', () => {
+                this.resetView();
+                this._viewHomeBtn.blur();
+            });
+        }
 
         // Timeline scrubbing
         this._timelineContainer.addEventListener('mousedown', /** @param {MouseEvent} e */ (e) => {
@@ -5635,18 +5691,118 @@ export class ThreeJSViewer {
         this._fitCameraToBox(bbox, 1.5);
     }
 
-    resetView() {
-        // Hail-mary: reset camera up to world-Z, point at origin, then frame
-        // everything. Recovers from degenerate / inverted / lost states.
-        this._camera.up.set(0, 0, 1);
-        const dir = this._camera.position.clone().sub(this._controls.target);
-        if (dir.lengthSq() < 1e-10) {
-            this._camera.position.set(5, -5, 5);
+    // ========== ViewHelper (corner gizmo) ==========
+
+    /**
+     * Enlarge the ViewHelper's axis sprites so they have a bigger hit target
+     * and a more visible cue. Baseline opacity is captured for the hover
+     * restore. Called once per ViewHelper instance — the helper is re-created
+     * on every perspective/ortho swap.
+     * @param {any} helper
+     */
+    _configureViewHelper(helper) {
+        const sprites = [];
+        for (const child of helper.children) {
+            if (!child.userData || !child.userData.type) continue;
+            child.scale.setScalar(this._gizmoBaseScale);
+            child.userData.baseOpacity = child.material.opacity;
+            sprites.push(child);
         }
-        this._controls.target.set(0, 0, 0);
-        this._camera.lookAt(0, 0, 0);
+        helper.userData.interactiveSprites = sprites;
+    }
+
+    /**
+     * CSS-pixel lift applied to the gizmo when the animation toolbar is
+     * visible — matches the render-time shim in the main loop.
+     */
+    _gizmoLiftCss() {
+        const el = this._animControlsEl;
+        return (el && el.classList.contains('visible')) ? el.offsetHeight : 0;
+    }
+
+    /**
+     * Hit-test a pointer event against the ViewHelper's axis sprites. Returns
+     * whether the pointer is inside the 128×128 gizmo rect at all, plus the
+     * hovered sprite (null if no sprite under cursor).
+     * @param {PointerEvent | MouseEvent} e
+     * @returns {{ insideRect: boolean, hit: any }}
+     */
+    _gizmoHitTest(e) {
+        const dom = this._renderer.domElement;
+        const rect = dom.getBoundingClientRect();
+        const dim = this._gizmoDim;
+        const liftCss = this._gizmoLiftCss();
+        const offsetX = rect.left + dom.offsetWidth - dim;
+        const offsetY = rect.top + dom.offsetHeight - dim - liftCss;
+        const insideRect =
+            e.clientX >= offsetX && e.clientX <= offsetX + dim &&
+            e.clientY >= offsetY && e.clientY <= offsetY + dim;
+        if (!insideRect) return { insideRect: false, hit: null };
+        const sprites = this._viewHelper.userData.interactiveSprites;
+        if (!sprites || sprites.length === 0) return { insideRect: true, hit: null };
+        const ndcX = ((e.clientX - offsetX) / dim) * 2 - 1;
+        const ndcY = -((e.clientY - offsetY) / dim) * 2 + 1;
+        this._gizmoHoverRaycaster.setFromCamera(
+            new THREE.Vector2(ndcX, ndcY),
+            this._gizmoHoverOrthoCam,
+        );
+        const hits = this._gizmoHoverRaycaster.intersectObjects(sprites, false);
+        return { insideRect: true, hit: hits.length ? hits[0].object : null };
+    }
+
+    /**
+     * Apply the hover visual (enlarged + fully opaque) to a sprite, restoring
+     * the previously hovered one. Pass `null` to clear.
+     * @param {any} sprite
+     */
+    _setGizmoHoverSprite(sprite) {
+        if (sprite === this._gizmoHovered) return;
+        if (this._gizmoHovered) {
+            this._gizmoHovered.scale.setScalar(this._gizmoBaseScale);
+            const base = this._gizmoHovered.userData.baseOpacity;
+            if (typeof base === 'number') this._gizmoHovered.material.opacity = base;
+        }
+        if (sprite) {
+            sprite.scale.setScalar(this._gizmoHoverScale);
+            sprite.material.opacity = 1.0;
+        }
+        this._gizmoHovered = sprite;
+    }
+
+    resetView() {
+        // Canonical home view: world-Z up, isometric-ish direction
+        // (+X, -Y, +Z) looking at the scene bbox center, then framed to fit.
+        // Replaces the old "hail-mary" reset — orientation is now always the
+        // same regardless of prior camera state, so Home is predictable.
+        this._camera.up.set(0, 0, 1);
+        const bbox = new THREE.Box3();
+        this._scene.traverse(/** @param {any} child */ child => {
+            if (!child.geometry) return;
+            if (child === this._gridHelper) return;
+            if (this._isClipHelper(child)) return;
+            child.updateWorldMatrix(true, false);
+            bbox.expandByObject(child);
+        });
+        const target = bbox.isEmpty()
+            ? new THREE.Vector3()
+            : bbox.getCenter(new THREE.Vector3());
+        this._controls.target.copy(target);
+        // Pre-orient along the canonical direction so _fitCameraToBox (which
+        // preserves whatever direction the camera is already pointing) puts
+        // the camera in the right spot after fitting.
+        const isoDir = new THREE.Vector3(1, -1, 1).normalize();
+        this._camera.position.copy(target).addScaledVector(isoDir, 1);
+        this._camera.lookAt(target);
         this._controls.update();
-        this.frameAll();
+        if (bbox.isEmpty()) {
+            // No scene yet — fall back to a sensible distance so the user
+            // isn't staring down at near-clipping at the origin.
+            this._camera.position.copy(target).addScaledVector(isoDir, 10);
+            this._camera.lookAt(target);
+            this._controls.update();
+        } else {
+            this._fitCameraToBox(bbox, 1.2);
+        }
     }
 
     frameAll() {
