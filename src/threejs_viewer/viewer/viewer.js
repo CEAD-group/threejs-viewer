@@ -697,14 +697,13 @@ function computeSectionNormals(section, nCs, out) {
  * @param {Float32Array} localFrames
  * @param {number} spineIdx
  * @param {number} tSign
+ * @param {number} Tx @param {number} Ty @param {number} Tz
  */
 function writeAnalyticCapNormals(normalArr, capBaseVert, nCs, nCapRings, capAngles,
-                                 width, height, localFrames, spineIdx, tSign) {
+                                 width, height, localFrames, spineIdx, tSign,
+                                 Tx, Ty, Tz) {
     const Ux = localFrames[spineIdx * 6],     Uy = localFrames[spineIdx * 6 + 1], Uz = localFrames[spineIdx * 6 + 2];
     const Vx = localFrames[spineIdx * 6 + 3], Vy = localFrames[spineIdx * 6 + 4], Vz = localFrames[spineIdx * 6 + 5];
-    const Tx = Uy * Vz - Uz * Vy;
-    const Ty = Uz * Vx - Ux * Vz;
-    const Tz = Ux * Vy - Uy * Vx;
     const section = _capScratchSection;
     sampleChamferedRect(section, width, height);
     const sectionNormals = _capScratchSectionNormals;
@@ -923,10 +922,10 @@ function computeSectionNormals(section, nCs, out) {
 
 function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
                                   width, height, localFrames, spineIdx, tSign,
-                                  sectionScratch, sectionNormalsScratch) {
+                                  sectionScratch, sectionNormalsScratch,
+                                  Tx, Ty, Tz) {
     const Ux = localFrames[spineIdx*6],   Uy = localFrames[spineIdx*6+1], Uz = localFrames[spineIdx*6+2];
     const Vx = localFrames[spineIdx*6+3], Vy = localFrames[spineIdx*6+4], Vz = localFrames[spineIdx*6+5];
-    const Tx = Uy*Vz - Uz*Vy, Ty = Uz*Vx - Ux*Vz, Tz = Ux*Vy - Uy*Vx;
     sampleChamferedRect(sectionScratch, width, height);
     computeSectionNormals(sectionScratch, N_CS, sectionNormalsScratch);
     for (let k = 0; k < nCapRings; k++) {
@@ -1048,12 +1047,15 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
         }
     }
 
-    // Revolution caps
+    // Revolution caps. T is read from the precomputed tangents array rather
+    // than U x V because the hairpin sweep above may have flipped U on the
+    // last ring; U x V would then point opposite the true spine tangent and
+    // the end cap would extrude backwards into the tube body.
     function buildCap(spineIdx, capBase, tSign) {
         const px = spine[spineIdx*3], py = spine[spineIdx*3+1], pz = spine[spineIdx*3+2];
         const Ux = localFrames[spineIdx*6], Uy = localFrames[spineIdx*6+1], Uz = localFrames[spineIdx*6+2];
         const vx = localFrames[spineIdx*6+3], vy = localFrames[spineIdx*6+4], vz = localFrames[spineIdx*6+5];
-        const Tx = Uy*vz-Uz*vy, Ty = Uz*vx-Ux*vz, Tz = Ux*vy-Uy*vx;
+        const Tx = tangents[spineIdx*3], Ty = tangents[spineIdx*3+1], Tz = tangents[spineIdx*3+2];
         sampleChamferedRect(section, widths[spineIdx], heights[spineIdx]);
         const capVOff = heightOffset ? heightOffset * heights[spineIdx] : 0;
         for (let k = 0; k < N_CAP_RINGS; k++) {
@@ -1138,11 +1140,14 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, heightOffset) 
         }
     }
     writeAnalyticCapNormalsW(normals, startCapBase, N_CAP_RINGS, capAngles,
-        widths[0], heights[0], localFrames, 0, -1, section, sectionNormals);
+        widths[0], heights[0], localFrames, 0, -1, section, sectionNormals,
+        tangents[0], tangents[1], tangents[2]);
+    const lastI = nSpine - 1;
     writeAnalyticCapNormalsW(normals, endCapBase, N_CAP_RINGS, capAngles,
-        widths[nSpine - 1], heights[nSpine - 1], localFrames, nSpine - 1, +1, section, sectionNormals);
+        widths[lastI], heights[lastI], localFrames, lastI, +1, section, sectionNormals,
+        tangents[lastI*3], tangents[lastI*3+1], tangents[lastI*3+2]);
 
-    return { positions, normals, colors, indices, localFrames, capAngles, endCapPattern,
+    return { positions, normals, colors, indices, localFrames, tangents, capAngles, endCapPattern,
              ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
              nSpine, totalVerts, is32bit: totalVerts > 65535 };
 }
@@ -1278,14 +1283,15 @@ self.onmessage = function(e) {
 
     // Transfer ownership of large buffers
     const transfer = [geo.positions.buffer, geo.normals.buffer, geo.indices.buffer, geo.localFrames.buffer,
-                      geo.endCapPattern.buffer, keptRaw.buffer, redSpine.buffer, redWidths.buffer, redHeights.buffer];
+                      geo.tangents.buffer, geo.endCapPattern.buffer, keptRaw.buffer,
+                      redSpine.buffer, redWidths.buffer, redHeights.buffer];
     if (geo.colors) transfer.push(geo.colors.buffer);
     if (redColors) transfer.push(redColors.buffer);
 
     self.postMessage({
         tubeId, allReused: false,
         positions: geo.positions, normals: geo.normals, colors: geo.colors, indices: geo.indices,
-        localFrames: geo.localFrames, capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
+        localFrames: geo.localFrames, tangents: geo.tangents, capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
         ringPairs: geo.ringPairs, indicesPerRingPair: geo.indicesPerRingPair,
         capIndicesPerCap: geo.capIndicesPerCap, endCapBase: geo.endCapBase,
         nSpine: geo.nSpine, is32bit: geo.is32bit,
@@ -1545,6 +1551,14 @@ function buildParametricTubeGeometry(
         }
         localFrames[i * 6]     = _U.x; localFrames[i * 6 + 1] = _U.y; localFrames[i * 6 + 2] = _U.z;
         localFrames[i * 6 + 3] = _V.x; localFrames[i * 6 + 4] = _V.y; localFrames[i * 6 + 5] = _V.z;
+        // With explicit orientations, the caller's intended T is the quaternion's
+        // Z axis (U × V), not the central-difference spine tangent. Overwrite so
+        // downstream cap construction reads a consistent T from `tangents[i]`.
+        if (orientations) {
+            tangents[i * 3]     = _U.y * _V.z - _U.z * _V.y;
+            tangents[i * 3 + 1] = _U.z * _V.x - _U.x * _V.z;
+            tangents[i * 3 + 2] = _U.x * _V.y - _U.y * _V.x;
+        }
 
         const w = widths[i];
         const h = heights[i];
@@ -1614,7 +1628,11 @@ function buildParametricTubeGeometry(
         const w = widths[spineIdx], h = heights[spineIdx];
         const ux = localFrames[spineIdx * 6], uy = localFrames[spineIdx * 6 + 1], uz = localFrames[spineIdx * 6 + 2];
         const vx = localFrames[spineIdx * 6 + 3], vy = localFrames[spineIdx * 6 + 4], vz = localFrames[spineIdx * 6 + 5];
-        const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
+        // Read T from the precomputed `tangents` array (not U × V): the
+        // hairpin sweep above may have flipped U on the last ring, which would
+        // make U × V point opposite the real spine tangent and the end cap
+        // would extrude backwards into the tube body.
+        const tx = tangents[spineIdx * 3], ty = tangents[spineIdx * 3 + 1], tz = tangents[spineIdx * 3 + 2];
         sampleChamferedRect(section, w, h);
         const capVOff = heightOffset ? heightOffset * h : 0;
         for (let k = 0; k < nCapRings; k++) {
@@ -1727,14 +1745,17 @@ function buildParametricTubeGeometry(
         }
     }
     writeAnalyticCapNormals(normalArr, startCapBase, nCs, nCapRings, capAngles,
-        widths[0], heights[0], localFrames, 0, -1);
+        widths[0], heights[0], localFrames, 0, -1,
+        tangents[0], tangents[1], tangents[2]);
+    const lastIdx = nSpine - 1;
     writeAnalyticCapNormals(normalArr, endCapBase, nCs, nCapRings, capAngles,
-        widths[nSpine - 1], heights[nSpine - 1], localFrames, nSpine - 1, +1);
+        widths[lastIdx], heights[lastIdx], localFrames, lastIdx, +1,
+        tangents[lastIdx * 3], tangents[lastIdx * 3 + 1], tangents[lastIdx * 3 + 2]);
     geometry.setAttribute('normal', new THREE.BufferAttribute(normalArr, 3));
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
-        localFrames, capAngles,
+        localFrames, tangents, capAngles,
         capIndicesPerCap, endCapBase, endCapPattern,
     };
 }
@@ -1843,6 +1864,7 @@ class ParametricTube {
             widths: msg.reducedWidths,
             heights: msg.reducedHeights,
             localFrames: msg.localFrames,
+            tangents: msg.tangents,
             capAngles: msg.capAngles,
             ringColors: msg.reducedColors,
             section: new Float32Array(nCs * 2),
@@ -1960,7 +1982,15 @@ class ParametricTube {
         let vLen = Math.hypot(vx, vy, vz);
         if (vLen > 1e-12) { vx /= vLen; vy /= vLen; vz /= vLen; }
 
-        md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz };
+        // Lerp the spine tangent too — caps derive their axial direction
+        // from this, not from U × V (see updateEndCap / buildRevolutionCap).
+        let tx = md.tangents[iA * 3]     * (1 - frac) + md.tangents[iB * 3]     * frac;
+        let ty = md.tangents[iA * 3 + 1] * (1 - frac) + md.tangents[iB * 3 + 1] * frac;
+        let tz = md.tangents[iA * 3 + 2] * (1 - frac) + md.tangents[iB * 3 + 2] * frac;
+        let tLen = Math.hypot(tx, ty, tz);
+        if (tLen > 1e-12) { tx /= tLen; ty /= tLen; tz /= tLen; }
+
+        md.morphedState = { sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz, tx, ty, tz };
 
         sampleChamferedRect(md.section, w, h);
         const vOff = md.heightOffset ? md.heightOffset * h : 0;
@@ -2006,21 +2036,24 @@ class ParametricTube {
         const posAttr = obj.geometry.getAttribute('position');
         const pos = posAttr.array;
 
-        let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz;
+        let sx, sy, sz, w, h, ux, uy, uz, vx, vy, vz, tx, ty, tz;
         if (md.morphedState) {
             const ms = md.morphedState;
             sx = ms.sx; sy = ms.sy; sz = ms.sz;
             w = ms.w; h = ms.h;
             ux = ms.ux; uy = ms.uy; uz = ms.uz;
             vx = ms.vx; vy = ms.vy; vz = ms.vz;
+            tx = ms.tx; ty = ms.ty; tz = ms.tz;
         } else {
             const i = lastVisibleRing;
             sx = md.spine[i * 3]; sy = md.spine[i * 3 + 1]; sz = md.spine[i * 3 + 2];
             w = md.widths[i]; h = md.heights[i];
             ux = md.localFrames[i * 6]; uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
             vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
+            // T from the stored spine-tangent array, not U × V — the hairpin
+            // fixup may have flipped U on return-leg rings.
+            tx = md.tangents[i * 3]; ty = md.tangents[i * 3 + 1]; tz = md.tangents[i * 3 + 2];
         }
-        const tx = uy * vz - uz * vy, ty = uz * vx - ux * vz, tz = ux * vy - uy * vx;
 
         sampleChamferedRect(md.section, w, h);
         const vOff = md.heightOffset ? md.heightOffset * h : 0;
@@ -2071,21 +2104,21 @@ class ParametricTube {
         if (!norAttr) return;
         const nor = norAttr.array;
 
-        let w, h, ux, uy, uz, vx, vy, vz;
+        let w, h, ux, uy, uz, vx, vy, vz, tx, ty, tz;
         if (md.morphedState) {
             const ms = md.morphedState;
             w = ms.w; h = ms.h;
             ux = ms.ux; uy = ms.uy; uz = ms.uz;
             vx = ms.vx; vy = ms.vy; vz = ms.vz;
+            tx = ms.tx; ty = ms.ty; tz = ms.tz;
         } else {
             const i = visiblePairs;
             w = md.widths[i]; h = md.heights[i];
             ux = md.localFrames[i * 6];     uy = md.localFrames[i * 6 + 1]; uz = md.localFrames[i * 6 + 2];
             vx = md.localFrames[i * 6 + 3]; vy = md.localFrames[i * 6 + 4]; vz = md.localFrames[i * 6 + 5];
+            // T from the stored tangents, not U × V (hairpin fixup may have flipped U).
+            tx = md.tangents[i * 3]; ty = md.tangents[i * 3 + 1]; tz = md.tangents[i * 3 + 2];
         }
-        const tx = uy * vz - uz * vy;
-        const ty = uz * vx - ux * vz;
-        const tz = ux * vy - uy * vx;
 
         sampleChamferedRect(md.section, w, h);
         if (!md._sectionNormalsScratch) md._sectionNormalsScratch = new Float32Array(nCs * 2);
@@ -5291,7 +5324,7 @@ export class ThreeJSViewer {
                                     // LOD initial reduction logged at debug level only
                                 }
 
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
+                                const { geometry, ringPairs, indicesPerRingPair, localFrames, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     buildSpine, buildWidths, buildHeights,
                                     buildOrientations, upVector, buildRingColors, heightOffset,
                                 );
@@ -5325,7 +5358,7 @@ export class ThreeJSViewer {
                                     spine: new Float32Array(buildSpine),
                                     widths: new Float32Array(buildWidths),
                                     heights: new Float32Array(buildHeights),
-                                    localFrames, capAngles,
+                                    localFrames, tangents: builtTangents, capAngles,
                                     ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
                                     section: new Float32Array(nCs * 2),
                                     savedRing: new Float32Array(nCs * 3),
