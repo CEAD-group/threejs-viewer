@@ -148,6 +148,52 @@ The HTML viewer provides:
 - Keyboard shortcuts for frame stepping
 - Automatic reconnection to Python
 
+### Embedding the Viewer
+
+`viewer.js` exports `ThreeJSViewer` as an ES module so the viewer can be mounted
+into any host page (a docs site, a custom panel, an Electron shell):
+
+```js
+import { ThreeJSViewer } from './viewer.js';
+
+const viewer = new ThreeJSViewer(document.getElementById('viewer-root'), {
+    wsUrl: 'ws://localhost:5666',     // or wsPort: 5666
+    htmlTemplate: TEMPLATE_HTML,       // contents of viewer/template.html (required)
+    cubemapData: { px, nx, py, ny, pz, nz }, // optional: base64 JPEGs for PBR env
+    autoConnect: true,                 // default; pass false to call viewer.connect() yourself
+});
+```
+
+The standalone `viewer.html` is the same code with `htmlTemplate` and `cubemapData`
+inlined by `viewer/build.py` — embedders supply those themselves.
+
+**WS host contract (the probe).** Before opening each WebSocket, `connect()`
+issues a `mode: 'no-cors'` HTTP GET to the URL derived from `wsUrl` by swapping
+only the scheme (`ws:` → `http:`, `wss:` → `https:`). Path and query are
+preserved, so the probe targets the same host, port, **path, and query** as the
+pending WebSocket — not just the same host:port. An embedder using
+`ws://host:port/my-path` must answer plain HTTP on `http://host:port/my-path`,
+not just on `/`. The browser logs `WebSocket connection to '...' failed`
+whenever a `new WebSocket()` fails to upgrade and there's no API to silence it,
+so the probe is what keeps devtools quiet while the Python server is down or
+restarting. In `no-cors` mode, *any* HTTP response counts as "server is up" —
+different servers and proxies may return 200, 400, 404, or 426 for a plain GET
+to a WebSocket URL, and all of them satisfy the probe. Only a TCP-level failure
+aborts the attempt and schedules a retry.
+
+The standard Python `websockets` library satisfies this for free as part of the
+upgrade handshake. **If you point `wsUrl` at a different WS host (custom server,
+reverse proxy, etc.), that host must answer *something* on plain HTTP GET for
+that same URL (same host, port, path, and query) — otherwise the probe fails
+forever and the WebSocket is never tried.**
+
+**HTTP sidecar.** Independent of the probe, `client.py` runs an HTTP blob server
+on `port + 1` (default 5667) for binary transfers (meshes, polylines, animation
+channels). The `blob_url` in each large-data message points to this port; the
+browser fetches with native `fetch()`. Embedders that proxy the WebSocket must
+also expose this sidecar (or rewrite `blob_url` to a reachable host) for binary
+loads to work.
+
 ## Message Protocol
 
 All messages are JSON (text) or binary with JSON header.
