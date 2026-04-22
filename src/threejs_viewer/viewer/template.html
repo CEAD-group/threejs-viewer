@@ -3,6 +3,7 @@
     <span class="tjsv-status-text">Disconnected</span>
     <div class="toolbar-sep"></div>
     <button class="toolbar-btn tjsv-btn-clip" title="Clipping Plane">&#x2702; C</button>
+    <button class="toolbar-btn tjsv-btn-lighting" title="Lighting / exposure (E)">&#x263C; E</button>
     <button class="toolbar-btn tjsv-btn-ortho" title="Orthographic / Perspective (O)">&#x2B1A; O</button>
     <button class="toolbar-btn tjsv-btn-orbit-mode" title="Orbit mode (R)">&#x27F3; R</button>
     <button class="toolbar-btn tjsv-btn-track" title="Camera tracking" style="display:none">&#x229A; T</button>
@@ -51,6 +52,49 @@
         </div>
     </div>
     <div class="clip-hint">C: toggle | S: slab | V: view normal | H: helper | &larr;&rarr;: position | &uarr;&darr;: thickness</div>
+</div>
+
+<div class="tjsv-lighting-panel">
+    <h3>Lighting <button class="tjsv-lighting-close" title="Close (E)">&times;</button></h3>
+    <div class="lighting-section">
+        <label>Tone mapping</label>
+        <div class="lighting-select-row">
+            <select class="tjsv-lighting-tone-mapping">
+                <option value="none">None</option>
+                <option value="linear">Linear</option>
+                <option value="reinhard">Reinhard</option>
+                <option value="cineon">Cineon</option>
+                <option value="aces" selected>ACES Filmic</option>
+                <option value="agx">AgX</option>
+                <option value="neutral">Neutral</option>
+            </select>
+        </div>
+    </div>
+    <div class="lighting-section">
+        <label>Tone mapping exposure</label>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-exposure" min="0" max="3" step="0.05" value="1">
+            <span class="lighting-value tjsv-lighting-exposure-value">1.00</span>
+        </div>
+    </div>
+    <div class="lighting-section">
+        <label>Environment intensity</label>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-env" min="0" max="4" step="0.05" value="2">
+            <span class="lighting-value tjsv-lighting-env-value">2.00</span>
+        </div>
+    </div>
+    <div class="lighting-section">
+        <label>Ambient intensity</label>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-ambient" min="0" max="3" step="0.05" value="1.5">
+            <span class="lighting-value tjsv-lighting-ambient-value">1.50</span>
+        </div>
+    </div>
+    <div class="lighting-actions">
+        <button class="tjsv-lighting-reset" title="Reset to initial values">Reset</button>
+    </div>
+    <div class="lighting-hint">E: toggle | values persist in localStorage</div>
 </div>
 
 <div class="tjsv-animation-controls">
