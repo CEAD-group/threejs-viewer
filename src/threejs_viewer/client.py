@@ -72,6 +72,33 @@ class ViewerClient:
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
     ):
+        """Create a viewer client.
+
+        Args:
+            host: Interface to bind the WebSocket / HTTP servers to.
+            port: WebSocket port (HTTP blob sidecar listens on ``port + 1``).
+            open_browser: Open the viewer in the system browser on ``connect()``.
+            tone_mapping_exposure: Override the renderer's ``toneMappingExposure``
+                (default ``1.0``). Must be finite; ``NaN``/``Inf`` raise
+                ``ValueError``.
+            environment_intensity: Override ``scene.environmentIntensity``
+                (default ``2.0``). Must be finite.
+            ambient_intensity: Override the ambient light's ``intensity``
+                (default ``1.5``). Must be finite.
+            tone_mapping: Tone-mapping mode, one of ``"none"``, ``"linear"``,
+                ``"reinhard"``, ``"cineon"``, ``"aces"`` (default), ``"agx"``,
+                ``"neutral"``. Case-insensitive; stored lowercase. Invalid
+                values raise ``ValueError``.
+
+        The four lighting kwargs are forwarded to the viewer as snake-case
+        query parameters on ``viewer_url``. They act as authoritative initial
+        values — they win over any value the user previously persisted via the
+        in-browser Lighting panel. Leave them as ``None`` to let the viewer
+        pick its default or restore the panel's last ``localStorage`` value.
+
+        Precedence for initial lighting values in the browser:
+        URL param > ``ThreeJSViewer`` option > ``localStorage`` > hard default.
+        """
         self.host = host
         self.port = port
         self.open_browser = open_browser
