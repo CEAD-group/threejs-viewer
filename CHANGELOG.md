@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.22
+
+### Viewer display and controls
+
+- **Default tone-mapping exposure lowered `1.5` → `1.0`.** Fixes highlight clipping / red-bleaching on saturated toolpath colors under the default ACES pipeline. **Visible behavior change**: scenes rendered before this version will look slightly darker after upgrading. Pass `ViewerClient(tone_mapping_exposure=1.5)` to restore the previous look.
+- **Runtime lighting panel (`E` key or `☼ E` toolbar button).** Four live controls — tone-mapping mode (`none` / `linear` / `reinhard` / `cineon` / `aces` (default) / `agx` / `neutral`), tone-mapping exposure, environment intensity, ambient intensity. Values are applied live and persist across reloads in `localStorage` under the `tjsv.` namespace. A Reset button restores the page-load baseline (URL param > options > hard default, skipping localStorage) and clears the four persisted keys. Changing the tone-mapping mode flushes every material's shader (`material.needsUpdate = true`) because three.js bakes the tone-mapping constant into the compiled program — expect a one-frame recompile stutter on very large scenes.
+- **`ViewerClient` accepts four lighting kwargs**: `tone_mapping`, `tone_mapping_exposure`, `environment_intensity`, `ambient_intensity`. When supplied, they're appended as snake-case query params on the viewer URL and act as authoritative initial values — they win over `localStorage` on reload. `tone_mapping` is validated case-insensitively against the seven modes and raises `ValueError` on anything else; the three float kwargs reject NaN/Inf so they never leak into the query string. Precedence for initial values: **URL param > `ThreeJSViewer` option > `localStorage` > hard default.**
+
 ## 0.0.21
 
 ### Fixes

@@ -1,11 +1,15 @@
 """Integration tests using Playwright — verify browser-side behavior end-to-end."""
 
+import socket
+import threading
 import time
+from http.server import HTTPServer
 
 import numpy as np
 import pytest
 
-from threejs_viewer import Animation, Frame
+from threejs_viewer import Animation, Frame, ViewerClient
+from threejs_viewer.client import _BlobHandler
 
 
 @pytest.mark.browser
@@ -459,3 +463,188 @@ def test_view_helper_setviewport_shim_no_stack_overflow(viewer_client, viewer_pa
     )
     assert result["cached"], "shim never cached the original setViewport"
     assert result["restored"], "setViewport was not restored after _viewHelper.render()"
+
+
+# --- Lighting panel: URL → renderer wiring + precedence vs localStorage ---
+
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _start_client(**kwargs):
+    """Start a ViewerClient + its HTTP sidecar without waiting for a browser.
+
+    Mirrors the bare-bones setup the ``viewer_client`` fixture does, but
+    accepts arbitrary ``ViewerClient`` kwargs — the fixture doesn't, and the
+    lighting tests need to drive the constructor.
+    """
+    port = _free_port()
+    client = ViewerClient(port=port, open_browser=False, **kwargs)
+    client._http_port = port + 1
+    http_server = HTTPServer((client.host, client._http_port), _BlobHandler)
+    http_server.blob_store = client._blob_store
+    client._http_server = http_server
+    threading.Thread(target=http_server.serve_forever, daemon=True).start()
+    client._server_thread = threading.Thread(target=client._run_server, daemon=True)
+    client._server_thread.start()
+    return client
+
+
+def _wait_for_viewer(page):
+    """Block until window.threejsViewer has finished its constructor."""
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._renderer",
+        timeout=10_000,
+    )
+
+
+@pytest.mark.browser
+def test_lighting_url_params_beat_localstorage(page):
+    """The PR's central claim: URL-pinned lighting values win over localStorage on reload.
+
+    Flow: visit once with no URL params and seed localStorage with rival
+    values; then visit again with the four lighting query params pinned and
+    assert the renderer/scene/ambient-light state lands on the URL values,
+    not the localStorage ones.
+    """
+    client = _start_client(
+        tone_mapping="neutral",
+        tone_mapping_exposure=2.3,
+        environment_intensity=0.5,
+        ambient_intensity=0.7,
+    )
+    try:
+        # First visit: no lighting query params, just ws_port. Seed localStorage
+        # with values that disagree with every URL-pinned value above.
+        path_uri = client.viewer_path.resolve().as_uri()
+        page.goto(f"{path_uri}?ws_port={client.port}")
+        _wait_for_viewer(page)
+        page.evaluate(
+            """() => {
+                localStorage.setItem('tjsv.toneMappingExposure', '0.1');
+                localStorage.setItem('tjsv.environmentIntensity', '3.9');
+                localStorage.setItem('tjsv.ambientIntensity', '2.9');
+                localStorage.setItem('tjsv.toneMapping', 'agx');
+            }"""
+        )
+
+        # Second visit: URL now pins lighting values. Same origin, so the
+        # localStorage seeded above is still present — URL must beat it.
+        page.goto(client.viewer_url)
+        _wait_for_viewer(page)
+        state = page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                return {
+                    exposure: v._renderer.toneMappingExposure,
+                    envIntensity: v._scene.environmentIntensity,
+                    ambient: v._ambientLight.intensity,
+                    toneMapping: v._lightingDefaults.toneMapping,
+                };
+            }"""
+        )
+        assert state["exposure"] == pytest.approx(2.3)
+        assert state["envIntensity"] == pytest.approx(0.5)
+        assert state["ambient"] == pytest.approx(0.7)
+        assert state["toneMapping"] == "neutral"
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.browser
+def test_lighting_panel_edits_persist_in_localstorage(page):
+    """Panel slider writes go to localStorage under the ``tjsv.`` namespace and
+    are re-applied on reload when no URL param pins the value."""
+    client = _start_client()
+    try:
+        page.goto(f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}")
+        _wait_for_viewer(page)
+        # Start from a clean slate so this test is reentrant across runs.
+        page.evaluate(
+            """() => {
+                localStorage.removeItem('tjsv.toneMappingExposure');
+                localStorage.removeItem('tjsv.environmentIntensity');
+                localStorage.removeItem('tjsv.ambientIntensity');
+                localStorage.removeItem('tjsv.toneMapping');
+            }"""
+        )
+        # Simulate a user dragging the exposure slider.
+        page.evaluate(
+            """() => {
+                const slider = window.threejsViewer._lightingExposureSlider;
+                slider.value = '0.25';
+                slider.dispatchEvent(new Event('input', { bubbles: true }));
+            }"""
+        )
+        ls_value = page.evaluate(
+            "() => localStorage.getItem('tjsv.toneMappingExposure')"
+        )
+        assert ls_value == "0.25"
+
+        # Reload: with no URL param, localStorage should drive the initial value.
+        page.reload()
+        _wait_for_viewer(page)
+        applied = page.evaluate(
+            "() => window.threejsViewer._renderer.toneMappingExposure"
+        )
+        assert applied == pytest.approx(0.25)
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.browser
+def test_tone_mapping_change_flushes_materials(page):
+    """Switching tone-mapping mode must set ``needsUpdate = true`` on every
+    material so three.js recompiles shaders against the new tone-mapping
+    constant. Without this flush the renderer value changes but already-
+    compiled programs keep the old look."""
+    client = _start_client()
+    try:
+        page.goto(f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}")
+        _wait_for_viewer(page)
+        # Wait for the WS handshake so we can push a box into the scene.
+        assert client._connected_event.wait(timeout=10)
+        client.add_box("flushbox")
+        time.sleep(0.1)
+        # Force the box material's `version` to a known state, then swap modes
+        # and confirm three.js bumped it (which is how `needsUpdate = true` is
+        # observable — it increments `.version`).
+        before = page.evaluate(
+            """() => {
+                const obj = window.threejsViewer._objects.get('flushbox');
+                const mat = Array.isArray(obj.material) ? obj.material[0] : obj.material;
+                return mat.version;
+            }"""
+        )
+        page.evaluate(
+            """() => {
+                const sel = window.threejsViewer._lightingToneMappingSelect;
+                sel.value = 'agx';
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        after = page.evaluate(
+            """() => {
+                const obj = window.threejsViewer._objects.get('flushbox');
+                const mat = Array.isArray(obj.material) ? obj.material[0] : obj.material;
+                return mat.version;
+            }"""
+        )
+        assert after > before, (
+            f"material.version did not increment after tone-mapping swap "
+            f"(before={before}, after={after}) — materials were not flushed"
+        )
+        # Renderer constant must have moved away from the default (ACESFilmic).
+        initial_tm = page.evaluate(
+            "() => window.threejsViewer._lightingDefaults.reset.toneMapping"
+        )
+        current_tm = page.evaluate(
+            "() => window.threejsViewer._lightingToneMappingSelect.value"
+        )
+        assert initial_tm == "aces"
+        assert current_tm == "agx"
+    finally:
+        client.disconnect()
