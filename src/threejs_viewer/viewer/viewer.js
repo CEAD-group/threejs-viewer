@@ -760,37 +760,39 @@ const TUBE_MITER_LIMIT = 4;
 function computeMiterFrames(spine, nSpine, outFrames, outScales,
                             upX, upY, upZ, fbX, fbY, fbZ) {
     const nSeg = nSpine - 1;
-    // Per-segment unit directions.
-    const segDirs = new Float32Array(nSeg * 3);
-    for (let i = 0; i < nSeg; i++) {
-        let dx = spine[(i + 1) * 3]     - spine[i * 3];
-        let dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
-        let dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
+    // Rolling segment directions — avoids a nSeg*3 scratch buffer on large
+    // spines (~12 MB throwaway at 1M points). At spine point i, (pX,pY,pZ)
+    // holds segDir[i-1] (incoming) and (cX,cY,cZ) holds segDir[i] (outgoing).
+    // Endpoints use both = the single adjacent segment direction. A single-
+    // point spine (nSeg===0) falls through with the default (1,0,0).
+    let pX = 1, pY = 0, pZ = 0;
+    let cX = 1, cY = 0, cZ = 0;
+    if (nSeg > 0) {
+        let dx = spine[3]     - spine[0];
+        let dy = spine[4]     - spine[1];
+        let dz = spine[5]     - spine[2];
         const len = Math.hypot(dx, dy, dz);
         if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
         else { dx = 1; dy = 0; dz = 0; }
-        segDirs[i * 3] = dx; segDirs[i * 3 + 1] = dy; segDirs[i * 3 + 2] = dz;
+        pX = cX = dx; pY = cY = dy; pZ = cZ = dz;
     }
     for (let i = 0; i < nSpine; i++) {
-        let inX, inY, inZ, outX, outY, outZ;
-        if (nSeg === 0) {
-            inX = 1; inY = 0; inZ = 0; outX = 1; outY = 0; outZ = 0;
-        } else if (i === 0) {
-            inX = outX = segDirs[0];
-            inY = outY = segDirs[1];
-            inZ = outZ = segDirs[2];
-        } else if (i === nSpine - 1) {
-            inX = outX = segDirs[(nSeg - 1) * 3];
-            inY = outY = segDirs[(nSeg - 1) * 3 + 1];
-            inZ = outZ = segDirs[(nSeg - 1) * 3 + 2];
-        } else {
-            inX = segDirs[(i - 1) * 3];
-            inY = segDirs[(i - 1) * 3 + 1];
-            inZ = segDirs[(i - 1) * 3 + 2];
-            outX = segDirs[i * 3];
-            outY = segDirs[i * 3 + 1];
-            outZ = segDirs[i * 3 + 2];
+        // Advance for interior points: shift c→p, compute new c = segDir[i].
+        // Endpoints (i=0 or i=nSpine-1) skip the advance, so p and c both hold
+        // their single adjacent segment direction.
+        if (i > 0 && i < nSeg) {
+            pX = cX; pY = cY; pZ = cZ;
+            let dx = spine[(i + 1) * 3]     - spine[i * 3];
+            let dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
+            let dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
+            const len = Math.hypot(dx, dy, dz);
+            if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
+            else { dx = 1; dy = 0; dz = 0; }
+            cX = dx; cY = dy; cZ = dz;
         }
+        const isEnd = i === 0 || i === nSpine - 1;
+        const inX  = isEnd ? cX : pX, inY  = isEnd ? cY : pY, inZ  = isEnd ? cZ : pZ;
+        const outX = cX, outY = cY, outZ = cZ;
         // Unit-bisector tangent.
         let tx = inX + outX, ty = inY + outY, tz = inZ + outZ;
         const tlen = Math.hypot(tx, ty, tz);
@@ -1031,59 +1033,11 @@ function computeSectionNormals(section, nCs, out) {
     }
 }
 
-// Per-spine-point miter frames + u-axis scale. Mirrors the main-thread helper;
-// see its docstring for the math.
-function computeMiterFrames(spine, nSpine, outFrames, outScales,
-                            upX, upY, upZ, fbX, fbY, fbZ) {
-    const nSeg = nSpine - 1;
-    const segDirs = new Float32Array(nSeg * 3);
-    for (let i = 0; i < nSeg; i++) {
-        let dx = spine[(i+1)*3]   - spine[i*3];
-        let dy = spine[(i+1)*3+1] - spine[i*3+1];
-        let dz = spine[(i+1)*3+2] - spine[i*3+2];
-        const len = Math.hypot(dx, dy, dz);
-        if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
-        else { dx = 1; dy = 0; dz = 0; }
-        segDirs[i*3] = dx; segDirs[i*3+1] = dy; segDirs[i*3+2] = dz;
-    }
-    for (let i = 0; i < nSpine; i++) {
-        let inX, inY, inZ, outX, outY, outZ;
-        if (nSeg === 0) {
-            inX = 1; inY = 0; inZ = 0; outX = 1; outY = 0; outZ = 0;
-        } else if (i === 0) {
-            inX = outX = segDirs[0]; inY = outY = segDirs[1]; inZ = outZ = segDirs[2];
-        } else if (i === nSpine - 1) {
-            inX = outX = segDirs[(nSeg-1)*3];
-            inY = outY = segDirs[(nSeg-1)*3+1];
-            inZ = outZ = segDirs[(nSeg-1)*3+2];
-        } else {
-            inX = segDirs[(i-1)*3];   inY = segDirs[(i-1)*3+1]; inZ = segDirs[(i-1)*3+2];
-            outX = segDirs[i*3];      outY = segDirs[i*3+1];    outZ = segDirs[i*3+2];
-        }
-        let tx = inX + outX, ty = inY + outY, tz = inZ + outZ;
-        const tlen = Math.hypot(tx, ty, tz);
-        if (tlen > 1e-12) { tx /= tlen; ty /= tlen; tz /= tlen; }
-        else { tx = inX; ty = inY; tz = inZ; }
-        const dotTu = tx*upX + ty*upY + tz*upZ;
-        let seedX, seedY, seedZ;
-        if (Math.abs(dotTu) > 0.99) { seedX = fbX; seedY = fbY; seedZ = fbZ; }
-        else { seedX = upX; seedY = upY; seedZ = upZ; }
-        const sdot = seedX*tx + seedY*ty + seedZ*tz;
-        let vx = seedX - sdot*tx, vy = seedY - sdot*ty, vz = seedZ - sdot*tz;
-        const vlen = Math.hypot(vx, vy, vz);
-        if (vlen > 1e-12) { vx /= vlen; vy /= vlen; vz /= vlen; }
-        let Ux = vy*tz - vz*ty, Uy = vz*tx - vx*tz, Uz = vx*ty - vy*tx;
-        const ulen = Math.hypot(Ux, Uy, Uz);
-        if (ulen > 1e-12) { Ux /= ulen; Uy /= ulen; Uz /= ulen; }
-        vx = ty*Uz - tz*Uy; vy = tz*Ux - tx*Uz; vz = tx*Uy - ty*Ux;
-        outFrames[i*6]   = Ux; outFrames[i*6+1] = Uy; outFrames[i*6+2] = Uz;
-        outFrames[i*6+3] = vx; outFrames[i*6+4] = vy; outFrames[i*6+5] = vz;
-        const dDot = inX*outX + inY*outY + inZ*outZ;
-        const cosHalfSq = Math.max(0, (1 + dDot) * 0.5);
-        const cosHalf = Math.sqrt(cosHalfSq);
-        outScales[i] = cosHalf < 1 / TUBE_MITER_LIMIT ? 1 : 1 / cosHalf;
-    }
-}
+// Per-spine-point miter frames + u-axis scale. Injected from the main-thread
+// definition via Function.prototype.toString() to keep a single source of
+// truth — the only dependency is TUBE_MITER_LIMIT, which is defined at this
+// scope's header.
+${computeMiterFrames.toString()}
 
 function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
                                   width, height, localFrames, spineIdx, tSign,
