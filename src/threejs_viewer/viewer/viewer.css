@@ -483,3 +483,7 @@
 .threejs-viewer .tjsv-view-home:focus {
     outline: none;
 }
+.threejs-viewer .tjsv-view-home:focus-visible {
+    outline: 2px solid #66b3ff;
+    outline-offset: 2px;
+}

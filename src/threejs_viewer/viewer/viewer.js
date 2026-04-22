@@ -2788,6 +2788,7 @@ export class ThreeJSViewer {
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
         this._clipClose = q('.tjsv-clip-close');
         this._animControlsEl = q('.tjsv-animation-controls');
+        this._animLiftCss = 0;
         this._viewHomeBtn = q('.tjsv-view-home');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
@@ -3278,6 +3279,17 @@ export class ThreeJSViewer {
         let node = child;
         while (node) {
             if (node === this._clipAnchor || node === this._clipGizmoHelper) return true;
+            node = node.parent;
+        }
+        return false;
+    }
+
+    /** @param {any} child */
+    _isPivotMarkerDescendant(child) {
+        if (!this._pivotMarker) return false;
+        let node = child;
+        while (node) {
+            if (node === this._pivotMarker) return true;
             node = node.parent;
         }
         return false;
@@ -3886,8 +3898,10 @@ export class ThreeJSViewer {
 
         this._animControlsEl.classList.add('visible');
         // Reading offsetHeight forces layout so --tjsv-anim-lift reflects the
-        // now-visible toolbar; CSS uses it to shift the Home button up.
-        this.el.style.setProperty('--tjsv-anim-lift', `${this._animControlsEl.offsetHeight}px`);
+        // now-visible toolbar; CSS uses it to shift the Home button up. Cache
+        // the value for the gizmo hit-test / render-shim hot paths.
+        this._animLiftCss = this._animControlsEl.offsetHeight;
+        this.el.style.setProperty('--tjsv-anim-lift', `${this._animLiftCss}px`);
         this._totalTimeEl.textContent = this._animation.duration.toFixed(2);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
@@ -3954,6 +3968,7 @@ export class ThreeJSViewer {
         this._animationPlaying = false;
         this._baselineVisibility.clear();
         this._animControlsEl.classList.remove('visible');
+        this._animLiftCss = 0;
         this.el.style.setProperty('--tjsv-anim-lift', '0px');
         this._trackMode = 'off';
         this._trackTargetId = null;
@@ -5598,10 +5613,7 @@ export class ThreeJSViewer {
         // Lift the ViewHelper above the animation toolbar when it's visible.
         // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
         // call to add a Y offset matching the toolbar height.
-        const animEl = this._animControlsEl;
-        const lift = (animEl && animEl.classList.contains('visible'))
-            ? animEl.offsetHeight * window.devicePixelRatio
-            : 0;
+        const lift = (this._animLiftCss || 0) * window.devicePixelRatio;
         if (lift > 0) {
             // Cache the true original once so we don't re-wrap the wrapped
             // setViewport each frame (which would deepen the call chain by
@@ -5713,11 +5725,13 @@ export class ThreeJSViewer {
 
     /**
      * CSS-pixel lift applied to the gizmo when the animation toolbar is
-     * visible — matches the render-time shim in the main loop.
+     * visible — matches the render-time shim in the main loop. Cached to
+     * avoid layout reads on every pointermove (hit-test) and every frame
+     * (render shim). Kept in sync by the show/hide paths that also set
+     * the --tjsv-anim-lift CSS var.
      */
     _gizmoLiftCss() {
-        const el = this._animControlsEl;
-        return (el && el.classList.contains('visible')) ? el.offsetHeight : 0;
+        return this._animLiftCss || 0;
     }
 
     /**
@@ -5732,8 +5746,8 @@ export class ThreeJSViewer {
         const rect = dom.getBoundingClientRect();
         const dim = this._gizmoDim;
         const liftCss = this._gizmoLiftCss();
-        const offsetX = rect.left + dom.offsetWidth - dim;
-        const offsetY = rect.top + dom.offsetHeight - dim - liftCss;
+        const offsetX = rect.left + rect.width - dim;
+        const offsetY = rect.top + rect.height - dim - liftCss;
         const insideRect =
             e.clientX >= offsetX && e.clientX <= offsetX + dim &&
             e.clientY >= offsetY && e.clientY <= offsetY + dim;
@@ -5780,6 +5794,7 @@ export class ThreeJSViewer {
             if (!child.geometry) return;
             if (child === this._gridHelper) return;
             if (this._isClipHelper(child)) return;
+            if (this._isPivotMarkerDescendant(child)) return;
             child.updateWorldMatrix(true, false);
             bbox.expandByObject(child);
         });
@@ -5811,6 +5826,7 @@ export class ThreeJSViewer {
             if (!child.geometry) return;
             if (child === this._gridHelper) return;
             if (this._isClipHelper(child)) return;
+            if (this._isPivotMarkerDescendant(child)) return;
             child.updateWorldMatrix(true, false);
             bbox.expandByObject(child);
         });
