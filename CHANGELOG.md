@@ -2,6 +2,11 @@
 
 ## 0.0.23
 
+### Animation lifecycle
+
+- **`load_animation` accepts `initial_time` to land the playhead at a chosen time on first load / restart.** Pass a number (seconds, clamped to `[0, duration]`) or the string `"end"` to seek to `duration`. The seek runs through the normal `_seekToTime` path after camera-tracking is installed, so the correct frame is painted on the first tick — no `t=0` flash. Combines cleanly with `autoplay=False` for "paused at completion", which is what callers need for simulated-toolpath previews where the user lands on the finished print and then scrubs backward. Ignored on a swap (a load while an animation is already loaded, without `restart=True`) — swaps continue to preserve the existing playhead. Invalid values (non-finite numbers, wrong types) raise `ValueError` client-side; the browser silently falls through to the default `t=0` on any unexpected wire value.
+- **`load_animation(loop=True|False)` — documented host-side override of the animation's baked `loop` flag.** The plumbing already existed (the `loop` field on the WS message has always been forwarded to `_animationLoop`); it's now an explicit kwarg with a docstring instead of relying on undocumented `animation.loop` mutation at the call site. Omit (or pass `None`) to use `animation.loop`.
+
 ### Parametric tube LOD
 
 - **Per-tube LOD configuration via `lod=` kwarg on `add_parametric_tube`** (and passthrough on `add_toolpath(**kwargs)`). Previously LOD was governed by two hardcoded globals — `epsilon = camera_distance / 2500` and a magic-number `n >= 25000` spine-length gate — with no way to override per tube. `lod=False` disables LOD entirely (use for inspection beads where every original spine point matters); `lod={"epsilon_divisor": N, "threshold": M}` tunes detail retention and the activation gate (`threshold=0` forces LOD on for short spines). Invalid shapes (`lod=True`, unknown keys, non-positive `epsilon_divisor`, negative `threshold`) raise `ValueError` client-side before the message is sent. Defaults are unchanged — omitting `lod` preserves the prior 2500/25000 behavior, so no existing caller needs updating. The wire format carries the per-tube config through to the worker, so ongoing 2 Hz LOD updates honor the override too (not just the initial synchronous reduction).

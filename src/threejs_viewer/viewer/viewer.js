@@ -3789,16 +3789,17 @@ export class ThreeJSViewer {
 
     /**
      * @param {any} animData
-     * @param {{ restart?: boolean, autoplay?: boolean }} [opts]
+     * @param {{ restart?: boolean, autoplay?: boolean, initial_time?: number | 'end' }} [opts]
      */
     _loadAnimation(animData, opts = {}) {
         // First load (no animation yet) or explicit restart resets the playhead
-        // to t=0 and installs camera-tracking from the new metadata; whether
-        // playback starts immediately is controlled by the caller's autoplay
-        // setting (applied by client.py before sending the load message). A
-        // subsequent load (animation already loaded, restart not set) preserves
-        // playhead time, play state, and camera-tracking — only the underlying
-        // frame data is swapped.
+        // to t=0 (or opts.initial_time, if provided) and installs camera-tracking
+        // from the new metadata; whether playback starts immediately is
+        // controlled by the caller's autoplay setting (applied by client.py
+        // before sending the load message). A subsequent load (animation already
+        // loaded, restart not set) preserves playhead time, play state, and
+        // camera-tracking — only the underlying frame data is swapped (and
+        // opts.initial_time is ignored on a swap).
         const isSwap = this._animation != null && !opts.restart;
         const prevTime = this._animationTime;
         const prevPlaying = this._animationPlaying;
@@ -3896,7 +3897,31 @@ export class ThreeJSViewer {
             }
             this._updateTrackingUI();
 
+            // Set play state before the optional seek — _seekToTime calls
+            // _updateAnimationUI, which paints the play/pause icon from
+            // _animationPlaying. Setting it after would leave the icon stale.
             this._animationPlaying = opts.autoplay !== false;
+
+            // Caller-chosen playhead on first load / restart. Seeking through
+            // _seekToTime paints the correct frame before the first tick, so
+            // "paused at end" or "start at t=5" doesn't flash t=0 first.
+            // Silently ignore bad values (NaN, wrong type) — they fall through
+            // to the default t=0 we already applied.
+            if (opts.initial_time !== undefined) {
+                const duration = animData.duration || 0;
+                let target = null;
+                if (opts.initial_time === 'end') {
+                    target = duration;
+                } else if (typeof opts.initial_time === 'number' && Number.isFinite(opts.initial_time)) {
+                    target = opts.initial_time;
+                }
+                if (target !== null) this._seekToTime(target);
+            }
+
+            // Refresh the animation UI so the play/pause icon reflects the
+            // just-set _animationPlaying (the earlier _updateAnimationUI call
+            // ran before we knew the autoplay choice).
+            this._updateAnimationUI();
         }
         this._lastAnimationUpdate = performance.now();
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s${isSwap ? ' (swap)' : ''}`);
@@ -4708,6 +4733,7 @@ export class ThreeJSViewer {
                         this._loadAnimation(data.animation, {
                             restart: !!data.restart,
                             autoplay: data.autoplay !== false,
+                            initial_time: data.initial_time,
                         });
                         break;
                     case 'load_animation_http': {
@@ -4804,6 +4830,7 @@ export class ThreeJSViewer {
                                 }, {
                                     restart: !!data.restart,
                                     autoplay: data.autoplay !== false,
+                                    initial_time: data.initial_time,
                                 });
                                 console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                             } catch (e) {

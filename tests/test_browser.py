@@ -237,6 +237,59 @@ def test_autoplay_false_loads_paused(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_initial_time_end_lands_at_duration(viewer_client, viewer_page):
+    """load_animation(initial_time='end', autoplay=False) parks playhead at duration."""
+    viewer_client.add_box("ebox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=5, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time="end")
+    _wait_for_animation_loaded(viewer_page)
+    # Playhead should snap to duration immediately, no t=0 flash.
+    assert _is_playing(viewer_page) is False
+    assert abs(_get_animation_time(viewer_page) - 5.0) < 1e-6, (
+        f"expected playhead at 5.0, got {_get_animation_time(viewer_page)}"
+    )
+
+
+@pytest.mark.browser
+def test_initial_time_numeric_seek(viewer_client, viewer_page):
+    """load_animation(initial_time=2.5) lands at 2.5s on first load."""
+    viewer_client.add_box("nbox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=5, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time=2.5)
+    _wait_for_animation_loaded(viewer_page)
+    assert abs(_get_animation_time(viewer_page) - 2.5) < 1e-6
+
+
+@pytest.mark.browser
+def test_loop_override_false_holds_at_end(viewer_client, viewer_page):
+    """load_animation(loop=False) disables looping even when the Animation is loop=True."""
+    viewer_client.add_box("lbox")
+    time.sleep(0.1)
+    # Animation is baked with loop=True — the kwarg must override.
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=0.5, transforms={})],
+        loop=True,
+    )
+    viewer_client.load_animation(anim, loop=False, initial_time="end")
+    _wait_for_animation_loaded(viewer_page)
+    # Playhead starts at duration; with loop override=False it should not wrap.
+    # Wait past the duration and verify we're still holding at 0.5 (not at 0).
+    time.sleep(0.5)
+    t = _get_animation_time(viewer_page)
+    assert abs(t - 0.5) < 0.1, (
+        f"loop=False override failed: playhead at {t} instead of holding at 0.5"
+    )
+
+
+@pytest.mark.browser
 def test_pause_and_resume_animation(viewer_client, viewer_page):
     """pause_animation() / resume_animation() toggle meta.animation.playing."""
     viewer_client.add_box("pbox")
