@@ -447,3 +447,43 @@
     color: #999;
     text-align: center;
 }
+
+/* Home button — centered inside the 128×128 ViewHelper area, shifts up
+   with the animation toolbar via --tjsv-anim-lift (set from JS). */
+.threejs-viewer .tjsv-view-home {
+    position: absolute;
+    right: 46px;
+    bottom: calc(46px + var(--tjsv-anim-lift, 0px));
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border-radius: 50%;
+    background: rgba(30, 30, 30, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #ddd;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    opacity: 0.75;
+    transition: background 0.15s, color 0.15s, opacity 0.15s, transform 0.15s;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    z-index: 2;
+}
+.threejs-viewer .tjsv-view-home:hover {
+    background: rgba(60, 60, 60, 0.95);
+    color: white;
+    opacity: 1;
+    transform: scale(1.06);
+}
+.threejs-viewer .tjsv-view-home:active {
+    transform: scale(0.96);
+}
+.threejs-viewer .tjsv-view-home:focus {
+    outline: none;
+}
+.threejs-viewer .tjsv-view-home:focus-visible {
+    outline: 2px solid #66b3ff;
+    outline-offset: 2px;
+}

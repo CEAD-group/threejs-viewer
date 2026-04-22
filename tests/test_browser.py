@@ -501,8 +501,11 @@ def test_view_helper_setviewport_shim_no_stack_overflow(viewer_client, viewer_pa
     result = viewer_page.evaluate(
         """() => {
             const v = window.threejsViewer;
-            // Force toolbar visible so the lift > 0 branch runs.
+            // Force toolbar visible so the lift > 0 branch runs. The render
+            // loop reads the cached CSS-pixel lift (updated by the show/hide
+            // paths) rather than offsetHeight; set it directly here.
             v._animControlsEl.classList.add('visible');
+            v._animLiftCss = 40;
             // Trigger many render passes synchronously.
             const origAnimate = v._animate.bind(v);
             for (let i = 0; i < 200; i++) {
