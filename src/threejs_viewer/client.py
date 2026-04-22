@@ -8,6 +8,7 @@ Runs a WebSocket server that the browser connects to directly.
 import json
 import logging
 import math
+import numbers
 import threading
 import time
 import urllib.parse
@@ -66,7 +67,7 @@ def _serialize_lod(lod):
     out: Dict[str, float] = {}
     if "epsilon_divisor" in lod:
         div = lod["epsilon_divisor"]
-        if not isinstance(div, (int, float)) or isinstance(div, bool):
+        if isinstance(div, bool) or not isinstance(div, numbers.Real):
             raise ValueError(f"lod.epsilon_divisor must be a number (got {div!r})")
         div = float(div)
         if not math.isfinite(div) or div <= 0:
@@ -76,13 +77,16 @@ def _serialize_lod(lod):
         out["epsilonDivisor"] = div
     if "threshold" in lod:
         thr = lod["threshold"]
-        if not isinstance(thr, (int, float)) or isinstance(thr, bool):
-            raise ValueError(f"lod.threshold must be a number (got {thr!r})")
-        if not math.isfinite(float(thr)) or thr < 0:
+        # Integer-only: docstring says "non-negative integer" and silent
+        # float→int truncation would be surprising (threshold=1.9 → 1).
+        if isinstance(thr, bool) or not isinstance(thr, numbers.Integral):
+            raise ValueError(f"lod.threshold must be an integer (got {thr!r})")
+        thr = int(thr)
+        if thr < 0:
             raise ValueError(
-                f"lod.threshold must be a non-negative finite number (got {thr!r})"
+                f"lod.threshold must be a non-negative integer (got {thr!r})"
             )
-        out["threshold"] = int(thr)
+        out["threshold"] = thr
     return out
 
 

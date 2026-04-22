@@ -216,6 +216,33 @@ def test_add_parametric_tube_lod_threshold_negative_rejected():
         c.add_parametric_tube("t", spine, widths, heights, lod={"threshold": -5})
 
 
+def test_add_parametric_tube_lod_threshold_float_rejected():
+    """threshold is documented as integer — reject floats to avoid silent
+    truncation (1.9 → 1)."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="threshold must be an integer"):
+        c.add_parametric_tube("t", spine, widths, heights, lod={"threshold": 1.9})
+
+
+def test_add_parametric_tube_lod_accepts_numpy_scalars():
+    """numpy scalar types (np.float32, np.int64, ...) must be accepted —
+    the rest of the client API accepts numpy-coercible numerics."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t",
+        spine,
+        widths,
+        heights,
+        lod={"epsilon_divisor": np.float32(7500), "threshold": np.int64(1000)},
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["lod"] == {"epsilonDivisor": 7500.0, "threshold": 1000}
+    assert isinstance(header["lod"]["threshold"], int)
+    assert isinstance(header["lod"]["epsilonDivisor"], float)
+
+
 # --- Browser integration tests ---
 
 
