@@ -16,7 +16,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
@@ -1344,7 +1344,7 @@ class ViewerClient:
         *,
         restart: bool = False,
         autoplay: bool = True,
-        initial_time: Optional[Union[float, str]] = None,
+        initial_time: Optional[Union[float, Literal["end"]]] = None,
         loop: Optional[bool] = None,
     ) -> None:
         """
@@ -1415,6 +1415,8 @@ class ViewerClient:
                 f"initial_time must be a finite number or the string 'end', "
                 f"got {initial_time!r}"
             )
+        if loop is not None and not isinstance(loop, bool):
+            raise ValueError(f"loop must be a bool or None, got {loop!r}")
         # Determine frame count and times
         if animation._frame_times is not None:
             n_frames = len(animation._frame_times)

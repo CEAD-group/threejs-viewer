@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from threejs_viewer import ViewerClient
+from threejs_viewer import Animation, Frame, ViewerClient
 
 
 def test_client_instantiation():
@@ -88,3 +88,30 @@ def test_viewer_client_rejects_non_finite_floats(kwarg):
         ViewerClient(**{kwarg: float("nan")})
     with pytest.raises(ValueError, match="must be a finite number"):
         ViewerClient(**{kwarg: float("inf")})
+
+
+def _mini_animation():
+    """Two-frame animation, just enough for load_animation's validation path."""
+    return Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=1, transforms={})],
+        loop=True,
+    )
+
+
+@pytest.mark.parametrize("bad_loop", ["yes", "true", 1, 0, []])
+def test_load_animation_rejects_non_bool_loop(bad_loop):
+    """loop must be a real bool — strings/ints/etc. are not coerced silently."""
+    client = ViewerClient()
+    with pytest.raises(ValueError, match="loop must be a bool or None"):
+        client.load_animation(_mini_animation(), loop=bad_loop)
+
+
+@pytest.mark.parametrize(
+    "bad_time",
+    [float("nan"), float("inf"), "start", "bogus", [], True],
+)
+def test_load_animation_rejects_bad_initial_time(bad_time):
+    """initial_time must be a finite number or the literal 'end'."""
+    client = ViewerClient()
+    with pytest.raises(ValueError, match="initial_time must be"):
+        client.load_animation(_mini_animation(), initial_time=bad_time)

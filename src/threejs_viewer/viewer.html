@@ -4920,6 +4920,11 @@ class ThreeJSViewer {
             }
             this._updateTrackingUI();
 
+            // Set play state before the optional seek — _seekToTime calls
+            // _updateAnimationUI, which paints the play/pause icon from
+            // _animationPlaying. Setting it after would leave the icon stale.
+            this._animationPlaying = opts.autoplay !== false;
+
             // Caller-chosen playhead on first load / restart. Seeking through
             // _seekToTime paints the correct frame before the first tick, so
             // "paused at end" or "start at t=5" doesn't flash t=0 first.
@@ -4936,7 +4941,10 @@ class ThreeJSViewer {
                 if (target !== null) this._seekToTime(target);
             }
 
-            this._animationPlaying = opts.autoplay !== false;
+            // Refresh the animation UI so the play/pause icon reflects the
+            // just-set _animationPlaying (the earlier _updateAnimationUI call
+            // ran before we knew the autoplay choice).
+            this._updateAnimationUI();
         }
         this._lastAnimationUpdate = performance.now();
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s${isSwap ? ' (swap)' : ''}`);
