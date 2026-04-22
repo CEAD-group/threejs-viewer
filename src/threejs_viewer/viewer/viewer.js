@@ -4168,6 +4168,9 @@ export class ThreeJSViewer {
             }
         } else if (this._trackMode === 'lookat') {
             this._controls.target.copy(targetPos);
+            // ViewerControls never calls camera.lookAt (would break click-to-pivot),
+            // so re-orient the camera explicitly here to actually track the target.
+            this._camera.lookAt(targetPos);
         }
 
         this._trackLastPos.copy(targetPos);
