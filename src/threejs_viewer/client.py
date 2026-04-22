@@ -1339,7 +1339,13 @@ class ViewerClient:
     # === Animation ===
 
     def load_animation(
-        self, animation, *, restart: bool = False, autoplay: bool = True
+        self,
+        animation,
+        *,
+        restart: bool = False,
+        autoplay: bool = True,
+        initial_time: Optional[Union[float, str]] = None,
+        loop: Optional[bool] = None,
     ) -> None:
         """
         Load an animation for playback in the viewer.
@@ -1349,14 +1355,15 @@ class ViewerClient:
         (clip_times, or any channel without a binary version).
 
         First load (no animation currently loaded) sets the playhead to
-        t=0 and installs camera-tracking from the new animation's metadata;
-        whether playback starts immediately is governed by ``autoplay``
-        (default ``True``). Subsequent loads (an animation is already
-        loaded) preserve the current playhead time (clamped to the new
-        duration), play state, and camera-tracking — only the underlying
-        frame data is swapped. Pass ``restart=True`` to force the
-        first-load behavior on a swap; ``autoplay`` still controls
-        play/paused on restart.
+        t=0 — or ``initial_time`` if provided — and installs camera-tracking
+        from the new animation's metadata; whether playback starts
+        immediately is governed by ``autoplay`` (default ``True``).
+        Subsequent loads (an animation is already loaded) preserve the
+        current playhead time (clamped to the new duration), play state,
+        and camera-tracking — only the underlying frame data is swapped.
+        Pass ``restart=True`` to force the first-load behavior on a swap;
+        ``autoplay`` still controls play/paused on restart, and
+        ``initial_time`` is applied as the restart playhead.
 
         Args:
             animation: Animation object with pre-computed frames
@@ -1368,6 +1375,17 @@ class ViewerClient:
                 animation loads paused on first-load and on a restart.
                 Has no effect on a swap without ``restart`` (the prior
                 play state is preserved regardless).
+            initial_time: Playhead position (seconds) on first load or
+                restart. Pass a number to land at a specific time
+                (clamped to ``[0, duration]``), or the string ``"end"``
+                to land at ``duration``. Combine with ``autoplay=False``
+                for "paused at completion". Ignored on a swap (a load
+                while an animation is already loaded, without ``restart``).
+            loop: If provided, overrides the animation's baked-in
+                ``loop`` flag for this load. ``True`` enables looping;
+                ``False`` disables (playback holds at ``duration`` when
+                it reaches the end). Omit (or pass ``None``) to use
+                ``animation.loop``.
 
         Example:
             frames = []
@@ -1379,7 +1397,24 @@ class ViewerClient:
                 ))
             animation = Animation(frames=frames, loop=True)
             viewer.load_animation(animation)
+
+            # Land at completion, paused, non-looping (simulated toolpath).
+            viewer.load_animation(
+                animation, autoplay=False, initial_time="end", loop=False
+            )
         """
+        if initial_time is not None and not (
+            initial_time == "end"
+            or (
+                isinstance(initial_time, (int, float))
+                and not isinstance(initial_time, bool)
+                and math.isfinite(initial_time)
+            )
+        ):
+            raise ValueError(
+                f"initial_time must be a finite number or the string 'end', "
+                f"got {initial_time!r}"
+            )
         # Determine frame count and times
         if animation._frame_times is not None:
             n_frames = len(animation._frame_times)
@@ -1529,7 +1564,7 @@ class ViewerClient:
             "frame_times": frame_times,
             "duration": animation.duration,
             "fps": animation.fps,
-            "loop": animation.loop,
+            "loop": animation.loop if loop is None else bool(loop),
             "markers": [
                 {"time": m.time, "label": m.label, "color": m.color}
                 for m in animation.markers
@@ -1545,6 +1580,8 @@ class ViewerClient:
             header["restart"] = True
         if not autoplay:
             header["autoplay"] = False
+        if initial_time is not None:
+            header["initial_time"] = initial_time
         self._send(header)
 
     def unload_animation(self, *, restore_visibility: bool = True) -> None:
