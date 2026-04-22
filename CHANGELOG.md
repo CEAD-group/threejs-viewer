@@ -11,6 +11,15 @@
 
 - **Per-tube LOD configuration via `lod=` kwarg on `add_parametric_tube`** (and passthrough on `add_toolpath(**kwargs)`). Previously LOD was governed by two hardcoded globals — `epsilon = camera_distance / 2500` and a magic-number `n >= 25000` spine-length gate — with no way to override per tube. `lod=False` disables LOD entirely (use for inspection beads where every original spine point matters); `lod={"epsilon_divisor": N, "threshold": M}` tunes detail retention and the activation gate (`threshold=0` forces LOD on for short spines). Invalid shapes (`lod=True`, unknown keys, non-positive `epsilon_divisor`, negative `threshold`) raise `ValueError` client-side before the message is sent. Defaults are unchanged — omitting `lod` preserves the prior 2500/25000 behavior, so no existing caller needs updating. The wire format carries the per-tube config through to the worker, so ongoing 2 Hz LOD updates honor the override too (not just the initial synchronous reduction).
 
+### Viewer display and controls
+
+- **Corner gizmo: hover feedback, bigger hit targets, near-miss suppression.** Axis sprites enlarged 1.4× and a hover raycast lights the sprite under the cursor (scale + opacity) with `cursor: pointer`, so users see when a click will actually land. A capture-phase pointerdown handler suppresses the click-to-pivot behavior inside the 128×128 gizmo rect — previously, missing an axis sprite by a few pixels would silently relocate the orbit pivot instead of doing nothing. The gizmo's `handleClick` event shim is also adjusted so axis clicks land correctly when the animation toolbar lifts the gizmo above the bottom edge (a pre-existing bug surfaced by the larger hit targets).
+- **Home button + canonical `resetView()`.** A new Home button sits in the empty middle of the gizmo ring (also bound to `F` / Home key) and re-frames the scene. `resetView()` now enforces a canonical orientation — world-Z up, isometric-ish `(+X, -Y, +Z)` direction from the scene-bbox center — and frames all objects, so it's predictable on scenes centered off-origin instead of just snapping the orbit controls back. Tab-reachable with `aria-label="Reset view"` and a `:focus-visible` outline; mouse focus stays outline-free. Lifts above the animation toolbar via a `--tjsv-anim-lift` CSS variable (cached to avoid per-pointermove `offsetHeight` reads).
+
+### Fixes
+
+- **`camera_lookat` tracking no longer no-ops.** The custom `ViewerControls` introduced in 0.0.20 deliberately never calls `camera.lookAt` inside `update()` to preserve its click-to-pivot guarantee — but stock `OrbitControls` used to do that re-orient implicitly, so the lookat branch in `_applyCameraTracking` had been silently relying on it. The orbit target was being moved to the tracked object each frame, but the camera was never re-oriented, so the view stayed pointed wherever it was before playback started. Now re-orients explicitly in the lookat branch, matching the precedent already in `CameraController`. `camera_follow` is unaffected — it translates camera and target by the same delta and preserves the view offset without needing a re-orient.
+
 ## 0.0.22
 
 ### Viewer display and controls
