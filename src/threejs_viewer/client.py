@@ -7,8 +7,10 @@ Runs a WebSocket server that the browser connects to directly.
 
 import json
 import logging
+import math
 import threading
 import time
+import urllib.parse
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -17,6 +19,21 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
+
+
+_ALLOWED_TONE_MAPPING_MODES = frozenset(
+    {"none", "linear", "reinhard", "cineon", "aces", "agx", "neutral"}
+)
+
+
+def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
+    """Reject NaN/Inf so they never leak into the query string."""
+    if value is None:
+        return None
+    f = float(value)
+    if not math.isfinite(f):
+        raise ValueError(f"{name} must be a finite number (got {value!r})")
+    return f
 
 
 class _BlobHandler(BaseHTTPRequestHandler):
@@ -50,10 +67,40 @@ class ViewerClient:
         host: str = "localhost",
         port: int = 5666,
         open_browser: bool = True,
+        tone_mapping_exposure: Optional[float] = None,
+        environment_intensity: Optional[float] = None,
+        ambient_intensity: Optional[float] = None,
+        tone_mapping: Optional[str] = None,
     ):
         self.host = host
         self.port = port
         self.open_browser = open_browser
+        # Lighting overrides — forwarded to the viewer via query string on launch.
+        # `None` means "not specified" (let the viewer pick its default or
+        # localStorage value). An explicit float (including 0.0) is authoritative
+        # and wins over localStorage in the browser. Floats are validated eagerly
+        # so we never serialize NaN/Inf into the URL.
+        self.tone_mapping_exposure = _validate_finite(
+            "tone_mapping_exposure", tone_mapping_exposure
+        )
+        self.environment_intensity = _validate_finite(
+            "environment_intensity", environment_intensity
+        )
+        self.ambient_intensity = _validate_finite(
+            "ambient_intensity", ambient_intensity
+        )
+        # Validate tone_mapping (case-insensitive, stored lowercase).  Matches
+        # the seven Three.js modes exposed in the viewer's lighting panel.
+        if tone_mapping is not None:
+            normalized = tone_mapping.lower()
+            if normalized not in _ALLOWED_TONE_MAPPING_MODES:
+                allowed = ", ".join(sorted(_ALLOWED_TONE_MAPPING_MODES))
+                raise ValueError(
+                    f"tone_mapping must be one of: {allowed} (got {tone_mapping!r})"
+                )
+            self.tone_mapping = normalized
+        else:
+            self.tone_mapping = None
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -128,8 +175,24 @@ class ViewerClient:
 
     @property
     def viewer_url(self) -> str:
-        """Full file:// URL to the viewer, including ws_port query param."""
-        return self.viewer_path.resolve().as_uri() + f"?ws_port={self.port}"
+        """Full file:// URL to the viewer.
+
+        Always includes `ws_port`. Appends `tone_mapping`,
+        `tone_mapping_exposure`, `environment_intensity`, and/or
+        `ambient_intensity` query params when the caller passed explicit
+        lighting overrides — those act as authoritative defaults in the
+        browser (they win over the panel's localStorage on reload).
+        """
+        params: list[tuple[str, str]] = [("ws_port", str(self.port))]
+        if self.tone_mapping is not None:
+            params.append(("tone_mapping", self.tone_mapping))
+        if self.tone_mapping_exposure is not None:
+            params.append(("tone_mapping_exposure", str(self.tone_mapping_exposure)))
+        if self.environment_intensity is not None:
+            params.append(("environment_intensity", str(self.environment_intensity)))
+        if self.ambient_intensity is not None:
+            params.append(("ambient_intensity", str(self.ambient_intensity)))
+        return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
     def _run_server(self):
         """Run the WebSocket server in a background thread."""
