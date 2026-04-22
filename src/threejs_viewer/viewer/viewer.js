@@ -2789,6 +2789,13 @@ export class ThreeJSViewer {
         this._clipClose = q('.tjsv-clip-close');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
+        // Toolbar height tracks viewport width: the timeline-row wraps when
+        // controls don't fit, so the lift is a function of viewport size, not
+        // just show/hide state. Observe the toolbar and push its height into
+        // the cache + CSS var whenever layout reports a new size. display:none
+        // reports 0 — matches the "not visible" state naturally.
+        this._animLiftObserver = new ResizeObserver(() => this._refreshAnimLift());
+        this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
@@ -3898,11 +3905,12 @@ export class ThreeJSViewer {
         }
 
         this._animControlsEl.classList.add('visible');
-        // Reading offsetHeight forces layout so --tjsv-anim-lift reflects the
-        // now-visible toolbar; CSS uses it to shift the Home button up. Cache
-        // the value for the gizmo hit-test / render-shim hot paths.
-        this._animLiftCss = this._animControlsEl.offsetHeight;
-        this.el.style.setProperty('--tjsv-anim-lift', `${this._animLiftCss}px`);
+        // Prime the cache synchronously so the very first rendered frame
+        // after the show already has the lift applied — ResizeObserver would
+        // otherwise fire a tick later and produce a one-frame flash. Further
+        // updates (reflow on resize, content changes) flow through the
+        // observer.
+        this._refreshAnimLift();
         this._totalTimeEl.textContent = this._animation.duration.toFixed(2);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
@@ -3993,8 +4001,10 @@ export class ThreeJSViewer {
         this._animationPlaying = false;
         this._baselineVisibility.clear();
         this._animControlsEl.classList.remove('visible');
-        this._animLiftCss = 0;
-        this.el.style.setProperty('--tjsv-anim-lift', '0px');
+        // display:none makes offsetHeight 0; the observer will sync shortly
+        // anyway, but zero it synchronously so the next render/hit-test sees
+        // the unlifted position immediately.
+        this._refreshAnimLift();
         this._trackMode = 'off';
         this._trackTargetId = null;
         this._trackHasLastPos = false;
@@ -5757,11 +5767,25 @@ export class ThreeJSViewer {
      * CSS-pixel lift applied to the gizmo when the animation toolbar is
      * visible — matches the render-time shim in the main loop. Cached to
      * avoid layout reads on every pointermove (hit-test) and every frame
-     * (render shim). Kept in sync by the show/hide paths that also set
-     * the --tjsv-anim-lift CSS var.
+     * (render shim). Kept in sync by a ResizeObserver on the toolbar (+
+     * synchronous priming in the show/hide paths) so viewport-driven
+     * wrap/unwrap of the timeline-row updates the lift too.
      */
     _gizmoLiftCss() {
         return this._animLiftCss || 0;
+    }
+
+    /**
+     * Read the toolbar's current height and push it into both the cache
+     * (hit-test + render shim) and the --tjsv-anim-lift CSS var (Home
+     * button). display:none yields 0, which matches the "toolbar hidden"
+     * state. Called on show/hide and by the ResizeObserver.
+     */
+    _refreshAnimLift() {
+        const h = this._animControlsEl.offsetHeight;
+        if (h === this._animLiftCss) return;
+        this._animLiftCss = h;
+        this.el.style.setProperty('--tjsv-anim-lift', `${h}px`);
     }
 
     /**
@@ -5885,6 +5909,7 @@ export class ThreeJSViewer {
         }
         clearTimeout(this._reconnectTimeout);
         this._resizeObserver.disconnect();
+        this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
