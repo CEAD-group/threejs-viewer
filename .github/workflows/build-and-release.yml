@@ -108,7 +108,11 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "Setting version to $VERSION"
-          sed -i 's/^version = ".*"/version = "'$VERSION'"/' pyproject.toml
+          sed -i "s/0\.0\.0-dev/$VERSION/g" \
+            pyproject.toml \
+            src/threejs_viewer/__init__.py \
+            src/threejs_viewer/viewer/viewer.js
+          uv run python src/threejs_viewer/viewer/build.py
 
       - name: Build package
         run: |

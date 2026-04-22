@@ -8,6 +8,19 @@
 - **Runtime lighting panel (`E` key or `☼ E` toolbar button).** Four live controls — tone-mapping mode (`none` / `linear` / `reinhard` / `cineon` / `aces` (default) / `agx` / `neutral`), tone-mapping exposure, environment intensity, ambient intensity. Values are applied live and persist across reloads in `localStorage` under the `tjsv.` namespace. A Reset button restores the page-load baseline (URL param > options > hard default, skipping localStorage) and clears the four persisted keys. Changing the tone-mapping mode flushes every material's shader (`material.needsUpdate = true`) because three.js bakes the tone-mapping constant into the compiled program — expect a one-frame recompile stutter on very large scenes.
 - **`ViewerClient` accepts four lighting kwargs**: `tone_mapping`, `tone_mapping_exposure`, `environment_intensity`, `ambient_intensity`. When supplied, they're appended as snake-case query params on the viewer URL and act as authoritative initial values — they win over `localStorage` on reload. `tone_mapping` is validated case-insensitively against the seven modes and raises `ValueError` on anything else; the three float kwargs reject NaN/Inf so they never leak into the query string. Precedence for initial values: **URL param > `ThreeJSViewer` option > `localStorage` > hard default.**
 
+### Parametric tube LOD
+
+- **Attribute-aware RDP simplification.** Parametric-tube LOD previously measured perpendicular distance in 3D only, so attribute variation on a geometrically straight segment (a colormap gradient, a width bump on a flat line) was invisible to RDP and would collapse — `LOD_MAX_SKIP=100` was a blunt safety valve that inserted a midpoint every 100 collapsed points to hide the worst banding, without knowing how variable the attribute actually was. The worker now projects into an augmented space (xyz + weighted width, height, r, g, b) so a single camera-scaled epsilon bounds geometric *and* attribute error together: colormap gradients and width ramps survive simplification at the same sub-pixel threshold as geometric detail. Internal weights: width/height contribute 0.5 world units per unit of delta; a full per-channel color swing costs 5% of the tube's bounding radius (which now includes the max cross-section half-extent, so thick tubes with a compact spine don't under-weight color). `LOD_MAX_SKIP` is kept as a safety valve but should rarely fire. The sync fallback (used for the first render before the worker is ready) mirrors the worker's logic so the initial LOD matches subsequent worker-produced levels.
+- **`update_parametric_tube_colors` invalidates the LOD chunk cache.** Chunk splits depend on color deltas under augmented-space RDP, so a color swap mid-animation now rebuilds affected chunks instead of reusing stale simplifications.
+
+### Docs
+
+- **Embedding contract documented.** The viewer issues a no-cors HTTP GET against `wsUrl` (scheme swapped to http/https, path+query preserved) before each WebSocket attempt to suppress the browser's unsilenceable "WebSocket failed" console warning. Embedders pointing at a non-`websockets` server need the host (or its proxy) to answer *something* on that GET (200/400/404/426 all count) or the probe never resolves and the WebSocket is never attempted. Previously only explained by a one-line code comment; now covered in `ThreeJSViewer` JSDoc, the probe-site comment, and a new "Embedding the Viewer" section in `DESIGN.md`.
+
+### Internal
+
+- Viewer JSDoc types tightened: typedefs for `ThreeJSViewerOptions`, `BinaryChannel`, `AnimationFrame`, `AnimationData`; binary-channel apply helpers and ring/color free functions fully annotated; `@type {any}` casts replaced with concrete types where practical. No runtime behavior change. Run `npx tsc --noEmit -p jsconfig.json` to type-check.
+
 ## 0.0.21
 
 ### Fixes
