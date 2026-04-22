@@ -521,6 +521,79 @@ def test_view_helper_setviewport_shim_no_stack_overflow(viewer_client, viewer_pa
     assert result["restored"], "setViewport was not restored after _viewHelper.render()"
 
 
+@pytest.mark.browser
+def test_anim_lift_tracks_toolbar_reflow_on_resize(viewer_client, viewer_page):
+    """Toolbar height depends on viewport width (timeline-row wraps when
+    controls don't fit). The render-shim/hit-test cache + --tjsv-anim-lift
+    CSS var must follow the toolbar so the gizmo and Home button stay
+    clear of the toolbar after a resize.
+
+    Regression: prior behavior only wrote the cache at load/unload, so
+    shrinking the viewport left the cache stale and the Home button
+    overlapped the now-taller toolbar."""
+    viewer_page.set_viewport_size({"width": 1600, "height": 900})
+    viewer_client.add_sphere("s")
+    identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    frames = [Frame(time=t / 10, transforms={"s": identity}) for t in range(10)]
+    viewer_client.load_animation(Animation(frames=frames))
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._animLiftCss > 0", timeout=5000
+    )
+
+    def snapshot():
+        return viewer_page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                const home = v.el.querySelector('.tjsv-view-home');
+                const homeRect = home.getBoundingClientRect();
+                const tbRect = v._animControlsEl.getBoundingClientRect();
+                return {
+                    animLiftCss: v._animLiftCss,
+                    tbHeight: v._animControlsEl.offsetHeight,
+                    cssVar: getComputedStyle(v.el)
+                        .getPropertyValue('--tjsv-anim-lift')
+                        .trim(),
+                    homeBottom: homeRect.bottom,
+                    tbTop: tbRect.top,
+                };
+            }"""
+        )
+
+    wide = snapshot()
+    assert wide["animLiftCss"] == wide["tbHeight"]
+    assert wide["cssVar"] == f"{wide['animLiftCss']}px"
+
+    # Force timeline-row to wrap by narrowing the viewport. The toolbar
+    # grows; the ResizeObserver must update the cache + CSS var.
+    viewer_page.set_viewport_size({"width": 500, "height": 900})
+    viewer_page.wait_for_function(
+        f"() => window.threejsViewer._animLiftCss > {wide['animLiftCss']}",
+        timeout=2000,
+    )
+    narrow = snapshot()
+    assert narrow["tbHeight"] > wide["tbHeight"], (
+        f"toolbar didn't grow on shrink: wide={wide['tbHeight']} "
+        f"narrow={narrow['tbHeight']}"
+    )
+    assert narrow["animLiftCss"] == narrow["tbHeight"], (
+        f"cache stale after shrink: {narrow}"
+    )
+    assert narrow["cssVar"] == f"{narrow['animLiftCss']}px", (
+        f"CSS var stale after shrink: {narrow}"
+    )
+    # Home button sits above the toolbar (1px tolerance for sub-pixel rounding).
+    assert narrow["homeBottom"] <= narrow["tbTop"] + 1, (
+        f"Home button overlaps toolbar after shrink: {narrow}"
+    )
+
+    # Expand back — cache returns to original.
+    viewer_page.set_viewport_size({"width": 1600, "height": 900})
+    viewer_page.wait_for_function(
+        f"() => window.threejsViewer._animLiftCss === {wide['animLiftCss']}",
+        timeout=2000,
+    )
+
+
 # --- Lighting panel: URL → renderer wiring + precedence vs localStorage ---
 
 
