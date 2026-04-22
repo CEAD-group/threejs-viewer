@@ -32,8 +32,78 @@ const CLIP_AXIS_NORMALS = {
 };
 
 
+// ========== Typedefs ==========
+//
+// These describe recurring shapes used across viewer.js. They are intentionally
+// loose — WebSocket payloads come in as `unknown` and are validated at the call
+// site — but they document the expected fields well enough for editors to catch
+// typos and wrong property accesses.
+
+/**
+ * @typedef {Object} ThreeJSViewerOptions
+ * @property {string} htmlTemplate                        HTML template string for UI controls (required — constructor throws without it)
+ * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://localhost:${port}` where port comes from the `ws_port` query param, `wsPort`, or 5666
+ * @property {number} [wsPort]                            WebSocket port used when `wsUrl` is not provided (default 5666)
+ * @property {boolean} [autoConnect]                      Auto-connect on construction (default true)
+ * @property {Object<string, string>} [cubemapData]       Map of face name -> base64 JPEG
+ * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
+ * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
+ * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
+ * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
+ */
+
+/**
+ * A binary animation channel once it has been materialised into a TypedArray
+ * view on the main thread. `refs` is a lazily-populated parallel array of the
+ * Three.js objects looked up by `ids`. `_objGen` / `_mixerGen` are cached
+ * generation counters used by the appliers to detect when the scene graph
+ * changed and refs need re-resolution.
+ *
+ * @typedef {Object} BinaryChannel
+ * @property {ArrayLike<number>} data                Flat typed array of length nFrames * ids.length * stride
+ * @property {string[]} ids                          Object ids addressed by this channel
+ * @property {number} stride                         Elements per (frame, object) tuple
+ * @property {Array<any>|null} refs                  Cached lookups for `ids` (null until first refresh)
+ * @property {number[]|null} [colormap]              Optional palette for indexed uint8 channels
+ * @property {'linear'|'hold'} interpolation         Per-channel interpolation mode
+ * @property {number} [_objGen]                      Cached viewer._objGeneration when refs were last resolved
+ * @property {number} [_mixerGen]                    Cached viewer._mixerGeneration (clip_times only)
+ */
+
+/**
+ * Minimal shape of a JSON animation frame. Fields beyond `time` are optional
+ * and only present when the producer emitted that channel; binary channels on
+ * the enclosing Animation supersede same-named frame fields.
+ *
+ * @typedef {Object} AnimationFrame
+ * @property {number} time
+ * @property {Record<string, number[]>} [transforms]
+ * @property {Record<string, number>}   [colors]
+ * @property {Record<string, boolean>}  [visibility]
+ * @property {Record<string, number>}   [opacity]
+ * @property {Record<string, number>}   [clip_times]
+ * @property {Record<string, number>}   [draw_ranges]
+ */
+
+/**
+ * Animation payload (either JSON-frame or binary-channel backed) received from
+ * Python. Frames and channels may coexist.
+ *
+ * @typedef {Object} AnimationData
+ * @property {number} duration
+ * @property {AnimationFrame[]} [frames]
+ * @property {Record<string, BinaryChannel>} [channels]
+ * @property {number} [generation]
+ */
+
+
 // Refresh cached refs array when the object/mixer map has changed.
 // Called at most once per frame per channel (guarded by generation check).
+/**
+ * @param {Array<any>} refs
+ * @param {string[]} ids
+ * @param {Map<string, any>} map
+ */
 function refreshRefs(refs, ids, map) {
     for (let i = 0; i < ids.length; i++) {
         refs[i] = map.get(ids[i]) || null;
@@ -53,6 +123,14 @@ const _lerpMatOut = new THREE.Matrix4();
 // Decompose two matrices (from a typed array or plain array) and write the
 // linearly-interpolated pos/slerped-quat/linearly-interpolated-scale recomposition
 // into `outMat`. Both sources are 16-element flat matrices (column-major).
+/**
+ * @param {ArrayLike<number>} srcA
+ * @param {number} baseA
+ * @param {ArrayLike<number>} srcB
+ * @param {number} baseB
+ * @param {number} t
+ * @param {THREE.Matrix4} outMat
+ */
 function lerpMatrixInto(srcA, baseA, srcB, baseB, t, outMat) {
     _lerpMatTmp.fromArray(srcA, baseA);
     _lerpMatTmp.decompose(_lerpPosA, _lerpQuatA, _lerpScaleA);
@@ -69,6 +147,11 @@ function lerpMatrixInto(srcA, baseA, srcB, baseB, t, outMat) {
 // Python-side per channel — this function just checks that mode plus the
 // standard guards (there is a next keyframe and we're between keyframes).
 // Visibility overrides this to always hold (see visibility applier).
+/**
+ * @param {{ interpolation?: string }} ch
+ * @param {number | null} baseNext
+ * @param {number} t
+ */
 function shouldInterpChannel(ch, baseNext, t) {
     if (baseNext === null || t <= 0) return false;
     return ch.interpolation === 'linear';
@@ -76,6 +159,11 @@ function shouldInterpChannel(ch, baseNext, t) {
 
 // Linear-interpolate two hex colors in 8-bit RGB space. Alpha byte (top 8
 // bits) is preserved from `a`; three.js only consumes the low 24 bits.
+/**
+ * @param {number} a
+ * @param {number} b
+ * @param {number} t
+ */
 function lerpHexColor(a, b, t) {
     const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
     const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
@@ -89,6 +177,10 @@ function lerpHexColor(a, b, t) {
 // 'linear'; anything else (null, undefined, typo like 'cubic') falls back
 // to the provided default so stray strings can't silently switch playback
 // semantics.
+/**
+ * @param {unknown} value
+ * @param {string} fallback
+ */
 function sanitizeInterpolation(value, fallback) {
     if (value === 'hold' || value === 'linear') return value;
     if (value != null) {
@@ -100,8 +192,21 @@ function sanitizeInterpolation(value, fallback) {
 // Channel apply functions — keyed by channel name. Signature is
 // (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
 // is null or t <= 0, all channels take the step path (current keyframe only).
+// TODO(types): `viewer` is ThreeJSViewer but its instance fields aren't all
+// declared up-front (many are attached inside methods), so a strict
+// ThreeJSViewer annotation surfaces noisy "property X does not exist" errors.
+// Leaving `any` until we either declare all fields in the constructor or
+// introduce a dedicated interface.
+/** @param {any} viewer */
 function makeChannelApply(viewer) {
     return {
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
         transforms(ch, refs, base, baseNext, t) {
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
@@ -129,6 +234,13 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
         colors(ch, refs, base, baseNext, t) {
             // Linear mode crossfades hex values component-wise in RGB space.
             // Indexed colors (uint8 + colormap) look up both endpoints in the
@@ -150,7 +262,7 @@ function makeChannelApply(viewer) {
                     const colorB = colormap ? colormap[rawB] : rawB;
                     color = lerpHexColor(color, colorB, t);
                 }
-                obj.traverse(child => {
+                obj.traverse(/** @param {any} child */ (child) => {
                     if (!child.material) return;
                     const mats = Array.isArray(child.material) ? child.material : [child.material];
                     for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
@@ -158,6 +270,11 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         */
         visibility(ch, refs, base) {
             // Booleans have no meaningful linear interpretation — "linear on
             // a bool" would be a step function at some arbitrary threshold.
@@ -174,6 +291,13 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
         draw_ranges(ch, refs, base, baseNext, t) {
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
@@ -200,6 +324,13 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
         opacity(ch, refs, base, baseNext, t) {
             if (ch._objGen !== viewer._objGeneration) {
                 refreshRefs(refs, ch.ids, viewer._objects);
@@ -218,6 +349,13 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
         clip_times(ch, refs, base, baseNext, t) {
             if (ch._mixerGen !== viewer._mixerGeneration) {
                 refreshRefs(refs, ch.ids, viewer._mixers);
@@ -287,7 +425,7 @@ const TONE_MAPPING_MODE_NAMES = ['none', 'linear', 'reinhard', 'cineon', 'aces',
  * non-finite numeric values silently fall through to the next level — we
  * never throw in the browser here; Python already validates its kwargs.
  *
- * @param {Object} options
+ * @param {ThreeJSViewerOptions} options
  * @param {URLSearchParams} urlParams
  * @returns {{
  *     exposure: number,
@@ -380,8 +518,12 @@ function resolveLightingDefaults(options, urlParams) {
     };
 }
 
+/**
+ * @param {THREE.Object3D} obj
+ * @param {number} opacity
+ */
 function applyOpacity(obj, opacity) {
-    obj.traverse(child => {
+    obj.traverse(/** @param {any} child */ child => {
         if (!child.material) return;
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
@@ -395,6 +537,7 @@ function applyOpacity(obj, opacity) {
 }
 
 // Primitive creators
+/** @type {Record<string, (params: any) => THREE.BufferGeometry>} */
 const PRIMITIVES = {
     box: (params) => new THREE.BoxGeometry(
         params.width || 1, params.height || 1, params.depth || 1
@@ -444,6 +587,11 @@ const LOD_MAX_SKIP = 100;
 const LOD_WIDTH_WEIGHT = 0.5;
 const LOD_HEIGHT_WEIGHT = 0.5;
 const LOD_COLOR_WEIGHT_FRAC = 0.05;
+/**
+ * @param {Float32Array} out
+ * @param {number} width
+ * @param {number} height
+ */
 function sampleChamferedRect(out, width, height) {
     if (!Number.isFinite(width) || width < 0) {
         throw new Error(`parametric_tube width must be finite and >= 0, got ${width}`);
@@ -485,6 +633,11 @@ function sampleChamferedRect(out, width, height) {
 // spine spacing. This is the key to killing LOD-induced normal artifacts:
 // face-area-weighted vertex normals skew heavily when adjacent ring-to-ring
 // quads have wildly different sizes (common after distance-weighted RDP).
+/**
+ * @param {Float32Array} section
+ * @param {number} nCs
+ * @param {Float32Array} out
+ */
 function computeSectionNormals(section, nCs, out) {
     for (let j = 0; j < nCs; j++) {
         const jPrev = (j - 1 + nCs) % nCs;
@@ -507,6 +660,18 @@ function computeSectionNormals(section, nCs, out) {
 // At angle θ: n(θ) = normalize( cos(θ)·(nu·U + nv·V) + sin(θ)·tSign·T ).
 // This matches the tube-side section normal at θ=0 (no shading seam) and
 // points along ±T at θ=90° (correct axial normal at the dome tip).
+/**
+ * @param {Float32Array} normalArr
+ * @param {number} capBaseVert
+ * @param {number} nCs
+ * @param {number} nCapRings
+ * @param {Float32Array} capAngles
+ * @param {number} width
+ * @param {number} height
+ * @param {Float32Array} localFrames
+ * @param {number} spineIdx
+ * @param {number} tSign
+ */
 function writeAnalyticCapNormals(normalArr, capBaseVert, nCs, nCapRings, capAngles,
                                  width, height, localFrames, spineIdx, tSign) {
     const Ux = localFrames[spineIdx * 6],     Uy = localFrames[spineIdx * 6 + 1], Uz = localFrames[spineIdx * 6 + 2];
@@ -542,6 +707,16 @@ const _capScratchSectionNormals = new Float32Array(N_CROSS_SECTION * 2);
 // Write one tube ring: `nCs` cross-section samples laid out around spine
 // point (sx,sy,sz) using local frame (U,V). `vOff` shifts along V for the
 // anchor offset (see the `heightOffset` / anchor parameter).
+/**
+ * @param {any} positions - Float32Array (raw) or typed-array view from BufferAttribute
+ * @param {number} ringBase
+ * @param {Float32Array} section
+ * @param {number} nCs
+ * @param {number} Ux @param {number} Uy @param {number} Uz
+ * @param {number} Vx @param {number} Vy @param {number} Vz
+ * @param {number} sx @param {number} sy @param {number} sz
+ * @param {number} vOff
+ */
 function writeRingVerts(positions, ringBase, section, nCs,
                         Ux, Uy, Uz, Vx, Vy, Vz, sx, sy, sz, vOff) {
     for (let j = 0; j < nCs; j++) {
@@ -555,6 +730,18 @@ function writeRingVerts(positions, ringBase, section, nCs,
 
 // Write one revolution-cap ring at angle (cosT, sinT). Each vertex j sweeps
 // along the tangent T by |cu|·sinT, so the ring collapses to a line at θ=90°.
+/**
+ * @param {any} positions - Float32Array (raw) or typed-array view from BufferAttribute
+ * @param {number} ringBase
+ * @param {Float32Array} section
+ * @param {number} nCs
+ * @param {number} Ux @param {number} Uy @param {number} Uz
+ * @param {number} Vx @param {number} Vy @param {number} Vz
+ * @param {number} Tx @param {number} Ty @param {number} Tz
+ * @param {number} sx @param {number} sy @param {number} sz
+ * @param {number} cosT @param {number} sinT
+ * @param {number} vOff
+ */
 function writeCapRingVerts(positions, ringBase, section, nCs,
                            Ux, Uy, Uz, Vx, Vy, Vz, Tx, Ty, Tz,
                            sx, sy, sz, cosT, sinT, vOff) {
@@ -569,6 +756,12 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 }
 
 // Fill `count` RGB triplets starting at float offset `floatBase`.
+/**
+ * @param {any} colors - Float32Array (raw) or typed-array view from BufferAttribute
+ * @param {number} floatBase
+ * @param {number} count
+ * @param {number} r @param {number} g @param {number} b
+ */
 function fillRGBBlock(colors, floatBase, count, r, g, b) {
     for (let v = 0; v < count; v++) {
         const dst = floatBase + v * 3;
@@ -1054,6 +1247,7 @@ self.onmessage = function(e) {
 };
 `;
 
+/** @type {Worker | null} */
 let _lodWorker = null;
 function _getLodWorker() {
     if (!_lodWorker) {
@@ -1070,6 +1264,14 @@ function _getLodWorker() {
 // worker-produced LOD levels.
 const LOD_CHUNK_SIZE = 5000;
 
+/**
+ * @param {Float32Array} spine
+ * @param {Float32Array | null} widths
+ * @param {Float32Array | null} heights
+ * @param {Float32Array | null} ringColors
+ * @param {number} iP @param {number} iA @param {number} iB
+ * @param {number} wColor
+ */
 function _augPerpDistSqSync(spine, widths, heights, ringColors, iP, iA, iB, wColor) {
     const ax = spine[iA * 3], ay = spine[iA * 3 + 1], az = spine[iA * 3 + 2];
     const abx = spine[iB * 3] - ax, aby = spine[iB * 3 + 1] - ay, abz = spine[iB * 3 + 2] - az;
@@ -1102,6 +1304,15 @@ function _augPerpDistSqSync(spine, widths, heights, ringColors, iP, iA, iB, wCol
     return Math.max(0, apSq - (apDot * apDot) / abSq);
 }
 
+/**
+ * @param {Float32Array} spine
+ * @param {Float32Array | null} widths
+ * @param {Float32Array | null} heights
+ * @param {Float32Array | null} ringColors
+ * @param {number} boundingRadius
+ * @param {number} nPoints
+ * @param {number} camX @param {number} camY @param {number} camZ
+ */
 function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius, nPoints, camX, camY, camZ) {
     if (nPoints <= 2) {
         const indices = nPoints < 1 ? new Uint32Array(0)
@@ -1175,6 +1386,15 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
 //
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
+/**
+ * @param {Float32Array} spine
+ * @param {Float32Array} widths
+ * @param {Float32Array} heights
+ * @param {Float32Array | null} orientations
+ * @param {number[] | null} upVector
+ * @param {Float32Array | null} ringColors
+ * @param {number} heightOffset
+ */
 function buildParametricTubeGeometry(
     spine, widths, heights,
     orientations, upVector, ringColors, heightOffset,
@@ -1296,6 +1516,11 @@ function buildParametricTubeGeometry(
     // at (cu, cv) sweeps: U shrinks as cu*cos(θ), T extends by |cu|*sin(θ).
     // At θ=90° the ring collapses to a vertical line (cu→0).
     // tangentSign = -1 for start cap (extends in -T), +1 for end cap.
+    /**
+     * @param {number} spineIdx
+     * @param {number} capBaseVert
+     * @param {number} tangentSign
+     */
     function buildRevolutionCap(spineIdx, capBaseVert, tangentSign) {
         const sx = spine[spineIdx * 3], sy = spine[spineIdx * 3 + 1], sz = spine[spineIdx * 3 + 2];
         const w = widths[spineIdx], h = heights[spineIdx];
@@ -1336,6 +1561,11 @@ function buildParametricTubeGeometry(
 
     // Helper: build revolution cap indices with radial spoke pattern.
     // Quads between consecutive ring layers, split along the spoke direction.
+    /**
+     * @param {number} tubeRingBase
+     * @param {number} capBaseVert
+     * @param {boolean} reverse
+     */
     function buildCapSpokeIndices(tubeRingBase, capBaseVert, reverse) {
         for (let k = 0; k < nCapRings; k++) {
             const innerBase = k === 0 ? tubeRingBase : capBaseVert + (k - 1) * nCs;
@@ -1429,6 +1659,10 @@ function buildParametricTubeGeometry(
 // Remap a draw_range value (0-1, fraction of original spine points) to
 // fractional ring pairs in the reduced spine.  Preserves the original
 // "fraction-of-points" semantics so animation pacing stays in sync.
+/**
+ * @param {any} lod
+ * @param {number} value
+ */
 function remapDrawRangeToReducedPairs(lod, value) {
     const kept = lod.keptIndices;
     const nRed = kept.length;
@@ -1451,6 +1685,12 @@ function remapDrawRangeToReducedPairs(lod, value) {
 // attribute of length nSpine*nCs*3, replicating each ring color across its nCs
 // vertices. Writes into `out` if provided (must be pre-sized) to avoid
 // reallocating on every color update.
+/**
+ * @param {Uint32Array | Uint8Array | number[]} packedColors
+ * @param {number} nSpine
+ * @param {number} nCs
+ * @param {Float32Array | null} [out]
+ */
 function expandRingColors(packedColors, nSpine, nCs, out) {
     const total = nSpine * nCs * 3;
     if (!out || out.length < total) {
@@ -1484,6 +1724,7 @@ class ParametricTube {
 
     // Apply pre-built geometry from LOD worker.
     // msg: worker message containing typed arrays + metadata.
+    /** @param {any} msg */
     applyWorkerGeometry(msg) {
         const mesh = this._mesh;
         const lod = mesh.userData.tubeLOD;
@@ -1569,6 +1810,7 @@ class ParametricTube {
     // Morph the frontier ring to the interpolated spine position. Returns
     // the number of ring pairs that should be visible (complete pairs + the
     // morphed frontier).
+    /** @param {number} fracRingPairs */
     morphFrontierRing(fracRingPairs) {
         const obj = this._mesh;
         const ud = obj.userData;
@@ -1665,6 +1907,7 @@ class ParametricTube {
     // Update the end cap revolution surface to match the last visible ring.
     // Uses morphed spine/frame/width/height stored by morphFrontierRing, or
     // reads original data for un-morphed rings.
+    /** @param {number} lastVisibleRing */
     updateEndCap(lastVisibleRing) {
         const obj = this._mesh;
         const ud = obj.userData;
@@ -1726,6 +1969,7 @@ class ParametricTube {
     // Frontier ring gets the pure cross-section bisector (pure UV radial); the
     // end cap uses cos(θ)·radial + sin(θ)·T so the seam at the frontier
     // matches and the dome tip points along +T.
+    /** @param {number} visiblePairs */
     updateMorphedNormals(visiblePairs) {
         const obj = this._mesh;
         const ud = obj.userData;
@@ -1807,6 +2051,7 @@ class ParametricTube {
 
     // Move end cap fan indices to sit right after the visible ring pairs so
     // setDrawRange(0, startCap + visiblePairs + endCap) draws them correctly.
+    /** @param {number} visiblePairs */
     relocateEndCap(visiblePairs) {
         const obj = this._mesh;
         const ud = obj.userData;
@@ -1838,6 +2083,7 @@ class ParametricTube {
         indexAttr.needsUpdate = true;
     }
 
+    /** @param {number} value */
     setDrawRange(value) {
         const obj = this._mesh;
         const ud = obj.userData;
@@ -1893,12 +2139,21 @@ class ParametricTube {
 
 // Back-compat free-function shims — these keep existing call sites simple
 // while the ParametricTube class is the source of truth.
+/**
+ * @param {THREE.Object3D} obj
+ * @param {number} value
+ */
 function applyParametricTubeDrawRange(obj, value) {
     obj.userData.parametricTube.setDrawRange(value);
 }
+/**
+ * @param {THREE.Mesh} mesh
+ * @param {any} msg
+ */
 function applyWorkerGeometry(mesh, msg) {
     mesh.userData.parametricTube.applyWorkerGeometry(msg);
 }
+/** @param {THREE.Object3D} obj */
 function restoreFrontierRing(obj) {
     const t = obj.userData.parametricTube;
     if (t) t.restoreFrontierRing();
@@ -1909,6 +2164,7 @@ function restoreFrontierRing(obj) {
  * frame-to-bbox). Camera objects themselves remain on the viewer.
  */
 class CameraController {
+    // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
     constructor(viewer) { this.v = viewer; }
 
@@ -2047,6 +2303,7 @@ class CameraController {
  * Holds cached debug materials + per-mesh helpers.
  */
 class ShadingDebugController {
+    // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
     constructor(viewer) {
         this.v = viewer;
@@ -2122,7 +2379,7 @@ class ShadingDebugController {
         const canvas = document.createElement('canvas');
         canvas.width = size;
         canvas.height = size;
-        const ctx = /** @type {any} */ (canvas.getContext('2d'));
+        const ctx = /** @type {CanvasRenderingContext2D} */ (canvas.getContext('2d'));
         for (let y = 0; y < cells; y++) {
             for (let x = 0; x < cells; x++) {
                 const dark = (x + y) % 2 === 0;
@@ -2262,7 +2519,7 @@ class ShadingDebugController {
     /** @param {any} obj */
     cameraRelativeNormalSize(obj) {
         // Target ~30 pixels on screen regardless of zoom.
-        const cam = /** @type {any} */ (this.v._camera);
+        const cam = /** @type {THREE.PerspectiveCamera & THREE.OrthographicCamera} */ (this.v._camera);
         const canvasH = Math.max(1, this.v._renderer.domElement.clientHeight);
         const targetPx = 30;
         if (!obj.geometry) return 0.1;
@@ -2287,6 +2544,9 @@ class ShadingDebugController {
  * Each child segment knows its (start, end) position in the overall toolpath.
  * Segments fully before the current position get 1.0, the active segment gets
  * a proportional fraction, and segments after get 0.0.
+ * @param {THREE.Object3D} grp
+ * @param {number} value
+ * @param {Map<string, any>} objects
  */
 function applyToolpathGroupDrawRange(grp, value, objects) {
     const segIds = grp.userData.toolpathSegmentIds;
@@ -2313,18 +2573,23 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
 export class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
-     * @param {Object} [options]
-     * @param {string}  [options.wsUrl]       - Full WebSocket URL (e.g., "ws://localhost:5666")
-     * @param {number}  [options.wsPort]      - Alternative: just specify port
-     * @param {boolean} [options.autoConnect=true] - Whether to connect WebSocket immediately
-     * @param {string}  [options.htmlTemplate] - HTML template string for UI controls
-     * @param {Object}  [options.cubemapData]  - {px,nx,py,ny,pz,nz} base64 JPEG strings
-     * @param {number}  [options.toneMappingExposure] - Override renderer tone-mapping exposure (default 1.0)
-     * @param {number}  [options.environmentIntensity] - Override scene environment intensity (default 2.0)
-     * @param {number}  [options.ambientIntensity] - Override ambient-light intensity (default 1.5)
-     * @param {string}  [options.toneMapping] - Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
+     * @param {ThreeJSViewerOptions} [options]
+     *
+     * Embedding contract: before opening each WebSocket, `connect()` issues a
+     * `mode: 'no-cors'` HTTP GET to the URL derived from `wsUrl` by swapping
+     * the scheme (`ws:` → `http:`, `wss:` → `https:`). Path and query are
+     * preserved, so the probe targets the *full* `wsUrl` with only the scheme
+     * changed — an embedder using `ws://host:port/my-path` must answer plain
+     * HTTP on `http://host:port/my-path`, not just on `/`. In `no-cors` mode,
+     * any HTTP response counts as "server is up" (different servers/proxies
+     * may return 200, 400, 404, or 426 for a plain GET to a WS URL — all fine);
+     * only a TCP-level failure aborts the attempt. The standard `websockets`
+     * Python library satisfies this for free as part of the WS upgrade
+     * handshake. If your WS host sits behind a proxy that drops non-upgrade
+     * HTTP on that path, make it answer *something*, or the browser will
+     * never attempt the WebSocket.
      */
-    constructor(container, options = {}) {
+    constructor(container, options = /** @type {ThreeJSViewerOptions} */ ({})) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
 
         this.container = container;
@@ -2420,6 +2685,7 @@ export class ThreeJSViewer {
         this._isOrtho = false;
 
         // Camera tracking state
+        /** @type {string | null} */
         this._trackTargetId = null;
         this._trackMode = 'off';       // 'off' | 'follow' | 'lookat' | 'scripted'
         this._trackLastPos = new THREE.Vector3();
@@ -2458,6 +2724,7 @@ export class ThreeJSViewer {
     }
 
     _cacheElements() {
+        /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
         this._statusDot = q('.tjsv-status-dot');
         this._statusText = q('.tjsv-status-text');
@@ -2589,7 +2856,7 @@ export class ThreeJSViewer {
         this._lodDirty = false;
         this._lodWorkerBusy = false;  // true while worker is computing
         this._lodWorker = _getLodWorker();
-        this._lodWorker.onmessage = (e) => {
+        this._lodWorker.onmessage = /** @param {MessageEvent} e */ (e) => {
             const msg = e.data;
             this._lodWorkerBusy = false;
             const obj = this._objects.get(msg.tubeId);
@@ -2818,7 +3085,7 @@ export class ThreeJSViewer {
             this._updateDiscPositions();
             this._clipDistanceSlider.value = this._clipPosition;
             this._clipDistanceValue.textContent = this._clipPosition.toFixed(2);
-            this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+            this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {Element} btn */ (btn) => {
                 btn.classList.remove('active');
             });
             this._clipAxis = null;
@@ -2845,19 +3112,21 @@ export class ThreeJSViewer {
         this._updateDiscPositions();
     }
 
+    /** @param {string} axis */
     _setClipAxis(axis) {
         this._clipAxis = axis;
-        const normal = CLIP_AXIS_NORMALS[axis].clone();
+        const normal = CLIP_AXIS_NORMALS[/** @type {keyof typeof CLIP_AXIS_NORMALS} */ (axis)].clone();
         this._clipPlane.normal.copy(normal);
         this._updatePlaneConstants();
         this._syncAnchorFromPlane();
         this._syncNormalInputs();
         this._updateClipSliderRange();
-        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
             btn.classList.toggle('active', btn.dataset.axis === axis);
         });
     }
 
+    /** @param {number} d */
     _setClipDistance(d) {
         this._clipPosition = d;
         this._updatePlaneConstants();
@@ -2894,6 +3163,7 @@ export class ThreeJSViewer {
         }
     }
 
+    /** @param {number} t */
     _setClipThickness(t) {
         this._clipSlabThickness = Math.max(0.01, Math.min(20, t));
         this._clipThicknessSlider.value = this._clipSlabThickness;
@@ -2907,9 +3177,10 @@ export class ThreeJSViewer {
         return this._clipEnabled ? this._clipPlanes : [];
     }
 
+    /** @param {THREE.Object3D} obj */
     _applyClipToObject(obj) {
         const planes = this._activeClippingPlanes();
-        obj.traverse(child => {
+        obj.traverse(/** @param {any} child */ child => {
             if (!child.material) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
@@ -2927,6 +3198,7 @@ export class ThreeJSViewer {
         });
     }
 
+    /** @param {any} child */
     _isClipHelper(child) {
         let node = child;
         while (node) {
@@ -3033,7 +3305,7 @@ export class ThreeJSViewer {
         this._updateClipSliderRange();
         this._updateClipMaterials();
         this._clipAxis = null;
-        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
+        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
             btn.classList.remove('active');
         });
     }
@@ -3159,6 +3431,7 @@ export class ThreeJSViewer {
 
     // ========== Camera ==========
 
+    /** @param {string} mode */
     _setOrbitMode(mode) {
         if (mode !== 'turntable' && mode !== 'free') return;
         this._orbitMode = mode;
@@ -3177,10 +3450,12 @@ export class ThreeJSViewer {
             : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
     }
 
+    /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
 
     // ========== Object Management ==========
 
+    /** @param {any} params */
     _createMaterial(params) {
         const color = params.color || 0x4a90d9;
         const materialType = params.materialType || 'standard';
@@ -3203,12 +3478,14 @@ export class ThreeJSViewer {
         }
     }
 
+    /** @param {string} id @param {number} opacity */
     _setOpacity(id, opacity) {
         const obj = this._objects.get(id);
         if (!obj) return;
         applyOpacity(obj, opacity);
     }
 
+    /** @param {THREE.Object3D} obj @param {string | null | undefined} parentId */
     _addToParentOrScene(obj, parentId) {
         if (parentId) {
             const parent = this._objects.get(parentId);
@@ -3225,6 +3502,7 @@ export class ThreeJSViewer {
         if (this._shading.wireframeMode !== 0) this._shading.applyWireframe();
     }
 
+    /** @param {any} obj @param {any} transform */
     _applyTransform(obj, transform) {
         if (!transform) return;
         if (transform.matrix) {
@@ -3240,6 +3518,11 @@ export class ThreeJSViewer {
         }
     }
 
+    // TODO(types): objData is a highly polymorphic add_object payload
+    // (primitive | model | polyline | mesh | tube | group); tightening it
+    // requires splitting the dispatch into per-kind helpers or a tagged-union
+    // typedef. Out of scope for the drive-by type tighten.
+    /** @param {string} id @param {any} objData @param {string} [parentId] */
     async _addObject(id, objData, parentId) {
         let obj;
         const token = this._claimLoadToken(id);
@@ -3250,7 +3533,7 @@ export class ThreeJSViewer {
             obj = new THREE.Mesh(geometry, material);
         } else if (objData.model) {
             const format = objData.format || 'gltf';
-            const loader = this._loaders[format];
+            const loader = this._loaders[/** @type {keyof typeof this._loaders} */ (format)];
             if (!loader) {
                 console.error(`Unknown format: ${format}`);
                 return;
@@ -3293,11 +3576,19 @@ export class ThreeJSViewer {
         }
     }
 
+    /**
+     * @param {any} loader
+     * @param {string} url
+     * @param {string} format
+     * @param {boolean} yUp
+     */
     _loadModel(loader, url, format, yUp) {
         return new Promise((resolve, reject) => {
             loader.load(
                 url,
+                /** @param {any} result */
                 (result) => {
+                    /** @type {any} */
                     let obj;
                     let animations = [];
                     if (format === 'gltf' || format === 'glb') {
@@ -3316,7 +3607,7 @@ export class ThreeJSViewer {
                         animations = result.animations || [];
                     } else if (format === 'dae') {
                         obj = new THREE.Group();
-                        result.scene.traverse((child) => {
+                        result.scene.traverse(/** @param {any} child */ (child) => {
                             if (child.isMesh) obj.add(child.clone());
                         });
                     } else if (format === 'stl' || format === 'ply') {
@@ -3333,12 +3624,14 @@ export class ThreeJSViewer {
         });
     }
 
+    /** @param {string} id @param {number} time */
     _setClipTime(id, time) {
         const mixer = this._mixers.get(id);
         if (!mixer) return;
         mixer.setTime(time);
     }
 
+    /** @param {string} id @param {number} value */
     _setDrawRange(id, value) {
         const obj = this._objects.get(id);
         if (!obj) return;
@@ -3353,6 +3646,7 @@ export class ThreeJSViewer {
         }
     }
 
+    /** @param {string} id @param {any} transform */
     _updateTransform(id, transform) {
         const obj = this._objects.get(id);
         if (obj) this._applyTransform(obj, transform);
@@ -3375,6 +3669,7 @@ export class ThreeJSViewer {
         return this._loadTokens.get(id) === token;
     }
 
+    /** @param {string} id */
     _deleteObject(id) {
         // Invalidate any in-flight async add/fetch for this id so a late
         // completion can't re-add an object that was explicitly deleted or
@@ -3383,8 +3678,9 @@ export class ThreeJSViewer {
         this._claimLoadToken(id);
         const obj = this._objects.get(id);
         if (obj) {
+            /** @type {string[]} */
             const childIds = [];
-            obj.traverse((child) => {
+            obj.traverse(/** @param {any} child */ (child) => {
                 if (child !== obj && child.userData.id) childIds.push(child.userData.id);
             });
             for (const childId of childIds) {
@@ -3398,7 +3694,7 @@ export class ThreeJSViewer {
             this._sceneBoundsDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
-            obj.traverse((child) => {
+            obj.traverse(/** @param {any} child */ (child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
@@ -3416,7 +3712,7 @@ export class ThreeJSViewer {
                 if (child.geometry) child.geometry.dispose();
                 if (child.material) {
                     if (Array.isArray(child.material)) {
-                        child.material.forEach(m => m.dispose());
+                        child.material.forEach(/** @param {any} m */ m => m.dispose());
                     } else {
                         child.material.dispose();
                     }
@@ -3425,11 +3721,13 @@ export class ThreeJSViewer {
         }
     }
 
+    /** @param {string} id @param {boolean} visible */
     _setVisibility(id, visible) {
         const obj = this._objects.get(id);
         if (obj) obj.visible = visible;
     }
 
+    /** @param {Record<string, boolean>} visibility */
     _setSceneVisibility(visibility) {
         for (const [id, visible] of Object.entries(visibility)) {
             const obj = this._objects.get(id);
@@ -3448,6 +3746,7 @@ export class ThreeJSViewer {
         }
     }
 
+    /** @param {Record<string, any>} transforms */
     _batchUpdate(transforms) {
         for (const [id, transform] of Object.entries(transforms)) {
             this._updateTransform(id, transform);
@@ -3457,6 +3756,10 @@ export class ThreeJSViewer {
 
     // ========== Animation ==========
 
+    /**
+     * @param {any} animData
+     * @param {{ restart?: boolean, autoplay?: boolean }} [opts]
+     */
     _loadAnimation(animData, opts = {}) {
         // First load (no animation yet) or explicit restart resets the playhead
         // to t=0 and installs camera-tracking from the new metadata; whether
@@ -3479,8 +3782,9 @@ export class ThreeJSViewer {
         this._lastAnimationUpdate = performance.now();
 
         if (this._animation.channels) {
-            for (const [name, ch] of Object.entries(this._animation.channels)) {
-                ch.refs = ch.ids.map(id => {
+            for (const [name, chRaw] of Object.entries(this._animation.channels)) {
+                const ch = /** @type {BinaryChannel} */ (chRaw);
+                ch.refs = ch.ids.map(/** @param {string} id */ id => {
                     const obj = this._objects.get(id);
                     if (obj && name === 'transforms') obj.matrixAutoUpdate = false;
                     return obj || null;
@@ -3595,6 +3899,7 @@ export class ThreeJSViewer {
         this._resetAnimationState();
     }
 
+    /** @param {number} frameIndex @param {number} [t] */
     _applyFrame(frameIndex, t = 0) {
         if (!this._animation || frameIndex < 0 || frameIndex >= this._animation.frames.length) return;
 
@@ -3617,7 +3922,7 @@ export class ThreeJSViewer {
                 }
             }
             for (const [name, ch] of Object.entries(this._animation.channels)) {
-                const applyFn = this._CHANNEL_APPLY[name];
+                const applyFn = this._CHANNEL_APPLY[/** @type {keyof typeof this._CHANNEL_APPLY} */ (name)];
                 if (applyFn) {
                     const nObj = ch.ids.length;
                     const base = frameIndex * nObj * ch.stride;
@@ -3657,7 +3962,7 @@ export class ThreeJSViewer {
                 if (nextC && nextC[id] != null) {
                     hex = lerpHexColor(color, nextC[id], t);
                 }
-                obj.traverse((child) => {
+                obj.traverse(/** @param {any} child */ (child) => {
                     if (!child.material) return;
                     const mats = Array.isArray(child.material) ? child.material : [child.material];
                     for (const mat of mats) { if (mat.color) mat.color.setHex(hex); }
@@ -3742,7 +4047,7 @@ export class ThreeJSViewer {
         const ids = this._animation.channels.transforms.ids;
         const hints = ['nozzle', 'tip', 'tool', 'effector'];
         for (const hint of hints) {
-            const match = ids.find(id => id.toLowerCase().includes(hint));
+            const match = ids.find(/** @param {string} id */ id => id.toLowerCase().includes(hint));
             if (match) return match;
         }
         return null;
@@ -3764,6 +4069,7 @@ export class ThreeJSViewer {
         this._btnTrack.title = title;
     }
 
+    /** @param {number} frameIndex @param {number} [frameIndexNext] @param {number} [t] */
     _applyCameraTracking(frameIndex, frameIndexNext = frameIndex, t = 0) {
         if (this._trackMode === 'off') return;
 
@@ -3841,6 +4147,7 @@ export class ThreeJSViewer {
     // is the fractional position between frames[index] and frames[index+1].
     // At (or past) the last frame, t is clamped to 0 so callers short-circuit
     // to step behavior.
+    /** @param {number} time */
     _getFrameAtTime(time) {
         if (!this._animation || this._animation.frames.length === 0) {
             return { index: 0, t: 0 };
@@ -3876,6 +4183,7 @@ export class ThreeJSViewer {
         this._btnPlay.textContent = this._animationPlaying ? '\u23F8' : '\u25B6';
     }
 
+    /** @param {number} delta */
     _stepFrames(delta) {
         if (!this._animation) return;
         const { index: currentFrame } = this._getFrameAtTime(this._animationTime);
@@ -3885,6 +4193,7 @@ export class ThreeJSViewer {
         this._updateAnimationUI();
     }
 
+    /** @param {number} time */
     _seekToTime(time) {
         if (!this._animation) return;
         this._animationTime = Math.max(0, Math.min(this._animation.duration, time));
@@ -3901,16 +4210,19 @@ export class ThreeJSViewer {
         this._updateAnimationUI();
     }
 
+    /** @param {number} speed */
     _setSpeed(speed) {
         this._animationSpeed = speed;
         this._speedDisplayEl.textContent = `${speed}x`;
     }
 
+    /** @param {number} delta */
     _stepSpeed(delta) {
         this._speedIndex = Math.max(0, Math.min(SPEED_STEPS.length - 1, this._speedIndex + delta));
         this._setSpeed(SPEED_STEPS[this._speedIndex]);
     }
 
+    /** @param {MouseEvent} e */
     _scrubFromEvent(e) {
         if (!this._animation) return;
         const rect = this._timelineContainer.getBoundingClientRect();
@@ -3952,21 +4264,21 @@ export class ThreeJSViewer {
         this._initLightingPanelUI();
 
         // Clip axis buttons
-        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(btn => {
-            btn.addEventListener('click', () => this._setClipAxis(btn.dataset.axis));
+        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {Element} btn */ (btn) => {
+            btn.addEventListener('click', () => this._setClipAxis(/** @type {HTMLElement} */ (btn).dataset.axis));
         });
 
         // Normal inputs
-        [this._clipNxInput, this._clipNyInput, this._clipNzInput].forEach(input => {
+        [this._clipNxInput, this._clipNyInput, this._clipNzInput].forEach((input) => {
             input.addEventListener('change', () => this._applyNormalInputs());
-            input.addEventListener('keydown', (e) => e.stopPropagation());
+            input.addEventListener('keydown', /** @param {Event} e */ (e) => e.stopPropagation());
         });
 
         // Distance slider
         this._clipDistanceSlider.addEventListener('input', () => {
             this._setClipDistance(parseFloat(this._clipDistanceSlider.value));
         });
-        this._clipDistanceSlider.addEventListener('wheel', (e) => {
+        this._clipDistanceSlider.addEventListener('wheel', /** @param {WheelEvent} e */ (e) => {
             e.preventDefault();
             const step = e.shiftKey ? 0.1 : 0.01;
             const delta = e.deltaY > 0 ? -step : step;
@@ -3975,9 +4287,9 @@ export class ThreeJSViewer {
         });
 
         // Slab mode toggles
-        this._clipModeSingle.addEventListener('click', (e) => {
+        this._clipModeSingle.addEventListener('click', /** @param {MouseEvent} e */ (e) => {
             this._clipSlabMode = false;
-            e.currentTarget.classList.add('active');
+            /** @type {HTMLElement} */ (e.currentTarget).classList.add('active');
             this._clipModeSlab.classList.remove('active');
             this._clipThicknessSection.style.display = 'none';
             this._clipPlanes = [this._clipPlane];
@@ -3985,9 +4297,9 @@ export class ThreeJSViewer {
             this._syncAnchorFromPlane();
             this._updateClipMaterials();
         });
-        this._clipModeSlab.addEventListener('click', (e) => {
+        this._clipModeSlab.addEventListener('click', /** @param {MouseEvent} e */ (e) => {
             this._clipSlabMode = true;
-            e.currentTarget.classList.add('active');
+            /** @type {HTMLElement} */ (e.currentTarget).classList.add('active');
             this._clipModeSingle.classList.remove('active');
             this._clipThicknessSection.style.display = '';
             this._clipPlanes = [this._clipPlane, this._clipPlane2];
@@ -4000,7 +4312,7 @@ export class ThreeJSViewer {
         this._clipThicknessSlider.addEventListener('input', () => {
             this._setClipThickness(parseFloat(this._clipThicknessSlider.value));
         });
-        this._clipThicknessSlider.addEventListener('wheel', (e) => {
+        this._clipThicknessSlider.addEventListener('wheel', /** @param {WheelEvent} e */ (e) => {
             e.preventDefault();
             const step = e.shiftKey ? 0.1 : 0.01;
             const delta = e.deltaY > 0 ? -step : step;
@@ -4025,7 +4337,7 @@ export class ThreeJSViewer {
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
         // Timeline scrubbing
-        this._timelineContainer.addEventListener('mousedown', (e) => {
+        this._timelineContainer.addEventListener('mousedown', /** @param {MouseEvent} e */ (e) => {
             if (!this._animation) return;
             this._scrubbing = true;
             this._wasPlayingBeforeScrub = this._animationPlaying;
@@ -4034,7 +4346,7 @@ export class ThreeJSViewer {
         });
 
         // Document-level listeners for scrubbing (stored for cleanup)
-        this._onDocMouseMove = (e) => {
+        this._onDocMouseMove = /** @param {MouseEvent} e */ (e) => {
             if (this._scrubbing) this._scrubFromEvent(e);
         };
         this._onDocMouseUp = () => {
@@ -4051,8 +4363,8 @@ export class ThreeJSViewer {
         document.addEventListener('mouseup', this._onDocMouseUp);
 
         // Keyboard shortcuts — scoped to container
-        this._onKeyDown = (e) => {
-            if (e.target.tagName === 'INPUT') return;
+        this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
+            if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
@@ -4193,13 +4505,26 @@ export class ThreeJSViewer {
     // ========== WebSocket ==========
 
     connect() {
-        // Derive HTTP probe URL from WS URL (same host/port)
+        // Derive the probe URL from the WS URL by swapping only the scheme
+        // (ws→http / wss→https). Path and query are preserved, so the probe
+        // targets the same endpoint as the eventual WebSocket upgrade.
         const probeUrl = this._wsUrl.replace(/^ws/, 'http');
 
         const doConnect = async () => {
             if (this._destroyed) return;
 
-            // Probe first to avoid browser console warnings on failed WS attempts
+            // Probe HTTP on the same URL (minus scheme) as the pending
+            // WebSocket: a failed `new WebSocket()` always logs `WebSocket
+            // connection to '...' failed` to devtools and there's no way to
+            // silence it, so we only attempt the upgrade once we know
+            // something is listening. `mode: 'no-cors'` makes *any* HTTP
+            // response count as success (200/400/404/426/... — the exact
+            // status varies by server/proxy, all of them satisfy the probe);
+            // only a TCP-level failure throws and triggers retry. The Python
+            // `websockets` server answers plain HTTP for free as part of the
+            // upgrade handshake; embedders pointing at a different WS host
+            // must ensure that host (or its proxy) returns *something* on GET
+            // for the same path/query as `wsUrl`, not just for `/`.
             try {
                 await fetch(probeUrl, { mode: 'no-cors', signal: AbortSignal.timeout(400) });
             } catch {
@@ -4233,7 +4558,7 @@ export class ThreeJSViewer {
 
             this._ws.onerror = () => {};
 
-            this._ws.onmessage = async (event) => {
+            this._ws.onmessage = /** @param {MessageEvent<string>} event */ async (event) => {
                 const tParse = performance.now();
                 const data = JSON.parse(event.data);
                 const parseMs = performance.now() - tParse;
@@ -4289,7 +4614,7 @@ export class ThreeJSViewer {
                     case 'set_color': {
                         const colorObj = this._objects.get(data.id);
                         if (colorObj) {
-                            colorObj.traverse((child) => {
+                            colorObj.traverse(/** @param {any} child */ (child) => {
                                 if (!child.material) return;
                                 const mats = Array.isArray(child.material) ? child.material : [child.material];
                                 for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
@@ -4309,6 +4634,7 @@ export class ThreeJSViewer {
                         }));
                         break;
                     case 'query_scene': {
+                        /** @type {Record<string, any>} */
                         const tree = {};
                         for (const [id, obj] of this._objects) {
                             let drawRange = 1.0;
@@ -4329,8 +4655,8 @@ export class ThreeJSViewer {
                                 type: obj.type,
                                 parent: obj.parent?.userData?.id || null,
                                 children: obj.children
-                                    .filter(c => c.userData?.id)
-                                    .map(c => c.userData.id),
+                                    .filter(/** @param {any} c */ (c) => c.userData?.id)
+                                    .map(/** @param {any} c */ (c) => c.userData.id),
                                 visible: obj.visible,
                                 drawRange: drawRange,
                             };
@@ -4370,6 +4696,7 @@ export class ThreeJSViewer {
                                 console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
 
                                 const nFrames = data.frame_count;
+                                /** @type {Record<string, {ArrayType: any, bytes: number}>} */
                                 const DTYPE_INFO = {
                                     float32: { ArrayType: Float32Array, bytes: 4 },
                                     uint32:  { ArrayType: Uint32Array,  bytes: 4 },
@@ -4381,6 +4708,7 @@ export class ThreeJSViewer {
                                 // Visibility is special-cased by its applier to always
                                 // hold regardless — see makeChannelApply.visibility.
                                 let byteOffset = 0;
+                                /** @type {Record<string, any>} */
                                 const channels = {};
                                 if (data.channels) {
                                     for (const ch of data.channels) {
@@ -4400,6 +4728,7 @@ export class ThreeJSViewer {
                                 }
 
                                 const tMeta = performance.now();
+                                /** @type {Record<number, any>} */
                                 const metaByFrame = {};
                                 if (data.frames_meta) {
                                     for (const meta of data.frames_meta) {
@@ -4407,8 +4736,10 @@ export class ThreeJSViewer {
                                     }
                                 }
 
+                                /** @type {Array<Record<string, any>>} */
                                 const frames = [];
                                 for (let fi = 0; fi < nFrames; fi++) {
+                                    /** @type {Record<string, any>} */
                                     const frame = { time: data.frame_times[fi] };
                                     const meta = metaByFrame[fi];
                                     if (meta) {
@@ -4880,6 +5211,14 @@ export class ThreeJSViewer {
                                     const md = obj.userData.tubeMorphData;
                                     if (md) restoreFrontierRing(obj);
                                     // Fill cap dome vertices with a single color
+                                    /**
+                                     * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                     * @param {number} baseVert
+                                     * @param {number} capVerts
+                                     * @param {number} r
+                                     * @param {number} g
+                                     * @param {number} b
+                                     */
                                     function fillCapColors(arr, baseVert, capVerts, r, g, b) {
                                         for (let j = 0; j < capVerts; j++) {
                                             arr[(baseVert + j) * 3]     = r;
@@ -4921,6 +5260,14 @@ export class ThreeJSViewer {
                                     }
                                     const n = nOrig;
                                     // Fill cap dome vertices with a single color
+                                    /**
+                                     * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                     * @param {number} baseVert
+                                     * @param {number} capVerts
+                                     * @param {number} r
+                                     * @param {number} g
+                                     * @param {number} b
+                                     */
                                     function fillCapColors(arr, baseVert, capVerts, r, g, b) {
                                         for (let j = 0; j < capVerts; j++) {
                                             arr[(baseVert + j) * 3]     = r;
@@ -5127,7 +5474,7 @@ export class ThreeJSViewer {
         // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
         // hide 900ms after the pivot was set (but only once the user stops dragging).
         if (this._pivotMarker && this._pivotMarker.visible) {
-            const cam = /** @type {any} */ (this._camera);
+            const cam = /** @type {THREE.PerspectiveCamera & THREE.OrthographicCamera} */ (this._camera);
             const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
             let worldPerPixel;
             if (cam.isPerspectiveCamera) {
@@ -5222,6 +5569,10 @@ export class ThreeJSViewer {
 
     // ========== Public API ==========
 
+    /**
+     * @param {number} [width]
+     * @param {number} [height]
+     */
     resize(width, height) {
         width = width ?? this.container.clientWidth;
         height = height ?? this.container.clientHeight;
@@ -5240,6 +5591,7 @@ export class ThreeJSViewer {
         });
     }
 
+    /** @param {THREE.Object3D} object */
     frameObject(object) {
         const bbox = new THREE.Box3();
         object.updateWorldMatrix(true, true);
@@ -5273,6 +5625,10 @@ export class ThreeJSViewer {
         this._fitCameraToBox(bbox, 1.2);
     }
 
+    /**
+     * @param {THREE.Box3} bbox
+     * @param {number} perspMargin
+     */
     _fitCameraToBox(bbox, perspMargin) { this._camController.fitToBox(bbox, perspMargin); }
 
     // ========== Destroy ==========
