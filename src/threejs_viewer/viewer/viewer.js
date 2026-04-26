@@ -809,11 +809,11 @@ function computeMiterFrames(spine, nSpine, outFrames, outScales, outTangents,
             // problem the miter fix can't solve.
             tx = inX; ty = inY; tz = inZ;
         }
-        // Constant-up frame: V = up projected onto plane perpendicular to T.
+        // V axis: constant-up projection.
         const dotTu = tx * upX + ty * upY + tz * upZ;
-        let seedX, seedY, seedZ;
-        if (Math.abs(dotTu) > 0.99) { seedX = fbX; seedY = fbY; seedZ = fbZ; }
-        else { seedX = upX; seedY = upY; seedZ = upZ; }
+        const seedX = Math.abs(dotTu) > 0.99 ? fbX : upX;
+        const seedY = Math.abs(dotTu) > 0.99 ? fbY : upY;
+        const seedZ = Math.abs(dotTu) > 0.99 ? fbZ : upZ;
         const sdot = seedX * tx + seedY * ty + seedZ * tz;
         let vx = seedX - sdot * tx, vy = seedY - sdot * ty, vz = seedZ - sdot * tz;
         const vlen = Math.hypot(vx, vy, vz);
@@ -894,6 +894,119 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
         positions[ringBase + j * 3]     = sx + cu * cosT * Ux + cv * Vx + tOff * Tx;
         positions[ringBase + j * 3 + 1] = sy + cu * cosT * Uy + cv * Vy + tOff * Ty;
         positions[ringBase + j * 3 + 2] = sz + cu * cosT * Uz + cv * Vz + tOff * Tz;
+    }
+}
+
+// Sliding-window self-intersection collapse for the nCs "strand" polylines
+// running along the tube. Each strand connects vertex j across all rings; at
+// inside corners with κ·W/2 > 1 the offset strand folds back on itself, and
+// non-adjacent segments (i, i+1) and (k, k+1) end up arbitrarily close. The
+// detector scans each strand with a sliding window of TUBE_STRAND_COLLAPSE_WIN
+// rings: for every node p_i, it tests the perpendicular foot of p_i onto each
+// segment (p_k, p_{k+1}) within the window, and flags the run [min(i,k) ..
+// max(i,k+1)] when the foot lands inside the segment and the perpendicular
+// distance falls below `tol`. Overlapping detection ranges merge; each merged
+// range collapses to its centroid.
+//
+// Tolerance is computed internally as 5% of the tube's largest cross-section
+// extent — invariant of placement / overall scale.
+//
+// Discrete topology fix: a borderline κ·W/2 ≈ 1 fold either fully collapses
+// or doesn't, no graceful ramp. The visible result at a collapsed fold is a
+// hard crease — coincident vertices produce zero-area quads that three.js
+// skips in raster.
+//
+// Endpoints are protected (collapse range is clamped to [1, nSpine-2]) so the
+// caps' anchor rings stay on the spine frame.
+//
+// Note: collapsed vertices are coincident, so neighbouring quads degenerate
+// to zero area — three.js skips them in raster, so the visible result is a
+// hard crease at the fold. Other strands at the same ring may not collapse,
+// so the ring becomes non-planar through the fold; this is intentional and
+// only happens where the bead was already geometrically degenerate.
+const TUBE_STRAND_COLLAPSE_WIN = 10;
+/**
+ * @param {Float32Array} positions
+ * @param {Float32Array} widths
+ * @param {Float32Array} heights
+ * @param {number} nSpine
+ * @param {number} nCs
+ */
+function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
+    if (nSpine < 4) return;
+    let maxDim = 0;
+    for (let i = 0; i < nSpine; i++) {
+        if (widths[i] > maxDim) maxDim = widths[i];
+        if (heights[i] > maxDim) maxDim = heights[i];
+    }
+    if (maxDim <= 0) return;
+    const tol = 0.05 * maxDim;
+    const tolSq = tol * tol;
+    const ringStride = nCs * 3;
+    const window = TUBE_STRAND_COLLAPSE_WIN;
+    /** @type {number[]} */
+    const rangeStart = [];
+    /** @type {number[]} */
+    const rangeEnd = [];
+    for (let j = 0; j < nCs; j++) {
+        rangeStart.length = 0;
+        rangeEnd.length = 0;
+        for (let i = 0; i < nSpine; i++) {
+            const ip = i * ringStride + j * 3;
+            const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
+            const kHi = Math.min(nSpine - 2, i + window);
+            // Only scan k > i; (k, i) was covered when i was at k's position.
+            // Skip the two adjacent segments touching p_i (k = i and k = i-1).
+            const kStart = i + 2;
+            for (let k = kStart; k <= kHi; k++) {
+                const ka = k * ringStride + j * 3;
+                const kb = (k + 1) * ringStride + j * 3;
+                const ax = positions[ka],     ay = positions[ka + 1], az = positions[ka + 2];
+                const ex = positions[kb] - ax, ey = positions[kb + 1] - ay, ez = positions[kb + 2] - az;
+                const eL2 = ex * ex + ey * ey + ez * ez;
+                if (eL2 < 1e-24) continue;
+                const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
+                if (t < 0 || t > 1) continue;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
+                if (dx * dx + dy * dy + dz * dz < tolSq) {
+                    rangeStart.push(i);
+                    rangeEnd.push(k + 1);
+                }
+            }
+        }
+        if (rangeStart.length === 0) continue;
+        // Detections are produced in non-decreasing order of `i`, so a single
+        // forward sweep merges overlapping ranges in place.
+        const mStart = [rangeStart[0]];
+        const mEnd = [rangeEnd[0]];
+        for (let m = 1; m < rangeStart.length; m++) {
+            const s = rangeStart[m], e = rangeEnd[m];
+            const last = mEnd.length - 1;
+            if (s <= mEnd[last]) {
+                if (e > mEnd[last]) mEnd[last] = e;
+            } else {
+                mStart.push(s);
+                mEnd.push(e);
+            }
+        }
+        for (let m = 0; m < mStart.length; m++) {
+            const s = Math.max(1, mStart[m]);
+            const e = Math.min(nSpine - 2, mEnd[m]);
+            if (e < s) continue;
+            let cx = 0, cy = 0, cz = 0;
+            const cnt = e - s + 1;
+            for (let i = s; i <= e; i++) {
+                const ip = i * ringStride + j * 3;
+                cx += positions[ip]; cy += positions[ip + 1]; cz += positions[ip + 2];
+            }
+            cx /= cnt; cy /= cnt; cz /= cnt;
+            for (let i = s; i <= e; i++) {
+                const ip = i * ringStride + j * 3;
+                positions[ip] = cx; positions[ip + 1] = cy; positions[ip + 2] = cz;
+            }
+        }
     }
 }
 
@@ -1546,6 +1659,10 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
 // - orientations: Float32Array length nSpine*4 quaternions, or null (constant-up derived)
 // - upVector:     [x, y, z] up direction for constant-up frame (default [0,0,1])
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
+// - strandCollapse: When true, each strand polyline is scanned for
+//                 self-intersections within a sliding window of 10 rings;
+//                 detected fold runs collapse to their centroid (see
+//                 collapseTubeStrandFolds).
 //
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
 /**
@@ -1556,10 +1673,12 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
  * @param {number[] | null} upVector
  * @param {Float32Array | null} ringColors
  * @param {number} heightOffset
+ * @param {boolean} [strandCollapse]
  */
 function buildParametricTubeGeometry(
     spine, widths, heights,
     orientations, upVector, ringColors, heightOffset,
+    strandCollapse,
 ) {
     const nCs = N_CROSS_SECTION;
     const nSpine = spine.length / 3;
@@ -1699,6 +1818,14 @@ function buildParametricTubeGeometry(
             writeRingVerts(positions, ringBase, section, nCs,
                            -Ux, -Uy, -Uz, Vx, Vy, Vz, sx, sy, sz, vOff, miterScales[i]);
         }
+    }
+
+    // Post-process strand collapse: runs after all ring vertices (and hairpin
+    // fixups) so it sees the final offset polylines, but before caps bolt on
+    // — caps read positions from the spine/frame arrays directly, not from
+    // the modified rings, so the cap seam stays analytic.
+    if (strandCollapse) {
+        collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs);
     }
 
     // --- Revolution cap vertices ---
@@ -5419,9 +5546,11 @@ export class ThreeJSViewer {
                                     // LOD initial reduction logged at debug level only
                                 }
 
+                                const strandCollapse = !!data.strandCollapse;
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, miterScales, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     buildSpine, buildWidths, buildHeights,
                                     buildOrientations, upVector, buildRingColors, heightOffset,
+                                    strandCollapse,
                                 );
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
                                 const material = new THREE.MeshStandardMaterial({

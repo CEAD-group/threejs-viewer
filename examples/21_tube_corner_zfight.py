@@ -1,22 +1,24 @@
 """
-Miter-frame demo: wide beads around sharp corners.
+Side-by-side demo of ``strand_collapse`` on ``add_parametric_tube``.
 
-Parametric tubes now build their cross-section frames as the angle bisector
-of the incoming/outgoing segment directions, and scale the width axis by
-1/cos(half_turn_angle) — the same miter math SVG stroke rendering uses, with
-a miter limit of 4 falling back to bevel (scale=1) past the limit.
+The spine is a centripetal Catmull-Rom spline through random polar
+control points — a smooth closed curve with continuously varying
+curvature that peaks well above 1/half_width in the tight lobes. Sparse
+sampling (10 points per segment) is deliberate: it matches the feel of
+a real 3D-printed toolpath where per-segment turn is often > 90° in
+tight corners.
 
-Two tubes side-by-side, both using the same miter code path:
+Both tiles use the same pathological spine (κ·W/2 up to ~9, so the
+inner offset curve self-intersects aggressively):
 
-* Left  — moderate corners (radius ≈ bead half-width). Miter handles this
-  cleanly: each quad fans along the bisector, no ring overlap.
-* Right — aggressive corners (radius << bead half-width). Densely sampled
-  through the arc so per-segment turn is tiny — miter still applies, but the
-  inside offset curve of the bead is *geometrically* inverted at each corner
-  (curvature > 1/half-width). Expect a clean outside surface and a visible
-  crease on the inside: that inside crease is a real self-intersection no
-  frame trick can fix; miter keeps the *outside* from exploding into a
-  triangle fan the way the pre-miter build did.
+    (left)   strand_collapse=False   — baseline miter (visible folds)
+    (right)  strand_collapse=True    — fold detect + snap
+
+``strand_collapse`` scans each per-cross-section-vertex strand polyline
+with a sliding window of 10 rings, using a point-to-segment distance
+test against a 5%-of-max-cross-section tolerance. Detected fold runs
+collapse to their centroid, turning the inner self-intersection into a
+clean crease instead of a self-intersecting triangle fan.
 
 Run: uv run python examples/21_tube_corner_zfight.py
 """
@@ -28,53 +30,53 @@ import numpy as np
 from threejs_viewer import viewer
 
 
-def rounded_square(side=2.0, radius=0.3, pts_per_corner=50, pts_per_side=8):
-    """Closed rounded-corner square, densely sampled through each corner arc."""
-    half = side / 2
-    corners = [
-        ((+half - radius, +half - radius), 0.0),
-        ((-half + radius, +half - radius), np.pi / 2),
-        ((-half + radius, -half + radius), np.pi),
-        ((+half - radius, -half + radius), 3 * np.pi / 2),
-    ]
-    pts = []
-    for i, ((cx, cy), a0) in enumerate(corners):
-        if i > 0:
-            prev_cx, prev_cy = corners[i - 1][0]
-            prev_a_end = corners[i - 1][1] + np.pi / 2
-            start = (
-                prev_cx + radius * np.cos(prev_a_end),
-                prev_cy + radius * np.sin(prev_a_end),
-            )
-            end = (cx + radius * np.cos(a0), cy + radius * np.sin(a0))
-            t = np.linspace(0, 1, pts_per_side, endpoint=False)[1:]
-            xs = start[0] + (end[0] - start[0]) * t
-            ys = start[1] + (end[1] - start[1]) * t
-            pts.append(np.column_stack([xs, ys]))
-        theta = np.linspace(a0, a0 + np.pi / 2, pts_per_corner)
-        xs = cx + radius * np.cos(theta)
-        ys = cy + radius * np.sin(theta)
-        pts.append(np.column_stack([xs, ys]))
-    prev_cx, prev_cy = corners[-1][0]
-    prev_a_end = corners[-1][1] + np.pi / 2
-    start = (
-        prev_cx + radius * np.cos(prev_a_end),
-        prev_cy + radius * np.sin(prev_a_end),
-    )
-    first_cx, first_cy = corners[0][0]
-    end = (first_cx + radius * np.cos(0.0), first_cy + radius * np.sin(0.0))
-    t = np.linspace(0, 1, pts_per_side, endpoint=False)[1:]
-    xs = start[0] + (end[0] - start[0]) * t
-    ys = start[1] + (end[1] - start[1]) * t
-    pts.append(np.column_stack([xs, ys]))
+def blobby_control_points(n, base_r, jitter, seed):
+    """Random polar control points on a closed loop: base radius + jitter."""
+    rng = np.random.default_rng(seed)
+    theta = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    theta = theta + rng.uniform(-0.35, 0.35, size=n) * (2.0 * np.pi / n)
+    r = base_r * (1.0 + rng.uniform(-jitter, jitter, size=n))
+    return np.column_stack([r * np.cos(theta), r * np.sin(theta)])
 
-    xy = np.concatenate(pts, axis=0)
-    z = np.zeros(len(xy))
-    return np.column_stack([xy[:, 0], xy[:, 1], z]).astype(np.float32)
+
+def catmull_rom_closed(points, samples_per_segment, alpha=0.5):
+    """Centripetal Catmull-Rom through a closed loop of 2D control points."""
+    pts = np.asarray(points, dtype=np.float64)
+    n = len(pts)
+
+    def knot(ti, a, b):
+        d = float(np.linalg.norm(b - a))
+        return ti + max(d, 1e-9) ** alpha
+
+    out = []
+    for i in range(n):
+        p0 = pts[(i - 1) % n]
+        p1 = pts[i]
+        p2 = pts[(i + 1) % n]
+        p3 = pts[(i + 2) % n]
+        t0 = 0.0
+        t1 = knot(t0, p0, p1)
+        t2 = knot(t1, p1, p2)
+        t3 = knot(t2, p2, p3)
+        ts = np.linspace(t1, t2, samples_per_segment, endpoint=False)
+        for t in ts:
+            a1 = (t1 - t) / (t1 - t0) * p0 + (t - t0) / (t1 - t0) * p1
+            a2 = (t2 - t) / (t2 - t1) * p1 + (t - t1) / (t2 - t1) * p2
+            a3 = (t3 - t) / (t3 - t2) * p2 + (t - t2) / (t3 - t2) * p3
+            b1 = (t2 - t) / (t2 - t0) * a1 + (t - t0) / (t2 - t0) * a2
+            b2 = (t3 - t) / (t3 - t1) * a2 + (t - t1) / (t3 - t1) * a3
+            c = (t2 - t) / (t2 - t1) * b1 + (t - t1) / (t2 - t1) * b2
+            out.append(c)
+    return np.asarray(out, dtype=np.float64)
+
+
+def lift_xy(xy, dx=0.0, dy=0.0):
+    xyz = np.column_stack([xy[:, 0] + dx, xy[:, 1] + dy, np.zeros(len(xy))])
+    return xyz.astype(np.float32)
 
 
 def hue_ramp(n, offset=0.0):
-    """HSV sweep so ring order through the corners is visible."""
+    """HSV sweep so ring order along the spine is visible."""
     h = (np.linspace(0, 1, n) + offset) % 1.0
     s, v = 0.9, 0.95
     hp = h * 6.0
@@ -103,59 +105,50 @@ def hue_ramp(n, offset=0.0):
 v = viewer()
 v.clear()
 
-SIDE = 2.0
-BEAD_W = 1.00
+BEAD_W = 0.70
 BEAD_H = 0.30
-PTS_PER_CORNER = 60
+BASE_R = 1.10
+SAMPLES_PER_SEG = 10  # sparse on purpose — realistic toolpath density
 
-MODERATE_R = 0.30  # half-width 0.25 ≲ radius 0.30 → miter handles cleanly
-AGGRESSIVE_R = 0.08  # half-width 0.25 >> radius 0.08 → miter clamped to limit
+ctrl = blobby_control_points(n=13, base_r=BASE_R, jitter=0.45, seed=7)
+spine_xy = catmull_rom_closed(ctrl, samples_per_segment=SAMPLES_PER_SEG)
+n = len(spine_xy)
+colors = hue_ramp(n)
+widths = np.full(n, BEAD_W, dtype=np.float32)
+heights = np.full(n, BEAD_H, dtype=np.float32)
 
+# Side-by-side layout.
+offset = BASE_R * 1.5
+ground_w = 2.0 * offset + 2.0 * BASE_R * (1.0 + 0.45) + 0.6
 v.add_box(
     "ground",
-    width=SIDE * 3.5,
-    height=SIDE + 1.0,
+    width=ground_w,
+    height=2.0 * BASE_R * (1.0 + 0.45) + 0.6,
     depth=0.02,
     color=0x1A1A1A,
     position=[0.0, 0.0, -0.01],
 )
 
-# Left: moderate corner radius — miter produces clean corners.
-spine_mod = rounded_square(
-    side=SIDE, radius=MODERATE_R, pts_per_corner=PTS_PER_CORNER, pts_per_side=8
-)
-spine_mod[:, 0] -= SIDE * 0.9
-n_mod = len(spine_mod)
-v.add_parametric_tube(
-    "tube_moderate",
-    spine=spine_mod,
-    widths=np.full(n_mod, BEAD_W, dtype=np.float32),
-    heights=np.full(n_mod, BEAD_H, dtype=np.float32),
-    colors=hue_ramp(n_mod),
-    roughness=0.35,
-    metalness=0.05,
-)
+for tube_id, dx, strand_collapse in [
+    ("tube_baseline", -offset, False),
+    ("tube_collapse", +offset, True),
+]:
+    spine = lift_xy(spine_xy, dx=dx, dy=0.0)
+    v.add_parametric_tube(
+        tube_id,
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=colors,
+        roughness=0.35,
+        metalness=0.05,
+        strand_collapse=strand_collapse,
+    )
 
-# Right: aggressive corner radius — miter clamps at the limit, bevelled.
-spine_agg = rounded_square(
-    side=SIDE, radius=AGGRESSIVE_R, pts_per_corner=PTS_PER_CORNER, pts_per_side=8
-)
-spine_agg[:, 0] += SIDE * 0.9
-n_agg = len(spine_agg)
-v.add_parametric_tube(
-    "tube_aggressive",
-    spine=spine_agg,
-    widths=np.full(n_agg, BEAD_W, dtype=np.float32),
-    heights=np.full(n_agg, BEAD_H, dtype=np.float32),
-    colors=hue_ramp(n_agg),
-    roughness=0.35,
-    metalness=0.05,
-)
-
-print(f"moderate:   corner radius {MODERATE_R:.2f}, bead half-width {BEAD_W / 2:.3f}")
-print(f"aggressive: corner radius {AGGRESSIVE_R:.2f}, bead half-width {BEAD_W / 2:.3f}")
-print("Both tubes use miter frames. Compare the left (clean) vs right")
-print("(bevelled, miter clamped at limit=4). Ctrl+C to exit.")
+print(f"spine: {n} samples/tile, bead half-width {BEAD_W / 2:.3f}")
+print("  left:  strand_collapse=False  (baseline)")
+print("  right: strand_collapse=True   (sliding-window fold detect + snap)")
+print("Ctrl+C to exit.")
 
 try:
     while True:
