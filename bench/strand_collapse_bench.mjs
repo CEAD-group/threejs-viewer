@@ -43,7 +43,10 @@ function catmullRomEval(t, p0, p1, p2, p3, t0, t1, t2, t3) {
     return [wc0 * b1x + wc1 * b2x, wc0 * b1y + wc1 * b2y];
 }
 
-function catmullRomClosed(points, samplesPerSegment, alpha = 0.5) {
+// Mirrors `catmull_rom_periodic` from examples/21_tube_corner_zfight.py:
+// returns a periodic-but-open polyline (last sample one cadence step before
+// the start) so behaviour matches what the demo actually feeds the algorithm.
+function catmullRomPeriodic(points, samplesPerSegment, alpha = 0.5) {
     const n = points.length;
     const knot = (ti, a, b) => {
         const dx = b[0] - a[0], dy = b[1] - a[1];
@@ -407,6 +410,81 @@ function collapseV4(positions, widths, heights, nSpine, nCs, spine) {
     }
 }
 
+// ---- V5: bidirectional V1 (current ship after PR review). Forward + backward
+// scans per i, both with first-hit early-exit. Sort detection list before
+// merge since backward pushes have start < i.
+
+function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
+    if (nSpine < 4) return;
+    let maxDim = 0;
+    for (let i = 0; i < nSpine; i++) {
+        if (widths[i] > maxDim) maxDim = widths[i];
+        if (heights[i] > maxDim) maxDim = heights[i];
+    }
+    if (maxDim <= 0) return;
+    const tol = 0.05 * maxDim;
+    const tolSq = tol * tol;
+    const ringStride = nCs * 3;
+    const rangeStart = [], rangeEnd = [];
+    for (let j = 0; j < nCs; j++) {
+        rangeStart.length = 0; rangeEnd.length = 0;
+        for (let i = 0; i < nSpine; i++) {
+            const ip = i * ringStride + j * 3;
+            const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
+            const kHi = Math.min(nSpine - 2, i + WIN);
+            for (let k = kHi; k >= i + 2; k--) {
+                const ka = k * ringStride + j * 3;
+                const kb = (k + 1) * ringStride + j * 3;
+                const ax = positions[ka], ay = positions[ka + 1], az = positions[ka + 2];
+                const ex = positions[kb] - ax, ey = positions[kb + 1] - ay, ez = positions[kb + 2] - az;
+                const eL2 = ex * ex + ey * ey + ez * ez;
+                if (eL2 < 1e-24) continue;
+                const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
+                if (t < 0 || t > 1) continue;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
+                if (dx * dx + dy * dy + dz * dz < tolSq) {
+                    rangeStart.push(i); rangeEnd.push(k + 1);
+                    break;
+                }
+            }
+            const kLo = Math.max(0, i - WIN);
+            for (let k = kLo; k <= i - 2; k++) {
+                const ka = k * ringStride + j * 3;
+                const kb = (k + 1) * ringStride + j * 3;
+                const ax = positions[ka], ay = positions[ka + 1], az = positions[ka + 2];
+                const ex = positions[kb] - ax, ey = positions[kb + 1] - ay, ez = positions[kb + 2] - az;
+                const eL2 = ex * ex + ey * ey + ez * ez;
+                if (eL2 < 1e-24) continue;
+                const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
+                if (t < 0 || t > 1) continue;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
+                if (dx * dx + dy * dy + dz * dz < tolSq) {
+                    rangeStart.push(k); rangeEnd.push(i);
+                    break;
+                }
+            }
+        }
+        if (rangeStart.length === 0) continue;
+        // Sort by start (backward pushes break the natural ordering).
+        const order = new Int32Array(rangeStart.length);
+        for (let m = 0; m < order.length; m++) order[m] = m;
+        const _starts = rangeStart.slice();
+        const _ends = rangeEnd.slice();
+        Array.prototype.sort.call(order, (a, b) => _starts[a] - _starts[b]);
+        const sortedStart = new Array(order.length);
+        const sortedEnd = new Array(order.length);
+        for (let m = 0; m < order.length; m++) {
+            sortedStart[m] = _starts[order[m]];
+            sortedEnd[m] = _ends[order[m]];
+        }
+        applyMergedCollapses(positions, ringStride, j, nSpine, sortedStart, sortedEnd);
+    }
+}
+
 // ---- Shared merge + collapse application ----
 
 function applyMergedCollapses(positions, ringStride, j, nSpine, rangeStart, rangeEnd) {
@@ -479,13 +557,18 @@ const itersFor = (n) => {
 };
 
 console.log("collapseTubeStrandFolds — variant comparison\n");
-console.log("V0=ship  V1=back-scan+break  V2=turn-sum gate  V3=per-pair pre-filter  V4=hoisted kMax precompute\n");
-console.log("N         | V0 ms     | V1 (vs V0)      | V2 (vs V0)      | V3 (vs V0)      | V4 (vs V0)      | hits");
-console.log("----------+-----------+-----------------+-----------------+-----------------+-----------------+-----");
+console.log("V0 = forward-only, log all hits (original)");
+console.log("V1 = forward-only, backwards inner scan + first-hit break");
+console.log("V2 = V1 + cumulative-spine-turn gate (UNSAFE: misses folds)");
+console.log("V3 = V1 + per-(i,k) spine-distance pre-filter");
+console.log("V4 = V1 + V3's pre-filter hoisted into one per-i precompute pass");
+console.log("V5 = bidirectional V1 — current ship after PR review (correctness fix; output differs from V0/V1 by design)\n");
+console.log("N         | V0 ms     | V1 (vs V0)      | V2 (vs V0)      | V3 (vs V0)      | V4 (vs V0)      | V5 (vs V0)      | hits");
+console.log("----------+-----------+-----------------+-----------------+-----------------+-----------------+-----------------+-----");
 
 for (const target of targets) {
     const samplesPerSeg = Math.max(1, Math.round(target / 13));
-    const spineXY = catmullRomClosed(ctrl, samplesPerSeg);
+    const spineXY = catmullRomPeriodic(ctrl, samplesPerSeg);
     const spine = liftXY(spineXY);
     const nSpine = spine.length / 3;
     const widths = new Float32Array(nSpine).fill(2 * RADIUS);
@@ -499,6 +582,8 @@ for (const target of targets) {
     const v0out = new Float32Array(positions0.length);
     v0out.set(positions0);
     collapseV0(v0out, widths, heights, nSpine, N_CS, spine);
+    // V5 is intentionally NOT compared element-wise to V0: bidirectional scan
+    // catches asymmetric folds V0 misses, so outputs differ by design.
     const labels = ["V1", "V2", "V3", "V4"];
     const others = [collapseV1, collapseV2, collapseV3, collapseV4];
     const mismatches = [];
@@ -558,11 +643,12 @@ for (const target of targets) {
     const t2 = run("V2", collapseV2, scratch, positions0, widths, heights, nSpine, spine, iters);
     const t3 = run("V3", collapseV3, scratch, positions0, widths, heights, nSpine, spine, iters);
     const t4 = run("V4", collapseV4, scratch, positions0, widths, heights, nSpine, spine, iters);
+    const t5 = run("V5", collapseV5, scratch, positions0, widths, heights, nSpine, spine, iters);
 
     const fmt = (x) => (x < 1 ? x.toFixed(3) : x.toFixed(2)).padStart(7);
     const ratio = (a, b) => `${(a / b).toFixed(2)}×`.padStart(7);
     console.log(
-        `${String(nSpine).padStart(9)} | ${fmt(t0)} ms | ${fmt(t1)} ${ratio(t0, t1)} | ${fmt(t2)} ${ratio(t0, t2)} | ${fmt(t3)} ${ratio(t0, t3)} | ${fmt(t4)} ${ratio(t0, t4)} | ${hitCount}` + (allSame ? "" : ` [${mismatches.join(", ")}]`)
+        `${String(nSpine).padStart(9)} | ${fmt(t0)} ms | ${fmt(t1)} ${ratio(t0, t1)} | ${fmt(t2)} ${ratio(t0, t2)} | ${fmt(t3)} ${ratio(t0, t3)} | ${fmt(t4)} ${ratio(t0, t4)} | ${fmt(t5)} ${ratio(t0, t5)} | ${hitCount}` + (allSame ? "" : ` [${mismatches.join(", ")}]`)
     );
 }
 console.log("\n(speedups vs V0; higher = faster; 'MISMATCH' = variant produced different output)");

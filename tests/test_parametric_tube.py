@@ -188,6 +188,22 @@ def test_add_parametric_tube_lod_non_dict_rejected():
         c.add_parametric_tube("t", spine, widths, heights, lod="bogus")
 
 
+def test_add_parametric_tube_strand_collapse_default_omits_header_key():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights)
+    header, _ = c._binary_messages[-1]
+    assert "strandCollapse" not in header
+
+
+def test_add_parametric_tube_strand_collapse_true_sets_header():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, strand_collapse=True)
+    header, _ = c._binary_messages[-1]
+    assert header["strandCollapse"] is True
+
+
 def test_add_parametric_tube_lod_unknown_key_rejected():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()

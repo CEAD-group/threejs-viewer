@@ -1,12 +1,16 @@
 """
 Side-by-side demo of ``strand_collapse`` on ``add_parametric_tube``.
 
-The spine is a centripetal Catmull-Rom spline through random polar
-control points — a smooth closed curve with continuously varying
-curvature that peaks well above 1/half_width in the tight lobes. Sparse
-sampling (10 points per segment) is deliberate: it matches the feel of
-a real 3D-printed toolpath where per-segment turn is often > 90° in
-tight corners.
+The spine is a centripetal Catmull-Rom spline through a periodic loop
+of random polar control points, sampled at 10 points per segment with
+``endpoint=False`` so the output polyline is periodic-but-open (the
+final sample is one cadence step before the start, not coincident with
+it). Curvature varies continuously and peaks well above 1/half_width
+in the tight lobes. Sparse sampling is deliberate: it matches the feel
+of a real 3D-printed toolpath where per-segment turn is often > 90° in
+tight corners. The tube has caps at both ends — closing the polyline
+exactly would create overlapping caps and trigger zero-length-segment
+false positives in the strand-collapse detector.
 
 Both tiles use the same pathological spine (κ·W/2 up to ~9, so the
 inner offset curve self-intersects aggressively):
@@ -39,8 +43,14 @@ def blobby_control_points(n, base_r, jitter, seed):
     return np.column_stack([r * np.cos(theta), r * np.sin(theta)])
 
 
-def catmull_rom_closed(points, samples_per_segment, alpha=0.5):
-    """Centripetal Catmull-Rom through a closed loop of 2D control points."""
+def catmull_rom_periodic(points, samples_per_segment, alpha=0.5):
+    """Centripetal Catmull-Rom through a periodic loop of 2D control points.
+
+    Returns a periodic-but-open polyline: the spline is built through the
+    points wrapped as a closed loop, but the output samples each segment
+    with ``endpoint=False``, so the last returned sample is one cadence
+    step before the start (not coincident with it).
+    """
     pts = np.asarray(points, dtype=np.float64)
     n = len(pts)
 
@@ -111,7 +121,7 @@ BASE_R = 1.10
 SAMPLES_PER_SEG = 10  # sparse on purpose — realistic toolpath density
 
 ctrl = blobby_control_points(n=13, base_r=BASE_R, jitter=0.45, seed=7)
-spine_xy = catmull_rom_closed(ctrl, samples_per_segment=SAMPLES_PER_SEG)
+spine_xy = catmull_rom_periodic(ctrl, samples_per_segment=SAMPLES_PER_SEG)
 n = len(spine_xy)
 colors = hue_ramp(n)
 widths = np.full(n, BEAD_W, dtype=np.float32)

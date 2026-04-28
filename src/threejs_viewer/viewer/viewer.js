@@ -900,13 +900,19 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 // Sliding-window self-intersection collapse for the nCs "strand" polylines
 // running along the tube. Each strand connects vertex j across all rings; at
 // inside corners with κ·W/2 > 1 the offset strand folds back on itself, and
-// non-adjacent segments (i, i+1) and (k, k+1) end up arbitrarily close. The
-// detector scans each strand with a sliding window of TUBE_STRAND_COLLAPSE_WIN
-// rings: for every node p_i, it tests the perpendicular foot of p_i onto each
-// segment (p_k, p_{k+1}) within the window, and flags the run [min(i,k) ..
-// max(i,k+1)] when the foot lands inside the segment and the perpendicular
-// distance falls below `tol`. Overlapping detection ranges merge; each merged
-// range collapses to its centroid.
+// non-adjacent segments end up arbitrarily close. The detector tests, for
+// every (i, k) pair within ±TUBE_STRAND_COLLAPSE_WIN rings (k - i ≥ 2 to skip
+// the two segments touching p_i), the perpendicular foot of p_i onto segment
+// (p_k, p_{k+1}). When the foot lands inside the segment and the distance
+// falls below `tol`, the run [min(i,k) .. max(i,k+1)] is flagged. Overlapping
+// detection ranges merge; each merged range collapses to its centroid.
+//
+// Both directions are scanned per i (k > i AND k < i). Point-to-segment is
+// asymmetric — p_i → seg(k,k+1) is not equivalent to p_k → seg(i,i+1) — so
+// scanning forward only would miss configurations where a later vertex is
+// close to an earlier segment but not vice versa. With first-hit early-exit
+// in each direction (largest forward k and smallest backward k both give the
+// largest range from a fixed i), the cost stays close to O(nCs · N · W).
 //
 // Tolerance is computed internally as 5% of the tube's largest cross-section
 // extent — invariant of placement / overall scale.
@@ -914,16 +920,12 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 // Discrete topology fix: a borderline κ·W/2 ≈ 1 fold either fully collapses
 // or doesn't, no graceful ramp. The visible result at a collapsed fold is a
 // hard crease — coincident vertices produce zero-area quads that three.js
-// skips in raster.
+// skips in raster. Other strands at the same ring may not collapse, so the
+// ring becomes non-planar through the fold; intentional, and only happens
+// where the bead was already geometrically degenerate.
 //
 // Endpoints are protected (collapse range is clamped to [1, nSpine-2]) so the
 // caps' anchor rings stay on the spine frame.
-//
-// Note: collapsed vertices are coincident, so neighbouring quads degenerate
-// to zero area — three.js skips them in raster, so the visible result is a
-// hard crease at the fold. Other strands at the same ring may not collapse,
-// so the ring becomes non-planar through the fold; this is intentional and
-// only happens where the bead was already geometrically degenerate.
 const TUBE_STRAND_COLLAPSE_WIN = 30;
 /**
  * @param {Float32Array} positions
@@ -954,13 +956,9 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
         for (let i = 0; i < nSpine; i++) {
             const ip = i * ringStride + j * 3;
             const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
+            // Forward scan: segments k in [i+2, i+W]. Largest k → largest range
+            // [i, k+1], so scan from kHi down and break on first hit.
             const kHi = Math.min(nSpine - 2, i + window);
-            // Only scan k > i; (k, i) was covered when i was at k's position.
-            // Skip the two adjacent segments touching p_i (k = i and k = i-1).
-            // Scan k backwards from kHi and break on the first hit: any later
-            // (smaller-k) hit from this same i would produce a sub-range that
-            // the merge step subsumes. Cuts work substantially in fold regions
-            // where many k's fire from the same i; equivalent to V0 elsewhere.
             for (let k = kHi; k >= i + 2; k--) {
                 const ka = k * ringStride + j * 3;
                 const kb = (k + 1) * ringStride + j * 3;
@@ -979,14 +977,42 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                     break;
                 }
             }
+            // Backward scan: segments k in [i-W, i-2]. Smallest k → largest
+            // range [k, i], so scan from kLo up and break on first hit.
+            const kLo = Math.max(0, i - window);
+            for (let k = kLo; k <= i - 2; k++) {
+                const ka = k * ringStride + j * 3;
+                const kb = (k + 1) * ringStride + j * 3;
+                const ax = positions[ka],     ay = positions[ka + 1], az = positions[ka + 2];
+                const ex = positions[kb] - ax, ey = positions[kb + 1] - ay, ez = positions[kb + 2] - az;
+                const eL2 = ex * ex + ey * ey + ez * ez;
+                if (eL2 < 1e-24) continue;
+                const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
+                if (t < 0 || t > 1) continue;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
+                if (dx * dx + dy * dy + dz * dz < tolSq) {
+                    rangeStart.push(k);
+                    rangeEnd.push(i);
+                    break;
+                }
+            }
         }
         if (rangeStart.length === 0) continue;
-        // Detections are produced in non-decreasing order of `i`, so a single
-        // forward sweep merges overlapping ranges in place.
-        const mStart = [rangeStart[0]];
-        const mEnd = [rangeEnd[0]];
-        for (let m = 1; m < rangeStart.length; m++) {
-            const s = rangeStart[m], e = rangeEnd[m];
+        // Detections from the backward scan can have starts < the current i,
+        // so the per-strand list is not sorted by start. Sort once before the
+        // single-pass merge. Detection counts are tiny (per-strand fold runs)
+        // so a JS array sort dominates only for pathological inputs.
+        const order = new Int32Array(rangeStart.length);
+        for (let m = 0; m < order.length; m++) order[m] = m;
+        const _starts = rangeStart.slice();
+        const _ends = rangeEnd.slice();
+        Array.prototype.sort.call(order, (a, b) => _starts[a] - _starts[b]);
+        const mStart = [_starts[order[0]]];
+        const mEnd = [_ends[order[0]]];
+        for (let m = 1; m < order.length; m++) {
+            const s = _starts[order[m]], e = _ends[order[m]];
             const last = mEnd.length - 1;
             if (s <= mEnd[last]) {
                 if (e > mEnd[last]) mEnd[last] = e;
