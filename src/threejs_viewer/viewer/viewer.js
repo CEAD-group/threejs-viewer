@@ -904,8 +904,19 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 // every (i, k) pair within ±TUBE_STRAND_COLLAPSE_WIN rings (k - i ≥ 2 to skip
 // the two segments touching p_i), the perpendicular foot of p_i onto segment
 // (p_k, p_{k+1}). When the foot lands inside the segment and the distance
-// falls below `tol`, the run [min(i,k) .. max(i,k+1)] is flagged. Overlapping
-// detection ranges merge; each merged range collapses to its centroid.
+// falls below `tol`, the run [min(i,k) .. max(i,k+1)] is flagged AND the
+// midpoint of (p_i, foot) is recorded — that midpoint is the geometric
+// "crossing" of the two strand segments and serves as the per-detection
+// collapse target. Overlapping detection ranges merge; each merged range
+// snaps every ring inside it to the AVERAGE of its constituent crossing
+// midpoints, NOT to the centroid of ring positions in the range.
+//
+// Why mean-of-crossings, not centroid-of-positions: a long fold range (many
+// rings of continuous high curvature) contains positions on both sides of
+// the fold, so their arithmetic centroid drifts toward the spine and pulls
+// the entire cross-section inward. The crossing midpoints all sit at the
+// geometric fold location, so their mean stays where the fold actually is —
+// the bead's outer hull is preserved up to the seam at the collapsed run.
 //
 // Both directions are scanned per i (k > i AND k < i). Point-to-segment is
 // asymmetric — p_i → seg(k,k+1) is not equivalent to p_k → seg(i,i+1) — so
@@ -950,9 +961,18 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
     const rangeStart = [];
     /** @type {number[]} */
     const rangeEnd = [];
+    /** @type {number[]} */
+    const foldX = [];
+    /** @type {number[]} */
+    const foldY = [];
+    /** @type {number[]} */
+    const foldZ = [];
     for (let j = 0; j < nCs; j++) {
         rangeStart.length = 0;
         rangeEnd.length = 0;
+        foldX.length = 0;
+        foldY.length = 0;
+        foldZ.length = 0;
         for (let i = 0; i < nSpine; i++) {
             const ip = i * ringStride + j * 3;
             const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
@@ -968,12 +988,18 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const dx = px - (ax + t * ex);
-                const dy = py - (ay + t * ey);
-                const dz = pz - (az + t * ez);
+                const fx = ax + t * ex;
+                const fy = ay + t * ey;
+                const fz = az + t * ez;
+                const dx = px - fx;
+                const dy = py - fy;
+                const dz = pz - fz;
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(i);
                     rangeEnd.push(k + 1);
+                    foldX.push(0.5 * (px + fx));
+                    foldY.push(0.5 * (py + fy));
+                    foldZ.push(0.5 * (pz + fz));
                     break;
                 }
             }
@@ -989,12 +1015,18 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const dx = px - (ax + t * ex);
-                const dy = py - (ay + t * ey);
-                const dz = pz - (az + t * ez);
+                const fx = ax + t * ex;
+                const fy = ay + t * ey;
+                const fz = az + t * ez;
+                const dx = px - fx;
+                const dy = py - fy;
+                const dz = pz - fz;
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(k);
                     rangeEnd.push(i);
+                    foldX.push(0.5 * (px + fx));
+                    foldY.push(0.5 * (py + fy));
+                    foldZ.push(0.5 * (pz + fz));
                     break;
                 }
             }
@@ -1008,30 +1040,46 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
         for (let m = 0; m < order.length; m++) order[m] = m;
         const _starts = rangeStart.slice();
         const _ends = rangeEnd.slice();
+        const _fx = foldX.slice();
+        const _fy = foldY.slice();
+        const _fz = foldZ.slice();
         Array.prototype.sort.call(order, (a, b) => _starts[a] - _starts[b]);
-        const mStart = [_starts[order[0]]];
-        const mEnd = [_ends[order[0]]];
+        // Merge overlapping ranges in order, accumulating sum-of-fold-midpoints
+        // per merged range.
+        const o0 = order[0];
+        const mStart = [_starts[o0]];
+        const mEnd = [_ends[o0]];
+        const mFx = [_fx[o0]];
+        const mFy = [_fy[o0]];
+        const mFz = [_fz[o0]];
+        const mCount = [1];
         for (let m = 1; m < order.length; m++) {
-            const s = _starts[order[m]], e = _ends[order[m]];
+            const o = order[m];
+            const s = _starts[o], e = _ends[o];
             const last = mEnd.length - 1;
             if (s <= mEnd[last]) {
                 if (e > mEnd[last]) mEnd[last] = e;
+                mFx[last] += _fx[o];
+                mFy[last] += _fy[o];
+                mFz[last] += _fz[o];
+                mCount[last]++;
             } else {
                 mStart.push(s);
                 mEnd.push(e);
+                mFx.push(_fx[o]);
+                mFy.push(_fy[o]);
+                mFz.push(_fz[o]);
+                mCount.push(1);
             }
         }
         for (let m = 0; m < mStart.length; m++) {
             const s = Math.max(1, mStart[m]);
             const e = Math.min(nSpine - 2, mEnd[m]);
             if (e < s) continue;
-            let cx = 0, cy = 0, cz = 0;
-            const cnt = e - s + 1;
-            for (let i = s; i <= e; i++) {
-                const ip = i * ringStride + j * 3;
-                cx += positions[ip]; cy += positions[ip + 1]; cz += positions[ip + 2];
-            }
-            cx /= cnt; cy /= cnt; cz /= cnt;
+            const inv = 1 / mCount[m];
+            const cx = mFx[m] * inv;
+            const cy = mFy[m] * inv;
+            const cz = mFz[m] * inv;
             for (let i = s; i <= e; i++) {
                 const ip = i * ringStride + j * 3;
                 positions[ip] = cx; positions[ip + 1] = cy; positions[ip + 2] = cz;

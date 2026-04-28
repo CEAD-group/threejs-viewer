@@ -410,9 +410,11 @@ function collapseV4(positions, widths, heights, nSpine, nCs, spine) {
     }
 }
 
-// ---- V5: bidirectional V1 (current ship after PR review). Forward + backward
-// scans per i, both with first-hit early-exit. Sort detection list before
-// merge since backward pushes have start < i.
+// ---- V5: bidirectional V1 + collapse to fold-midpoint (current ship).
+// Records each detection's crossing midpoint (between p_i and the foot on
+// segment k) and snaps the merged-range rings to the average of those
+// midpoints — preserves outer hull width at long folds, where the centroid-
+// of-positions target would drift toward the spine and pinch the bead.
 
 function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
     if (nSpine < 4) return;
@@ -426,8 +428,10 @@ function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
     const tolSq = tol * tol;
     const ringStride = nCs * 3;
     const rangeStart = [], rangeEnd = [];
+    const foldX = [], foldY = [], foldZ = [];
     for (let j = 0; j < nCs; j++) {
         rangeStart.length = 0; rangeEnd.length = 0;
+        foldX.length = 0; foldY.length = 0; foldZ.length = 0;
         for (let i = 0; i < nSpine; i++) {
             const ip = i * ringStride + j * 3;
             const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
@@ -441,11 +445,13 @@ function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const dx = px - (ax + t * ex);
-                const dy = py - (ay + t * ey);
-                const dz = pz - (az + t * ez);
+                const fx = ax + t * ex, fy = ay + t * ey, fz = az + t * ez;
+                const dx = px - fx, dy = py - fy, dz = pz - fz;
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(i); rangeEnd.push(k + 1);
+                    foldX.push(0.5 * (px + fx));
+                    foldY.push(0.5 * (py + fy));
+                    foldZ.push(0.5 * (pz + fz));
                     break;
                 }
             }
@@ -459,29 +465,54 @@ function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const dx = px - (ax + t * ex);
-                const dy = py - (ay + t * ey);
-                const dz = pz - (az + t * ez);
+                const fx = ax + t * ex, fy = ay + t * ey, fz = az + t * ez;
+                const dx = px - fx, dy = py - fy, dz = pz - fz;
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(k); rangeEnd.push(i);
+                    foldX.push(0.5 * (px + fx));
+                    foldY.push(0.5 * (py + fy));
+                    foldZ.push(0.5 * (pz + fz));
                     break;
                 }
             }
         }
         if (rangeStart.length === 0) continue;
-        // Sort by start (backward pushes break the natural ordering).
         const order = new Int32Array(rangeStart.length);
         for (let m = 0; m < order.length; m++) order[m] = m;
-        const _starts = rangeStart.slice();
-        const _ends = rangeEnd.slice();
-        Array.prototype.sort.call(order, (a, b) => _starts[a] - _starts[b]);
-        const sortedStart = new Array(order.length);
-        const sortedEnd = new Array(order.length);
-        for (let m = 0; m < order.length; m++) {
-            sortedStart[m] = _starts[order[m]];
-            sortedEnd[m] = _ends[order[m]];
+        const _s = rangeStart.slice();
+        const _e = rangeEnd.slice();
+        const _fx = foldX.slice();
+        const _fy = foldY.slice();
+        const _fz = foldZ.slice();
+        Array.prototype.sort.call(order, (a, b) => _s[a] - _s[b]);
+        const o0 = order[0];
+        const mS = [_s[o0]], mE = [_e[o0]];
+        const mFx = [_fx[o0]], mFy = [_fy[o0]], mFz = [_fz[o0]], mCnt = [1];
+        for (let m = 1; m < order.length; m++) {
+            const o = order[m];
+            const s = _s[o], e = _e[o];
+            const last = mE.length - 1;
+            if (s <= mE[last]) {
+                if (e > mE[last]) mE[last] = e;
+                mFx[last] += _fx[o]; mFy[last] += _fy[o]; mFz[last] += _fz[o];
+                mCnt[last]++;
+            } else {
+                mS.push(s); mE.push(e);
+                mFx.push(_fx[o]); mFy.push(_fy[o]); mFz.push(_fz[o]);
+                mCnt.push(1);
+            }
         }
-        applyMergedCollapses(positions, ringStride, j, nSpine, sortedStart, sortedEnd);
+        for (let m = 0; m < mS.length; m++) {
+            const s = Math.max(1, mS[m]);
+            const e = Math.min(nSpine - 2, mE[m]);
+            if (e < s) continue;
+            const inv = 1 / mCnt[m];
+            const cx = mFx[m] * inv, cy = mFy[m] * inv, cz = mFz[m] * inv;
+            for (let i = s; i <= e; i++) {
+                const ip = i * ringStride + j * 3;
+                positions[ip] = cx; positions[ip + 1] = cy; positions[ip + 2] = cz;
+            }
+        }
     }
 }
 
