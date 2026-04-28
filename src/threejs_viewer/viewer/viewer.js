@@ -924,7 +924,7 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 // hard crease at the fold. Other strands at the same ring may not collapse,
 // so the ring becomes non-planar through the fold; this is intentional and
 // only happens where the bead was already geometrically degenerate.
-const TUBE_STRAND_COLLAPSE_WIN = 10;
+const TUBE_STRAND_COLLAPSE_WIN = 30;
 /**
  * @param {Float32Array} positions
  * @param {Float32Array} widths
@@ -957,8 +957,11 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
             const kHi = Math.min(nSpine - 2, i + window);
             // Only scan k > i; (k, i) was covered when i was at k's position.
             // Skip the two adjacent segments touching p_i (k = i and k = i-1).
-            const kStart = i + 2;
-            for (let k = kStart; k <= kHi; k++) {
+            // Scan k backwards from kHi and break on the first hit: any later
+            // (smaller-k) hit from this same i would produce a sub-range that
+            // the merge step subsumes. Cuts work substantially in fold regions
+            // where many k's fire from the same i; equivalent to V0 elsewhere.
+            for (let k = kHi; k >= i + 2; k--) {
                 const ka = k * ringStride + j * 3;
                 const kb = (k + 1) * ringStride + j * 3;
                 const ax = positions[ka],     ay = positions[ka + 1], az = positions[ka + 2];
@@ -973,6 +976,7 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(i);
                     rangeEnd.push(k + 1);
+                    break;
                 }
             }
         }
@@ -1660,7 +1664,7 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
 // - upVector:     [x, y, z] up direction for constant-up frame (default [0,0,1])
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
 // - strandCollapse: When true, each strand polyline is scanned for
-//                 self-intersections within a sliding window of 10 rings;
+//                 self-intersections within a sliding window of 30 rings;
 //                 detected fold runs collapse to their centroid (see
 //                 collapseTubeStrandFolds).
 //

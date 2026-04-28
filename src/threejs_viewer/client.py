@@ -883,7 +883,7 @@ class ViewerClient:
                     )
             strand_collapse: When True, the viewer scans each per-cross-
                 section-vertex "strand" polyline with a sliding window of
-                10 rings and collapses any run that self-intersects
+                30 rings and collapses any run that self-intersects
                 (point-to-segment distance below 5% of max(width, height)
                 with the foot inside the segment) to its centroid. Folds
                 that arise where ``κ·W/2 > 1`` on tight inside corners

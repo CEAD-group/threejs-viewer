@@ -15,7 +15,7 @@ inner offset curve self-intersects aggressively):
     (right)  strand_collapse=True    — fold detect + snap
 
 ``strand_collapse`` scans each per-cross-section-vertex strand polyline
-with a sliding window of 10 rings, using a point-to-segment distance
+with a sliding window of 30 rings, using a point-to-segment distance
 test against a 5%-of-max-cross-section tolerance. Detected fold runs
 collapse to their centroid, turning the inner self-intersection into a
 clean crease instead of a self-intersecting triangle fan.
