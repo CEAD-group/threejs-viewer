@@ -1968,6 +1968,63 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
     }
 }
 
+// Closest-pair midpoint between two 3D segments (P0,P1) and (Q0,Q1), with
+// segment indices a, b (segment a is the strand-vertex pair (a, a+1) for
+// strand j, segment b similarly). Writes the midpoint into out[0..2]. Uses
+// the standard parametric-clamp formulation (Real-Time Collision Detection,
+// Ericson, §5.1.9): solve the unconstrained 2D minimum of |P(s)-Q(t)|², then
+// clamp s, t to [0,1] in the order that respects the constraint normals.
+// Degenerate-segment branches kept for completeness; in practice both
+// segments are non-degenerate strand pieces.
+/**
+ * @param {Float32Array} positions
+ * @param {number} ringStride
+ * @param {number} j
+ * @param {number} aIdx
+ * @param {number} bIdx
+ * @param {Float64Array} out
+ */
+function strandSegSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
+    const a0 = aIdx * ringStride + j * 3;
+    const a1 = (aIdx + 1) * ringStride + j * 3;
+    const b0 = bIdx * ringStride + j * 3;
+    const b1 = (bIdx + 1) * ringStride + j * 3;
+    const p0x = positions[a0], p0y = positions[a0 + 1], p0z = positions[a0 + 2];
+    const p1x = positions[a1], p1y = positions[a1 + 1], p1z = positions[a1 + 2];
+    const q0x = positions[b0], q0y = positions[b0 + 1], q0z = positions[b0 + 2];
+    const q1x = positions[b1], q1y = positions[b1 + 1], q1z = positions[b1 + 2];
+    const dx = p1x - p0x, dy = p1y - p0y, dz = p1z - p0z;
+    const ex = q1x - q0x, ey = q1y - q0y, ez = q1z - q0z;
+    const rx = p0x - q0x, ry = p0y - q0y, rz = p0z - q0z;
+    const dL2 = dx * dx + dy * dy + dz * dz;
+    const eL2 = ex * ex + ey * ey + ez * ez;
+    const f = ex * rx + ey * ry + ez * rz;
+    let s = 0, t = 0;
+    if (dL2 > 1e-24 && eL2 > 1e-24) {
+        const b = dx * ex + dy * ey + dz * ez;
+        const c = dx * rx + dy * ry + dz * rz;
+        const denom = dL2 * eL2 - b * b;
+        s = denom !== 0 ? (b * f - c * eL2) / denom : 0;
+        if (s < 0) s = 0; else if (s > 1) s = 1;
+        t = (b * s + f) / eL2;
+        if (t < 0) {
+            t = 0;
+            s = -c / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        } else if (t > 1) {
+            t = 1;
+            s = (b - c) / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        }
+    } else if (eL2 > 1e-24) {
+        t = f / eL2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    out[0] = 0.5 * (p0x + s * dx + q0x + t * ex);
+    out[1] = 0.5 * (p0y + s * dy + q0y + t * ey);
+    out[2] = 0.5 * (p0z + s * dz + q0z + t * ez);
+}
+
 // Sliding-window self-intersection collapse for the nCs "strand" polylines
 // running along the tube. Each strand connects vertex j across all rings; at
 // inside corners with κ·W/2 > 1 the offset strand folds back on itself, and
@@ -1976,18 +2033,20 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 // the two segments touching p_i), the perpendicular foot of p_i onto segment
 // (p_k, p_{k+1}). When the foot lands inside the segment and the distance
 // falls below `tol`, the run [min(i,k) .. max(i,k+1)] is flagged AND the
-// midpoint of (p_i, foot) is recorded — that midpoint is the geometric
-// "crossing" of the two strand segments and serves as the per-detection
-// collapse target. Overlapping detection ranges merge; each merged range
-// snaps every ring inside it to the AVERAGE of its constituent crossing
-// midpoints, NOT to the centroid of ring positions in the range.
+// closest-pair midpoint between segment(p_a, p_{a+1}) and segment(p_b, p_{b+1})
+// is recorded as the per-detection fold target. Overlapping detection ranges
+// merge; each merged range snaps every ring inside it to the AVERAGE of its
+// constituent fold targets.
 //
-// Why mean-of-crossings, not centroid-of-positions: a long fold range (many
-// rings of continuous high curvature) contains positions on both sides of
-// the fold, so their arithmetic centroid drifts toward the spine and pulls
-// the entire cross-section inward. The crossing midpoints all sit at the
-// geometric fold location, so their mean stays where the fold actually is —
-// the bead's outer hull is preserved up to the seam at the collapsed run.
+// Why segment-segment closest-pair midpoint (not foot-of-vertex midpoint):
+// the foot of p_i on seg(k, k+1) is, by detection, within `tol` of p_i, so
+// (p_i + foot)/2 ≈ p_i — averaging those midpoints across a range reduces
+// to the centroid of ring positions in that range, which drags the snap
+// target toward the spine when the fold spans many rings. The closest-pair
+// midpoint instead sits in the *gap* between the two folding segments
+// (typically near the geometric crossing line of the fold), so averaging it
+// across detections keeps the snap target at the geometric fold location
+// rather than drifting toward the spine.
 //
 // Both directions are scanned per i (k > i AND k < i). Point-to-segment is
 // asymmetric — p_i → seg(k,k+1) is not equivalent to p_k → seg(i,i+1) — so
@@ -2038,6 +2097,7 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
     const foldY = [];
     /** @type {number[]} */
     const foldZ = [];
+    const foldOut = new Float64Array(3);
     for (let j = 0; j < nCs; j++) {
         rangeStart.length = 0;
         rangeEnd.length = 0;
@@ -2059,18 +2119,18 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const fx = ax + t * ex;
-                const fy = ay + t * ey;
-                const fz = az + t * ez;
-                const dx = px - fx;
-                const dy = py - fy;
-                const dz = pz - fz;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(i);
                     rangeEnd.push(k + 1);
-                    foldX.push(0.5 * (px + fx));
-                    foldY.push(0.5 * (py + fy));
-                    foldZ.push(0.5 * (pz + fz));
+                    // a-segment for forward detection: (p_i, p_{i+1}). Always
+                    // valid since k ≤ nSpine-2 and k > i imply i+1 ≤ nSpine-2.
+                    strandSegSegMidpoint(positions, ringStride, j, i, k, foldOut);
+                    foldX.push(foldOut[0]);
+                    foldY.push(foldOut[1]);
+                    foldZ.push(foldOut[2]);
                     break;
                 }
             }
@@ -2086,18 +2146,19 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const fx = ax + t * ex;
-                const fy = ay + t * ey;
-                const fz = az + t * ez;
-                const dx = px - fx;
-                const dy = py - fy;
-                const dz = pz - fz;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(k);
                     rangeEnd.push(i);
-                    foldX.push(0.5 * (px + fx));
-                    foldY.push(0.5 * (py + fy));
-                    foldZ.push(0.5 * (pz + fz));
+                    // a-segment for backward detection: (p_{i-1}, p_i). The
+                    // backward inner-loop condition k ≤ i-2 forces i ≥ 2, so
+                    // i-1 ≥ 1 — always valid.
+                    strandSegSegMidpoint(positions, ringStride, j, i - 1, k, foldOut);
+                    foldX.push(foldOut[0]);
+                    foldY.push(foldOut[1]);
+                    foldZ.push(foldOut[2]);
                     break;
                 }
             }

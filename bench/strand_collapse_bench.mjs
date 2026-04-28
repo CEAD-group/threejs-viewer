@@ -410,11 +410,54 @@ function collapseV4(positions, widths, heights, nSpine, nCs, spine) {
     }
 }
 
-// ---- V5: bidirectional V1 + collapse to fold-midpoint (current ship).
-// Records each detection's crossing midpoint (between p_i and the foot on
-// segment k) and snaps the merged-range rings to the average of those
-// midpoints — preserves outer hull width at long folds, where the centroid-
-// of-positions target would drift toward the spine and pinch the bead.
+// ---- V5: bidirectional V1 + collapse to segment-segment closest-pair
+// midpoint (current ship). For each detection (i, k), the per-detection
+// fold target is the midpoint of the closest point on segment(p_a, p_{a+1})
+// and the closest point on segment(p_k, p_{k+1}), where a = i for forward
+// detection and a = i-1 for backward. Sits in the gap between the two
+// folding segments, so averaging across the merged range stays at the
+// geometric fold location instead of drifting toward the spine.
+
+function _segSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
+    const a0 = aIdx * ringStride + j * 3;
+    const a1 = (aIdx + 1) * ringStride + j * 3;
+    const b0 = bIdx * ringStride + j * 3;
+    const b1 = (bIdx + 1) * ringStride + j * 3;
+    const p0x = positions[a0], p0y = positions[a0 + 1], p0z = positions[a0 + 2];
+    const p1x = positions[a1], p1y = positions[a1 + 1], p1z = positions[a1 + 2];
+    const q0x = positions[b0], q0y = positions[b0 + 1], q0z = positions[b0 + 2];
+    const q1x = positions[b1], q1y = positions[b1 + 1], q1z = positions[b1 + 2];
+    const dx = p1x - p0x, dy = p1y - p0y, dz = p1z - p0z;
+    const ex = q1x - q0x, ey = q1y - q0y, ez = q1z - q0z;
+    const rx = p0x - q0x, ry = p0y - q0y, rz = p0z - q0z;
+    const dL2 = dx * dx + dy * dy + dz * dz;
+    const eL2 = ex * ex + ey * ey + ez * ez;
+    const f = ex * rx + ey * ry + ez * rz;
+    let s = 0, t = 0;
+    if (dL2 > 1e-24 && eL2 > 1e-24) {
+        const b = dx * ex + dy * ey + dz * ez;
+        const c = dx * rx + dy * ry + dz * rz;
+        const denom = dL2 * eL2 - b * b;
+        s = denom !== 0 ? (b * f - c * eL2) / denom : 0;
+        if (s < 0) s = 0; else if (s > 1) s = 1;
+        t = (b * s + f) / eL2;
+        if (t < 0) {
+            t = 0;
+            s = -c / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        } else if (t > 1) {
+            t = 1;
+            s = (b - c) / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        }
+    } else if (eL2 > 1e-24) {
+        t = f / eL2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    out[0] = 0.5 * (p0x + s * dx + q0x + t * ex);
+    out[1] = 0.5 * (p0y + s * dy + q0y + t * ey);
+    out[2] = 0.5 * (p0z + s * dz + q0z + t * ez);
+}
 
 function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
     if (nSpine < 4) return;
@@ -429,6 +472,7 @@ function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
     const ringStride = nCs * 3;
     const rangeStart = [], rangeEnd = [];
     const foldX = [], foldY = [], foldZ = [];
+    const foldOut = new Float64Array(3);
     for (let j = 0; j < nCs; j++) {
         rangeStart.length = 0; rangeEnd.length = 0;
         foldX.length = 0; foldY.length = 0; foldZ.length = 0;
@@ -445,13 +489,13 @@ function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const fx = ax + t * ex, fy = ay + t * ey, fz = az + t * ez;
-                const dx = px - fx, dy = py - fy, dz = pz - fz;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(i); rangeEnd.push(k + 1);
-                    foldX.push(0.5 * (px + fx));
-                    foldY.push(0.5 * (py + fy));
-                    foldZ.push(0.5 * (pz + fz));
+                    _segSegMidpoint(positions, ringStride, j, i, k, foldOut);
+                    foldX.push(foldOut[0]); foldY.push(foldOut[1]); foldZ.push(foldOut[2]);
                     break;
                 }
             }
@@ -465,13 +509,13 @@ function collapseV5(positions, widths, heights, nSpine, nCs, _spine) {
                 if (eL2 < 1e-24) continue;
                 const t = ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / eL2;
                 if (t < 0 || t > 1) continue;
-                const fx = ax + t * ex, fy = ay + t * ey, fz = az + t * ez;
-                const dx = px - fx, dy = py - fy, dz = pz - fz;
+                const dx = px - (ax + t * ex);
+                const dy = py - (ay + t * ey);
+                const dz = pz - (az + t * ez);
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
                     rangeStart.push(k); rangeEnd.push(i);
-                    foldX.push(0.5 * (px + fx));
-                    foldY.push(0.5 * (py + fy));
-                    foldZ.push(0.5 * (pz + fz));
+                    _segSegMidpoint(positions, ringStride, j, i - 1, k, foldOut);
+                    foldX.push(foldOut[0]); foldY.push(foldOut[1]); foldZ.push(foldOut[2]);
                     break;
                 }
             }
