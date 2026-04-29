@@ -2061,9 +2061,14 @@ function strandSegSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
 // Both directions are scanned per i (k > i AND k < i). Point-to-segment is
 // asymmetric — p_i → seg(k,k+1) is not equivalent to p_k → seg(i,i+1) — so
 // scanning forward only would miss configurations where a later vertex is
-// close to an earlier segment but not vice versa. With first-hit early-exit
-// in each direction (largest forward k and smallest backward k both give the
-// largest range from a fixed i), the cost stays close to O(nCs · N · W).
+// close to an earlier segment but not vice versa. The scan walks every k in
+// the window per direction (no early-exit), tracking the largest-k hit (for
+// range coverage) and the tightest-gap hit (for the snap midpoint) in one
+// pass. Cost is O(nCs · N · W); first-hit-from-furthest early-exit was
+// dropped because it systematically picked the loose pair at gap ≈ tol —
+// for deep folds the tightest pair is at smaller k, which the early-exit
+// scan never visited. Per ring per direction at most one synthesised
+// detection is pushed (largest range + tightest midpoint, decoupled).
 //
 // Tolerance is computed internally as 5% of the tube's largest cross-section
 // extent — invariant of placement / overall scale.
@@ -2120,10 +2125,16 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
         for (let i = 0; i < nSpine; i++) {
             const ip = i * ringStride + j * 3;
             const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
-            // Forward scan: segments k in [i+2, i+W]. Largest k → largest range
-            // [i, k+1], so scan from kHi down and break on first hit.
+            // Forward scan: walk every k in [i+2, i+W] — no early-exit. We
+            // need both the largest k that detects (for range coverage) and
+            // the tightest detection in the window (for the snap midpoint).
+            // First-hit-from-furthest would systematically pick a loose pair
+            // at gap ≈ tol; the deeper fold's tightest pair (typically at a
+            // smaller k inside the window) would be skipped.
             const kHi = Math.min(nSpine - 2, i + window);
-            for (let k = kHi; k >= i + 2; k--) {
+            let kLargestF = -1;
+            let bestD2F = Infinity, bestXF = 0, bestYF = 0, bestZF = 0;
+            for (let k = i + 2; k <= kHi; k++) {
                 const ka = k * ringStride + j * 3;
                 const kb = (k + 1) * ringStride + j * 3;
                 const ax = positions[ka],     ay = positions[ka + 1], az = positions[ka + 2];
@@ -2136,21 +2147,30 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 const dy = py - (ay + t * ey);
                 const dz = pz - (az + t * ez);
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
-                    rangeStart.push(i);
-                    rangeEnd.push(k + 1);
+                    if (k > kLargestF) kLargestF = k;
                     // a-segment for forward detection: (p_i, p_{i+1}). Always
                     // valid since k ≤ nSpine-2 and k > i imply i+1 ≤ nSpine-2.
                     strandSegSegMidpoint(positions, ringStride, j, i, k, foldOut);
-                    foldX.push(foldOut[0]);
-                    foldY.push(foldOut[1]);
-                    foldZ.push(foldOut[2]);
-                    foldD2.push(foldOut[3]);
-                    break;
+                    if (foldOut[3] < bestD2F) {
+                        bestD2F = foldOut[3];
+                        bestXF = foldOut[0];
+                        bestYF = foldOut[1];
+                        bestZF = foldOut[2];
+                    }
                 }
             }
-            // Backward scan: segments k in [i-W, i-2]. Smallest k → largest
-            // range [k, i], so scan from kLo up and break on first hit.
+            if (kLargestF >= 0) {
+                rangeStart.push(i);
+                rangeEnd.push(kLargestF + 1);
+                foldX.push(bestXF);
+                foldY.push(bestYF);
+                foldZ.push(bestZF);
+                foldD2.push(bestD2F);
+            }
+            // Backward scan: walk every k in [i-W, i-2].
             const kLo = Math.max(0, i - window);
+            let kSmallestB = nSpine;
+            let bestD2B = Infinity, bestXB = 0, bestYB = 0, bestZB = 0;
             for (let k = kLo; k <= i - 2; k++) {
                 const ka = k * ringStride + j * 3;
                 const kb = (k + 1) * ringStride + j * 3;
@@ -2164,18 +2184,26 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                 const dy = py - (ay + t * ey);
                 const dz = pz - (az + t * ez);
                 if (dx * dx + dy * dy + dz * dz < tolSq) {
-                    rangeStart.push(k);
-                    rangeEnd.push(i);
+                    if (k < kSmallestB) kSmallestB = k;
                     // a-segment for backward detection: (p_{i-1}, p_i). The
                     // backward inner-loop condition k ≤ i-2 forces i ≥ 2, so
                     // i-1 ≥ 1 — always valid.
                     strandSegSegMidpoint(positions, ringStride, j, i - 1, k, foldOut);
-                    foldX.push(foldOut[0]);
-                    foldY.push(foldOut[1]);
-                    foldZ.push(foldOut[2]);
-                    foldD2.push(foldOut[3]);
-                    break;
+                    if (foldOut[3] < bestD2B) {
+                        bestD2B = foldOut[3];
+                        bestXB = foldOut[0];
+                        bestYB = foldOut[1];
+                        bestZB = foldOut[2];
+                    }
                 }
+            }
+            if (kSmallestB < nSpine) {
+                rangeStart.push(kSmallestB);
+                rangeEnd.push(i);
+                foldX.push(bestXB);
+                foldY.push(bestYB);
+                foldZ.push(bestZB);
+                foldD2.push(bestD2B);
             }
         }
         if (rangeStart.length === 0) continue;
