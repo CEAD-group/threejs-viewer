@@ -2086,6 +2086,13 @@ function strandSegSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
 //
 // Cost: O(nCs · nSpine · WIN). Memory: 4 × nSpine × (WIN - MIN_GAP + 1)
 // floats of scratch, allocated once per call and released when it returns.
+//
+// Pre-filter (kMax): for each i, find the highest j ≤ i+WIN whose spine
+// endpoints sit within `rejectDist = maxDim + 2·maxSegLen + tol` of
+// spine[i]. Pairs further apart than that have a worst-case lower bound
+// on seg-seg distance that already exceeds tol — they cannot fold and
+// don't need polylineSegSegMidpoint. Worth ~10% on long realistic-density
+// tubes; ~3× on short ones. See bench/strand_collapse_bench.mjs.
 const TUBE_STRAND_COLLAPSE_WIN = 50;
 const TUBE_STRAND_COLLAPSE_MIN_GAP = 4;
 const TUBE_STRAND_COLLAPSE_TOL_FRAC = 0.04;
@@ -2105,14 +2112,41 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     const nSeg = nSpine - 1;
     if (stride <= 0 || nSeg < minGap + 1) return;
     let maxDim = 0;
+    let maxSegLen2 = 0;
     for (let i = 0; i < nSpine; i++) {
         if (widths[i] > maxDim) maxDim = widths[i];
         if (heights[i] > maxDim) maxDim = heights[i];
     }
+    for (let i = 0; i < nSpine - 1; i++) {
+        const dx = spine[(i + 1) * 3]     - spine[i * 3];
+        const dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
+        const dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > maxSegLen2) maxSegLen2 = d2;
+    }
     if (maxDim <= 0) return;
     const tol = TUBE_STRAND_COLLAPSE_TOL_FRAC * maxDim;
     const tolSq = tol * tol;
+    const reject = maxDim + 2 * Math.sqrt(maxSegLen2) + tol;
+    const rejectSq = reject * reject;
     const ringStride = nCs * 3;
+
+    // Per-i upper bound on the fold-eligible j: highest j ∈ [i+minGap, i+winMax]
+    // with ‖spine[j] - spine[i]‖² ≤ rejectSq. -1 when no such j exists (the
+    // spine bends back and away too quickly, or i sits in a straight section).
+    const kMax = new Int32Array(nSeg);
+    for (let i = 0; i < nSeg; i++) {
+        const isx = spine[i * 3], isy = spine[i * 3 + 1], isz = spine[i * 3 + 2];
+        const jHi = Math.min(nSeg - 1, i + winMax);
+        let best = -1;
+        for (let j = jHi; j >= i + minGap; j--) {
+            const dx = spine[j * 3]     - isx;
+            const dy = spine[j * 3 + 1] - isy;
+            const dz = spine[j * 3 + 2] - isz;
+            if (dx * dx + dy * dy + dz * dz <= rejectSq) { best = j; break; }
+        }
+        kMax[i] = best;
+    }
 
     // Per-strand scratch for the (i, j) grid restricted to j - i ∈ [minGap, winMax].
     // Cell index: i*stride + (j - i - minGap). Out-of-range j get +Infinity so
@@ -2137,24 +2171,32 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         }
 
         // Fill the seg-seg distance² grid from the un-mitered strand.
+        // Pairs beyond kMax[i] keep +Infinity so they're skipped in both
+        // the threshold check and the local-min comparison.
         for (let i = 0; i < nSeg; i++) {
             const rowBase = i * stride;
-            for (let off = 0; off < stride; off++) {
-                const j = i + minGap + off;
-                if (j >= nSeg) {
-                    dist2[rowBase + off] = Infinity;
-                } else {
-                    polylineSegSegMidpoint(strandPoly, i, j, segOut);
-                    dist2[rowBase + off] = segOut[3];
-                }
+            const jLim = kMax[i];
+            if (jLim < 0) {
+                for (let off = 0; off < stride; off++) dist2[rowBase + off] = Infinity;
+                continue;
             }
+            const offMax = Math.min(jLim - i - minGap, stride - 1);
+            let off = 0;
+            for (; off <= offMax; off++) {
+                polylineSegSegMidpoint(strandPoly, i, i + minGap + off, segOut);
+                dist2[rowBase + off] = segOut[3];
+            }
+            for (; off < stride; off++) dist2[rowBase + off] = Infinity;
         }
 
         // Local-min sweep. For each fold target, snap mesh rings to the
         // miter-aware mesh midpoint (read from positions[]).
         for (let i = 0; i < nSeg; i++) {
+            const jLim = kMax[i];
+            if (jLim < 0) continue;
             const rowBase = i * stride;
-            for (let off = 0; off < stride; off++) {
+            const offMax = Math.min(jLim - i - minGap, stride - 1);
+            for (let off = 0; off <= offMax; off++) {
                 const j = i + minGap + off;
                 if (j >= nSeg) break;
                 const d = dist2[rowBase + off];
