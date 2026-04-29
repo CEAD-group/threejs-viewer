@@ -1970,12 +1970,15 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
 
 // Closest-pair midpoint between two 3D segments (P0,P1) and (Q0,Q1), with
 // segment indices a, b (segment a is the strand-vertex pair (a, a+1) for
-// strand j, segment b similarly). Writes the midpoint into out[0..2]. Uses
-// the standard parametric-clamp formulation (Real-Time Collision Detection,
-// Ericson, §5.1.9): solve the unconstrained 2D minimum of |P(s)-Q(t)|², then
-// clamp s, t to [0,1] in the order that respects the constraint normals.
-// Degenerate-segment branches kept for completeness; in practice both
-// segments are non-degenerate strand pieces.
+// strand j, segment b similarly). Writes the midpoint into out[0..2] and the
+// squared distance between the two closest points into out[3] — used to rank
+// detections within a merged fold range so the snap target is the *tightest*
+// crossing (smallest gap), not the average. Uses the standard parametric-
+// clamp formulation (Real-Time Collision Detection, Ericson, §5.1.9): solve
+// the unconstrained 2D minimum of |P(s)-Q(t)|², then clamp s, t to [0,1] in
+// the order that respects the constraint normals. Degenerate-segment
+// branches kept for completeness; in practice both segments are non-
+// degenerate strand pieces.
 /**
  * @param {Float32Array} positions
  * @param {number} ringStride
@@ -2020,9 +2023,13 @@ function strandSegSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
         t = f / eL2;
         if (t < 0) t = 0; else if (t > 1) t = 1;
     }
-    out[0] = 0.5 * (p0x + s * dx + q0x + t * ex);
-    out[1] = 0.5 * (p0y + s * dy + q0y + t * ey);
-    out[2] = 0.5 * (p0z + s * dz + q0z + t * ez);
+    const Psx = p0x + s * dx, Psy = p0y + s * dy, Psz = p0z + s * dz;
+    const Qtx = q0x + t * ex, Qty = q0y + t * ey, Qtz = q0z + t * ez;
+    out[0] = 0.5 * (Psx + Qtx);
+    out[1] = 0.5 * (Psy + Qty);
+    out[2] = 0.5 * (Psz + Qtz);
+    const gx = Psx - Qtx, gy = Psy - Qty, gz = Psz - Qtz;
+    out[3] = gx * gx + gy * gy + gz * gz;
 }
 
 // Sliding-window self-intersection collapse for the nCs "strand" polylines
@@ -2034,19 +2041,22 @@ function strandSegSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
 // (p_k, p_{k+1}). When the foot lands inside the segment and the distance
 // falls below `tol`, the run [min(i,k) .. max(i,k+1)] is flagged AND the
 // closest-pair midpoint between segment(p_a, p_{a+1}) and segment(p_b, p_{b+1})
-// is recorded as the per-detection fold target. Overlapping detection ranges
-// merge; each merged range snaps every ring inside it to the AVERAGE of its
-// constituent fold targets.
+// is recorded as the per-detection fold target along with the squared
+// closest-pair gap. Overlapping detection ranges merge; each merged range
+// snaps every ring inside it to the midpoint of the *tightest* constituent
+// detection (the one whose two segments came closest to each other).
 //
-// Why segment-segment closest-pair midpoint (not foot-of-vertex midpoint):
-// the foot of p_i on seg(k, k+1) is, by detection, within `tol` of p_i, so
-// (p_i + foot)/2 ≈ p_i — averaging those midpoints across a range reduces
-// to the centroid of ring positions in that range, which drags the snap
-// target toward the spine when the fold spans many rings. The closest-pair
-// midpoint instead sits in the *gap* between the two folding segments
-// (typically near the geometric crossing line of the fold), so averaging it
-// across detections keeps the snap target at the geometric fold location
-// rather than drifting toward the spine.
+// Why "tightest" instead of average: the closest-pair midpoint of two
+// near-crossing segments lies on the perpendicular bisector of the closest
+// pair of points — which approaches the strand's actual self-intersection
+// only as the gap shrinks to zero. Long-range detections (segment pairs far
+// apart along the strand but still inside the window) have closest-pair
+// midpoints biased toward the medial axis of the fold's interior, away
+// from the apex. Averaging short-range and long-range midpoints together
+// drags the snap point toward the centroid of that interior cloud. Picking
+// the single detection with the smallest closest-pair gap lands the snap
+// at the actual crossing apex regardless of how many other looser
+// detections fired in the same range.
 //
 // Both directions are scanned per i (k > i AND k < i). Point-to-segment is
 // asymmetric — p_i → seg(k,k+1) is not equivalent to p_k → seg(i,i+1) — so
@@ -2097,13 +2107,16 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
     const foldY = [];
     /** @type {number[]} */
     const foldZ = [];
-    const foldOut = new Float64Array(3);
+    /** @type {number[]} */
+    const foldD2 = [];
+    const foldOut = new Float64Array(4);
     for (let j = 0; j < nCs; j++) {
         rangeStart.length = 0;
         rangeEnd.length = 0;
         foldX.length = 0;
         foldY.length = 0;
         foldZ.length = 0;
+        foldD2.length = 0;
         for (let i = 0; i < nSpine; i++) {
             const ip = i * ringStride + j * 3;
             const px = positions[ip], py = positions[ip + 1], pz = positions[ip + 2];
@@ -2131,6 +2144,7 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                     foldX.push(foldOut[0]);
                     foldY.push(foldOut[1]);
                     foldZ.push(foldOut[2]);
+                    foldD2.push(foldOut[3]);
                     break;
                 }
             }
@@ -2159,6 +2173,7 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
                     foldX.push(foldOut[0]);
                     foldY.push(foldOut[1]);
                     foldZ.push(foldOut[2]);
+                    foldD2.push(foldOut[3]);
                     break;
                 }
             }
@@ -2175,43 +2190,45 @@ function collapseTubeStrandFolds(positions, widths, heights, nSpine, nCs) {
         const _fx = foldX.slice();
         const _fy = foldY.slice();
         const _fz = foldZ.slice();
+        const _d2 = foldD2.slice();
         Array.prototype.sort.call(order, (a, b) => _starts[a] - _starts[b]);
-        // Merge overlapping ranges in order, accumulating sum-of-fold-midpoints
-        // per merged range.
+        // Merge overlapping ranges in order. Within each merged range keep
+        // only the tightest detection's midpoint (smallest closest-pair gap²).
         const o0 = order[0];
         const mStart = [_starts[o0]];
         const mEnd = [_ends[o0]];
         const mFx = [_fx[o0]];
         const mFy = [_fy[o0]];
         const mFz = [_fz[o0]];
-        const mCount = [1];
+        const mD2 = [_d2[o0]];
         for (let m = 1; m < order.length; m++) {
             const o = order[m];
             const s = _starts[o], e = _ends[o];
             const last = mEnd.length - 1;
             if (s <= mEnd[last]) {
                 if (e > mEnd[last]) mEnd[last] = e;
-                mFx[last] += _fx[o];
-                mFy[last] += _fy[o];
-                mFz[last] += _fz[o];
-                mCount[last]++;
+                if (_d2[o] < mD2[last]) {
+                    mFx[last] = _fx[o];
+                    mFy[last] = _fy[o];
+                    mFz[last] = _fz[o];
+                    mD2[last] = _d2[o];
+                }
             } else {
                 mStart.push(s);
                 mEnd.push(e);
                 mFx.push(_fx[o]);
                 mFy.push(_fy[o]);
                 mFz.push(_fz[o]);
-                mCount.push(1);
+                mD2.push(_d2[o]);
             }
         }
         for (let m = 0; m < mStart.length; m++) {
             const s = Math.max(1, mStart[m]);
             const e = Math.min(nSpine - 2, mEnd[m]);
             if (e < s) continue;
-            const inv = 1 / mCount[m];
-            const cx = mFx[m] * inv;
-            const cy = mFy[m] * inv;
-            const cz = mFz[m] * inv;
+            const cx = mFx[m];
+            const cy = mFy[m];
+            const cz = mFz[m];
             for (let i = s; i <= e; i++) {
                 const ip = i * ringStride + j * 3;
                 positions[ip] = cx; positions[ip + 1] = cy; positions[ip + 2] = cz;
