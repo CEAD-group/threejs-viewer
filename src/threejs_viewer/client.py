@@ -881,14 +881,16 @@ class ViewerClient:
                         "hires", spine, w, h,
                         lod={"epsilon_divisor": 10000},
                     )
-            strand_collapse: When True, the viewer scans each per-cross-
-                section-vertex "strand" polyline with a sliding window of
-                30 rings and collapses any run that self-intersects
-                (point-to-segment distance below 5% of max(width, height)
-                with the foot inside the segment) to its centroid. Folds
-                that arise where ``κ·W/2 > 1`` on tight inside corners
-                turn into clean creases instead of self-intersecting
-                triangle fans.
+            strand_collapse: When True, the viewer scans every per-
+                cross-section-vertex strand polyline for fold targets —
+                cells (i, j) of the 3D seg-seg shortest-line-distance
+                grid that are local minima below 5% of max(width, height)
+                — and snaps the rings inside each fold range to the
+                closest-pair midpoint. Folds that arise where ``κ·W/2 >
+                1`` on tight inside corners turn into clean creases
+                instead of self-intersecting triangle fans, with the
+                top-view bead footprint preserved (only inside-of-bend
+                strands fold, so outside-bend silhouette never moves).
         """
         lod_header = _serialize_lod(lod)
 
