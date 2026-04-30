@@ -1880,11 +1880,11 @@ function computeMiterFrames(spine, nSpine, outFrames, outScales, outTangents,
             // problem the miter fix can't solve.
             tx = inX; ty = inY; tz = inZ;
         }
-        // Constant-up frame: V = up projected onto plane perpendicular to T.
+        // V axis: constant-up projection.
         const dotTu = tx * upX + ty * upY + tz * upZ;
-        let seedX, seedY, seedZ;
-        if (Math.abs(dotTu) > 0.99) { seedX = fbX; seedY = fbY; seedZ = fbZ; }
-        else { seedX = upX; seedY = upY; seedZ = upZ; }
+        const seedX = Math.abs(dotTu) > 0.99 ? fbX : upX;
+        const seedY = Math.abs(dotTu) > 0.99 ? fbY : upY;
+        const seedZ = Math.abs(dotTu) > 0.99 ? fbZ : upZ;
         const sdot = seedX * tx + seedY * ty + seedZ * tz;
         let vx = seedX - sdot * tx, vy = seedY - sdot * ty, vz = seedZ - sdot * tz;
         const vlen = Math.hypot(vx, vy, vz);
@@ -1968,6 +1968,326 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
     }
 }
 
+// Closest-pair midpoint between two 3D segments (P0,P1) and (Q0,Q1), with
+// segment indices a, b (segment a is the strand-vertex pair (a, a+1) for
+// strand j, segment b similarly). Writes the midpoint into out[0..2] and the
+// squared distance between the two closest points into out[3] — used to rank
+// detections within a merged fold range so the snap target is the *tightest*
+// crossing (smallest gap), not the average. Uses the standard parametric-
+// clamp formulation (Real-Time Collision Detection, Ericson, §5.1.9): solve
+// the unconstrained 2D minimum of |P(s)-Q(t)|², then clamp s, t to [0,1] in
+// the order that respects the constraint normals. Degenerate-segment
+// branches kept for completeness; in practice both segments are non-
+// degenerate strand pieces.
+/**
+ * @param {Float32Array} positions
+ * @param {number} ringStride
+ * @param {number} j
+ * @param {number} aIdx
+ * @param {number} bIdx
+ * @param {Float64Array} out
+ */
+function strandSegSegMidpoint(positions, ringStride, j, aIdx, bIdx, out) {
+    const a0 = aIdx * ringStride + j * 3;
+    const a1 = (aIdx + 1) * ringStride + j * 3;
+    const b0 = bIdx * ringStride + j * 3;
+    const b1 = (bIdx + 1) * ringStride + j * 3;
+    const p0x = positions[a0], p0y = positions[a0 + 1], p0z = positions[a0 + 2];
+    const p1x = positions[a1], p1y = positions[a1 + 1], p1z = positions[a1 + 2];
+    const q0x = positions[b0], q0y = positions[b0 + 1], q0z = positions[b0 + 2];
+    const q1x = positions[b1], q1y = positions[b1 + 1], q1z = positions[b1 + 2];
+    const dx = p1x - p0x, dy = p1y - p0y, dz = p1z - p0z;
+    const ex = q1x - q0x, ey = q1y - q0y, ez = q1z - q0z;
+    const rx = p0x - q0x, ry = p0y - q0y, rz = p0z - q0z;
+    const dL2 = dx * dx + dy * dy + dz * dz;
+    const eL2 = ex * ex + ey * ey + ez * ez;
+    const f = ex * rx + ey * ry + ez * rz;
+    let s = 0, t = 0;
+    if (dL2 > 1e-24 && eL2 > 1e-24) {
+        const b = dx * ex + dy * ey + dz * ez;
+        const c = dx * rx + dy * ry + dz * rz;
+        const denom = dL2 * eL2 - b * b;
+        s = denom !== 0 ? (b * f - c * eL2) / denom : 0;
+        if (s < 0) s = 0; else if (s > 1) s = 1;
+        t = (b * s + f) / eL2;
+        if (t < 0) {
+            t = 0;
+            s = -c / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        } else if (t > 1) {
+            t = 1;
+            s = (b - c) / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        }
+    } else if (eL2 > 1e-24) {
+        t = f / eL2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    const Psx = p0x + s * dx, Psy = p0y + s * dy, Psz = p0z + s * dz;
+    const Qtx = q0x + t * ex, Qty = q0y + t * ey, Qtz = q0z + t * ez;
+    out[0] = 0.5 * (Psx + Qtx);
+    out[1] = 0.5 * (Psy + Qty);
+    out[2] = 0.5 * (Psz + Qtz);
+    const gx = Psx - Qtx, gy = Psy - Qty, gz = Psz - Qtz;
+    out[3] = gx * gx + gy * gy + gz * gz;
+}
+
+// Per-strand fold detection + collapse for the nCs offset polylines that
+// run along the tube. Each strand connects cross-section vertex k across
+// every ring; at inside corners with κ·offset > 1 the offset strand folds
+// back on itself and overlapping triangles z-fight.
+//
+// Algorithm (no planarity assumption on the spine):
+//
+//   For every cross-section vertex k (independent strand):
+//     1. Build the un-mitered strand polyline strand[i] = spine[i] + u·U[i]
+//        + v·V[i] using the local frame and the cross-section's (u, v).
+//        Detection runs on the un-mitered strand because miter-scaled U at
+//        sharp corners inflates the strand toward the inside of the bend
+//        and synthesises spurious local minima that aren't real folds.
+//     2. For every segment pair (i, j) with j - i ∈ [MIN_GAP, WIN], compute
+//        the 3D seg-seg shortest-line distance² on the un-mitered strand.
+//     3. A "fold target" is a cell (i, j) that is a strict local minimum of
+//        the distance² grid (vs. its 8 neighbours within the window) AND
+//        whose distance² is below TOL² (TOL = TOL_FRAC · max(W, H)).
+//     4. For each fold target, take the closest-pair midpoint of the
+//        *mitered* mesh segments (positions[]) — that's the snap location
+//        in mesh space. Snap rings (i+1..j) on strand k to that midpoint.
+//
+// Why detect on un-mitered, snap on mitered: the un-mitered strand is the
+// geometric truth of "where does the offset curve fold," and matches the
+// reference Python prototype's fold targets one-for-one. The mitered mesh
+// has the same fold (corners scale U up but the bend's spine geometry is
+// unchanged), and its actual seg-seg crossing midpoint is the place we
+// want strand vertices to land so the resulting crease sits inside the
+// real mesh, not on the un-mitered ghost.
+//
+// MIN_GAP filters out adjacent segments that share an endpoint — those
+// trivially have ~0 distance regardless of curvature and are not folds.
+// Local-minimum detection isolates one snap point per genuine fold even
+// when many neighbouring (i, j) pairs all sit below TOL (which they do for
+// any reasonably resolved fold). It also avoids the previous algorithm's
+// range-merge bookkeeping: each strand independently produces its own
+// fold targets at the right depth, top/bottom/widest don't smear into a
+// single range, and outside-of-bend strands produce no targets at all.
+//
+// Coverage preservation: the outermost strand on each side of the bead
+// is the *opposite* tip vertex. On the inside of a bend only the inside
+// tip's strand folds — the outside tip never moves. Top-view footprint
+// is preserved by construction.
+//
+// Topology: snap-only, no re-triangulation. Coincident strand vertices
+// produce zero-area quads in the two columns adjacent to k; the GPU culls
+// them in hardware. Index buffer, per-vertex normals (cross-section
+// bisector — independent of face geometry), and colors are all unchanged.
+//
+// Endpoints are protected (snap range clamped to [1, nSpine-2]) so the
+// revolution caps' anchor rings stay on the spine frame.
+//
+// Cost: O(nCs · nSpine · WIN). Memory: 4 × nSpine × (WIN - MIN_GAP + 1)
+// floats of scratch, allocated once per call and released when it returns.
+//
+// Pre-filter (kMax): for each i, find the highest j ≤ i+WIN whose spine
+// endpoints sit within `rejectDist = maxDim + 2·maxSegLen + tol` of
+// spine[i]. Pairs further apart than that have a worst-case lower bound
+// on seg-seg distance that already exceeds tol — they cannot fold and
+// don't need polylineSegSegMidpoint. Worth ~10% on long realistic-density
+// tubes; ~3× on short ones. See bench/strand_collapse_bench.mjs.
+const TUBE_STRAND_COLLAPSE_WIN = 50;
+const TUBE_STRAND_COLLAPSE_MIN_GAP = 4;
+const TUBE_STRAND_COLLAPSE_TOL_FRAC = 0.04;
+/**
+ * @param {Float32Array} positions
+ * @param {Float32Array} spine
+ * @param {Float32Array} widths
+ * @param {Float32Array} heights
+ * @param {Float32Array} localFrames
+ * @param {number} nSpine
+ * @param {number} nCs
+ */
+function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs) {
+    const minGap = TUBE_STRAND_COLLAPSE_MIN_GAP;
+    const winMax = TUBE_STRAND_COLLAPSE_WIN;
+    const stride = winMax - minGap + 1;
+    const nSeg = nSpine - 1;
+    if (stride <= 0 || nSeg < minGap + 1) return;
+    let maxDim = 0;
+    let maxSegLen2 = 0;
+    for (let i = 0; i < nSpine; i++) {
+        if (widths[i] > maxDim) maxDim = widths[i];
+        if (heights[i] > maxDim) maxDim = heights[i];
+    }
+    for (let i = 0; i < nSpine - 1; i++) {
+        const dx = spine[(i + 1) * 3]     - spine[i * 3];
+        const dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
+        const dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > maxSegLen2) maxSegLen2 = d2;
+    }
+    if (maxDim <= 0) return;
+    const tol = TUBE_STRAND_COLLAPSE_TOL_FRAC * maxDim;
+    const tolSq = tol * tol;
+    const reject = maxDim + 2 * Math.sqrt(maxSegLen2) + tol;
+    const rejectSq = reject * reject;
+    const ringStride = nCs * 3;
+
+    // Per-i upper bound on the fold-eligible j: highest j ∈ [i+minGap, i+winMax]
+    // with ‖spine[j] - spine[i]‖² ≤ rejectSq. -1 when no such j exists (the
+    // spine bends back and away too quickly, or i sits in a straight section).
+    const kMax = new Int32Array(nSeg);
+    for (let i = 0; i < nSeg; i++) {
+        const isx = spine[i * 3], isy = spine[i * 3 + 1], isz = spine[i * 3 + 2];
+        const jHi = Math.min(nSeg - 1, i + winMax);
+        let best = -1;
+        for (let j = jHi; j >= i + minGap; j--) {
+            const dx = spine[j * 3]     - isx;
+            const dy = spine[j * 3 + 1] - isy;
+            const dz = spine[j * 3 + 2] - isz;
+            if (dx * dx + dy * dy + dz * dz <= rejectSq) { best = j; break; }
+        }
+        kMax[i] = best;
+    }
+
+    // Per-strand scratch for the (i, j) grid restricted to j - i ∈ [minGap, winMax].
+    // Cell index: i*stride + (j - i - minGap). Out-of-range j get +Infinity so
+    // they never win the local-min test.
+    const dist2 = new Float32Array(nSeg * stride);
+    const strandPoly = new Float32Array(nSpine * 3);
+    const sectionScratch = new Float32Array(nCs * 2);
+    const segOut = new Float64Array(4);
+    const foldOut = new Float64Array(4);
+
+    for (let strand = 0; strand < nCs; strand++) {
+        // Build the un-mitered strand polyline for this cross-section vertex.
+        for (let i = 0; i < nSpine; i++) {
+            sampleChamferedRect(sectionScratch, widths[i], heights[i]);
+            const u = sectionScratch[strand * 2];
+            const v = sectionScratch[strand * 2 + 1];
+            const Ux = localFrames[i * 6],     Uy = localFrames[i * 6 + 1], Uz = localFrames[i * 6 + 2];
+            const Vx = localFrames[i * 6 + 3], Vy = localFrames[i * 6 + 4], Vz = localFrames[i * 6 + 5];
+            strandPoly[i * 3]     = spine[i * 3]     + u * Ux + v * Vx;
+            strandPoly[i * 3 + 1] = spine[i * 3 + 1] + u * Uy + v * Vy;
+            strandPoly[i * 3 + 2] = spine[i * 3 + 2] + u * Uz + v * Vz;
+        }
+
+        // Fill the seg-seg distance² grid from the un-mitered strand.
+        // Pairs beyond kMax[i] keep +Infinity so they're skipped in both
+        // the threshold check and the local-min comparison.
+        for (let i = 0; i < nSeg; i++) {
+            const rowBase = i * stride;
+            const jLim = kMax[i];
+            if (jLim < 0) {
+                for (let off = 0; off < stride; off++) dist2[rowBase + off] = Infinity;
+                continue;
+            }
+            const offMax = Math.min(jLim - i - minGap, stride - 1);
+            let off = 0;
+            for (; off <= offMax; off++) {
+                polylineSegSegMidpoint(strandPoly, i, i + minGap + off, segOut);
+                dist2[rowBase + off] = segOut[3];
+            }
+            for (; off < stride; off++) dist2[rowBase + off] = Infinity;
+        }
+
+        // Local-min sweep. For each fold target, snap mesh rings to the
+        // miter-aware mesh midpoint (read from positions[]).
+        for (let i = 0; i < nSeg; i++) {
+            const jLim = kMax[i];
+            if (jLim < 0) continue;
+            const rowBase = i * stride;
+            const offMax = Math.min(jLim - i - minGap, stride - 1);
+            for (let off = 0; off <= offMax; off++) {
+                const j = i + minGap + off;
+                if (j >= nSeg) break;
+                const d = dist2[rowBase + off];
+                if (!(d < tolSq)) continue;
+                let isMin = true;
+                neighbourLoop:
+                for (let di = -1; di <= 1; di++) {
+                    const ni = i + di;
+                    if (ni < 0 || ni >= nSeg) continue;
+                    const niRow = ni * stride;
+                    for (let dj = -1; dj <= 1; dj++) {
+                        if (di === 0 && dj === 0) continue;
+                        const noff = off + (dj - di);
+                        if (noff < 0 || noff >= stride) continue;
+                        if (dist2[niRow + noff] <= d) {
+                            isMin = false;
+                            break neighbourLoop;
+                        }
+                    }
+                }
+                if (!isMin) continue;
+                strandSegSegMidpoint(positions, ringStride, strand, i, j, foldOut);
+                const cx = foldOut[0];
+                const cy = foldOut[1];
+                const cz = foldOut[2];
+                const sLo = Math.max(1, i + 1);
+                const sHi = Math.min(nSpine - 2, j);
+                for (let r = sLo; r <= sHi; r++) {
+                    const ip = r * ringStride + strand * 3;
+                    positions[ip] = cx;
+                    positions[ip + 1] = cy;
+                    positions[ip + 2] = cz;
+                }
+            }
+        }
+    }
+}
+
+// Closest-pair midpoint between two 3D segments laid out as flat (3*N)
+// triples in `poly`. Mirrors `strandSegSegMidpoint`'s parametric-clamp
+// formulation but reads from a contiguous strand polyline rather than a
+// strided ring buffer. Writes [mx, my, mz, distSq] into `out`.
+/**
+ * @param {Float32Array} poly
+ * @param {number} aIdx
+ * @param {number} bIdx
+ * @param {Float64Array} out
+ */
+function polylineSegSegMidpoint(poly, aIdx, bIdx, out) {
+    const a0 = aIdx * 3, a1 = (aIdx + 1) * 3;
+    const b0 = bIdx * 3, b1 = (bIdx + 1) * 3;
+    const p0x = poly[a0], p0y = poly[a0 + 1], p0z = poly[a0 + 2];
+    const p1x = poly[a1], p1y = poly[a1 + 1], p1z = poly[a1 + 2];
+    const q0x = poly[b0], q0y = poly[b0 + 1], q0z = poly[b0 + 2];
+    const q1x = poly[b1], q1y = poly[b1 + 1], q1z = poly[b1 + 2];
+    const dx = p1x - p0x, dy = p1y - p0y, dz = p1z - p0z;
+    const ex = q1x - q0x, ey = q1y - q0y, ez = q1z - q0z;
+    const rx = p0x - q0x, ry = p0y - q0y, rz = p0z - q0z;
+    const dL2 = dx * dx + dy * dy + dz * dz;
+    const eL2 = ex * ex + ey * ey + ez * ez;
+    const f = ex * rx + ey * ry + ez * rz;
+    let s = 0, t = 0;
+    if (dL2 > 1e-24 && eL2 > 1e-24) {
+        const b = dx * ex + dy * ey + dz * ez;
+        const c = dx * rx + dy * ry + dz * rz;
+        const denom = dL2 * eL2 - b * b;
+        s = denom !== 0 ? (b * f - c * eL2) / denom : 0;
+        if (s < 0) s = 0; else if (s > 1) s = 1;
+        t = (b * s + f) / eL2;
+        if (t < 0) {
+            t = 0;
+            s = -c / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        } else if (t > 1) {
+            t = 1;
+            s = (b - c) / dL2;
+            if (s < 0) s = 0; else if (s > 1) s = 1;
+        }
+    } else if (eL2 > 1e-24) {
+        t = f / eL2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    const Psx = p0x + s * dx, Psy = p0y + s * dy, Psz = p0z + s * dz;
+    const Qtx = q0x + t * ex, Qty = q0y + t * ey, Qtz = q0z + t * ez;
+    out[0] = 0.5 * (Psx + Qtx);
+    out[1] = 0.5 * (Psy + Qty);
+    out[2] = 0.5 * (Psz + Qtz);
+    const gx = Psx - Qtx, gy = Psy - Qty, gz = Psz - Qtz;
+    out[3] = gx * gx + gy * gy + gz * gz;
+}
+
 // Fill `count` RGB triplets starting at float offset `floatBase`.
 /**
  * @param {any} colors - Float32Array (raw) or typed-array view from BufferAttribute
@@ -2007,6 +2327,9 @@ const LOD_CHUNK_REUSE_RATIO = 1.5;
 const N_CS = ${N_CROSS_SECTION};
 const N_CAP_RINGS = 8;
 const TUBE_MITER_LIMIT = ${TUBE_MITER_LIMIT};
+const TUBE_STRAND_COLLAPSE_WIN = ${TUBE_STRAND_COLLAPSE_WIN};
+const TUBE_STRAND_COLLAPSE_MIN_GAP = ${TUBE_STRAND_COLLAPSE_MIN_GAP};
+const TUBE_STRAND_COLLAPSE_TOL_FRAC = ${TUBE_STRAND_COLLAPSE_TOL_FRAC};
 
 // ---- Augmented-space RDP helpers ----
 //
@@ -2114,6 +2437,12 @@ function computeSectionNormals(section, nCs, out) {
 // truth — the only dependency is TUBE_MITER_LIMIT, which is defined at this
 // scope's header.
 ${computeMiterFrames.toString()}
+
+${strandSegSegMidpoint.toString()}
+
+${polylineSegSegMidpoint.toString()}
+
+${collapseTubeStrandFolds.toString()}
 
 function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
                                   width, height, localFrames, spineIdx, tSign,
@@ -2344,6 +2673,7 @@ self.onmessage = function(e) {
             heightOffset: msg.heightOffset || 0,
             boundingRadius: msg.boundingRadius || 0,
             epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
+            strandCollapse: !!msg.strandCollapse,
         });
         _rdpCache.delete(msg.tubeId);
         return;
@@ -2355,6 +2685,27 @@ self.onmessage = function(e) {
         const tube = _tubes.get(msg.tubeId);
         if (tube) tube.ringColors = msg.ringColors;
         _rdpCache.delete(msg.tubeId);
+        return;
+    }
+
+    // 'collapseOnly': run strand-collapse on the supplied positions and
+    // hand the modified buffer back. Used by the main thread to offload
+    // the synchronous fold-detect-and-snap pass for newly-created tubes.
+    // All inputs arrive transferred — we own them while the message is
+    // in flight, transfer the positions buffer back on return. The
+    // loadToken is opaque to the worker; we round-trip it so the main
+    // thread can verify the response still applies to the live mesh.
+    if (msg.type === 'collapseOnly') {
+        collapseTubeStrandFolds(
+            msg.positions, msg.spine, msg.widths, msg.heights, msg.localFrames,
+            msg.nSpine, N_CS,
+        );
+        self.postMessage({
+            type: 'collapseOnlyResult',
+            tubeId: msg.tubeId,
+            loadToken: msg.loadToken,
+            positions: msg.positions,
+        }, [msg.positions.buffer]);
         return;
     }
 
@@ -2453,6 +2804,14 @@ self.onmessage = function(e) {
 
     // Build geometry in worker
     const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, heightOffset);
+
+    // Strand-collapse pass on the reduced spine. The reduced mesh sees
+    // the same fold geometry as the full-resolution main-thread build,
+    // just resampled — running collapseTubeStrandFolds here keeps the
+    // crisp creases visible at every LOD level.
+    if (tube.strandCollapse) {
+        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS);
+    }
 
     // Transfer ownership of large buffers
     const transfer = [geo.positions.buffer, geo.normals.buffer, geo.indices.buffer, geo.localFrames.buffer,
@@ -2619,6 +2978,12 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
 //
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
+//
+// Strand collapse (when the user-facing flag is set) is NOT applied here.
+// The caller posts a 'collapseOnly' message to the LOD worker after the
+// mesh is created — see ParametricTube setup. Keeping it off this hot
+// synchronous path means tube creation never blocks the main thread on
+// the O(nCs · nSpine · WIN) scan.
 /**
  * @param {Float32Array} spine
  * @param {Float32Array} widths
@@ -2771,6 +3136,13 @@ function buildParametricTubeGeometry(
                            -Ux, -Uy, -Uz, Vx, Vy, Vz, sx, sy, sz, vOff, miterScales[i]);
         }
     }
+
+    // Strand collapse no longer runs synchronously here — it's offloaded to
+    // the LOD worker via a 'collapseOnly' message after mesh creation, so
+    // the main thread doesn't block on it for big tubes. The reduced-spine
+    // rebuild path (also in the worker) runs collapse inline as part of
+    // buildGeometry on every LOD level. See ParametricTube setup for the
+    // 'collapseOnly' postMessage.
 
     // --- Revolution cap vertices ---
     // Revolution around V (up axis) through the spine center.  Each vertex
@@ -4164,6 +4536,28 @@ class ThreeJSViewer {
         this._lodWorker = _getLodWorker();
         this._lodWorker.onmessage = /** @param {MessageEvent} e */ (e) => {
             const msg = e.data;
+            // 'collapseOnlyResult' is independent of LOD — runs even on tubes
+            // without a tubeLOD record. Apply the snapped positions to the
+            // mesh's existing geometry and let three.js re-upload them.
+            // Drop late results: if the tube has been deleted (or deleted
+            // and re-created with the same id) since we sent the request,
+            // the load token won't match and the response is stale.
+            if (msg.type === 'collapseOnlyResult') {
+                if (!this._isLoadTokenCurrent(msg.tubeId, msg.loadToken)) return;
+                const meshObj = this._objects.get(msg.tubeId);
+                if (!meshObj) return;
+                const posAttr = /** @type {THREE.BufferAttribute | undefined} */ (
+                    meshObj.geometry && meshObj.geometry.getAttribute && meshObj.geometry.getAttribute('position')
+                );
+                if (!posAttr) return;
+                const dst = /** @type {Float32Array} */ (posAttr.array);
+                const src = /** @type {Float32Array} */ (msg.positions);
+                const copyLen = Math.min(dst.length, src.length);
+                dst.set(src.subarray(0, copyLen));
+                posAttr.needsUpdate = true;
+                if (meshObj.geometry.boundingSphere) meshObj.geometry.computeBoundingSphere();
+                return;
+            }
             this._lodWorkerBusy = false;
             const obj = this._objects.get(msg.tubeId);
             if (!obj || !obj.userData.tubeLOD) return;
@@ -6490,6 +6884,7 @@ class ThreeJSViewer {
                                     // LOD initial reduction logged at debug level only
                                 }
 
+                                const strandCollapse = !!data.strandCollapse;
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, miterScales, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     buildSpine, buildWidths, buildHeights,
                                     buildOrientations, upVector, buildRingColors, heightOffset,
@@ -6537,6 +6932,17 @@ class ThreeJSViewer {
                                     savedCapOffset: -1,
                                     heightOffset,
                                 };
+                                // Dispose any existing object at this id BEFORE posting
+                                // worker messages so the worker's queue order is
+                                // dispose(old) → init(new) → collapseOnly(new). Sending
+                                // 'init' first would let the trailing 'dispose' that
+                                // _deleteObject queues for the old tubeLOD clobber the
+                                // new tube's worker state (same tubeId).
+                                this._deleteObject(data.id);
+                                this._addToParentOrScene(mesh, data.parent);
+                                this._objects.set(data.id, mesh);
+                                this._objGeneration++;
+                                if (data.transform) this._applyTransform(mesh, data.transform);
                                 if (tubeLOD) {
                                     mesh.userData.tubeLOD = tubeLOD;
                                     // Register original arrays with LOD worker
@@ -6552,14 +6958,48 @@ class ThreeJSViewer {
                                         heightOffset: heightOffset,
                                         boundingRadius: tubeLOD.boundingRadius,
                                         epsilonDivisor: tubeLOD.epsilonDivisor,
+                                        strandCollapse,
                                     });
                                 }
-                                this._deleteObject(data.id);
-                                this._addToParentOrScene(mesh, data.parent);
-                                this._objects.set(data.id, mesh);
-                                this._objGeneration++;
-                                if (data.transform) this._applyTransform(mesh, data.transform);
-                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs`);
+                                // Async strand-collapse offload: post the un-collapsed
+                                // positions to the LOD worker. The mesh is visible
+                                // immediately (un-collapsed); when the worker returns
+                                // we copy the snapped positions back in. Sends a
+                                // CLONE — main thread keeps the renderable buffer
+                                // attached to THREE so the render loop never sees a
+                                // detached ArrayBuffer mid-frame.
+                                //
+                                // Includes the current load token so a late response
+                                // for a tube that's been deleted (and possibly re-
+                                // created with the same id) is dropped instead of
+                                // stomping the new mesh's positions.
+                                if (strandCollapse) {
+                                    const posAttr = /** @type {THREE.BufferAttribute} */ (geometry.getAttribute('position'));
+                                    const posClone = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+                                    const spineForWorker = new Float32Array(buildSpine);
+                                    const widthsForWorker = new Float32Array(buildWidths);
+                                    const heightsForWorker = new Float32Array(buildHeights);
+                                    const localFramesForWorker = new Float32Array(localFrames);
+                                    const collapseToken = this._loadTokens.get(data.id);
+                                    this._lodWorker.postMessage({
+                                        type: 'collapseOnly',
+                                        tubeId: data.id,
+                                        loadToken: collapseToken,
+                                        positions: posClone,
+                                        spine: spineForWorker,
+                                        widths: widthsForWorker,
+                                        heights: heightsForWorker,
+                                        localFrames: localFramesForWorker,
+                                        nSpine: buildN,
+                                    }, [
+                                        posClone.buffer,
+                                        spineForWorker.buffer,
+                                        widthsForWorker.buffer,
+                                        heightsForWorker.buffer,
+                                        localFramesForWorker.buffer,
+                                    ]);
+                                }
+                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                             } catch (e) {
                                 console.error(`Error creating parametric_tube:`, e);
                             } finally {

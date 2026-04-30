@@ -830,6 +830,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         lod: Optional[Union[bool, dict]] = None,
+        strand_collapse: bool = False,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -880,6 +881,20 @@ class ViewerClient:
                         "hires", spine, w, h,
                         lod={"epsilon_divisor": 10000},
                     )
+            strand_collapse: When True, the viewer detects fold targets
+                on every per-cross-section-vertex strand polyline (cells
+                of the 3D seg-seg shortest-line-distance grid that are
+                local minima below 4% of ``max(width, height)``) and
+                snaps the rings inside each fold range to the closest-
+                pair midpoint. Folds that arise where ``κ·W/2 > 1`` on
+                tight inside corners turn into clean creases instead of
+                self-intersecting triangle fans, with the top-view bead
+                footprint preserved (only inside-of-bend strands fold,
+                so the outside-bend silhouette never moves). The pass
+                runs on the LOD worker after the mesh is created — the
+                main thread never blocks — and is re-applied on every
+                reduced-spine rebuild for LOD-enabled tubes, so creases
+                stay crisp at every camera distance.
         """
         lod_header = _serialize_lod(lod)
 
@@ -900,6 +915,13 @@ class ViewerClient:
         if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr < 0):
             raise ValueError("heights must be finite and >= 0 at every spine point")
 
+        color_arr_in: Optional[np.ndarray] = None
+        if colors is not None:
+            color_arr_in = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
+            if color_arr_in.shape[0] != n:
+                raise ValueError(
+                    f"colors must have length {n}, got {color_arr_in.shape[0]}"
+                )
         parts = [
             spine_arr.tobytes(),
             widths_arr.tobytes(),
@@ -916,14 +938,9 @@ class ViewerClient:
                 )
             parts.append(orient_arr.tobytes())
 
-        has_colors = colors is not None
+        has_colors = color_arr_in is not None
         if has_colors:
-            color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
-            if color_arr.shape[0] != n:
-                raise ValueError(
-                    f"colors must have length {n}, got {color_arr.shape[0]}"
-                )
-            parts.append(color_arr.tobytes())
+            parts.append(color_arr_in.tobytes())
 
         header = {
             "type": "add_parametric_tube_binary",
@@ -936,6 +953,8 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if strand_collapse:
+            header["strandCollapse"] = True
         if lod_header is not _LOD_DEFAULT:
             header["lod"] = lod_header
         # The viewer applies heightOffset as a *shift* to section cv values,
