@@ -2327,6 +2327,9 @@ const LOD_CHUNK_REUSE_RATIO = 1.5;
 const N_CS = ${N_CROSS_SECTION};
 const N_CAP_RINGS = 8;
 const TUBE_MITER_LIMIT = ${TUBE_MITER_LIMIT};
+const TUBE_STRAND_COLLAPSE_WIN = ${TUBE_STRAND_COLLAPSE_WIN};
+const TUBE_STRAND_COLLAPSE_MIN_GAP = ${TUBE_STRAND_COLLAPSE_MIN_GAP};
+const TUBE_STRAND_COLLAPSE_TOL_FRAC = ${TUBE_STRAND_COLLAPSE_TOL_FRAC};
 
 // ---- Augmented-space RDP helpers ----
 //
@@ -2434,6 +2437,12 @@ function computeSectionNormals(section, nCs, out) {
 // truth — the only dependency is TUBE_MITER_LIMIT, which is defined at this
 // scope's header.
 ${computeMiterFrames.toString()}
+
+${strandSegSegMidpoint.toString()}
+
+${polylineSegSegMidpoint.toString()}
+
+${collapseTubeStrandFolds.toString()}
 
 function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
                                   width, height, localFrames, spineIdx, tSign,
@@ -2664,6 +2673,7 @@ self.onmessage = function(e) {
             heightOffset: msg.heightOffset || 0,
             boundingRadius: msg.boundingRadius || 0,
             epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
+            strandCollapse: !!msg.strandCollapse,
         });
         _rdpCache.delete(msg.tubeId);
         return;
@@ -2773,6 +2783,14 @@ self.onmessage = function(e) {
 
     // Build geometry in worker
     const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, heightOffset);
+
+    // Strand-collapse pass on the reduced spine. The reduced mesh sees
+    // the same fold geometry as the full-resolution main-thread build,
+    // just resampled — running collapseTubeStrandFolds here keeps the
+    // crisp creases visible at every LOD level.
+    if (tube.strandCollapse) {
+        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS);
+    }
 
     // Transfer ownership of large buffers
     const transfer = [geo.positions.buffer, geo.normals.buffer, geo.indices.buffer, geo.localFrames.buffer,
@@ -6876,6 +6894,7 @@ class ThreeJSViewer {
                                 };
                                 if (tubeLOD) {
                                     mesh.userData.tubeLOD = tubeLOD;
+                                    mesh.userData.tubeStrandCollapse = strandCollapse;
                                     // Register original arrays with LOD worker
                                     this._lodWorker.postMessage({
                                         type: 'init',
@@ -6889,6 +6908,7 @@ class ThreeJSViewer {
                                         heightOffset: heightOffset,
                                         boundingRadius: tubeLOD.boundingRadius,
                                         epsilonDivisor: tubeLOD.epsilonDivisor,
+                                        strandCollapse,
                                     });
                                 }
                                 this._deleteObject(data.id);

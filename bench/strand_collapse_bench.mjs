@@ -178,6 +178,145 @@ function collapseV0(positions, spine, widths, heights, localFrames, nSpine, nCs)
     }
 }
 
+// ---- V3: V2 + cache-tiled streaming dist² (3-row sliding buffer) ----
+//
+// V0/V1/V2 allocate dist²[nSeg × stride] (24 MB at N=130k), way bigger
+// than L2. Sequential writes are cheap but the local-min sweep's 8-
+// neighbour reads cross row boundaries — every read is a potential
+// cache miss. V3 keeps only three rows of dist² alive at once (~564 B),
+// fully L1-resident. On every iteration we fill the row two ahead, then
+// check the centre row using its three-row neighbourhood.
+//
+// strandPoly stays the same (1.6 MB at N=130k, sequential, fits L2).
+// Sentinel rows (full-Infinity) act as out-of-bounds neighbours so the
+// loop body has no conditionals on prev/next existence.
+
+function collapseV3(positions, spine, widths, heights, localFrames, nSpine, nCs) {
+    const stride = WIN - MIN_GAP + 1;
+    const nSeg = nSpine - 1;
+    if (stride <= 0 || nSeg < MIN_GAP + 1) return;
+    let maxDim = 0;
+    let maxSegLen2 = 0;
+    for (let i = 0; i < nSpine; i++) {
+        if (widths[i] > maxDim) maxDim = widths[i];
+        if (heights[i] > maxDim) maxDim = heights[i];
+    }
+    for (let i = 0; i < nSpine - 1; i++) {
+        const dx = spine[(i+1)*3] - spine[i*3];
+        const dy = spine[(i+1)*3+1] - spine[i*3+1];
+        const dz = spine[(i+1)*3+2] - spine[i*3+2];
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 > maxSegLen2) maxSegLen2 = d2;
+    }
+    if (maxDim <= 0) return;
+    const tol = TOL_FRAC * maxDim;
+    const tolSq = tol * tol;
+    const ringStride = nCs * 3;
+    const reject = maxDim + 2 * Math.sqrt(maxSegLen2) + tol;
+    const rejectSq = reject * reject;
+    const kMax = new Int32Array(nSeg);
+    for (let i = 0; i < nSeg; i++) {
+        const isx = spine[i*3], isy = spine[i*3+1], isz = spine[i*3+2];
+        const jHi = Math.min(nSeg - 1, i + WIN);
+        let best = -1;
+        for (let j = jHi; j >= i + MIN_GAP; j--) {
+            const dx = spine[j*3] - isx;
+            const dy = spine[j*3+1] - isy;
+            const dz = spine[j*3+2] - isz;
+            if (dx*dx + dy*dy + dz*dz <= rejectSq) { best = j; break; }
+        }
+        kMax[i] = best;
+    }
+
+    const strandPoly = new Float32Array(nSpine * 3);
+    const sec = new Float32Array(nCs * 2);
+    const segOut = new Float64Array(4);
+    const foldOut = new Float64Array(4);
+    // Three-row sliding dist² buffer + one sentinel for out-of-bounds.
+    const rowBuf = [
+        new Float32Array(stride),
+        new Float32Array(stride),
+        new Float32Array(stride),
+    ];
+    const infRow = new Float32Array(stride).fill(Infinity);
+
+    function fillRow(buf, i) {
+        const jLim = kMax[i];
+        if (jLim < 0) {
+            for (let off = 0; off < stride; off++) buf[off] = Infinity;
+            return;
+        }
+        const offMax = Math.min(jLim - i - MIN_GAP, stride - 1);
+        let off = 0;
+        for (; off <= offMax; off++) {
+            polySegSeg(strandPoly, i, i + MIN_GAP + off, segOut);
+            buf[off] = segOut[3];
+        }
+        for (; off < stride; off++) buf[off] = Infinity;
+    }
+
+    for (let k = 0; k < nCs; k++) {
+        for (let i = 0; i < nSpine; i++) {
+            sampleChamferedRect(sec, widths[i], heights[i]);
+            const u = sec[k * 2], v = sec[k * 2 + 1];
+            const Ux = localFrames[i*6],   Uy = localFrames[i*6+1], Uz = localFrames[i*6+2];
+            const Vx = localFrames[i*6+3], Vy = localFrames[i*6+4], Vz = localFrames[i*6+5];
+            strandPoly[i*3]     = spine[i*3]     + u*Ux + v*Vx;
+            strandPoly[i*3 + 1] = spine[i*3 + 1] + u*Uy + v*Vy;
+            strandPoly[i*3 + 2] = spine[i*3 + 2] + u*Uz + v*Vz;
+        }
+
+        // Pre-fill row 0 and row 1 (when present) so the loop can read
+        // a valid `next` at i=0.
+        fillRow(rowBuf[0], 0);
+        if (nSeg > 1) fillRow(rowBuf[1], 1);
+
+        for (let i = 0; i < nSeg; i++) {
+            const prev = i > 0 ? rowBuf[(i - 1) % 3] : infRow;
+            const curr = rowBuf[i % 3];
+            const next = i + 1 < nSeg ? rowBuf[(i + 1) % 3] : infRow;
+            const jLim = kMax[i];
+            if (jLim >= 0) {
+                const offMax = Math.min(jLim - i - MIN_GAP, stride - 1);
+                for (let off = 0; off <= offMax; off++) {
+                    const j = i + MIN_GAP + off;
+                    if (j >= nSeg) break;
+                    const d = curr[off];
+                    if (!(d < tolSq)) continue;
+                    let isMin = true;
+                    // Inlined 3-row × 3-col neighbour check (8 neighbours).
+                    // prev row neighbours (di = -1): nooff = off + (dj + 1)
+                    // curr row neighbours (di =  0): noff  = off + dj   (skip dj=0)
+                    // next row neighbours (di = +1): noff  = off + (dj - 1)
+                    if (off + 0 >= 0 && off + 0 < stride && prev[off + 0] <= d) isMin = false;
+                    else if (off + 1 >= 0 && off + 1 < stride && prev[off + 1] <= d) isMin = false;
+                    else if (off + 2 >= 0 && off + 2 < stride && prev[off + 2] <= d) isMin = false;
+                    else if (off - 1 >= 0 && off - 1 < stride && curr[off - 1] <= d) isMin = false;
+                    else if (off + 1 >= 0 && off + 1 < stride && curr[off + 1] <= d) isMin = false;
+                    else if (off - 2 >= 0 && off - 2 < stride && next[off - 2] <= d) isMin = false;
+                    else if (off - 1 >= 0 && off - 1 < stride && next[off - 1] <= d) isMin = false;
+                    else if (off + 0 >= 0 && off + 0 < stride && next[off + 0] <= d) isMin = false;
+                    if (!isMin) continue;
+                    meshSegSeg(positions, ringStride, k, i, j, foldOut);
+                    const cx = foldOut[0], cy = foldOut[1], cz = foldOut[2];
+                    const sLo = Math.max(1, i + 1);
+                    const sHi = Math.min(nSpine - 2, j);
+                    for (let r = sLo; r <= sHi; r++) {
+                        const ip = r * ringStride + k * 3;
+                        positions[ip] = cx;
+                        positions[ip + 1] = cy;
+                        positions[ip + 2] = cz;
+                    }
+                }
+            }
+            // Pre-fill row i+2 (overwrites slot (i-1)%3, no longer needed).
+            if (i + 2 < nSeg) {
+                fillRow(rowBuf[(i + 2) % 3], i + 2);
+            }
+        }
+    }
+}
+
 // ---- V2: V1 with the kMax check hoisted out of the inner loop ----
 //
 // V1's branch inside polySegSeg's inner loop confused V8's optimizer and
@@ -559,12 +698,13 @@ const itersFor = (n) => {
 };
 
 console.log("collapseTubeStrandFolds — local-min algorithm\n");
-console.log("V0 = current ship (un-mitered strand build, full dist² grid, local-min sweep)");
-console.log("V1 = V0 + per-i spine-distance pre-filter (kMax) — skip pairs that can't fold geometrically");
-console.log("V2 = V1 with kMax check hoisted out of the inner loop (two-phase fill)\n");
+console.log("V0 = un-mitered strand build, full dist² grid, local-min sweep (no pre-filter)");
+console.log("V1 = V0 + per-i spine-distance pre-filter (kMax) — skip pairs that can't fold");
+console.log("V2 = V1 with kMax check hoisted out of the inner loop (two-phase fill) — current ship");
+console.log("V3 = V2 + cache-tiled streaming dist² (3-row sliding buffer, ~600 B working set)\n");
 console.log(`grid: SAMPLES_PER_SEG=${SAMPLES_PER_SEG}, W=${BEAD_W}, H=${BEAD_H}, WIN=${WIN}, MIN_GAP=${MIN_GAP}, TOL_FRAC=${TOL_FRAC}\n`);
-console.log("N         | nCtrl  | V0 ms     | V1 (vs V0)      | V2 (vs V0)      | folds | output");
-console.log("----------+--------+-----------+-----------------+-----------------+-------+--------");
+console.log("N         | nCtrl  | V0 ms     | V1 (vs V0)      | V2 (vs V0)      | V3 (vs V0)      | folds | output");
+console.log("----------+--------+-----------+-----------------+-----------------+-----------------+-------+--------");
 
 for (const target of targets) {
     const nCtrl = Math.max(13, Math.round(target / SAMPLES_PER_SEG));
@@ -577,7 +717,7 @@ for (const target of targets) {
     const scratch = new Float32Array(positions0.length);
     const iters = itersFor(nSpine);
 
-    // Correctness: V1 and V2 should produce identical positions to V0.
+    // Correctness: V1, V2, V3 should produce identical positions to V0.
     const v0out = new Float32Array(positions0.length);
     v0out.set(positions0);
     collapseV0(v0out, td.spine, td.widths, td.heights, td.localFrames, nSpine, N_CS);
@@ -587,12 +727,17 @@ for (const target of targets) {
     const v2out = new Float32Array(positions0.length);
     v2out.set(positions0);
     collapseV2(v2out, td.spine, td.widths, td.heights, td.localFrames, nSpine, N_CS);
+    const v3out = new Float32Array(positions0.length);
+    v3out.set(positions0);
+    collapseV3(v3out, td.spine, td.widths, td.heights, td.localFrames, nSpine, N_CS);
     let maxDelta = 0;
     for (let i = 0; i < v0out.length; i++) {
         const d1 = Math.abs(v0out[i] - v1out[i]);
         const d2 = Math.abs(v0out[i] - v2out[i]);
+        const d3 = Math.abs(v0out[i] - v3out[i]);
         if (d1 > maxDelta) maxDelta = d1;
         if (d2 > maxDelta) maxDelta = d2;
+        if (d3 > maxDelta) maxDelta = d3;
     }
     // Count snapped vertices in V0 output for context.
     let snapped = 0;
@@ -605,11 +750,12 @@ for (const target of targets) {
     const t0 = run("V0", collapseV0, scratch, positions0, td, iters);
     const t1 = run("V1", collapseV1, scratch, positions0, td, iters);
     const t2 = run("V2", collapseV2, scratch, positions0, td, iters);
+    const t3 = run("V3", collapseV3, scratch, positions0, td, iters);
     const fmt = (x) => (x < 1 ? x.toFixed(3) : x.toFixed(2)).padStart(7);
     const ratio = (a, b) => `${(a / b).toFixed(2)}×`.padStart(7);
     const status = maxDelta < 1e-4 ? "match" : `Δ=${maxDelta.toExponential(2)}`;
     console.log(
-        `${String(nSpine).padStart(9)} | ${String(nCtrl).padStart(6)} | ${fmt(t0)} ms | ${fmt(t1)} ${ratio(t0, t1)} | ${fmt(t2)} ${ratio(t0, t2)} | ${String(snapped).padStart(5)} | ${status}`
+        `${String(nSpine).padStart(9)} | ${String(nCtrl).padStart(6)} | ${fmt(t0)} ms | ${fmt(t1)} ${ratio(t0, t1)} | ${fmt(t2)} ${ratio(t0, t2)} | ${fmt(t3)} ${ratio(t0, t3)} | ${String(snapped).padStart(5)} | ${status}`
     );
 }
 console.log("\n(speedups vs V0; higher = faster)");
