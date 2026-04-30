@@ -2692,7 +2692,9 @@ self.onmessage = function(e) {
     // hand the modified buffer back. Used by the main thread to offload
     // the synchronous fold-detect-and-snap pass for newly-created tubes.
     // All inputs arrive transferred — we own them while the message is
-    // in flight, transfer the positions buffer back on return.
+    // in flight, transfer the positions buffer back on return. The
+    // loadToken is opaque to the worker; we round-trip it so the main
+    // thread can verify the response still applies to the live mesh.
     if (msg.type === 'collapseOnly') {
         collapseTubeStrandFolds(
             msg.positions, msg.spine, msg.widths, msg.heights, msg.localFrames,
@@ -2701,6 +2703,7 @@ self.onmessage = function(e) {
         self.postMessage({
             type: 'collapseOnlyResult',
             tubeId: msg.tubeId,
+            loadToken: msg.loadToken,
             positions: msg.positions,
         }, [msg.positions.buffer]);
         return;
@@ -4536,7 +4539,11 @@ class ThreeJSViewer {
             // 'collapseOnlyResult' is independent of LOD — runs even on tubes
             // without a tubeLOD record. Apply the snapped positions to the
             // mesh's existing geometry and let three.js re-upload them.
+            // Drop late results: if the tube has been deleted (or deleted
+            // and re-created with the same id) since we sent the request,
+            // the load token won't match and the response is stale.
             if (msg.type === 'collapseOnlyResult') {
+                if (!this._isLoadTokenCurrent(msg.tubeId, msg.loadToken)) return;
                 const meshObj = this._objects.get(msg.tubeId);
                 if (!meshObj) return;
                 const posAttr = /** @type {THREE.BufferAttribute | undefined} */ (
@@ -6925,9 +6932,19 @@ class ThreeJSViewer {
                                     savedCapOffset: -1,
                                     heightOffset,
                                 };
+                                // Dispose any existing object at this id BEFORE posting
+                                // worker messages so the worker's queue order is
+                                // dispose(old) → init(new) → collapseOnly(new). Sending
+                                // 'init' first would let the trailing 'dispose' that
+                                // _deleteObject queues for the old tubeLOD clobber the
+                                // new tube's worker state (same tubeId).
+                                this._deleteObject(data.id);
+                                this._addToParentOrScene(mesh, data.parent);
+                                this._objects.set(data.id, mesh);
+                                this._objGeneration++;
+                                if (data.transform) this._applyTransform(mesh, data.transform);
                                 if (tubeLOD) {
                                     mesh.userData.tubeLOD = tubeLOD;
-                                    mesh.userData.tubeStrandCollapse = strandCollapse;
                                     // Register original arrays with LOD worker
                                     this._lodWorker.postMessage({
                                         type: 'init',
@@ -6944,11 +6961,6 @@ class ThreeJSViewer {
                                         strandCollapse,
                                     });
                                 }
-                                this._deleteObject(data.id);
-                                this._addToParentOrScene(mesh, data.parent);
-                                this._objects.set(data.id, mesh);
-                                this._objGeneration++;
-                                if (data.transform) this._applyTransform(mesh, data.transform);
                                 // Async strand-collapse offload: post the un-collapsed
                                 // positions to the LOD worker. The mesh is visible
                                 // immediately (un-collapsed); when the worker returns
@@ -6956,6 +6968,11 @@ class ThreeJSViewer {
                                 // CLONE — main thread keeps the renderable buffer
                                 // attached to THREE so the render loop never sees a
                                 // detached ArrayBuffer mid-frame.
+                                //
+                                // Includes the current load token so a late response
+                                // for a tube that's been deleted (and possibly re-
+                                // created with the same id) is dropped instead of
+                                // stomping the new mesh's positions.
                                 if (strandCollapse) {
                                     const posAttr = /** @type {THREE.BufferAttribute} */ (geometry.getAttribute('position'));
                                     const posClone = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
@@ -6963,9 +6980,11 @@ class ThreeJSViewer {
                                     const widthsForWorker = new Float32Array(buildWidths);
                                     const heightsForWorker = new Float32Array(buildHeights);
                                     const localFramesForWorker = new Float32Array(localFrames);
+                                    const collapseToken = this._loadTokens.get(data.id);
                                     this._lodWorker.postMessage({
                                         type: 'collapseOnly',
                                         tubeId: data.id,
+                                        loadToken: collapseToken,
                                         positions: posClone,
                                         spine: spineForWorker,
                                         widths: widthsForWorker,
