@@ -2688,6 +2688,24 @@ self.onmessage = function(e) {
         return;
     }
 
+    // 'collapseOnly': run strand-collapse on the supplied positions and
+    // hand the modified buffer back. Used by the main thread to offload
+    // the synchronous fold-detect-and-snap pass for newly-created tubes.
+    // All inputs arrive transferred — we own them while the message is
+    // in flight, transfer the positions buffer back on return.
+    if (msg.type === 'collapseOnly') {
+        collapseTubeStrandFolds(
+            msg.positions, msg.spine, msg.widths, msg.heights, msg.localFrames,
+            msg.nSpine, N_CS,
+        );
+        self.postMessage({
+            type: 'collapseOnlyResult',
+            tubeId: msg.tubeId,
+            positions: msg.positions,
+        }, [msg.positions.buffer]);
+        return;
+    }
+
     // 'dispose': clean up cached state for a deleted tube
     if (msg.type === 'dispose') {
         _tubes.delete(msg.tubeId);
@@ -2955,13 +2973,14 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
 // - orientations: Float32Array length nSpine*4 quaternions, or null (constant-up derived)
 // - upVector:     [x, y, z] up direction for constant-up frame (default [0,0,1])
 // - ringColors:   Float32Array length nSpine*3 RGB (0..1), or null
-// - strandCollapse: When true, every per-cross-section-vertex strand
-//                 polyline is scanned for fold targets (3D seg-seg
-//                 closest-pair local minima within a sliding window) and
-//                 the rings inside each fold range are snapped to the
-//                 closest-pair midpoint. See collapseTubeStrandFolds.
 //
 // Returns { geometry, ringPairs, indicesPerRingPair, nCs }.
+//
+// Strand collapse (when the user-facing flag is set) is NOT applied here.
+// The caller posts a 'collapseOnly' message to the LOD worker after the
+// mesh is created — see ParametricTube setup. Keeping it off this hot
+// synchronous path means tube creation never blocks the main thread on
+// the O(nCs · nSpine · WIN) scan.
 /**
  * @param {Float32Array} spine
  * @param {Float32Array} widths
@@ -2970,12 +2989,10 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
  * @param {number[] | null} upVector
  * @param {Float32Array | null} ringColors
  * @param {number} heightOffset
- * @param {boolean} [strandCollapse]
  */
 function buildParametricTubeGeometry(
     spine, widths, heights,
     orientations, upVector, ringColors, heightOffset,
-    strandCollapse,
 ) {
     const nCs = N_CROSS_SECTION;
     const nSpine = spine.length / 3;
@@ -3117,13 +3134,12 @@ function buildParametricTubeGeometry(
         }
     }
 
-    // Post-process strand collapse: runs after all ring vertices (and hairpin
-    // fixups) so it sees the final offset polylines, but before caps bolt on
-    // — caps read positions from the spine/frame arrays directly, not from
-    // the modified rings, so the cap seam stays analytic.
-    if (strandCollapse) {
-        collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs);
-    }
+    // Strand collapse no longer runs synchronously here — it's offloaded to
+    // the LOD worker via a 'collapseOnly' message after mesh creation, so
+    // the main thread doesn't block on it for big tubes. The reduced-spine
+    // rebuild path (also in the worker) runs collapse inline as part of
+    // buildGeometry on every LOD level. See ParametricTube setup for the
+    // 'collapseOnly' postMessage.
 
     // --- Revolution cap vertices ---
     // Revolution around V (up axis) through the spine center.  Each vertex
@@ -4517,6 +4533,24 @@ class ThreeJSViewer {
         this._lodWorker = _getLodWorker();
         this._lodWorker.onmessage = /** @param {MessageEvent} e */ (e) => {
             const msg = e.data;
+            // 'collapseOnlyResult' is independent of LOD — runs even on tubes
+            // without a tubeLOD record. Apply the snapped positions to the
+            // mesh's existing geometry and let three.js re-upload them.
+            if (msg.type === 'collapseOnlyResult') {
+                const meshObj = this._objects.get(msg.tubeId);
+                if (!meshObj) return;
+                const posAttr = /** @type {THREE.BufferAttribute | undefined} */ (
+                    meshObj.geometry && meshObj.geometry.getAttribute && meshObj.geometry.getAttribute('position')
+                );
+                if (!posAttr) return;
+                const dst = /** @type {Float32Array} */ (posAttr.array);
+                const src = /** @type {Float32Array} */ (msg.positions);
+                const copyLen = Math.min(dst.length, src.length);
+                dst.set(src.subarray(0, copyLen));
+                posAttr.needsUpdate = true;
+                if (meshObj.geometry.boundingSphere) meshObj.geometry.computeBoundingSphere();
+                return;
+            }
             this._lodWorkerBusy = false;
             const obj = this._objects.get(msg.tubeId);
             if (!obj || !obj.userData.tubeLOD) return;
@@ -6847,7 +6881,6 @@ class ThreeJSViewer {
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, miterScales, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     buildSpine, buildWidths, buildHeights,
                                     buildOrientations, upVector, buildRingColors, heightOffset,
-                                    strandCollapse,
                                 );
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
                                 const material = new THREE.MeshStandardMaterial({
@@ -6916,7 +6949,38 @@ class ThreeJSViewer {
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
                                 if (data.transform) this._applyTransform(mesh, data.transform);
-                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs`);
+                                // Async strand-collapse offload: post the un-collapsed
+                                // positions to the LOD worker. The mesh is visible
+                                // immediately (un-collapsed); when the worker returns
+                                // we copy the snapped positions back in. Sends a
+                                // CLONE — main thread keeps the renderable buffer
+                                // attached to THREE so the render loop never sees a
+                                // detached ArrayBuffer mid-frame.
+                                if (strandCollapse) {
+                                    const posAttr = /** @type {THREE.BufferAttribute} */ (geometry.getAttribute('position'));
+                                    const posClone = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+                                    const spineForWorker = new Float32Array(buildSpine);
+                                    const widthsForWorker = new Float32Array(buildWidths);
+                                    const heightsForWorker = new Float32Array(buildHeights);
+                                    const localFramesForWorker = new Float32Array(localFrames);
+                                    this._lodWorker.postMessage({
+                                        type: 'collapseOnly',
+                                        tubeId: data.id,
+                                        positions: posClone,
+                                        spine: spineForWorker,
+                                        widths: widthsForWorker,
+                                        heights: heightsForWorker,
+                                        localFrames: localFramesForWorker,
+                                        nSpine: buildN,
+                                    }, [
+                                        posClone.buffer,
+                                        spineForWorker.buffer,
+                                        widthsForWorker.buffer,
+                                        heightsForWorker.buffer,
+                                        localFramesForWorker.buffer,
+                                    ]);
+                                }
+                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                             } catch (e) {
                                 console.error(`Error creating parametric_tube:`, e);
                             } finally {
