@@ -881,16 +881,20 @@ class ViewerClient:
                         "hires", spine, w, h,
                         lod={"epsilon_divisor": 10000},
                     )
-            strand_collapse: When True, the viewer scans every per-
-                cross-section-vertex strand polyline for fold targets —
-                cells (i, j) of the 3D seg-seg shortest-line-distance
-                grid that are local minima below 5% of max(width, height)
-                — and snaps the rings inside each fold range to the
-                closest-pair midpoint. Folds that arise where ``κ·W/2 >
-                1`` on tight inside corners turn into clean creases
-                instead of self-intersecting triangle fans, with the
-                top-view bead footprint preserved (only inside-of-bend
-                strands fold, so outside-bend silhouette never moves).
+            strand_collapse: When True, the viewer detects fold targets
+                on every per-cross-section-vertex strand polyline (cells
+                of the 3D seg-seg shortest-line-distance grid that are
+                local minima below 4% of ``max(width, height)``) and
+                snaps the rings inside each fold range to the closest-
+                pair midpoint. Folds that arise where ``κ·W/2 > 1`` on
+                tight inside corners turn into clean creases instead of
+                self-intersecting triangle fans, with the top-view bead
+                footprint preserved (only inside-of-bend strands fold,
+                so the outside-bend silhouette never moves). The pass
+                runs on the LOD worker after the mesh is created — the
+                main thread never blocks — and is re-applied on every
+                reduced-spine rebuild for LOD-enabled tubes, so creases
+                stay crisp at every camera distance.
         """
         lod_header = _serialize_lod(lod)
 
