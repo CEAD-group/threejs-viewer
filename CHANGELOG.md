@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.25
+## 0.0.26
 
 ### Viewer display and controls
 
@@ -9,6 +9,8 @@
 ### Polyline
 
 - **`update_polyline_colors(id, colors)` swaps per-vertex colors on an existing polyline without rebuilding it.** Mirrors `update_parametric_tube_colors` for the polyline case — the typical use is keeping a diagnostic-coloured spine line in sync with the parametric tube's bead colours when the colour mode changes (layer → feed-rate → curvature → ...). Accepts the same `colors` shapes as `add_polyline(colors=...)`: a scalar `(N,)` array (mapped via `colormap` / `cmin` / `cmax`) or an `(N, 3)` RGB float array in 0..1; any other shape raises `ValueError` Python-side rather than shipping a misaligned uint8 blob. Internally fetches the new colours via the HTTP blob channel and calls `LineGeometry.setColors`, which rebuilds only the `instanceColorStart` / `instanceColorEnd` instanced attributes — positions, indices, and line distances are untouched. If the polyline was created without per-vertex colours (flat-colour `LineMaterial`), the update flips `material.vertexColors = true` *and resets the material's base colour to white*, so the new vertex colours aren't tinted/zeroed by the prior flat colour (e.g. a red base × green vertex would otherwise render black). Length is validated against the polyline's stored vertex count (`maxInstanceCount + 1`) before `setColors` runs; mismatches log a warning and bail rather than desync the new colour attributes from the existing positions. Regression covered by `tests/test_browser.py::test_update_polyline_colors_swaps_colors` (round-trip on a coloured polyline) and `::test_update_polyline_colors_flips_material_when_no_initial_colors` (uses a `0xFF0000` base to actually exercise the white-tint reset).
+
+## 0.0.25
 
 ### Parametric tube
 
