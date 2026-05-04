@@ -562,6 +562,25 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
     assert state["target"]["y"] > 40, state
     assert state["target"]["z"] > 40, state
 
+    # Hide everything: empty-bbox path. resetView must fall through to the
+    # origin-and-default-distance fallback without crashing.
+    viewer_client.set_visible("near", False)
+    viewer_client.set_visible("far", False)
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["near"]["visible"] is False
+    assert objects["far"]["visible"] is False
+    target = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.resetView();
+            const t = v._controls.target;
+            return { x: t.x, y: t.y, z: t.z };
+        }"""
+    )
+    assert abs(target["x"]) < 1e-3, target
+    assert abs(target["y"]) < 1e-3, target
+    assert abs(target["z"]) < 1e-3, target
+
 
 # --- ViewHelper setViewport shim regression ---
 
