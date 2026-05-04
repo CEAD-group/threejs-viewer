@@ -487,6 +487,82 @@ def test_viewer_controls_r_key_toggles_orbit_mode(viewer_client, viewer_page):
     assert {start, after} == {"turntable", "free"}
 
 
+# --- Framing honors visibility ---
+
+
+@pytest.mark.browser
+def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
+    """Hidden objects must not pull the framing bbox.
+
+    Setup: a tiny visible box near the origin and a huge hidden box far away.
+    If resetView/frameAll honor `.visible`, the orbit target lands on the
+    visible box's center, not the midpoint between the two.
+    """
+    viewer_client.add_box("near", width=0.1, height=0.1, depth=0.1, position=[0, 0, 0])
+    viewer_client.add_box("far", width=2, height=2, depth=2, position=[100, 100, 100])
+    viewer_client.set_visible("far", False)
+    # query_scene round-trips through the WS, which guarantees the queued
+    # add/set_visibility messages have been applied before we frame.
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["far"]["visible"] is False
+
+    # frameAll: target should be at origin (visible box center), not at (~50,50,50).
+    target = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.frameAll();
+            const t = v._controls.target;
+            return { x: t.x, y: t.y, z: t.z };
+        }"""
+    )
+    # Visible box center is the origin; allow a small slack for floating point.
+    assert abs(target["x"]) < 1e-3, target
+    assert abs(target["y"]) < 1e-3, target
+    assert abs(target["z"]) < 1e-3, target
+
+    # resetView: same expectation — orbit target snaps to the visible content.
+    target = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.resetView();
+            const t = v._controls.target;
+            return { x: t.x, y: t.y, z: t.z };
+        }"""
+    )
+    assert abs(target["x"]) < 1e-3, target
+    assert abs(target["y"]) < 1e-3, target
+    assert abs(target["z"]) < 1e-3, target
+
+    # Re-show the hidden box: framing should now include it.
+    viewer_client.set_visible("far", True)
+    # query_scene round-trips through the WS to the browser, which guarantees
+    # any preceding messages (the set_visibility above) have been processed.
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["far"]["visible"] is True
+    state = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const far = v._objects.get('far');
+            const near = v._objects.get('near');
+            v.frameAll();
+            const t = v._controls.target;
+            return {
+                target: { x: t.x, y: t.y, z: t.z },
+                farVisible: far ? far.visible : null,
+                nearVisible: near ? near.visible : null,
+                farPos: far ? { x: far.position.x, y: far.position.y, z: far.position.z } : null,
+            };
+        }"""
+    )
+    assert state["farVisible"] is True, state
+    assert state["nearVisible"] is True, state
+    # With both boxes visible, the bbox is ~([-0.05, 101], [-0.05, 101], [-0.05, 101])
+    # so the center sits well above 40 on every axis.
+    assert state["target"]["x"] > 40, state
+    assert state["target"]["y"] > 40, state
+    assert state["target"]["z"] > 40, state
+
+
 # --- ViewHelper setViewport shim regression ---
 
 
