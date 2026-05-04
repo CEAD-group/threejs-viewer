@@ -1010,6 +1010,47 @@ class ViewerClient:
         }
         self._send_binary(header, color_arr.tobytes())
 
+    def update_polyline_colors(
+        self,
+        id: str,
+        colors: np.ndarray,
+        colormap: str = "viridis",
+        cmin: float = None,
+        cmax: float = None,
+    ) -> None:
+        """Swap per-vertex colors on an existing polyline without rebuilding it.
+
+        The polyline must have been created with `add_polyline(..., colors=...)`
+        — the line material needs `vertexColors: true`. If it was created
+        without per-vertex colors, the swap will set the material into
+        vertex-color mode so the new colors take effect.
+
+        Args:
+            id: Target polyline id.
+            colors: Either a scalar array of shape (N,) (mapped via `colormap`/
+                `cmin`/`cmax`) or an (N, 3) RGB float array in 0..1.
+                Length must match the polyline's vertex count.
+            colormap: Colormap name when `colors` is scalar.
+            cmin, cmax: Colormap range. Auto-computed from `colors` if None.
+        """
+        colors = np.asarray(colors)
+        if colors.ndim == 1:
+            if cmin is None:
+                cmin = float(colors.min())
+            if cmax is None:
+                cmax = float(colors.max())
+            colors_rgb = self._apply_colormap(colors, colormap, cmin, cmax)
+        else:
+            colors_rgb = colors
+        colors_rgb = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
+        n_points = int(colors_rgb.shape[0])
+        header = {
+            "type": "update_polyline_colors",
+            "id": id,
+            "numPoints": n_points,
+        }
+        self._send_binary(header, colors_rgb.tobytes())
+
     def add_toolpath(self, id: str, toolpath, **kwargs) -> None:
         """Add a Toolpath as one or more parametric tubes.
 

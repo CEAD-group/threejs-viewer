@@ -6688,6 +6688,50 @@ class ThreeJSViewer {
                         })();
                         break;
                     }
+                    case 'update_polyline_colors': {
+                        this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale polyline color fetch');
+                                    return;
+                                }
+                                const obj = this._objects.get(data.id);
+                                if (!obj || !obj.userData.isPolyline) {
+                                    console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                    return;
+                                }
+                                const numPoints = data.numPoints;
+                                if (buffer.byteLength < numPoints * 3) {
+                                    console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
+                                    return;
+                                }
+                                const bytes = new Uint8Array(buffer, 0, numPoints * 3);
+                                const colorData = new Float32Array(numPoints * 3);
+                                for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                    colorData[i] = bytes[i] / 255;
+                                }
+                                // setColors rebuilds the instanceColorStart/End
+                                // instanced attributes on the LineGeometry.
+                                obj.geometry.setColors(colorData);
+                                // If the polyline was created without vertex colors,
+                                // the material is in flat-color mode — flip it so
+                                // the new attributes are actually consumed.
+                                if (!obj.material.vertexColors) {
+                                    obj.material.vertexColors = true;
+                                    obj.material.needsUpdate = true;
+                                }
+                            } catch (e) {
+                                console.error(`Error updating polyline colors:`, e);
+                            } finally {
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
                     case 'add_mesh_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
