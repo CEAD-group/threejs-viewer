@@ -1015,15 +1015,14 @@ class ViewerClient:
         id: str,
         colors: np.ndarray,
         colormap: str = "viridis",
-        cmin: float = None,
-        cmax: float = None,
+        cmin: Optional[float] = None,
+        cmax: Optional[float] = None,
     ) -> None:
         """Swap per-vertex colors on an existing polyline without rebuilding it.
 
-        The polyline must have been created with `add_polyline(..., colors=...)`
-        — the line material needs `vertexColors: true`. If it was created
-        without per-vertex colors, the swap will set the material into
-        vertex-color mode so the new colors take effect.
+        Works on any polyline. If the original was created with a flat color
+        (no `colors=` arg on `add_polyline`), the line material is auto-flipped
+        into vertex-color mode so the new colors actually take effect.
 
         Args:
             id: Target polyline id.
