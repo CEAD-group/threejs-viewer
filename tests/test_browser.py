@@ -607,6 +607,8 @@ def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
         time.sleep(0.05)
         if viewer_client.query_scene()["objects"].get("pl_swap"):
             break
+    else:
+        pytest.fail("polyline 'pl_swap' did not appear within 2s")
     before = _read_polyline_first_color(viewer_page, "pl_swap")
     assert abs(before["r"] - 1.0) < 1e-3
     assert before["g"] < 0.01
@@ -619,6 +621,8 @@ def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
         c = _read_polyline_first_color(viewer_page, "pl_swap")
         if c["b"] > 0.99 and c["r"] < 0.01:
             break
+    else:
+        pytest.fail(f"color swap on 'pl_swap' did not land within 2s; last={c}")
     after = _read_polyline_first_color(viewer_page, "pl_swap")
     assert after["r"] < 0.01, after
     assert abs(after["b"] - 1.0) < 1e-3, after
@@ -631,11 +635,16 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
     """If a polyline was created without per-vertex colors, the update must
     flip the material into vertex-color mode so the new colors are used."""
     pts = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
-    viewer_client.add_polyline("pl_noinit", pts, color=0xFFFFFF)
+    # Use a non-white base color: confirms the white-tint reset on flip.
+    # If the base color stayed red, the green vertex colors would render
+    # as black (red × green = 0).
+    viewer_client.add_polyline("pl_noinit", pts, color=0xFF0000)
     for _ in range(40):
         time.sleep(0.05)
         if viewer_client.query_scene()["objects"].get("pl_noinit"):
             break
+    else:
+        pytest.fail("polyline 'pl_noinit' did not appear within 2s")
     initial_vertex_colors = viewer_page.evaluate(
         "(id) => window.threejsViewer._objects.get(id).material.vertexColors",
         "pl_noinit",
@@ -652,7 +661,16 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
         )
         if flipped:
             break
+    else:
+        pytest.fail("vertexColors flip on 'pl_noinit' did not land within 2s")
     assert flipped is True
+    # Material's base color must be white after the flip — otherwise the
+    # vertex green would be tinted/zeroed by the prior 0xFF0000 base.
+    base_color = viewer_page.evaluate(
+        "(id) => window.threejsViewer._objects.get(id).material.color.getHex()",
+        "pl_noinit",
+    )
+    assert base_color == 0xFFFFFF, hex(base_color)
     color = _read_polyline_first_color(viewer_page, "pl_noinit")
     assert color["r"] < 0.01, color
     assert abs(color["g"] - 1.0) < 1e-3, color

@@ -1039,8 +1039,12 @@ class ViewerClient:
             if cmax is None:
                 cmax = float(colors.max())
             colors_rgb = self._apply_colormap(colors, colormap, cmin, cmax)
-        else:
+        elif colors.ndim == 2 and colors.shape[1] == 3:
             colors_rgb = colors
+        else:
+            raise ValueError(
+                f"colors must be (N,) scalar or (N, 3) RGB float, got shape {colors.shape}"
+            )
         colors_rgb = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
         n_points = int(colors_rgb.shape[0])
         header = {

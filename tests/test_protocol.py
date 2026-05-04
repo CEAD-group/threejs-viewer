@@ -226,6 +226,17 @@ def test_update_polyline_colors_scalar_uses_colormap(client):
     assert payload[:3] != payload[3:]
 
 
+def test_update_polyline_colors_rejects_bad_shapes(client):
+    # (N, 4) RGBA — must raise rather than ship a misaligned uint8 blob.
+    rgba = np.zeros((3, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="N, 3"):
+        client.update_polyline_colors("pl", rgba)
+    # (N, 2) — likewise.
+    bad = np.zeros((3, 2), dtype=np.float32)
+    with pytest.raises(ValueError):
+        client.update_polyline_colors("pl", bad)
+
+
 # === add_mesh ===
 
 

@@ -5634,6 +5634,16 @@ export class ThreeJSViewer {
                                     return;
                                 }
                                 const numPoints = data.numPoints;
+                                // userData.maxInstanceCount = numPoints - 1 (one
+                                // segment per pair of points), so vertex count
+                                // is maxInstanceCount + 1. A length mismatch
+                                // would desync the new color attributes from
+                                // the existing positions.
+                                const expected = obj.userData.maxInstanceCount + 1;
+                                if (numPoints !== expected) {
+                                    console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
+                                    return;
+                                }
                                 if (buffer.byteLength < numPoints * 3) {
                                     console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
                                     return;
@@ -5647,10 +5657,13 @@ export class ThreeJSViewer {
                                 // instanced attributes on the LineGeometry.
                                 obj.geometry.setColors(colorData);
                                 // If the polyline was created without vertex colors,
-                                // the material is in flat-color mode — flip it so
-                                // the new attributes are actually consumed.
+                                // the material is in flat-color mode — flip it.
+                                // Also reset the base color to white so vertex
+                                // colors aren't tinted/multiplied by the prior
+                                // flat color (e.g. red base × green vertex = 0).
                                 if (!obj.material.vertexColors) {
                                     obj.material.vertexColors = true;
+                                    obj.material.color.setHex(0xffffff);
                                     obj.material.needsUpdate = true;
                                 }
                             } catch (e) {
