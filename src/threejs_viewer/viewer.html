@@ -7546,21 +7546,40 @@ class ThreeJSViewer {
         this._gizmoHovered = sprite;
     }
 
+    /**
+     * Bbox over visible, geometry-bearing scene content — what camera
+     * framing should target. Skips helpers (grid, clip gizmo, pivot
+     * marker) and bails on `.visible === false` subtrees so hidden
+     * objects don't dwarf the visible ones during Home / F.
+     * Used by resetView() and frameAll(); near/far and clip-slider
+     * bounds intentionally don't filter on visibility (a hidden object
+     * may become visible later and must not get clipped).
+     */
+    _collectFrameableBounds() {
+        const bbox = new THREE.Box3();
+        const visit = /** @param {any} child */ (child) => {
+            if (!child.visible) return;
+            if (child.geometry &&
+                child !== this._gridHelper &&
+                !this._isClipHelper(child) &&
+                !this._isPivotMarkerDescendant(child)) {
+                child.updateWorldMatrix(true, false);
+                bbox.expandByObject(child);
+            }
+            const kids = child.children;
+            for (let i = 0; i < kids.length; i++) visit(kids[i]);
+        };
+        visit(this._scene);
+        return bbox;
+    }
+
     resetView() {
         // Canonical home view: world-Z up, isometric-ish direction
         // (+X, -Y, +Z) looking at the scene bbox center, then framed to fit.
         // Replaces the old "hail-mary" reset — orientation is now always the
         // same regardless of prior camera state, so Home is predictable.
         this._camera.up.set(0, 0, 1);
-        const bbox = new THREE.Box3();
-        this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.geometry) return;
-            if (child === this._gridHelper) return;
-            if (this._isClipHelper(child)) return;
-            if (this._isPivotMarkerDescendant(child)) return;
-            child.updateWorldMatrix(true, false);
-            bbox.expandByObject(child);
-        });
+        const bbox = this._collectFrameableBounds();
         const target = bbox.isEmpty()
             ? new THREE.Vector3()
             : bbox.getCenter(new THREE.Vector3());
@@ -7584,16 +7603,7 @@ class ThreeJSViewer {
     }
 
     frameAll() {
-        const bbox = new THREE.Box3();
-        this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.geometry) return;
-            if (child === this._gridHelper) return;
-            if (this._isClipHelper(child)) return;
-            if (this._isPivotMarkerDescendant(child)) return;
-            child.updateWorldMatrix(true, false);
-            bbox.expandByObject(child);
-        });
-        this._fitCameraToBox(bbox, 1.2);
+        this._fitCameraToBox(this._collectFrameableBounds(), 1.2);
     }
 
     /**
