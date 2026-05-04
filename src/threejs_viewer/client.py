@@ -1010,6 +1010,50 @@ class ViewerClient:
         }
         self._send_binary(header, color_arr.tobytes())
 
+    def update_polyline_colors(
+        self,
+        id: str,
+        colors: np.ndarray,
+        colormap: str = "viridis",
+        cmin: Optional[float] = None,
+        cmax: Optional[float] = None,
+    ) -> None:
+        """Swap per-vertex colors on an existing polyline without rebuilding it.
+
+        Works on any polyline. If the original was created with a flat color
+        (no `colors=` arg on `add_polyline`), the line material is auto-flipped
+        into vertex-color mode so the new colors actually take effect.
+
+        Args:
+            id: Target polyline id.
+            colors: Either a scalar array of shape (N,) (mapped via `colormap`/
+                `cmin`/`cmax`) or an (N, 3) RGB float array in 0..1.
+                Length must match the polyline's vertex count.
+            colormap: Colormap name when `colors` is scalar.
+            cmin, cmax: Colormap range. Auto-computed from `colors` if None.
+        """
+        colors = np.asarray(colors)
+        if colors.ndim == 1:
+            if cmin is None:
+                cmin = float(colors.min())
+            if cmax is None:
+                cmax = float(colors.max())
+            colors_rgb = self._apply_colormap(colors, colormap, cmin, cmax)
+        elif colors.ndim == 2 and colors.shape[1] == 3:
+            colors_rgb = colors
+        else:
+            raise ValueError(
+                f"colors must be (N,) scalar or (N, 3) RGB float, got shape {colors.shape}"
+            )
+        colors_rgb = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
+        n_points = int(colors_rgb.shape[0])
+        header = {
+            "type": "update_polyline_colors",
+            "id": id,
+            "numPoints": n_points,
+        }
+        self._send_binary(header, colors_rgb.tobytes())
+
     def add_toolpath(self, id: str, toolpath, **kwargs) -> None:
         """Add a Toolpath as one or more parametric tubes.
 

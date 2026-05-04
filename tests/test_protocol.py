@@ -202,6 +202,41 @@ def test_add_polyline_no_parent(client):
     assert "parent" not in header
 
 
+def test_update_polyline_colors_rgb(client):
+    rgb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    client.update_polyline_colors("pl", rgb)
+    header, payload = client._binary_messages[0]
+    assert header["type"] == "update_polyline_colors"
+    assert header["id"] == "pl"
+    assert header["numPoints"] == 2
+    # Two points × 3 channels = 6 uint8 bytes — red, then blue.
+    assert payload == bytes([255, 0, 0, 0, 0, 255])
+
+
+def test_update_polyline_colors_scalar_uses_colormap(client):
+    # Scalar input gets passed through `_apply_colormap`, so two distinct
+    # values produce two distinct (non-equal) RGB entries.
+    scalars = np.array([0.0, 1.0], dtype=np.float32)
+    client.update_polyline_colors("pl", scalars, colormap="viridis")
+    header, payload = client._binary_messages[0]
+    assert header["type"] == "update_polyline_colors"
+    assert header["numPoints"] == 2
+    assert len(payload) == 6
+    # First and last viridis stops differ on every channel.
+    assert payload[:3] != payload[3:]
+
+
+def test_update_polyline_colors_rejects_bad_shapes(client):
+    # (N, 4) RGBA — must raise rather than ship a misaligned uint8 blob.
+    rgba = np.zeros((3, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="N, 3"):
+        client.update_polyline_colors("pl", rgba)
+    # (N, 2) — likewise.
+    bad = np.zeros((3, 2), dtype=np.float32)
+    with pytest.raises(ValueError):
+        client.update_polyline_colors("pl", bad)
+
+
 # === add_mesh ===
 
 

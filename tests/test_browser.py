@@ -582,6 +582,100 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
     assert abs(target["z"]) < 1e-3, target
 
 
+# --- update_polyline_colors round-trip ---
+
+
+def _read_polyline_first_color(page, id_):
+    return page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const start = obj.geometry.attributes.instanceColorStart;
+            return { r: start.array[0], g: start.array[1], b: start.array[2] };
+        }""",
+        id_,
+    )
+
+
+@pytest.mark.browser
+def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
+    """update_polyline_colors replaces the per-vertex colors on an existing polyline."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    rgb_red = np.array([[1, 0, 0]] * 3, dtype=np.float32)
+    viewer_client.add_polyline("pl_swap", pts, colors=rgb_red)
+    # Polyline create is async (HTTP fetch); poll until the object exists.
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_client.query_scene()["objects"].get("pl_swap"):
+            break
+    else:
+        pytest.fail("polyline 'pl_swap' did not appear within 2s")
+    before = _read_polyline_first_color(viewer_page, "pl_swap")
+    assert abs(before["r"] - 1.0) < 1e-3
+    assert before["g"] < 0.01
+
+    rgb_blue = np.array([[0, 0, 1]] * 3, dtype=np.float32)
+    viewer_client.update_polyline_colors("pl_swap", rgb_blue)
+    # Color update is also async; poll for the swap to land.
+    for _ in range(40):
+        time.sleep(0.05)
+        c = _read_polyline_first_color(viewer_page, "pl_swap")
+        if c["b"] > 0.99 and c["r"] < 0.01:
+            break
+    else:
+        pytest.fail(f"color swap on 'pl_swap' did not land within 2s; last={c}")
+    after = _read_polyline_first_color(viewer_page, "pl_swap")
+    assert after["r"] < 0.01, after
+    assert abs(after["b"] - 1.0) < 1e-3, after
+
+
+@pytest.mark.browser
+def test_update_polyline_colors_flips_material_when_no_initial_colors(
+    viewer_client, viewer_page
+):
+    """If a polyline was created without per-vertex colors, the update must
+    flip the material into vertex-color mode so the new colors are used."""
+    pts = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    # Use a non-white base color: confirms the white-tint reset on flip.
+    # If the base color stayed red, the green vertex colors would render
+    # as black (red × green = 0).
+    viewer_client.add_polyline("pl_noinit", pts, color=0xFF0000)
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_client.query_scene()["objects"].get("pl_noinit"):
+            break
+    else:
+        pytest.fail("polyline 'pl_noinit' did not appear within 2s")
+    initial_vertex_colors = viewer_page.evaluate(
+        "(id) => window.threejsViewer._objects.get(id).material.vertexColors",
+        "pl_noinit",
+    )
+    assert initial_vertex_colors is False
+
+    rgb = np.array([[0, 1, 0], [0, 1, 0]], dtype=np.float32)
+    viewer_client.update_polyline_colors("pl_noinit", rgb)
+    for _ in range(40):
+        time.sleep(0.05)
+        flipped = viewer_page.evaluate(
+            "(id) => window.threejsViewer._objects.get(id).material.vertexColors",
+            "pl_noinit",
+        )
+        if flipped:
+            break
+    else:
+        pytest.fail("vertexColors flip on 'pl_noinit' did not land within 2s")
+    assert flipped is True
+    # Material's base color must be white after the flip — otherwise the
+    # vertex green would be tinted/zeroed by the prior 0xFF0000 base.
+    base_color = viewer_page.evaluate(
+        "(id) => window.threejsViewer._objects.get(id).material.color.getHex()",
+        "pl_noinit",
+    )
+    assert base_color == 0xFFFFFF, hex(base_color)
+    color = _read_polyline_first_color(viewer_page, "pl_noinit")
+    assert color["r"] < 0.01, color
+    assert abs(color["g"] - 1.0) < 1e-3, color
+
+
 # --- ViewHelper setViewport shim regression ---
 
 
