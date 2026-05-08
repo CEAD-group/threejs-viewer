@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.27
+
+### Fixes
+
+- **`set_scene_visibility` arriving during an async model load is no longer silently dropped.** `_setSceneVisibility` previously gated *both* the `obj.visible = visible` apply *and* the `_baselineVisibility.set(id, visible)` record on `_objects.has(id)` — so a visibility flip that landed while a GLB was still being fetched had no object to apply to and left no record. The loaded object then honoured only the original `add_object`'s `visible` field, staying at whatever its initial display state was until a page reload. Surfaced in ribweaver-web as a cell-switch bug: switching cells while on the Simulate step hid the larger fixtures (cabinets, consoles, big tables) until a reload, because their GLB fetches took longer than the visibility flip and the flip ran against an empty `_objects` map. Fix: `_setSceneVisibility` always records the desired baseline regardless of load state, and `_addObject` consults `_baselineVisibility` after the async load resolves and applies it *after* the message's `visible` field — so a `set_scene_visibility({id: true})` that arrived during the load now sticks once the GLB lands. `_deleteObject` prunes the entry for the deleted id so baselines don't accumulate for never-loaded or explicitly-deleted ids and don't shadow re-adds; the prune is safe relative to the async-load fix because `_addObject` reads the baseline into a local before its own internal `_deleteObject` call. Regression covered by `tests/test_browser.py::test_set_scene_visibility_before_add_is_honoured` and `::test_baseline_visibility_pruned_on_delete`.
+
 ## 0.0.26
 
 ### Viewer display and controls
