@@ -4249,6 +4249,15 @@ export class ThreeJSViewer {
             obj.userData.id = id;
             this._applyTransform(obj, objData.transform);
             if (objData.visible === false) obj.visible = false;
+            // If a `set_scene_visibility` arrived for this id BEFORE the
+            // async model load resolved, the desired baseline was
+            // recorded but had no object to apply to. Honour it now —
+            // otherwise the loaded object would stay at the message's
+            // initial `visible: false`, leaving large GLB fixtures
+            // (cabinets, consoles, …) permanently hidden after a
+            // cell switch.
+            const baseline = this._baselineVisibility.get(id);
+            if (baseline !== undefined) obj.visible = baseline;
             this._deleteObject(id);
             this._addToParentOrScene(obj, parentId);
             this._objects.set(id, obj);
@@ -4411,11 +4420,13 @@ export class ThreeJSViewer {
     /** @param {Record<string, boolean>} visibility */
     _setSceneVisibility(visibility) {
         for (const [id, visible] of Object.entries(visibility)) {
+            // Always remember the desired baseline, even when the id
+            // hasn't loaded yet. _addObject reads back from this map
+            // when an async model load resolves so a visibility request
+            // that arrived during the load isn't silently dropped.
+            this._baselineVisibility.set(id, visible);
             const obj = this._objects.get(id);
-            if (obj) {
-                obj.visible = visible;
-                this._baselineVisibility.set(id, visible);
-            }
+            if (obj) obj.visible = visible;
         }
     }
 
