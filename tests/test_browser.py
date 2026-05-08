@@ -63,6 +63,36 @@ def test_visibility(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_set_scene_visibility_before_add_is_honoured(viewer_client, viewer_page):
+    """set_scene_visibility for an id that doesn't exist yet must apply once the
+    object loads. Regression test for the race where a visibility flip arriving
+    during a slow GLB fetch was silently dropped, leaving the loaded object
+    permanently at its initial `visible` state (PR #47)."""
+    viewer_client.set_scene_visibility({"m1": False})
+    time.sleep(0.05)
+    viewer_client.add_box("m1")
+    time.sleep(0.1)
+    objects = viewer_client.query_scene()["objects"]
+    assert "m1" in objects
+    assert objects["m1"]["visible"] is False
+
+
+@pytest.mark.browser
+def test_baseline_visibility_pruned_on_delete(viewer_client, viewer_page):
+    """Deleting an object prunes its baseline so a later re-add isn't shadowed
+    by stale visibility from a prior set_scene_visibility."""
+    viewer_client.add_box("m1")
+    viewer_client.set_scene_visibility({"m1": False})
+    time.sleep(0.05)
+    viewer_client.delete("m1")
+    time.sleep(0.05)
+    viewer_client.add_box("m1")
+    time.sleep(0.1)
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["m1"]["visible"] is True
+
+
+@pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
     viewer_client.add_box("a")

@@ -4249,6 +4249,11 @@ export class ThreeJSViewer {
             obj.userData.id = id;
             this._applyTransform(obj, objData.transform);
             if (objData.visible === false) obj.visible = false;
+            // A set_scene_visibility that arrived during the async load
+            // recorded a baseline with no object to apply to; honour it
+            // now so the request isn't silently dropped behind objData.visible.
+            const baseline = this._baselineVisibility.get(id);
+            if (baseline !== undefined) obj.visible = baseline;
             this._deleteObject(id);
             this._addToParentOrScene(obj, parentId);
             this._objects.set(id, obj);
@@ -4357,6 +4362,11 @@ export class ThreeJSViewer {
         // cleared. Safe to call unconditionally — the load handlers'
         // post-delete insert path has already passed its own token check.
         this._claimLoadToken(id);
+        // Prune any recorded baseline so set_scene_visibility entries for
+        // never-loaded or explicitly-deleted ids don't accumulate. _addObject
+        // reads the baseline into a local before calling _deleteObject, so the
+        // race fix is unaffected.
+        this._baselineVisibility.delete(id);
         const obj = this._objects.get(id);
         if (obj) {
             /** @type {string[]} */
@@ -4411,11 +4421,13 @@ export class ThreeJSViewer {
     /** @param {Record<string, boolean>} visibility */
     _setSceneVisibility(visibility) {
         for (const [id, visible] of Object.entries(visibility)) {
+            // Always remember the desired baseline, even when the id
+            // hasn't loaded yet. _addObject reads back from this map
+            // when an async model load resolves so a visibility request
+            // that arrived during the load isn't silently dropped.
+            this._baselineVisibility.set(id, visible);
             const obj = this._objects.get(id);
-            if (obj) {
-                obj.visible = visible;
-                this._baselineVisibility.set(id, visible);
-            }
+            if (obj) obj.visible = visible;
         }
     }
 
