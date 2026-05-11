@@ -250,9 +250,7 @@ def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_pag
     """set_draw_range queued onto an in-flight binary load applies once the
     mesh lands."""
     # Two triangles (6 indices) so a 0.5 draw range produces a stable half-count.
-    positions = np.array(
-        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], dtype=np.float32
-    )
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], dtype=np.float32)
     indices = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
     viewer_client.add_mesh("dr", positions, indices)
     viewer_client.set_draw_range("dr", 0.5)
@@ -264,7 +262,9 @@ def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_pag
             dr = objects["dr"]["drawRange"]
             if abs(dr - 0.5) < 1e-3:
                 break
-    assert dr is not None and abs(dr - 0.5) < 1e-3, f"expected drawRange 0.5, got {dr!r}"
+    assert dr is not None and abs(dr - 0.5) < 1e-3, (
+        f"expected drawRange 0.5, got {dr!r}"
+    )
 
 
 @pytest.mark.browser
