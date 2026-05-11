@@ -3233,6 +3233,13 @@ export class ThreeJSViewer {
         // from letting stale data replace newer geometry when the same id
         // is re-added rapidly.
         this._loadTokens = new Map();
+        // Per-id in-flight load deferred. Set synchronously when a binary
+        // loader case branch starts; resolved when _objects.set(id, obj)
+        // lands; rejected on error, stale token, or delete-mid-load.
+        // Read-side handlers that miss _objects consult this map and defer
+        // onto it via _withObject().
+        /** @type {Map<string, {promise: Promise<void>, resolve: () => void, reject: (err: any) => void}>} */
+        this._inflightLoads = new Map();
         this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
@@ -4203,8 +4210,23 @@ export class ThreeJSViewer {
     // (primitive | model | polyline | mesh | tube | group); tightening it
     // requires splitting the dispatch into per-kind helpers or a tagged-union
     // typedef. Out of scope for the drive-by type tighten.
-    /** @param {string} id @param {any} objData @param {string} [parentId] */
-    async _addObject(id, objData, parentId) {
+    /**
+     * @param {string} id
+     * @param {any} objData
+     * @param {string} [parentId]
+     * @param {{ preserveInflight?: boolean }} [deleteOpts]
+     *   Forwarded to the internal `_deleteObject` call used to clear any
+     *   prior object at this id. Binary loaders pass `preserveInflight: true`
+     *   so the in-flight deferred they just installed survives the cleanup.
+     * @returns {Promise<any>}
+     *   The registered object, or `undefined` if this call did not register
+     *   (unknown format, stale token, model load threw). Callers that need
+     *   to verify *their* load did the registration — `add_model_binary`,
+     *   which would otherwise stamp the old blobUrl onto a newer same-id
+     *   load that won the await race — must read the return rather than
+     *   `_objects.get(id)`.
+     */
+    async _addObject(id, objData, parentId, deleteOpts) {
         let obj;
         const token = this._claimLoadToken(id);
 
@@ -4217,13 +4239,13 @@ export class ThreeJSViewer {
             const loader = this._loaders[/** @type {keyof typeof this._loaders} */ (format)];
             if (!loader) {
                 console.error(`Unknown format: ${format}`);
-                return;
+                return undefined;
             }
             try {
                 const result = await this._loadModel(loader, objData.model, format, objData.yUp === true);
                 if (!this._isLoadTokenCurrent(id, token)) {
                     console.log(`Discarding stale model load for '${id}'`);
-                    return;
+                    return undefined;
                 }
                 obj = result.obj;
                 if (result.animations.length > 0) {
@@ -4240,26 +4262,26 @@ export class ThreeJSViewer {
                 }
             } catch (e) {
                 console.error(`Failed to load model: ${e}`);
-                return;
+                return undefined;
             }
         }
 
-        if (obj) {
-            obj.name = id;
-            obj.userData.id = id;
-            this._applyTransform(obj, objData.transform);
-            if (objData.visible === false) obj.visible = false;
-            // A set_scene_visibility that arrived during the async load
-            // recorded a baseline with no object to apply to; honour it
-            // now so the request isn't silently dropped behind objData.visible.
-            const baseline = this._baselineVisibility.get(id);
-            if (baseline !== undefined) obj.visible = baseline;
-            this._deleteObject(id);
-            this._addToParentOrScene(obj, parentId);
-            this._objects.set(id, obj);
-            this._objGeneration++;
-            if (this._clipEnabled) this._applyClipToObject(obj);
-        }
+        if (!obj) return undefined;
+        obj.name = id;
+        obj.userData.id = id;
+        this._applyTransform(obj, objData.transform);
+        if (objData.visible === false) obj.visible = false;
+        // A set_scene_visibility that arrived during the async load
+        // recorded a baseline with no object to apply to; honour it
+        // now so the request isn't silently dropped behind objData.visible.
+        const baseline = this._baselineVisibility.get(id);
+        if (baseline !== undefined) obj.visible = baseline;
+        this._deleteObject(id, deleteOpts);
+        this._addToParentOrScene(obj, parentId);
+        this._objects.set(id, obj);
+        this._objGeneration++;
+        if (this._clipEnabled) this._applyClipToObject(obj);
+        return obj;
     }
 
     /**
@@ -4355,13 +4377,82 @@ export class ThreeJSViewer {
         return this._loadTokens.get(id) === token;
     }
 
-    /** @param {string} id */
-    _deleteObject(id) {
+    /**
+     * Create a deferred promise with externally-callable resolve/reject.
+     * Used by binary loaders to expose load completion to read-side handlers
+     * that arrive while the load is still in flight.
+     */
+    _makeDeferred() {
+        /** @type {() => void} */
+        let resolve;
+        /** @type {(err: any) => void} */
+        let reject;
+        const promise = /** @type {Promise<void>} */ (new Promise((res, rej) => {
+            resolve = res;
+            reject = rej;
+        }));
+        // @ts-ignore — resolve/reject are assigned synchronously inside the executor
+        return { promise, resolve, reject };
+    }
+
+    /**
+     * Apply fn to the object with this id. If it exists, run synchronously.
+     * If a binary load is in flight for this id, queue fn onto its
+     * completion. Otherwise silent no-op (matches today's behaviour for
+     * genuinely missing ids). Used at the WebSocket case-branch boundary
+     * so read-side ops issued during a binary load are not dropped.
+     * @param {string} id
+     * @param {string} opName
+     * @param {(obj: any) => void} fn
+     */
+    _withObject(id, opName, fn) {
+        // Catch handler exceptions at the dispatch boundary: an uncaught
+        // throw on the deferred path would surface as an unhandled rejection
+        // (the .then success branch rejects the chain), and on the sync
+        // path it would bubble up into the WebSocket onmessage handler.
+        const apply = (/** @type {any} */ target) => {
+            try { fn(target); }
+            catch (e) { console.error(`${opName}: '${id}' handler threw`, e); }
+        };
+        const obj = this._objects.get(id);
+        if (obj) { apply(obj); return; }
+        const inflight = this._inflightLoads.get(id);
+        if (!inflight) return;
+        inflight.promise.then(
+            () => {
+                const o = this._objects.get(id);
+                if (o) apply(o);
+            },
+            (err) => {
+                console.warn(`${opName}: '${id}' load failed/cancelled, dropping op`, err);
+            },
+        );
+    }
+
+    /**
+     * @param {string} id
+     * @param {{ preserveInflight?: boolean }} [opts]
+     *   Pass `preserveInflight: true` from inside a binary loader's IIFE
+     *   when it pre-clears a prior object with the same id — otherwise the
+     *   loader would reject its own in-flight deferred and break queued
+     *   read-side ops for the load that just installed it.
+     */
+    _deleteObject(id, opts) {
         // Invalidate any in-flight async add/fetch for this id so a late
         // completion can't re-add an object that was explicitly deleted or
         // cleared. Safe to call unconditionally — the load handlers'
         // post-delete insert path has already passed its own token check.
         this._claimLoadToken(id);
+        // Also drop any read-side ops queued onto an in-flight load: reject
+        // the deferred so _withObject's fail-branch fires a single warn per
+        // queued op rather than letting them silently disappear.
+        if (!opts || !opts.preserveInflight) {
+            const pendingLoad = this._inflightLoads.get(id);
+            if (pendingLoad) {
+                pendingLoad.reject(new Error('deleted'));
+                this._inflightLoads.delete(id);
+            }
+        }
         // Prune any recorded baseline so set_scene_visibility entries for
         // never-loaded or explicitly-deleted ids don't accumulate. _addObject
         // reads the baseline into a local before calling _deleteObject, so the
@@ -5333,13 +5424,13 @@ export class ThreeJSViewer {
                         await this._addObject(data.id, data.object, data.parent);
                         break;
                     case 'update_transform':
-                        this._updateTransform(data.id, data.transform);
+                        this._withObject(data.id, 'update_transform', (obj) => this._applyTransform(obj, data.transform));
                         break;
                     case 'delete_object':
                         this._deleteObject(data.id);
                         break;
                     case 'set_visibility':
-                        this._setVisibility(data.id, data.visible);
+                        this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
                         break;
                     case 'set_scene_visibility':
                         this._setSceneVisibility(data.visibility);
@@ -5351,19 +5442,18 @@ export class ThreeJSViewer {
                         this._batchUpdate(data.transforms);
                         break;
                     case 'set_color': {
-                        const colorObj = this._objects.get(data.id);
-                        if (colorObj) {
+                        this._withObject(data.id, 'set_color', (colorObj) => {
                             colorObj.traverse(/** @param {any} child */ (child) => {
                                 if (!child.material) return;
                                 const mats = Array.isArray(child.material) ? child.material : [child.material];
                                 for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
                             });
                             if (data.opacity != null) applyOpacity(colorObj, data.opacity);
-                        }
+                        });
                         break;
                     }
                     case 'set_opacity':
-                        this._setOpacity(data.id, data.opacity);
+                        this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
                         break;
                     case 'list_objects':
                         this._ws.send(JSON.stringify({
@@ -5527,30 +5617,50 @@ export class ThreeJSViewer {
                     case 'add_model_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
+                        const deferred = this._makeDeferred();
+                        // Suppress unhandled-rejection noise — _withObject is
+                        // the only consumer and queued ops attach their own
+                        // .then. Loads with no queued ops would otherwise
+                        // surface their stale/deleted rejection.
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const meshBytes = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale model fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const blob = new Blob([meshBytes]);
                                 const blobUrl = URL.createObjectURL(blob);
                                 console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
-                                await this._addObject(data.id, {
+                                // Read the registered object from _addObject's
+                                // return rather than _objects.get(id) — under a
+                                // delete-and-re-add race the latter could return
+                                // a *newer* same-id object that some other load
+                                // registered while we awaited _loadModel, and we
+                                // would then stamp our stale blobUrl onto it.
+                                const obj = await this._addObject(data.id, {
                                     model: blobUrl,
                                     format: data.format || 'stl',
                                     yUp: data.yUp === true,
-                                }, data.parent);
-                                const obj = this._objects.get(data.id);
+                                }, data.parent, { preserveInflight: true });
                                 if (obj) {
                                     obj.userData.blobUrl = blobUrl;
                                     if (data.transform) this._updateTransform(data.id, data.transform);
+                                    deferred.resolve();
+                                } else {
+                                    deferred.reject(new Error('stale'));
                                 }
                             } catch (e) {
                                 console.error(`Error loading model via HTTP:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
@@ -5560,16 +5670,21 @@ export class ThreeJSViewer {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale polyline fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 if (!this._isLoadTokenCurrent(data.id, loadToken)) {
                                     console.log(`Discarding stale polyline fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const rawData = new Uint8Array(buffer);
@@ -5617,89 +5732,105 @@ export class ThreeJSViewer {
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
                                 line.userData.maxInstanceCount = numPoints - 1;
-                                this._deleteObject(data.id);
+                                this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
                                 this._objGeneration++;
+                                deferred.resolve();
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
                         break;
                     }
                     case 'update_polyline_colors': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale polyline color fetch');
-                                    return;
-                                }
-                                const obj = this._objects.get(data.id);
-                                if (!obj || !obj.userData.isPolyline) {
-                                    console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
-                                    return;
-                                }
-                                const numPoints = data.numPoints;
-                                // userData.maxInstanceCount = numPoints - 1 (one
-                                // segment per pair of points), so vertex count
-                                // is maxInstanceCount + 1. A length mismatch
-                                // would desync the new color attributes from
-                                // the existing positions.
-                                const expected = obj.userData.maxInstanceCount + 1;
-                                if (numPoints !== expected) {
-                                    console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
-                                    return;
-                                }
-                                if (buffer.byteLength < numPoints * 3) {
-                                    console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
-                                    return;
-                                }
-                                const bytes = new Uint8Array(buffer, 0, numPoints * 3);
-                                const colorData = new Float32Array(numPoints * 3);
-                                for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                    colorData[i] = bytes[i] / 255;
-                                }
-                                // setColors rebuilds the instanceColorStart/End
-                                // instanced attributes on the LineGeometry.
-                                obj.geometry.setColors(colorData);
-                                // If the polyline was created without vertex colors,
-                                // the material is in flat-color mode — flip it.
-                                // Also reset the base color to white so vertex
-                                // colors aren't tinted/multiplied by the prior
-                                // flat color (e.g. red base × green vertex = 0).
-                                if (!obj.material.vertexColors) {
-                                    obj.material.vertexColors = true;
-                                    obj.material.color.setHex(0xffffff);
-                                    obj.material.needsUpdate = true;
-                                }
-                            } catch (e) {
-                                console.error(`Error updating polyline colors:`, e);
-                            } finally {
-                                this._onFetchEnd();
+                        this._withObject(data.id, 'update_polyline_colors', (target) => {
+                            if (!target.userData.isPolyline) {
+                                console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                return;
                             }
-                        })();
+                            this._onFetchStart();
+                            const capturedScene = this._sceneGeneration;
+                            (async () => {
+                                try {
+                                    const resp = await fetch(data.blob_url);
+                                    const buffer = await resp.arrayBuffer();
+                                    if (this._sceneGeneration !== capturedScene) {
+                                        console.log('Discarding stale polyline color fetch');
+                                        return;
+                                    }
+                                    const obj = this._objects.get(data.id);
+                                    if (!obj || !obj.userData.isPolyline) {
+                                        console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                        return;
+                                    }
+                                    const numPoints = data.numPoints;
+                                    // userData.maxInstanceCount = numPoints - 1 (one
+                                    // segment per pair of points), so vertex count
+                                    // is maxInstanceCount + 1. A length mismatch
+                                    // would desync the new color attributes from
+                                    // the existing positions.
+                                    const expected = obj.userData.maxInstanceCount + 1;
+                                    if (numPoints !== expected) {
+                                        console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
+                                        return;
+                                    }
+                                    if (buffer.byteLength < numPoints * 3) {
+                                        console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
+                                        return;
+                                    }
+                                    const bytes = new Uint8Array(buffer, 0, numPoints * 3);
+                                    const colorData = new Float32Array(numPoints * 3);
+                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                        colorData[i] = bytes[i] / 255;
+                                    }
+                                    // setColors rebuilds the instanceColorStart/End
+                                    // instanced attributes on the LineGeometry.
+                                    obj.geometry.setColors(colorData);
+                                    // If the polyline was created without vertex colors,
+                                    // the material is in flat-color mode — flip it.
+                                    // Also reset the base color to white so vertex
+                                    // colors aren't tinted/multiplied by the prior
+                                    // flat color (e.g. red base × green vertex = 0).
+                                    if (!obj.material.vertexColors) {
+                                        obj.material.vertexColors = true;
+                                        obj.material.color.setHex(0xffffff);
+                                        obj.material.needsUpdate = true;
+                                    }
+                                } catch (e) {
+                                    console.error(`Error updating polyline colors:`, e);
+                                } finally {
+                                    this._onFetchEnd();
+                                }
+                            })();
+                        });
                         break;
                     }
                     case 'add_mesh_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale mesh fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 if (!this._isLoadTokenCurrent(data.id, loadToken)) {
                                     console.log(`Discarding stale mesh fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const nv = data.numVertices;
@@ -5753,15 +5884,20 @@ export class ThreeJSViewer {
                                 mesh.userData.id = data.id;
                                 mesh.userData.isMesh = true;
                                 mesh.userData.totalIndexCount = ni;
-                                this._deleteObject(data.id);
+                                this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
                                 if (data.transform) this._applyTransform(mesh, data.transform);
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
+                                deferred.resolve();
                             } catch (e) {
                                 console.error(`Error creating mesh:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
@@ -5771,16 +5907,21 @@ export class ThreeJSViewer {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale parametric tube fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 if (!this._isLoadTokenCurrent(data.id, loadToken)) {
                                     console.log(`Discarding stale parametric tube fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const n = data.numSpinePoints;
@@ -5936,11 +6077,12 @@ export class ThreeJSViewer {
                                 // 'init' first would let the trailing 'dispose' that
                                 // _deleteObject queues for the old tubeLOD clobber the
                                 // new tube's worker state (same tubeId).
-                                this._deleteObject(data.id);
+                                this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
                                 if (data.transform) this._applyTransform(mesh, data.transform);
+                                deferred.resolve();
                                 if (tubeLOD) {
                                     mesh.userData.tubeLOD = tubeLOD;
                                     // Register original arrays with LOD worker
@@ -6000,166 +6142,176 @@ export class ThreeJSViewer {
                                 console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                             } catch (e) {
                                 console.error(`Error creating parametric_tube:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
                         break;
                     }
                     case 'update_parametric_tube_colors': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale parametric tube color fetch');
-                                    return;
-                                }
-                                const obj = this._objects.get(data.id);
-                                if (!obj || !obj.userData.isParametricTube) {
-                                    console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
-                                    return;
-                                }
-                                const lod = obj.userData.tubeLOD;
-                                // Color data from Python is always for the original spine count
-                                const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
-                                const nCs = obj.userData.tubeNCs;
-                                if (buffer.byteLength < nOrig * 4) {
-                                    console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
-                                    return;
-                                }
-                                const packed = new Uint32Array(buffer, 0, nOrig);
-                                // Decode per-ring colors (full original count)
-                                const rc = new Float32Array(nOrig * 3);
-                                for (let i = 0; i < nOrig; i++) {
-                                    const c = packed[i];
-                                    rc[i * 3]     = ((c >> 16) & 0xff) / 255;
-                                    rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
-                                    rc[i * 3 + 2] = (c & 0xff) / 255;
-                                }
-
-                                // When LOD is active, store full colors and rebuild with reduced subset
-                                if (lod && lod.keptIndices) {
-                                    lod.originalRingColors = new Float32Array(rc);
-                                    lod.colorVersion = (lod.colorVersion || 0) + 1;
-                                    this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                    // Extract reduced colors for current LOD level
-                                    const nRed = lod.keptIndices.length;
-                                    const redRc = new Float32Array(nRed * 3);
-                                    const redPacked = new Uint32Array(nRed);
-                                    for (let i = 0; i < nRed; i++) {
-                                        const oi = lod.keptIndices[i];
-                                        redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
-                                        redPacked[i] = packed[oi];
+                        this._withObject(data.id, 'update_parametric_tube_colors', (target) => {
+                            if (!target.userData.isParametricTube) {
+                                console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                return;
+                            }
+                            this._onFetchStart();
+                            const capturedScene = this._sceneGeneration;
+                            (async () => {
+                                try {
+                                    const resp = await fetch(data.blob_url);
+                                    const buffer = await resp.arrayBuffer();
+                                    if (this._sceneGeneration !== capturedScene) {
+                                        console.log('Discarding stale parametric tube color fetch');
+                                        return;
                                     }
-                                    // Update geometry colors for reduced mesh
-                                    const n = nRed;
-                                    // Restore frontier ring BEFORE writing new colors
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) restoreFrontierRing(obj);
-                                    // Fill cap dome vertices with a single color
-                                    /**
-                                     * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                     * @param {number} baseVert
-                                     * @param {number} capVerts
-                                     * @param {number} r
-                                     * @param {number} g
-                                     * @param {number} b
-                                     */
-                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                        for (let j = 0; j < capVerts; j++) {
-                                            arr[(baseVert + j) * 3]     = r;
-                                            arr[(baseVert + j) * 3 + 1] = g;
-                                            arr[(baseVert + j) * 3 + 2] = b;
-                                        }
+                                    const obj = this._objects.get(data.id);
+                                    if (!obj || !obj.userData.isParametricTube) {
+                                        console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                        return;
                                     }
-                                    const posCount = obj.geometry.getAttribute('position').count;
-                                    const capVertsPerCap = (posCount - n * nCs) / 2;
-                                    const startCapBaseVert = n * nCs;
-                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                    const lr = (n - 1) * 3;
-                                    const existing = obj.geometry.getAttribute('color');
-                                    if (existing) {
-                                        expandRingColors(redPacked, n, nCs, existing.array);
-                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                        existing.clearUpdateRanges();
-                                        existing.needsUpdate = true;
-                                    } else {
-                                        const allColors = new Float32Array(posCount * 3);
-                                        expandRingColors(redPacked, n, nCs, allColors);
-                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                    const lod = obj.userData.tubeLOD;
+                                    // Color data from Python is always for the original spine count
+                                    const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
+                                    const nCs = obj.userData.tubeNCs;
+                                    if (buffer.byteLength < nOrig * 4) {
+                                        console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
+                                        return;
                                     }
-                                    obj.material.vertexColors = true;
-                                    obj.material.color.setHex(0xffffff);
-                                    obj.material.needsUpdate = true;
-                                    obj.userData.tubeHasColors = true;
-                                    obj.userData._colorFullUploadNeeded = true;
-                                    if (md) md.ringColors = redRc;
-                                } else {
-                                    // No LOD active — original path
-                                    if (lod) {
+                                    const packed = new Uint32Array(buffer, 0, nOrig);
+                                    // Decode per-ring colors (full original count)
+                                    const rc = new Float32Array(nOrig * 3);
+                                    for (let i = 0; i < nOrig; i++) {
+                                        const c = packed[i];
+                                        rc[i * 3]     = ((c >> 16) & 0xff) / 255;
+                                        rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                        rc[i * 3 + 2] = (c & 0xff) / 255;
+                                    }
+    
+                                    // When LOD is active, store full colors and rebuild with reduced subset
+                                    if (lod && lod.keptIndices) {
                                         lod.originalRingColors = new Float32Array(rc);
                                         lod.colorVersion = (lod.colorVersion || 0) + 1;
                                         this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                    }
-                                    const n = nOrig;
-                                    // Fill cap dome vertices with a single color
-                                    /**
-                                     * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                     * @param {number} baseVert
-                                     * @param {number} capVerts
-                                     * @param {number} r
-                                     * @param {number} g
-                                     * @param {number} b
-                                     */
-                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                        for (let j = 0; j < capVerts; j++) {
-                                            arr[(baseVert + j) * 3]     = r;
-                                            arr[(baseVert + j) * 3 + 1] = g;
-                                            arr[(baseVert + j) * 3 + 2] = b;
+                                        // Extract reduced colors for current LOD level
+                                        const nRed = lod.keptIndices.length;
+                                        const redRc = new Float32Array(nRed * 3);
+                                        const redPacked = new Uint32Array(nRed);
+                                        for (let i = 0; i < nRed; i++) {
+                                            const oi = lod.keptIndices[i];
+                                            redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                                            redPacked[i] = packed[oi];
                                         }
-                                    }
-                                    const posCount = obj.geometry.getAttribute('position').count;
-                                    const capVertsPerCap = (posCount - n * nCs) / 2;
-                                    const startCapBaseVert = n * nCs;
-                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                    const lr = (n - 1) * 3;
-                                    // Restore frontier ring BEFORE writing new colors so
-                                    // the stale savedRingColors don't overwrite the update.
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) restoreFrontierRing(obj);
-                                    const existing = obj.geometry.getAttribute('color');
-                                    if (existing) {
-                                        expandRingColors(packed, n, nCs, existing.array);
-                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                        existing.clearUpdateRanges();
-                                        existing.needsUpdate = true;
+                                        // Update geometry colors for reduced mesh
+                                        const n = nRed;
+                                        // Restore frontier ring BEFORE writing new colors
+                                        const md = obj.userData.tubeMorphData;
+                                        if (md) restoreFrontierRing(obj);
+                                        // Fill cap dome vertices with a single color
+                                        /**
+                                         * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                         * @param {number} baseVert
+                                         * @param {number} capVerts
+                                         * @param {number} r
+                                         * @param {number} g
+                                         * @param {number} b
+                                         */
+                                        function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                            for (let j = 0; j < capVerts; j++) {
+                                                arr[(baseVert + j) * 3]     = r;
+                                                arr[(baseVert + j) * 3 + 1] = g;
+                                                arr[(baseVert + j) * 3 + 2] = b;
+                                            }
+                                        }
+                                        const posCount = obj.geometry.getAttribute('position').count;
+                                        const capVertsPerCap = (posCount - n * nCs) / 2;
+                                        const startCapBaseVert = n * nCs;
+                                        const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                        const lr = (n - 1) * 3;
+                                        const existing = obj.geometry.getAttribute('color');
+                                        if (existing) {
+                                            expandRingColors(redPacked, n, nCs, existing.array);
+                                            fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                            fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                            existing.clearUpdateRanges();
+                                            existing.needsUpdate = true;
+                                        } else {
+                                            const allColors = new Float32Array(posCount * 3);
+                                            expandRingColors(redPacked, n, nCs, allColors);
+                                            fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                            fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                            obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                        }
+                                        obj.material.vertexColors = true;
+                                        obj.material.color.setHex(0xffffff);
+                                        obj.material.needsUpdate = true;
+                                        obj.userData.tubeHasColors = true;
+                                        obj.userData._colorFullUploadNeeded = true;
+                                        if (md) md.ringColors = redRc;
                                     } else {
-                                        const allColors = new Float32Array(posCount * 3);
-                                        expandRingColors(packed, n, nCs, allColors);
-                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                        // No LOD active — original path
+                                        if (lod) {
+                                            lod.originalRingColors = new Float32Array(rc);
+                                            lod.colorVersion = (lod.colorVersion || 0) + 1;
+                                            this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
+                                        }
+                                        const n = nOrig;
+                                        // Fill cap dome vertices with a single color
+                                        /**
+                                         * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                         * @param {number} baseVert
+                                         * @param {number} capVerts
+                                         * @param {number} r
+                                         * @param {number} g
+                                         * @param {number} b
+                                         */
+                                        function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                            for (let j = 0; j < capVerts; j++) {
+                                                arr[(baseVert + j) * 3]     = r;
+                                                arr[(baseVert + j) * 3 + 1] = g;
+                                                arr[(baseVert + j) * 3 + 2] = b;
+                                            }
+                                        }
+                                        const posCount = obj.geometry.getAttribute('position').count;
+                                        const capVertsPerCap = (posCount - n * nCs) / 2;
+                                        const startCapBaseVert = n * nCs;
+                                        const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                        const lr = (n - 1) * 3;
+                                        // Restore frontier ring BEFORE writing new colors so
+                                        // the stale savedRingColors don't overwrite the update.
+                                        const md = obj.userData.tubeMorphData;
+                                        if (md) restoreFrontierRing(obj);
+                                        const existing = obj.geometry.getAttribute('color');
+                                        if (existing) {
+                                            expandRingColors(packed, n, nCs, existing.array);
+                                            fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                            fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                            existing.clearUpdateRanges();
+                                            existing.needsUpdate = true;
+                                        } else {
+                                            const allColors = new Float32Array(posCount * 3);
+                                            expandRingColors(packed, n, nCs, allColors);
+                                            fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                            fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                            obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                        }
+                                        obj.material.vertexColors = true;
+                                        obj.material.color.setHex(0xffffff);
+                                        obj.material.needsUpdate = true;
+                                        obj.userData.tubeHasColors = true;
+                                        obj.userData._colorFullUploadNeeded = true;
+                                        if (md) md.ringColors = rc;
                                     }
-                                    obj.material.vertexColors = true;
-                                    obj.material.color.setHex(0xffffff);
-                                    obj.material.needsUpdate = true;
-                                    obj.userData.tubeHasColors = true;
-                                    obj.userData._colorFullUploadNeeded = true;
-                                    if (md) md.ringColors = rc;
+                                } catch (e) {
+                                    console.error(`Error updating parametric_tube colors:`, e);
+                                } finally {
+                                    this._onFetchEnd();
                                 }
-                            } catch (e) {
-                                console.error(`Error updating parametric_tube colors:`, e);
-                            } finally {
-                                this._onFetchEnd();
-                            }
-                        })();
+                            })();
+                        });
                         break;
                     }
                     case 'register_toolpath_group': {
@@ -6188,10 +6340,10 @@ export class ThreeJSViewer {
                         }
                         break;
                     case 'set_clip_time':
-                        this._setClipTime(data.id, data.time);
+                        this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
                         break;
                     case 'set_draw_range':
-                        this._setDrawRange(data.id, data.value);
+                        this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
                         break;
                     case 'set_clipping_plane': {
                         this._clipEnabled = true;
