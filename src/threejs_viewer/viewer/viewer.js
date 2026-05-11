@@ -3233,6 +3233,13 @@ export class ThreeJSViewer {
         // from letting stale data replace newer geometry when the same id
         // is re-added rapidly.
         this._loadTokens = new Map();
+        // Per-id in-flight load deferred. Set synchronously when a binary
+        // loader case branch starts; resolved when _objects.set(id, obj)
+        // lands; rejected on error, stale token, or delete-mid-load.
+        // Read-side handlers that miss _objects consult this map and defer
+        // onto it via _withObject().
+        /** @type {Map<string, {promise: Promise<void>, resolve: () => void, reject: (err: any) => void}>} */
+        this._inflightLoads = new Map();
         this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
@@ -4203,8 +4210,16 @@ export class ThreeJSViewer {
     // (primitive | model | polyline | mesh | tube | group); tightening it
     // requires splitting the dispatch into per-kind helpers or a tagged-union
     // typedef. Out of scope for the drive-by type tighten.
-    /** @param {string} id @param {any} objData @param {string} [parentId] */
-    async _addObject(id, objData, parentId) {
+    /**
+     * @param {string} id
+     * @param {any} objData
+     * @param {string} [parentId]
+     * @param {{ preserveInflight?: boolean }} [deleteOpts]
+     *   Forwarded to the internal `_deleteObject` call used to clear any
+     *   prior object at this id. Binary loaders pass `preserveInflight: true`
+     *   so the in-flight deferred they just installed survives the cleanup.
+     */
+    async _addObject(id, objData, parentId, deleteOpts) {
         let obj;
         const token = this._claimLoadToken(id);
 
@@ -4254,7 +4269,7 @@ export class ThreeJSViewer {
             // now so the request isn't silently dropped behind objData.visible.
             const baseline = this._baselineVisibility.get(id);
             if (baseline !== undefined) obj.visible = baseline;
-            this._deleteObject(id);
+            this._deleteObject(id, deleteOpts);
             this._addToParentOrScene(obj, parentId);
             this._objects.set(id, obj);
             this._objGeneration++;
@@ -4355,13 +4370,74 @@ export class ThreeJSViewer {
         return this._loadTokens.get(id) === token;
     }
 
-    /** @param {string} id */
-    _deleteObject(id) {
+    /**
+     * Create a deferred promise with externally-callable resolve/reject.
+     * Used by binary loaders to expose load completion to read-side handlers
+     * that arrive while the load is still in flight.
+     */
+    _makeDeferred() {
+        /** @type {() => void} */
+        let resolve;
+        /** @type {(err: any) => void} */
+        let reject;
+        const promise = /** @type {Promise<void>} */ (new Promise((res, rej) => {
+            resolve = res;
+            reject = rej;
+        }));
+        // @ts-ignore — resolve/reject are assigned synchronously inside the executor
+        return { promise, resolve, reject };
+    }
+
+    /**
+     * Apply fn to the object with this id. If it exists, run synchronously.
+     * If a binary load is in flight for this id, queue fn onto its
+     * completion. Otherwise silent no-op (matches today's behaviour for
+     * genuinely missing ids). Used at the WebSocket case-branch boundary
+     * so read-side ops issued during a binary load are not dropped.
+     * @param {string} id
+     * @param {string} opName
+     * @param {(obj: any) => void} fn
+     */
+    _withObject(id, opName, fn) {
+        const obj = this._objects.get(id);
+        if (obj) { fn(obj); return; }
+        const inflight = this._inflightLoads.get(id);
+        if (!inflight) return;
+        inflight.promise.then(
+            () => {
+                const o = this._objects.get(id);
+                if (o) fn(o);
+            },
+            (err) => {
+                console.warn(`${opName}: '${id}' load failed/cancelled, dropping op`, err);
+            },
+        );
+    }
+
+    /**
+     * @param {string} id
+     * @param {{ preserveInflight?: boolean }} [opts]
+     *   Pass `preserveInflight: true` from inside a binary loader's IIFE
+     *   when it pre-clears a prior object with the same id — otherwise the
+     *   loader would reject its own in-flight deferred and break queued
+     *   read-side ops for the load that just installed it.
+     */
+    _deleteObject(id, opts) {
         // Invalidate any in-flight async add/fetch for this id so a late
         // completion can't re-add an object that was explicitly deleted or
         // cleared. Safe to call unconditionally — the load handlers'
         // post-delete insert path has already passed its own token check.
         this._claimLoadToken(id);
+        // Also drop any read-side ops queued onto an in-flight load: reject
+        // the deferred so _withObject's fail-branch fires a single warn per
+        // queued op rather than letting them silently disappear.
+        if (!opts || !opts.preserveInflight) {
+            const pendingLoad = this._inflightLoads.get(id);
+            if (pendingLoad) {
+                pendingLoad.reject(new Error('deleted'));
+                this._inflightLoads.delete(id);
+            }
+        }
         // Prune any recorded baseline so set_scene_visibility entries for
         // never-loaded or explicitly-deleted ids don't accumulate. _addObject
         // reads the baseline into a local before calling _deleteObject, so the
@@ -5333,13 +5409,13 @@ export class ThreeJSViewer {
                         await this._addObject(data.id, data.object, data.parent);
                         break;
                     case 'update_transform':
-                        this._updateTransform(data.id, data.transform);
+                        this._withObject(data.id, 'update_transform', (obj) => this._applyTransform(obj, data.transform));
                         break;
                     case 'delete_object':
                         this._deleteObject(data.id);
                         break;
                     case 'set_visibility':
-                        this._setVisibility(data.id, data.visible);
+                        this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
                         break;
                     case 'set_scene_visibility':
                         this._setSceneVisibility(data.visibility);
@@ -5351,19 +5427,18 @@ export class ThreeJSViewer {
                         this._batchUpdate(data.transforms);
                         break;
                     case 'set_color': {
-                        const colorObj = this._objects.get(data.id);
-                        if (colorObj) {
+                        this._withObject(data.id, 'set_color', (colorObj) => {
                             colorObj.traverse(/** @param {any} child */ (child) => {
                                 if (!child.material) return;
                                 const mats = Array.isArray(child.material) ? child.material : [child.material];
                                 for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
                             });
                             if (data.opacity != null) applyOpacity(colorObj, data.opacity);
-                        }
+                        });
                         break;
                     }
                     case 'set_opacity':
-                        this._setOpacity(data.id, data.opacity);
+                        this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
                         break;
                     case 'list_objects':
                         this._ws.send(JSON.stringify({
@@ -5527,12 +5602,20 @@ export class ThreeJSViewer {
                     case 'add_model_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
+                        const deferred = this._makeDeferred();
+                        // Suppress unhandled-rejection noise — _withObject is
+                        // the only consumer and queued ops attach their own
+                        // .then. Loads with no queued ops would otherwise
+                        // surface their stale/deleted rejection.
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const meshBytes = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale model fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const blob = new Blob([meshBytes]);
@@ -5542,15 +5625,22 @@ export class ThreeJSViewer {
                                     model: blobUrl,
                                     format: data.format || 'stl',
                                     yUp: data.yUp === true,
-                                }, data.parent);
+                                }, data.parent, { preserveInflight: true });
                                 const obj = this._objects.get(data.id);
                                 if (obj) {
                                     obj.userData.blobUrl = blobUrl;
                                     if (data.transform) this._updateTransform(data.id, data.transform);
+                                    deferred.resolve();
+                                } else {
+                                    deferred.reject(new Error('stale'));
                                 }
                             } catch (e) {
                                 console.error(`Error loading model via HTTP:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
@@ -5560,16 +5650,21 @@ export class ThreeJSViewer {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale polyline fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 if (!this._isLoadTokenCurrent(data.id, loadToken)) {
                                     console.log(`Discarding stale polyline fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const rawData = new Uint8Array(buffer);
@@ -5617,19 +5712,29 @@ export class ThreeJSViewer {
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
                                 line.userData.maxInstanceCount = numPoints - 1;
-                                this._deleteObject(data.id);
+                                this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
                                 this._objGeneration++;
+                                deferred.resolve();
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
                         break;
                     }
                     case 'update_polyline_colors': {
+                        this._withObject(data.id, 'update_polyline_colors', (target) => {
+                        if (!target.userData.isPolyline) {
+                            console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                            return;
+                        }
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         (async () => {
@@ -5684,22 +5789,28 @@ export class ThreeJSViewer {
                                 this._onFetchEnd();
                             }
                         })();
+                        });
                         break;
                     }
                     case 'add_mesh_binary': {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale mesh fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 if (!this._isLoadTokenCurrent(data.id, loadToken)) {
                                     console.log(`Discarding stale mesh fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const nv = data.numVertices;
@@ -5753,15 +5864,20 @@ export class ThreeJSViewer {
                                 mesh.userData.id = data.id;
                                 mesh.userData.isMesh = true;
                                 mesh.userData.totalIndexCount = ni;
-                                this._deleteObject(data.id);
+                                this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
                                 if (data.transform) this._applyTransform(mesh, data.transform);
                                 console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
+                                deferred.resolve();
                             } catch (e) {
                                 console.error(`Error creating mesh:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
@@ -5771,16 +5887,21 @@ export class ThreeJSViewer {
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
                         (async () => {
                             try {
                                 const resp = await fetch(data.blob_url);
                                 const buffer = await resp.arrayBuffer();
                                 if (this._sceneGeneration !== capturedScene) {
                                     console.log('Discarding stale parametric tube fetch');
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 if (!this._isLoadTokenCurrent(data.id, loadToken)) {
                                     console.log(`Discarding stale parametric tube fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
                                     return;
                                 }
                                 const n = data.numSpinePoints;
@@ -5936,11 +6057,12 @@ export class ThreeJSViewer {
                                 // 'init' first would let the trailing 'dispose' that
                                 // _deleteObject queues for the old tubeLOD clobber the
                                 // new tube's worker state (same tubeId).
-                                this._deleteObject(data.id);
+                                this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(mesh, data.parent);
                                 this._objects.set(data.id, mesh);
                                 this._objGeneration++;
                                 if (data.transform) this._applyTransform(mesh, data.transform);
+                                deferred.resolve();
                                 if (tubeLOD) {
                                     mesh.userData.tubeLOD = tubeLOD;
                                     // Register original arrays with LOD worker
@@ -6000,13 +6122,22 @@ export class ThreeJSViewer {
                                 console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                             } catch (e) {
                                 console.error(`Error creating parametric_tube:`, e);
+                                deferred.reject(e);
                             } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
                                 this._onFetchEnd();
                             }
                         })();
                         break;
                     }
                     case 'update_parametric_tube_colors': {
+                        this._withObject(data.id, 'update_parametric_tube_colors', (target) => {
+                        if (!target.userData.isParametricTube) {
+                            console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                            return;
+                        }
                         this._onFetchStart();
                         const capturedScene = this._sceneGeneration;
                         (async () => {
@@ -6160,6 +6291,7 @@ export class ThreeJSViewer {
                                 this._onFetchEnd();
                             }
                         })();
+                        });
                         break;
                     }
                     case 'register_toolpath_group': {
@@ -6191,7 +6323,7 @@ export class ThreeJSViewer {
                         this._setClipTime(data.id, data.time);
                         break;
                     case 'set_draw_range':
-                        this._setDrawRange(data.id, data.value);
+                        this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
                         break;
                     case 'set_clipping_plane': {
                         this._clipEnabled = true;

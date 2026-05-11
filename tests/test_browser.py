@@ -92,6 +92,80 @@ def test_baseline_visibility_pruned_on_delete(viewer_client, viewer_page):
     assert objects["m1"]["visible"] is True
 
 
+def _get_material_color(page, obj_id):
+    """Read the first material color (hex) for an object by id, or None."""
+    return page.evaluate(
+        "(id) => {"
+        " const o = window.threejsViewer._objects.get(id);"
+        " if (!o) return null;"
+        " let c = null;"
+        " o.traverse((child) => {"
+        "  if (c !== null || !child.material) return;"
+        "  const m = Array.isArray(child.material) ? child.material[0] : child.material;"
+        "  if (m && m.color) c = m.color.getHex();"
+        " });"
+        " return c;"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_set_color_during_binary_load_is_honoured(viewer_client, viewer_page):
+    """set_color sent immediately after add_mesh races the binary HTTP fetch.
+    Before the inflight-load deferral fix, set_color silently no-opped because
+    _objects.get(id) was undefined when the message dispatched. Regression test
+    for the add_*_binary race."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("rc", positions, indices)
+    viewer_client.set_color("rc", 0xFF0000)  # fire immediately, no sleep
+    # Poll until the mesh lands and the color stuck. The deferred replay
+    # happens in a microtask after the load resolves, so a couple of polls
+    # past first registration is enough.
+    color = None
+    for _ in range(40):
+        time.sleep(0.05)
+        color = _get_material_color(viewer_page, "rc")
+        if color == 0xFF0000:
+            break
+    assert color == 0xFF0000, f"expected 0xff0000, got {color!r}"
+
+
+@pytest.mark.browser
+def test_set_visibility_during_binary_load_is_honoured(viewer_client, viewer_page):
+    """set_visible sent immediately after add_mesh races the binary HTTP fetch
+    the same way set_color does. The general per-id deferred queue should
+    apply the visibility flip once the mesh registers."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("vc", positions, indices)
+    viewer_client.set_visible("vc", False)
+    objects = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "vc" in objects:
+            break
+    assert objects is not None and "vc" in objects
+    assert objects["vc"]["visible"] is False
+
+
+@pytest.mark.browser
+def test_delete_during_binary_load_drops_queued_ops(viewer_client, viewer_page):
+    """A read-side op queued onto an in-flight load whose target gets deleted
+    must drop the op (with a warn) instead of applying to a re-add with the
+    same id or raising. The mesh should be absent from the scene at the end."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("dc", positions, indices)
+    viewer_client.set_color("dc", 0x00FF00)  # queued on inflight
+    viewer_client.delete("dc")  # rejects inflight → set_color drops
+    time.sleep(0.4)
+    objects = viewer_client.query_scene()["objects"]
+    assert "dc" not in objects
+
+
 @pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
