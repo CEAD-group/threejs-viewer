@@ -5289,6 +5289,13 @@ class ThreeJSViewer {
      *   Forwarded to the internal `_deleteObject` call used to clear any
      *   prior object at this id. Binary loaders pass `preserveInflight: true`
      *   so the in-flight deferred they just installed survives the cleanup.
+     * @returns {Promise<any>}
+     *   The registered object, or `undefined` if this call did not register
+     *   (unknown format, stale token, model load threw). Callers that need
+     *   to verify *their* load did the registration — `add_model_binary`,
+     *   which would otherwise stamp the old blobUrl onto a newer same-id
+     *   load that won the await race — must read the return rather than
+     *   `_objects.get(id)`.
      */
     async _addObject(id, objData, parentId, deleteOpts) {
         let obj;
@@ -5303,13 +5310,13 @@ class ThreeJSViewer {
             const loader = this._loaders[/** @type {keyof typeof this._loaders} */ (format)];
             if (!loader) {
                 console.error(`Unknown format: ${format}`);
-                return;
+                return undefined;
             }
             try {
                 const result = await this._loadModel(loader, objData.model, format, objData.yUp === true);
                 if (!this._isLoadTokenCurrent(id, token)) {
                     console.log(`Discarding stale model load for '${id}'`);
-                    return;
+                    return undefined;
                 }
                 obj = result.obj;
                 if (result.animations.length > 0) {
@@ -5326,26 +5333,26 @@ class ThreeJSViewer {
                 }
             } catch (e) {
                 console.error(`Failed to load model: ${e}`);
-                return;
+                return undefined;
             }
         }
 
-        if (obj) {
-            obj.name = id;
-            obj.userData.id = id;
-            this._applyTransform(obj, objData.transform);
-            if (objData.visible === false) obj.visible = false;
-            // A set_scene_visibility that arrived during the async load
-            // recorded a baseline with no object to apply to; honour it
-            // now so the request isn't silently dropped behind objData.visible.
-            const baseline = this._baselineVisibility.get(id);
-            if (baseline !== undefined) obj.visible = baseline;
-            this._deleteObject(id, deleteOpts);
-            this._addToParentOrScene(obj, parentId);
-            this._objects.set(id, obj);
-            this._objGeneration++;
-            if (this._clipEnabled) this._applyClipToObject(obj);
-        }
+        if (!obj) return undefined;
+        obj.name = id;
+        obj.userData.id = id;
+        this._applyTransform(obj, objData.transform);
+        if (objData.visible === false) obj.visible = false;
+        // A set_scene_visibility that arrived during the async load
+        // recorded a baseline with no object to apply to; honour it
+        // now so the request isn't silently dropped behind objData.visible.
+        const baseline = this._baselineVisibility.get(id);
+        if (baseline !== undefined) obj.visible = baseline;
+        this._deleteObject(id, deleteOpts);
+        this._addToParentOrScene(obj, parentId);
+        this._objects.set(id, obj);
+        this._objGeneration++;
+        if (this._clipEnabled) this._applyClipToObject(obj);
+        return obj;
     }
 
     /**
@@ -5470,14 +5477,22 @@ class ThreeJSViewer {
      * @param {(obj: any) => void} fn
      */
     _withObject(id, opName, fn) {
+        // Catch handler exceptions at the dispatch boundary: an uncaught
+        // throw on the deferred path would surface as an unhandled rejection
+        // (the .then success branch rejects the chain), and on the sync
+        // path it would bubble up into the WebSocket onmessage handler.
+        const apply = (/** @type {any} */ target) => {
+            try { fn(target); }
+            catch (e) { console.error(`${opName}: '${id}' handler threw`, e); }
+        };
         const obj = this._objects.get(id);
-        if (obj) { fn(obj); return; }
+        if (obj) { apply(obj); return; }
         const inflight = this._inflightLoads.get(id);
         if (!inflight) return;
         inflight.promise.then(
             () => {
                 const o = this._objects.get(id);
-                if (o) fn(o);
+                if (o) apply(o);
             },
             (err) => {
                 console.warn(`${opName}: '${id}' load failed/cancelled, dropping op`, err);
@@ -6692,12 +6707,17 @@ class ThreeJSViewer {
                                 const blob = new Blob([meshBytes]);
                                 const blobUrl = URL.createObjectURL(blob);
                                 console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
-                                await this._addObject(data.id, {
+                                // Read the registered object from _addObject's
+                                // return rather than _objects.get(id) — under a
+                                // delete-and-re-add race the latter could return
+                                // a *newer* same-id object that some other load
+                                // registered while we awaited _loadModel, and we
+                                // would then stamp our stale blobUrl onto it.
+                                const obj = await this._addObject(data.id, {
                                     model: blobUrl,
                                     format: data.format || 'stl',
                                     yUp: data.yUp === true,
                                 }, data.parent, { preserveInflight: true });
-                                const obj = this._objects.get(data.id);
                                 if (obj) {
                                     obj.userData.blobUrl = blobUrl;
                                     if (data.transform) this._updateTransform(data.id, data.transform);
@@ -6802,64 +6822,64 @@ class ThreeJSViewer {
                     }
                     case 'update_polyline_colors': {
                         this._withObject(data.id, 'update_polyline_colors', (target) => {
-                        if (!target.userData.isPolyline) {
-                            console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
-                            return;
-                        }
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale polyline color fetch');
-                                    return;
-                                }
-                                const obj = this._objects.get(data.id);
-                                if (!obj || !obj.userData.isPolyline) {
-                                    console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
-                                    return;
-                                }
-                                const numPoints = data.numPoints;
-                                // userData.maxInstanceCount = numPoints - 1 (one
-                                // segment per pair of points), so vertex count
-                                // is maxInstanceCount + 1. A length mismatch
-                                // would desync the new color attributes from
-                                // the existing positions.
-                                const expected = obj.userData.maxInstanceCount + 1;
-                                if (numPoints !== expected) {
-                                    console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
-                                    return;
-                                }
-                                if (buffer.byteLength < numPoints * 3) {
-                                    console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
-                                    return;
-                                }
-                                const bytes = new Uint8Array(buffer, 0, numPoints * 3);
-                                const colorData = new Float32Array(numPoints * 3);
-                                for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                    colorData[i] = bytes[i] / 255;
-                                }
-                                // setColors rebuilds the instanceColorStart/End
-                                // instanced attributes on the LineGeometry.
-                                obj.geometry.setColors(colorData);
-                                // If the polyline was created without vertex colors,
-                                // the material is in flat-color mode — flip it.
-                                // Also reset the base color to white so vertex
-                                // colors aren't tinted/multiplied by the prior
-                                // flat color (e.g. red base × green vertex = 0).
-                                if (!obj.material.vertexColors) {
-                                    obj.material.vertexColors = true;
-                                    obj.material.color.setHex(0xffffff);
-                                    obj.material.needsUpdate = true;
-                                }
-                            } catch (e) {
-                                console.error(`Error updating polyline colors:`, e);
-                            } finally {
-                                this._onFetchEnd();
+                            if (!target.userData.isPolyline) {
+                                console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                return;
                             }
-                        })();
+                            this._onFetchStart();
+                            const capturedScene = this._sceneGeneration;
+                            (async () => {
+                                try {
+                                    const resp = await fetch(data.blob_url);
+                                    const buffer = await resp.arrayBuffer();
+                                    if (this._sceneGeneration !== capturedScene) {
+                                        console.log('Discarding stale polyline color fetch');
+                                        return;
+                                    }
+                                    const obj = this._objects.get(data.id);
+                                    if (!obj || !obj.userData.isPolyline) {
+                                        console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                        return;
+                                    }
+                                    const numPoints = data.numPoints;
+                                    // userData.maxInstanceCount = numPoints - 1 (one
+                                    // segment per pair of points), so vertex count
+                                    // is maxInstanceCount + 1. A length mismatch
+                                    // would desync the new color attributes from
+                                    // the existing positions.
+                                    const expected = obj.userData.maxInstanceCount + 1;
+                                    if (numPoints !== expected) {
+                                        console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
+                                        return;
+                                    }
+                                    if (buffer.byteLength < numPoints * 3) {
+                                        console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
+                                        return;
+                                    }
+                                    const bytes = new Uint8Array(buffer, 0, numPoints * 3);
+                                    const colorData = new Float32Array(numPoints * 3);
+                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                        colorData[i] = bytes[i] / 255;
+                                    }
+                                    // setColors rebuilds the instanceColorStart/End
+                                    // instanced attributes on the LineGeometry.
+                                    obj.geometry.setColors(colorData);
+                                    // If the polyline was created without vertex colors,
+                                    // the material is in flat-color mode — flip it.
+                                    // Also reset the base color to white so vertex
+                                    // colors aren't tinted/multiplied by the prior
+                                    // flat color (e.g. red base × green vertex = 0).
+                                    if (!obj.material.vertexColors) {
+                                        obj.material.vertexColors = true;
+                                        obj.material.color.setHex(0xffffff);
+                                        obj.material.needsUpdate = true;
+                                    }
+                                } catch (e) {
+                                    console.error(`Error updating polyline colors:`, e);
+                                } finally {
+                                    this._onFetchEnd();
+                                }
+                            })();
                         });
                         break;
                     }
@@ -7205,163 +7225,163 @@ class ThreeJSViewer {
                     }
                     case 'update_parametric_tube_colors': {
                         this._withObject(data.id, 'update_parametric_tube_colors', (target) => {
-                        if (!target.userData.isParametricTube) {
-                            console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
-                            return;
-                        }
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale parametric tube color fetch');
-                                    return;
-                                }
-                                const obj = this._objects.get(data.id);
-                                if (!obj || !obj.userData.isParametricTube) {
-                                    console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
-                                    return;
-                                }
-                                const lod = obj.userData.tubeLOD;
-                                // Color data from Python is always for the original spine count
-                                const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
-                                const nCs = obj.userData.tubeNCs;
-                                if (buffer.byteLength < nOrig * 4) {
-                                    console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
-                                    return;
-                                }
-                                const packed = new Uint32Array(buffer, 0, nOrig);
-                                // Decode per-ring colors (full original count)
-                                const rc = new Float32Array(nOrig * 3);
-                                for (let i = 0; i < nOrig; i++) {
-                                    const c = packed[i];
-                                    rc[i * 3]     = ((c >> 16) & 0xff) / 255;
-                                    rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
-                                    rc[i * 3 + 2] = (c & 0xff) / 255;
-                                }
-
-                                // When LOD is active, store full colors and rebuild with reduced subset
-                                if (lod && lod.keptIndices) {
-                                    lod.originalRingColors = new Float32Array(rc);
-                                    lod.colorVersion = (lod.colorVersion || 0) + 1;
-                                    this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                    // Extract reduced colors for current LOD level
-                                    const nRed = lod.keptIndices.length;
-                                    const redRc = new Float32Array(nRed * 3);
-                                    const redPacked = new Uint32Array(nRed);
-                                    for (let i = 0; i < nRed; i++) {
-                                        const oi = lod.keptIndices[i];
-                                        redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
-                                        redPacked[i] = packed[oi];
+                            if (!target.userData.isParametricTube) {
+                                console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                return;
+                            }
+                            this._onFetchStart();
+                            const capturedScene = this._sceneGeneration;
+                            (async () => {
+                                try {
+                                    const resp = await fetch(data.blob_url);
+                                    const buffer = await resp.arrayBuffer();
+                                    if (this._sceneGeneration !== capturedScene) {
+                                        console.log('Discarding stale parametric tube color fetch');
+                                        return;
                                     }
-                                    // Update geometry colors for reduced mesh
-                                    const n = nRed;
-                                    // Restore frontier ring BEFORE writing new colors
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) restoreFrontierRing(obj);
-                                    // Fill cap dome vertices with a single color
-                                    /**
-                                     * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                     * @param {number} baseVert
-                                     * @param {number} capVerts
-                                     * @param {number} r
-                                     * @param {number} g
-                                     * @param {number} b
-                                     */
-                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                        for (let j = 0; j < capVerts; j++) {
-                                            arr[(baseVert + j) * 3]     = r;
-                                            arr[(baseVert + j) * 3 + 1] = g;
-                                            arr[(baseVert + j) * 3 + 2] = b;
-                                        }
+                                    const obj = this._objects.get(data.id);
+                                    if (!obj || !obj.userData.isParametricTube) {
+                                        console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                        return;
                                     }
-                                    const posCount = obj.geometry.getAttribute('position').count;
-                                    const capVertsPerCap = (posCount - n * nCs) / 2;
-                                    const startCapBaseVert = n * nCs;
-                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                    const lr = (n - 1) * 3;
-                                    const existing = obj.geometry.getAttribute('color');
-                                    if (existing) {
-                                        expandRingColors(redPacked, n, nCs, existing.array);
-                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                        existing.clearUpdateRanges();
-                                        existing.needsUpdate = true;
-                                    } else {
-                                        const allColors = new Float32Array(posCount * 3);
-                                        expandRingColors(redPacked, n, nCs, allColors);
-                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                    const lod = obj.userData.tubeLOD;
+                                    // Color data from Python is always for the original spine count
+                                    const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
+                                    const nCs = obj.userData.tubeNCs;
+                                    if (buffer.byteLength < nOrig * 4) {
+                                        console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
+                                        return;
                                     }
-                                    obj.material.vertexColors = true;
-                                    obj.material.color.setHex(0xffffff);
-                                    obj.material.needsUpdate = true;
-                                    obj.userData.tubeHasColors = true;
-                                    obj.userData._colorFullUploadNeeded = true;
-                                    if (md) md.ringColors = redRc;
-                                } else {
-                                    // No LOD active — original path
-                                    if (lod) {
+                                    const packed = new Uint32Array(buffer, 0, nOrig);
+                                    // Decode per-ring colors (full original count)
+                                    const rc = new Float32Array(nOrig * 3);
+                                    for (let i = 0; i < nOrig; i++) {
+                                        const c = packed[i];
+                                        rc[i * 3]     = ((c >> 16) & 0xff) / 255;
+                                        rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                        rc[i * 3 + 2] = (c & 0xff) / 255;
+                                    }
+    
+                                    // When LOD is active, store full colors and rebuild with reduced subset
+                                    if (lod && lod.keptIndices) {
                                         lod.originalRingColors = new Float32Array(rc);
                                         lod.colorVersion = (lod.colorVersion || 0) + 1;
                                         this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                    }
-                                    const n = nOrig;
-                                    // Fill cap dome vertices with a single color
-                                    /**
-                                     * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                     * @param {number} baseVert
-                                     * @param {number} capVerts
-                                     * @param {number} r
-                                     * @param {number} g
-                                     * @param {number} b
-                                     */
-                                    function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                        for (let j = 0; j < capVerts; j++) {
-                                            arr[(baseVert + j) * 3]     = r;
-                                            arr[(baseVert + j) * 3 + 1] = g;
-                                            arr[(baseVert + j) * 3 + 2] = b;
+                                        // Extract reduced colors for current LOD level
+                                        const nRed = lod.keptIndices.length;
+                                        const redRc = new Float32Array(nRed * 3);
+                                        const redPacked = new Uint32Array(nRed);
+                                        for (let i = 0; i < nRed; i++) {
+                                            const oi = lod.keptIndices[i];
+                                            redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                                            redPacked[i] = packed[oi];
                                         }
-                                    }
-                                    const posCount = obj.geometry.getAttribute('position').count;
-                                    const capVertsPerCap = (posCount - n * nCs) / 2;
-                                    const startCapBaseVert = n * nCs;
-                                    const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                    const lr = (n - 1) * 3;
-                                    // Restore frontier ring BEFORE writing new colors so
-                                    // the stale savedRingColors don't overwrite the update.
-                                    const md = obj.userData.tubeMorphData;
-                                    if (md) restoreFrontierRing(obj);
-                                    const existing = obj.geometry.getAttribute('color');
-                                    if (existing) {
-                                        expandRingColors(packed, n, nCs, existing.array);
-                                        fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                        fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                        existing.clearUpdateRanges();
-                                        existing.needsUpdate = true;
+                                        // Update geometry colors for reduced mesh
+                                        const n = nRed;
+                                        // Restore frontier ring BEFORE writing new colors
+                                        const md = obj.userData.tubeMorphData;
+                                        if (md) restoreFrontierRing(obj);
+                                        // Fill cap dome vertices with a single color
+                                        /**
+                                         * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                         * @param {number} baseVert
+                                         * @param {number} capVerts
+                                         * @param {number} r
+                                         * @param {number} g
+                                         * @param {number} b
+                                         */
+                                        function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                            for (let j = 0; j < capVerts; j++) {
+                                                arr[(baseVert + j) * 3]     = r;
+                                                arr[(baseVert + j) * 3 + 1] = g;
+                                                arr[(baseVert + j) * 3 + 2] = b;
+                                            }
+                                        }
+                                        const posCount = obj.geometry.getAttribute('position').count;
+                                        const capVertsPerCap = (posCount - n * nCs) / 2;
+                                        const startCapBaseVert = n * nCs;
+                                        const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                        const lr = (n - 1) * 3;
+                                        const existing = obj.geometry.getAttribute('color');
+                                        if (existing) {
+                                            expandRingColors(redPacked, n, nCs, existing.array);
+                                            fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                            fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                            existing.clearUpdateRanges();
+                                            existing.needsUpdate = true;
+                                        } else {
+                                            const allColors = new Float32Array(posCount * 3);
+                                            expandRingColors(redPacked, n, nCs, allColors);
+                                            fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                            fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                            obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                        }
+                                        obj.material.vertexColors = true;
+                                        obj.material.color.setHex(0xffffff);
+                                        obj.material.needsUpdate = true;
+                                        obj.userData.tubeHasColors = true;
+                                        obj.userData._colorFullUploadNeeded = true;
+                                        if (md) md.ringColors = redRc;
                                     } else {
-                                        const allColors = new Float32Array(posCount * 3);
-                                        expandRingColors(packed, n, nCs, allColors);
-                                        fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                        fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                        obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                        // No LOD active — original path
+                                        if (lod) {
+                                            lod.originalRingColors = new Float32Array(rc);
+                                            lod.colorVersion = (lod.colorVersion || 0) + 1;
+                                            this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
+                                        }
+                                        const n = nOrig;
+                                        // Fill cap dome vertices with a single color
+                                        /**
+                                         * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                         * @param {number} baseVert
+                                         * @param {number} capVerts
+                                         * @param {number} r
+                                         * @param {number} g
+                                         * @param {number} b
+                                         */
+                                        function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                            for (let j = 0; j < capVerts; j++) {
+                                                arr[(baseVert + j) * 3]     = r;
+                                                arr[(baseVert + j) * 3 + 1] = g;
+                                                arr[(baseVert + j) * 3 + 2] = b;
+                                            }
+                                        }
+                                        const posCount = obj.geometry.getAttribute('position').count;
+                                        const capVertsPerCap = (posCount - n * nCs) / 2;
+                                        const startCapBaseVert = n * nCs;
+                                        const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                        const lr = (n - 1) * 3;
+                                        // Restore frontier ring BEFORE writing new colors so
+                                        // the stale savedRingColors don't overwrite the update.
+                                        const md = obj.userData.tubeMorphData;
+                                        if (md) restoreFrontierRing(obj);
+                                        const existing = obj.geometry.getAttribute('color');
+                                        if (existing) {
+                                            expandRingColors(packed, n, nCs, existing.array);
+                                            fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                            fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                            existing.clearUpdateRanges();
+                                            existing.needsUpdate = true;
+                                        } else {
+                                            const allColors = new Float32Array(posCount * 3);
+                                            expandRingColors(packed, n, nCs, allColors);
+                                            fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                            fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                            obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                        }
+                                        obj.material.vertexColors = true;
+                                        obj.material.color.setHex(0xffffff);
+                                        obj.material.needsUpdate = true;
+                                        obj.userData.tubeHasColors = true;
+                                        obj.userData._colorFullUploadNeeded = true;
+                                        if (md) md.ringColors = rc;
                                     }
-                                    obj.material.vertexColors = true;
-                                    obj.material.color.setHex(0xffffff);
-                                    obj.material.needsUpdate = true;
-                                    obj.userData.tubeHasColors = true;
-                                    obj.userData._colorFullUploadNeeded = true;
-                                    if (md) md.ringColors = rc;
+                                } catch (e) {
+                                    console.error(`Error updating parametric_tube colors:`, e);
+                                } finally {
+                                    this._onFetchEnd();
                                 }
-                            } catch (e) {
-                                console.error(`Error updating parametric_tube colors:`, e);
-                            } finally {
-                                this._onFetchEnd();
-                            }
-                        })();
+                            })();
                         });
                         break;
                     }
@@ -7391,7 +7411,7 @@ class ThreeJSViewer {
                         }
                         break;
                     case 'set_clip_time':
-                        this._setClipTime(data.id, data.time);
+                        this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
                         break;
                     case 'set_draw_range':
                         this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));

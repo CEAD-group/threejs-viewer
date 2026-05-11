@@ -167,6 +167,107 @@ def test_delete_during_binary_load_drops_queued_ops(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_two_queued_set_colors_apply_in_order(viewer_client, viewer_page):
+    """Two set_color calls during a single binary load apply in FIFO order;
+    the second call wins. Regression for the microtask-FIFO ordering claim —
+    the deferred .then() chain must replay queued ops in arrival order."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("fifo", positions, indices)
+    viewer_client.set_color("fifo", 0xFF0000)  # red first
+    viewer_client.set_color("fifo", 0x0000FF)  # blue second — must win
+    color = None
+    for _ in range(40):
+        time.sleep(0.05)
+        color = _get_material_color(viewer_page, "fifo")
+        if color == 0x0000FF:
+            break
+    assert color == 0x0000FF, f"expected 0x0000ff (blue), got {color!r}"
+
+
+def _get_material_opacity(page, obj_id):
+    """Read the first material opacity for an object by id, or None."""
+    return page.evaluate(
+        "(id) => {"
+        " const o = window.threejsViewer._objects.get(id);"
+        " if (!o) return null;"
+        " let opacity = null;"
+        " o.traverse((child) => {"
+        "  if (opacity !== null || !child.material) return;"
+        "  const m = Array.isArray(child.material) ? child.material[0] : child.material;"
+        "  if (m && typeof m.opacity === 'number') opacity = m.opacity;"
+        " });"
+        " return opacity;"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_set_opacity_during_binary_load_is_honoured(viewer_client, viewer_page):
+    """set_opacity queued onto an in-flight binary load applies once the
+    object lands."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("op", positions, indices)
+    viewer_client.set_opacity("op", 0.5)
+    opacity = None
+    for _ in range(40):
+        time.sleep(0.05)
+        opacity = _get_material_opacity(viewer_page, "op")
+        if opacity is not None and abs(opacity - 0.5) < 1e-3:
+            break
+    assert opacity is not None and abs(opacity - 0.5) < 1e-3, (
+        f"expected opacity 0.5, got {opacity!r}"
+    )
+
+
+@pytest.mark.browser
+def test_update_transform_during_binary_load_is_honoured(viewer_client, viewer_page):
+    """update_transform (set_matrix) queued onto an in-flight binary load
+    applies once the object lands."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("tx", positions, indices)
+    # 4x4 translation matrix in column-major order: translate (5, 0, 0).
+    viewer_client.set_matrix("tx", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1])
+    px = None
+    for _ in range(40):
+        time.sleep(0.05)
+        px = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('tx');"
+            " return o ? o.position.x : null;"
+            "}"
+        )
+        if px is not None and abs(px - 5.0) < 1e-3:
+            break
+    assert px is not None and abs(px - 5.0) < 1e-3, f"expected position.x=5, got {px!r}"
+
+
+@pytest.mark.browser
+def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_page):
+    """set_draw_range queued onto an in-flight binary load applies once the
+    mesh lands."""
+    # Two triangles (6 indices) so a 0.5 draw range produces a stable half-count.
+    positions = np.array(
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], dtype=np.float32
+    )
+    indices = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("dr", positions, indices)
+    viewer_client.set_draw_range("dr", 0.5)
+    dr = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "dr" in objects:
+            dr = objects["dr"]["drawRange"]
+            if abs(dr - 0.5) < 1e-3:
+                break
+    assert dr is not None and abs(dr - 0.5) < 1e-3, f"expected drawRange 0.5, got {dr!r}"
+
+
+@pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
     viewer_client.add_box("a")
