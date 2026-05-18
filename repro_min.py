@@ -25,7 +25,7 @@ import numpy as np
 from threejs_viewer import viewer
 
 
-N = 100   # spine length after slicing
+N = 100  # spine length after slicing
 _SPINE_W_H_B64 = (
     "IAa3PYAKIb7ALya7oHu2PQApIL7O2SO7IC+2PYCrH74+CBq74OG1PSAuH75m5gK7AJa1PUCwHr7U"
     "9My6AEi1PTAzHr5IInG6wEazPcDaGr4gmvs5QFCxPXCCF76g2fM5gGetPRDNEL6gzvQ5QJClPUhp"
@@ -76,11 +76,15 @@ spine *= SCALE
 widths *= SCALE
 heights *= SCALE
 
-print(f"spine bbox: x[{spine[:,0].min():.2f},{spine[:,0].max():.2f}] "
-      f"y[{spine[:,1].min():.2f},{spine[:,1].max():.2f}] "
-      f"z[{spine[:,2].min():.3f},{spine[:,2].max():.3f}]")
-print(f"width range: [{widths.min():.3f}, {widths.max():.3f}]  "
-      f"zero-width points: {int((widths==0).sum())}")
+print(
+    f"spine bbox: x[{spine[:, 0].min():.2f},{spine[:, 0].max():.2f}] "
+    f"y[{spine[:, 1].min():.2f},{spine[:, 1].max():.2f}] "
+    f"z[{spine[:, 2].min():.3f},{spine[:, 2].max():.3f}]"
+)
+print(
+    f"width range: [{widths.min():.3f}, {widths.max():.3f}]  "
+    f"zero-width points: {int((widths == 0).sum())}"
+)
 
 v = viewer()
 v.clear()
@@ -98,6 +102,8 @@ v.add_parametric_tube(
     strand_collapse=True,
 )
 
-print("\nViewer up. Press 'M' for wireframe to make the diamond fan obvious.")
+print("\nViewer up. With the fix in place, the bead should render without a flat")
+print("diamond fan across multi-corner spans. Toggle strand_collapse=False above")
+print("to compare; press 'M' for wireframe to inspect the cross-section topology.")
 while True:
     time.sleep(1.0)
