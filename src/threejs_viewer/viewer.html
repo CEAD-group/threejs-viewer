@@ -2213,6 +2213,37 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         kMax[i] = best;
     }
 
+    // Pre-compute spine-endpoint separation reject mask. Strand-independent
+    // (depends only on spine + widths/heights), so hoisted out of the strand
+    // loop. Rejected cells get +Infinity in dist2 during fill so they can't
+    // pollute the 3×3 local-min comparison: a high-separation cell with low
+    // seg-seg distance² would otherwise beat a valid neighbour fold, leaving
+    // no snap at the real corner.
+    const sepReject = new Uint8Array(nSeg * stride);
+    for (let i = 0; i < nSeg; i++) {
+        const rowBase = i * stride;
+        const isx = spine[i * 3], isy = spine[i * 3 + 1], isz = spine[i * 3 + 2];
+        const dimI = Math.max(widths[i], heights[i]);
+        const jLim = kMax[i];
+        if (jLim < 0) {
+            for (let off = 0; off < stride; off++) sepReject[rowBase + off] = 1;
+            continue;
+        }
+        const offMax = Math.min(jLim - i - minGap, stride - 1);
+        let off = 0;
+        for (; off <= offMax; off++) {
+            const j = i + minGap + off;
+            const dx = spine[j * 3]     - isx;
+            const dy = spine[j * 3 + 1] - isy;
+            const dz = spine[j * 3 + 2] - isz;
+            const dimJ = Math.max(widths[j], heights[j]);
+            const sepLimit = FOLD_SEP_FACTOR * Math.min(dimI, dimJ);
+            const sepSq = dx * dx + dy * dy + dz * dz;
+            sepReject[rowBase + off] = (sepSq > sepLimit * sepLimit) ? 1 : 0;
+        }
+        for (; off < stride; off++) sepReject[rowBase + off] = 1;
+    }
+
     // Per-strand scratch for the (i, j) grid restricted to j - i ∈ [minGap, winMax].
     // Cell index: i*stride + (j - i - minGap). Out-of-range j get +Infinity so
     // they never win the local-min test.
@@ -2248,6 +2279,10 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
             const offMax = Math.min(jLim - i - minGap, stride - 1);
             let off = 0;
             for (; off <= offMax; off++) {
+                if (sepReject[rowBase + off]) {
+                    dist2[rowBase + off] = Infinity;
+                    continue;
+                }
                 polylineSegSegMidpoint(strandPoly, i, i + minGap + off, segOut);
                 dist2[rowBase + off] = segOut[3];
             }
@@ -2283,18 +2318,12 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
                     }
                 }
                 if (!isMin) continue;
-                const dxij = spine[j * 3]     - spine[i * 3];
-                const dyij = spine[j * 3 + 1] - spine[i * 3 + 1];
-                const dzij = spine[j * 3 + 2] - spine[i * 3 + 2];
-                const sepSq = dxij * dxij + dyij * dyij + dzij * dzij;
-                const dimI = Math.max(widths[i], heights[i]);
-                const dimJ = Math.max(widths[j], heights[j]);
-                const sepLimit = FOLD_SEP_FACTOR * Math.min(dimI, dimJ);
+                // sepSq cap is pre-applied as sepReject above (rejected cells
+                // hold +Infinity in dist2 and never reach this point).
                 let peakTurn = 0;
                 for (let k = i + 1; k <= j; k++) {
                     if (vertTurn[k] > peakTurn) peakTurn = vertTurn[k];
                 }
-                if (sepSq > sepLimit * sepLimit) continue;
                 if (peakTurn < MIN_FOLD_PEAK_TURN) continue;
                 strandSegSegMidpoint(positions, ringStride, strand, i, j, foldOut);
                 const cx = foldOut[0];
