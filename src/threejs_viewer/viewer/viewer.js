@@ -1060,6 +1060,71 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     const rejectSq = reject * reject;
     const ringStride = nCs * 3;
 
+    // Spine-endpoint separation cap for "cross-link" fold targets — pairs
+    // (i, j) where the un-mitered strands of two *different* corners
+    // happen to land within tol of each other in 3D. The seg-seg
+    // distance² grid then has a strict local minimum at (i, j) just
+    // like a genuine fold, but snapping rings (i+1..j) to that pair's
+    // midpoint zips up a span of spine that crosses multiple corners →
+    // produces a flat triangulated diamond / membrane instead of a
+    // single crease.
+    //
+    // strand_collapse is explicitly for *tight inside corners* where
+    // the spine bends back near itself. For such corners the euclidean
+    // displacement ‖spine[j] - spine[i]‖ stays small even when the
+    // spine arc-length between them is significant (a hairpin returns
+    // to its entry point). A cross-link spanning multiple distinct
+    // corners — e.g. across a bead width-bulge feature — does not
+    // satisfy this: the spine moves forward through the bulb and ends
+    // up far from where it started.
+    //
+    // The cap scales with the LOCAL bead dimension at the narrower
+    // endpoint. Using global maxDim is too generous on beads whose
+    // width varies (a bulb's peak width inflates the cap and the
+    // cross-link slips through); the narrower endpoint pins the cap to
+    // the bead's nominal half-width, which is the actual fold-radius
+    // scale. A real fold has the same nominal width on both sides
+    // (sharp corner in a constant-width bead), so the min equals each
+    // endpoint's width and the cap stays roomy.
+    // The 0.5 factor is half the bead's outer dimension — i.e. roughly
+    // the strand offset magnitude — which is the natural geometric
+    // scale for fold-back distances.
+    const FOLD_SEP_FACTOR = 0.5;
+
+    // Minimum peak per-vertex turn (radians) inside the fold range for a
+    // candidate to be considered a real corner fold. Below this, the
+    // strand self-intersection is caused by *bead width variation*
+    // through a smooth bulge — not by a sharp inside corner — and
+    // snapping creates a coincident-vertex "cube + spokes" cluster
+    // instead of a clean crease. Falling back to un-collapsed geometry
+    // (a fat self-intersecting blob) is the lesser visual evil.
+    //
+    // 8° is below the real-corner peaks we measured on the ribweaver
+    // dump (14–23° on sharp 99° turns) and above the bulb-peak smooth-
+    // bend peaks (5.8°), giving a clean discriminator. Beads sampled
+    // very densely (sub-W/10 segments) at a wide-arc real fold might
+    // dip below this, but those configurations also won't form
+    // strand_collapse-worthy creases — they smoothly miter.
+    const MIN_FOLD_PEAK_TURN = (8 * Math.PI) / 180;
+
+    // Per-vertex turn angle (radians) — angle between consecutive spine
+    // segments at each interior spine point. Endpoints are 0.
+    const vertTurn = new Float32Array(nSpine);
+    for (let k = 1; k < nSpine - 1; k++) {
+        const tax = spine[k * 3]     - spine[(k - 1) * 3];
+        const tay = spine[k * 3 + 1] - spine[(k - 1) * 3 + 1];
+        const taz = spine[k * 3 + 2] - spine[(k - 1) * 3 + 2];
+        const tbx = spine[(k + 1) * 3]     - spine[k * 3];
+        const tby = spine[(k + 1) * 3 + 1] - spine[k * 3 + 1];
+        const tbz = spine[(k + 1) * 3 + 2] - spine[k * 3 + 2];
+        const tan2 = tax * tax + tay * tay + taz * taz;
+        const tbn2 = tbx * tbx + tby * tby + tbz * tbz;
+        if (tan2 < 1e-24 || tbn2 < 1e-24) continue;
+        let cosA = (tax * tbx + tay * tby + taz * tbz) / Math.sqrt(tan2 * tbn2);
+        if (cosA > 1) cosA = 1; else if (cosA < -1) cosA = -1;
+        vertTurn[k] = Math.acos(cosA);
+    }
+
     // Per-i upper bound on the fold-eligible j: highest j ∈ [i+minGap, i+winMax]
     // with ‖spine[j] - spine[i]‖² ≤ rejectSq. -1 when no such j exists (the
     // spine bends back and away too quickly, or i sits in a straight section).
@@ -1147,6 +1212,19 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
                     }
                 }
                 if (!isMin) continue;
+                const dxij = spine[j * 3]     - spine[i * 3];
+                const dyij = spine[j * 3 + 1] - spine[i * 3 + 1];
+                const dzij = spine[j * 3 + 2] - spine[i * 3 + 2];
+                const sepSq = dxij * dxij + dyij * dyij + dzij * dzij;
+                const dimI = Math.max(widths[i], heights[i]);
+                const dimJ = Math.max(widths[j], heights[j]);
+                const sepLimit = FOLD_SEP_FACTOR * Math.min(dimI, dimJ);
+                let peakTurn = 0;
+                for (let k = i + 1; k <= j; k++) {
+                    if (vertTurn[k] > peakTurn) peakTurn = vertTurn[k];
+                }
+                if (sepSq > sepLimit * sepLimit) continue;
+                if (peakTurn < MIN_FOLD_PEAK_TURN) continue;
                 strandSegSegMidpoint(positions, ringStride, strand, i, j, foldOut);
                 const cx = foldOut[0];
                 const cy = foldOut[1];
