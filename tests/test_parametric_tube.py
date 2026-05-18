@@ -857,3 +857,144 @@ def test_parametric_tube_color_update_clears_pending_update_ranges(
         f"Expected 0 pending color ranges after fix, got {result['rangesAfterFix']}"
     )
     assert result["flagCleared"], "_colorFullUploadNeeded flag was not consumed"
+
+
+# 100-spine-point bead extracted from the ribweaver dump tube_8f5bba97.
+# Triggers the strand_collapse cross-link and wide-bead-corner bugs that
+# previously rendered as a flat triangulated diamond fan / cube-cluster.
+# See repro_min.py for the manual visual repro context.
+_REPRO_SPINE_W_H_B64 = (
+    "IAa3PYAKIb7ALya7oHu2PQApIL7O2SO7IC+2PYCrH74+CBq74OG1PSAuH75m5gK7AJa1PUCwHr7U"
+    "9My6AEi1PTAzHr5IInG6wEazPcDaGr4gmvs5QFCxPXCCF76g2fM5gGetPRDNEL6gzvQ5QJClPUhp"
+    "A77Ap/Q5AOqVPbAt0b2gpvQ5gEttPUCgS72ghfQ5QOpqPYBoRr0Ag/Q5QMNlPaD1Q71AlPQ5AEwj"
+    "O8BAA71gnPQ5ACLHvADjxbzgHvQ5YHMavcCxpbwgnfY5oOQ1vUCFlbwgue85gJ1DvUB+jbzA/v05"
+    "YFxRvUCUhbxAnvO5gDBTvYCLhLy4uHi64ANVvcB5g7xwfLC6wNZWvQBogrw8ete6IKxYvUBjgbyc"
+    "5ue6IHhbvYAdf7ywr+m6QEJevYBOe7ywuem6QKdjvYD/cbyMsem6AH1ovYCQY7yQxem6wEBrvYBC"
+    "TrwYuum6QLBrvQBiOrzkyum6oJ9rvYBlMLxAium64DNrvQB+Jrw4Sd+6oOxqvYD8HrxASMK6oKRq"
+    "vYBxF7y0GJq6oDZqvYATELxodUC6wMJpvQCrCLzAire5wI9kvQD6e7sA7f05oDxfvQDgKzrgse05"
+    "YGRUvYCBHTwAAvc5IAM/vQAR4jzA8vQ5wHIUvVBCgj2AB/U5IKERvbCGhj3gnvU5AN0HvfAYiz2g"
+    "mfQ5wKT9vACajD0AdvQ5AKSsPBCeqz2gpPQ5gNFAPSAruz1gsfQ5gPl1PXD/wj3AqfQ5IE6IPQDh"
+    "xj3ArvQ54PGOPTDXyD1gq/Q5QKaVPZCZyj0ArfQ5YJuWPTDLyj1ArPQ54JGXPZD5yj3grPQ5YIiY"
+    "PZAlyz2grPQ5wIGZPWA4yz3ArPQ54LmaPTBayz3ArPQ5IPCbPXBeyz3ArPQ5AF+ePTAeyz3ArPQ5"
+    "ALigPeAWyj3ArPQ5QKmhPWAxyT3ArPQ5AD2iPTAPyD3ArPQ5IJaiPeAhxz3ArPQ5IKqiPRAtxj3A"
+    "rPQ5QLuiPYAxxT3ArPQ5QKeiPQA4xD3ArPQ54EKgPaCiuj3ArPQ5QHadPaAfsT3ArPQ5QOmXPVAf"
+    "nj3ArPQ5gMSMPYApcD3ArPQ5wPNsPUDcrzzArPQ5gIRqPYBwpTzArPQ5AE9lPQCboDzArPQ5AGgw"
+    "OwDrgjvArPQ5wCPEvADOebvArPQ5oJEYvQDJ/LvArPQ5oNgzvYBnHrzArPQ5IHhBvQBXLrzArPQ5"
+    "IDVPvQDVPLzArPQ5gCdRvQCRPrzArPQ5gB5TvQD7P7zArPQ5QBZVvQBPQbzArPQ5gA5XvYCgQrzA"
+    "rPQ5ILdZvYBwRLzArPQ5IGZcvYDDRbzArPQ5AL5hvYCaSLzArPQ5YORnvYCzTbzArPQ5ABptvYAf"
+    "W7zArPQ54ORvvQC/a7zArPQ5oPZxvQDwfbzArPQ5YKZyvYC9grzArPQ5gGpzvUBohrzArPQ54AF0"
+    "vQBCirygrPQ5AKN0vcACjrzArPQ5oKp4vUAfqbyArPQ5IMV8vcDlw7xArfQ50D+CvUBw+rwArPQ5"
+    "4FGGvaAMGL2ArfQ5IBeLvQByMb3AsfQ5UO6MvcBiM72gsfQ5IJSPveB4Mr0AmvQ5kAKSvaAfK72A"
+    "lvQ5XPyCPHJTgjzIgH087S9xPBLVYTwFQ1I8f2o8PH9qPDx/ajw8f2o8PH9qPDx/ajw8f2o8PH9q"
+    "PDx/ajw8f2o8PH9qPDx/ajw8f2o8POS0ZTyNUXk8fGaFPODAizxNgI486sqOPOrKjjzqyo486sqO"
+    "POrKjjzqyo486sqOPPgLjTzhYog8slyBPF7mcTxkR2A8f2o8PH9qPDx/ajw8f2o8PH9qPDx/ajw8"
+    "f2o8PH9qPDx/ajw8f2o8PH9qPDx/ajw8f2o8PJIyXDzRcXA8WfiBPJKdiTxu54086sqOPOrKjjzq"
+    "yo486sqOPOrKjjz6uY48uNaLPGpdhTxEnng8VjdkPH9qPDx/ajw8f2o8PH9qPDx/ajw8f2o8PH9q"
+    "PDx/ajw8f2o8PH9qPDx/ajw8f2o8PJO+WzxodXA8MC6CPCDbiTyxCY486sqOPOrKjjzqyo486sqO"
+    "POrKjjzqyo48WnyNPGhaiTw9iYI8JD10PIb3YTx/ajw8f2o8PH9qPDx/ajw8f2o8PH9qPDx/ajw8"
+    "f2o8PKabRDsmX0Y7A+1PO61iYDsZ6HQ7ptuEO7x0kzuMZ5M7vHSTO2x0kztadJM7SnKTOyBykzs0"
+    "c5M7t3OTO+Brkzu8dJM7giWTO7x0kzu3QGg7tCVKO0L2LzvFlhw7MFcUO7x0Ezu8dBM7vHQTOxpx"
+    "Ezu8dBM7cW4TO7x0EztFrxg7TOYmO4ZHOzvTv1U7Tn1wO7x0kzsPBZM7vHSTO7x0kzu8dJM7vHST"
+    "O4pzkztQcZM7O3STO7x0kzuNdJM7vHSTO6V0kzvXrnY7LfVXO25fOjsyKyM7JicWO7x0Ezu8dBM7"
+    "vHQTO7x0Ezu8dBM7IqgTO9FrHDvJETA72Y1LO7yDaju8dJM7vHSTO7x0kzu8dJM7vHSTO7x0kzu8"
+    "dJM7vHSTO7x0kzu8dJM7vHSTO7x0kzveXnc7uu9XOwW8OTtgcCI7Kr8VO7x0Ezu8dBM7vHQTO7x0"
+    "Ezu8dBM7vHQTOyRsFzsM9yM7sKc4OywzUjuJ7W07t3STO7x0kzuxdJM7vHSTO7x0kzu8dJM7knOT"
+    "O1hzkzs="
+)
+
+
+def _decode_repro_bead(scale=100.0):
+    import base64
+
+    n = 100
+    buf = np.frombuffer(base64.b64decode(_REPRO_SPINE_W_H_B64), dtype=np.float32)
+    spine = buf[: n * 3].reshape(n, 3).copy() * scale
+    widths = buf[n * 3 : n * 3 + n].copy() * scale
+    heights = buf[n * 3 + n :].copy() * scale
+    return spine, widths, heights
+
+
+@pytest.mark.browser
+def test_parametric_tube_strand_collapse_repro_renders_clean(
+    viewer_client, viewer_page
+):
+    """Regression for the strand_collapse cross-link / wide-bead-corner bugs.
+
+    The 100-pt bead previously rendered as a flat triangulated diamond fan /
+    cube-cluster across multi-corner spans when strand_collapse=True. After
+    the fix, the mesh must (a) have no NaN/Inf positions and (b) have a
+    bounding box that matches strand_collapse=False within tolerance — the
+    fold only pulls inside-bend strands inward, so the outer envelope is
+    preserved.
+    """
+    spine, widths, heights = _decode_repro_bead()
+
+    viewer_client.add_parametric_tube(
+        "repro_baseline",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        anchor="top",
+        lod=False,
+    )
+    _wait_for_object(viewer_page, "repro_baseline")
+
+    viewer_client.add_parametric_tube(
+        "repro_collapsed",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        anchor="top",
+        lod=False,
+        strand_collapse=True,
+    )
+    _wait_for_object(viewer_page, "repro_collapsed")
+
+    info = viewer_page.evaluate(
+        """(ids) => {
+            const out = {};
+            for (const id of ids) {
+                const obj = window.threejsViewer._objects.get(id);
+                const pos = obj.geometry.getAttribute('position').array;
+                let nonFinite = 0;
+                for (let i = 0; i < pos.length; i++) {
+                    if (!Number.isFinite(pos[i])) nonFinite++;
+                }
+                obj.geometry.computeBoundingBox();
+                const bb = obj.geometry.boundingBox;
+                out[id] = {
+                    nonFinite,
+                    w: bb.max.x - bb.min.x,
+                    h: bb.max.y - bb.min.y,
+                    d: bb.max.z - bb.min.z,
+                };
+            }
+            return out;
+        }""",
+        ["repro_baseline", "repro_collapsed"],
+    )
+
+    base = info["repro_baseline"]
+    coll = info["repro_collapsed"]
+
+    assert base["nonFinite"] == 0, f"baseline has {base['nonFinite']} NaN/Inf positions"
+    assert coll["nonFinite"] == 0, (
+        f"strand_collapse has {coll['nonFinite']} NaN/Inf positions"
+    )
+
+    # Outer envelope is set by the cross-section's outside strands, which
+    # strand_collapse never touches. Bbox must match within a couple percent
+    # of the larger dimension. Before the cross-link guard, the diamond fan
+    # warped the envelope by snapping inside-bend strands of unrelated
+    # corners together (visually flat, geometrically detectable as bbox
+    # drift on this dataset).
+    tol = 0.02 * max(base["w"], base["h"], base["d"])
+    assert abs(coll["w"] - base["w"]) < tol, (
+        f"bbox width drifted: baseline={base['w']:.3f}, collapsed={coll['w']:.3f}"
+    )
+    assert abs(coll["h"] - base["h"]) < tol, (
+        f"bbox height drifted: baseline={base['h']:.3f}, collapsed={coll['h']:.3f}"
+    )
+    assert abs(coll["d"] - base["d"]) < tol, (
+        f"bbox depth drifted: baseline={base['d']:.3f}, collapsed={coll['d']:.3f}"
+    )
