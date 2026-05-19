@@ -80,6 +80,35 @@ def _decode_bead(scale=100.0):
     return spine, widths, heights
 
 
+def _spine_corner_lookat(
+    spine: np.ndarray, widths: np.ndarray, heights: np.ndarray, idx: int, half: int = 4
+):
+    """Lookat target and per-axis half-extents from the *input spine*.
+
+    The geometry's ring centroid matches spine[idx] up to the height-anchor
+    offset, but indexing the position buffer requires assumptions about cap
+    layout that get fragile if the pipeline changes. Reading straight from
+    the input is unambiguous: spine[idx] is the corner, and
+    spine[idx-half..idx+half] is the local arc.
+
+    Half-extents in XY are floored to ~1.5× the bead width and in Z to
+    ~4× the bead height — at a bulb apex the spine is dense and the
+    arc-only extent collapses to a fraction of the cross-section, which
+    would frame the camera *inside* the bead body.
+    """
+    n = len(spine)
+    i0 = max(0, idx - half)
+    i1 = min(n - 1, idx + half)
+    arc = spine[i0 : i1 + 1]
+    target = spine[idx].copy()
+    arc_extent = np.abs(arc - target).max(axis=0)
+    w = float(widths[idx])
+    h = float(heights[idx])
+    floor = np.array([max(w * 1.5, 1.5), max(w * 1.5, 1.5), max(h * 4.0, 0.5)])
+    half_extents = np.maximum(arc_extent, floor)
+    return target, half_extents
+
+
 def capture(
     out_path: Path,
     mode: str = "overview",
@@ -146,10 +175,24 @@ def capture(
         # Two modes:
         #   "overview" — oblique view, shows the rectangle-loop diamond fan
         #     (PR 49) clearly. Bulb-corner cube (PR 50) is subtle at this zoom.
-        #   "corner"   — close zoom on the bulb's inside-corner apex (the
-        #     wide-bead corner cube territory for PR 50). Aim at spine[~30],
-        #     which is inside the bulb feature, with the camera pulled in to
-        #     ~10% of the global bead size.
+        #   "corner"   — close zoom on a corner detected from the *input
+        #     spine* (not from the geometry's position buffer). Two adjacent
+        #     bulb apexes can share an XY footprint at different Z layers;
+        #     buffer-indexed corner extents see them as overlapping, so the
+        #     lookat must come from the input.
+        if mode == "corner":
+            radius_steps = max(3, round(zoom * 2))
+            target, half_extents = _spine_corner_lookat(
+                spine, widths, heights, ring, half=radius_steps
+            )
+            tx, ty, tz = float(target[0]), float(target[1]), float(target[2])
+            hx, hy, hz = (
+                float(half_extents[0]),
+                float(half_extents[1]),
+                float(half_extents[2]),
+            )
+        else:
+            tx = ty = tz = hx = hy = hz = 0.0  # unused in overview mode
         page.evaluate(
             f"""() => {{
                 const v = window.threejsViewer;
@@ -165,55 +208,16 @@ def capture(
                 const s = Math.max(sx, sy, sz);
                 const mode = "{mode}";
                 if (mode === "corner") {{
-                    // Camera is aimed at the corner ring's centroid and
-                    // pulled back along the chosen direction by `dist`,
-                    // where `dist` is computed from the per-axis half-
-                    // extent of the surrounding rings *measured from the
-                    // corner ring centroid*. That keeps the corner at
-                    // screen center for asymmetric spine arcs (one long
-                    // arm, one short) and gives consistent visual scale
-                    // across rings regardless of how the bead is oriented.
-                    const pos = obj.geometry.getAttribute('position').array;
-                    const nCs = obj.userData.tubeNCs;
-                    const nSpine = obj.userData.tubeNumSpinePoints;
-                    // Corner ring centroid — the camera target.
-                    let crx = 0, cry = 0, crz = 0;
-                    for (let j = 0; j < nCs; j++) {{
-                        crx += pos[({ring} * nCs + j) * 3];
-                        cry += pos[({ring} * nCs + j) * 3 + 1];
-                        crz += pos[({ring} * nCs + j) * 3 + 2];
-                    }}
-                    crx /= nCs; cry /= nCs; crz /= nCs;
-                    // Half-extents in the local neighbourhood. Measured as
-                    // max(|p - centroid|) so the bbox is symmetric around
-                    // the corner — leaves no biased empty space on either
-                    // side of the frame.
-                    const radius = Math.max(3, Math.round({zoom} * 2));
-                    const r0 = Math.max(0, {ring} - radius);
-                    const r1 = Math.min(nSpine - 1, {ring} + radius);
-                    let halfX = 0, halfY = 0, halfZ = 0;
-                    for (let r = r0; r <= r1; r++) {{
-                        for (let k = 0; k < nCs; k++) {{
-                            const i = (r * nCs + k) * 3;
-                            const ex = Math.abs(pos[i]     - crx);
-                            const ey = Math.abs(pos[i + 1] - cry);
-                            const ez = Math.abs(pos[i + 2] - crz);
-                            if (ex > halfX) halfX = ex;
-                            if (ey > halfY) halfY = ey;
-                            if (ez > halfZ) halfZ = ez;
-                        }}
-                    }}
-                    // FOV-aware fit. The viewer's perspective FOV is on the
-                    // vertical axis; horizontal half-FOV = atan(tan(vFOV/2) * aspect).
-                    // Pull back so the *worst* axis fits inside the frame.
+                    const crx = {tx}, cry = {ty}, crz = {tz};
+                    const halfX = {hx}, halfY = {hy}, halfZ = {hz};
+                    // FOV-aware fit. Vertical FOV is the camera setting;
+                    // horizontal half-FOV = atan(tan(vFOV/2) * aspect).
                     const vFov = (v._perspCamera.fov || 75) * Math.PI / 180 / 2;
                     const aspect = v._perspCamera.aspect || (1600 / 1200);
                     const hFov = Math.atan(Math.tan(vFov) * aspect);
                     const distV = Math.max(halfY, halfZ) / Math.tan(vFov);
                     const distH = Math.max(halfX, halfY) / Math.tan(hFov);
                     const dist = Math.max(distV, distH) * 1.4;
-                    // Direction preset. Elevation > azimuth ("more down than
-                    // sideways") — ~67° elevation in 'a'/'b', steeper in 'c'.
                     const dirCode = "{cam_dir}";
                     let dx, dy, dz;
                     if (dirCode === "b")      {{ dx =  0.3; dy =  0.3; dz =  1.0; }}
@@ -223,9 +227,6 @@ def capture(
                     dx /= dLen; dy /= dLen; dz /= dLen;
                     v._camera.position.set(crx + dx * dist, cry + dy * dist, crz + dz * dist);
                     v._controls.target.set(crx, cry, crz);
-                    v._camera.up.set(0, 0, 1);
-                    v._camera.lookAt(crx, cry, crz);
-                    v._controls.update();
                 }} else {{
                     v._camera.position.set(cx + 0.8 * s, cy - 0.6 * s, cz + 0.55 * s);
                     v._controls.target.set(cx, cy, cz);

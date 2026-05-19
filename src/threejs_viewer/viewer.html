@@ -2253,6 +2253,18 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     const segOut = new Float64Array(4);
     const foldOut = new Float64Array(4);
 
+    // Phase 1 collects fold targets across all strands; phase 2 groups co-
+    // located fold targets (across different strands at the same corner)
+    // and averages their mids to a single apex; phase 3 snaps. Delaying the
+    // snap to phase 3 lets us collapse the inside-bend half of the cross-
+    // section to one 3D point: per-strand mids at a sharp corner stack
+    // vertically by ≈H/2 across the cross-section's height and would
+    // otherwise render as a visible "cube + spokes" cluster on wide beads
+    // instead of a single-point V-crease. Typical worst-case count is
+    // (nCs / 2) per spine corner × a few corners — JS array is fine.
+    /** @type {Array<{strand:number, i:number, j:number, mx:number, my:number, mz:number}>} */
+    const foldTargets = [];
+
     for (let strand = 0; strand < nCs; strand++) {
         // Build the un-mitered strand polyline for this cross-section vertex.
         for (let i = 0; i < nSpine; i++) {
@@ -2318,25 +2330,265 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
                     }
                 }
                 if (!isMin) continue;
-                // sepSq cap is pre-applied as sepReject above (rejected cells
-                // hold +Infinity in dist2 and never reach this point).
-                let peakTurn = 0;
-                for (let k = i + 1; k <= j; k++) {
-                    if (vertTurn[k] > peakTurn) peakTurn = vertTurn[k];
-                }
-                if (peakTurn < MIN_FOLD_PEAK_TURN) continue;
+                // sepSq cap is pre-applied via sepReject (rejected cells hold
+                // +Infinity in dist2 and never reach this point). The peak-
+                // turn check is intentionally deferred to the per-cluster
+                // pass below so a strand whose individual fold range misses
+                // the nearby sharp turn (e.g. left-tip at the bulb peak —
+                // its strand polyline self-intersects inside the bulb body
+                // where the spine is locally smooth) still gets snapped
+                // together with the chamfer-corner strands that DO straddle
+                // the sharp turn. Without that, only 2 of the 3 inside-bend
+                // strands collapse to the apex, the third stays at its
+                // natural offset, and the cross-section ends up as a
+                // 5-vertex wedge with overlapping boundary triangles that
+                // z-fight.
                 strandSegSegMidpoint(positions, ringStride, strand, i, j, foldOut);
-                const cx = foldOut[0];
-                const cy = foldOut[1];
-                const cz = foldOut[2];
-                const sLo = Math.max(1, i + 1);
-                const sHi = Math.min(nSpine - 2, j);
-                for (let r = sLo; r <= sHi; r++) {
-                    const ip = r * ringStride + strand * 3;
-                    positions[ip] = cx;
-                    positions[ip + 1] = cy;
-                    positions[ip + 2] = cz;
-                }
+                foldTargets.push({
+                    strand,
+                    i,
+                    j,
+                    mx: foldOut[0],
+                    my: foldOut[1],
+                    mz: foldOut[2],
+                });
+            }
+        }
+    }
+
+    if (foldTargets.length === 0) return;
+
+    // Phase 2: union-find cluster fold targets whose (i, j) ranges overlap
+    // and that are on *different* strands. Two strands' polylines self-
+    // intersect at the same spine corner, just at slightly different (i, j)
+    // pairs because each strand's offset sits at a different point on the
+    // cross-section. Same-strand fold targets are NOT merged: multiple
+    // local minima on one strand correspond to genuinely different folds
+    // (separate corners) and the existing 0.0.25 semantics — later snap
+    // overwrites overlapping rings — is preserved by leaving them as-is.
+    const parent = new Int32Array(foldTargets.length);
+    for (let n = 0; n < parent.length; n++) parent[n] = n;
+    const findRoot = (/** @type {number} */ x) => {
+        while (parent[x] !== x) {
+            parent[x] = parent[parent[x]]; // path compression
+            x = parent[x];
+        }
+        return x;
+    };
+    const unite = (/** @type {number} */ a, /** @type {number} */ b) => {
+        const ra = findRoot(a), rb = findRoot(b);
+        if (ra !== rb) parent[ra] = rb;
+    };
+    for (let n = 0; n < foldTargets.length; n++) {
+        for (let m = n + 1; m < foldTargets.length; m++) {
+            const fn = foldTargets[n], fm = foldTargets[m];
+            if (fn.strand === fm.strand) continue;
+            if (Math.max(fn.i, fm.i) <= Math.min(fn.j, fm.j)) {
+                unite(n, m);
+            }
+        }
+    }
+
+    // Build cluster aggregates: averaged mid + union ring range +
+    // per-cluster peak turn over the union. The peak-turn cap is applied
+    // here rather than per-fold-target so a strand whose individual range
+    // misses the nearby sharp spine turn (e.g. the left-tip strand at the
+    // bulb peak — its polyline self-intersects inside the bulb body, away
+    // from the corner peak) still passes when its cluster mates anchor
+    // the cluster's union range over a real sharp turn.
+    /** @type {Map<number, {sx:number, sy:number, sz:number, count:number, iLo:number, jHi:number, peakTurn:number}>} */
+    const clusters = new Map();
+    for (let n = 0; n < foldTargets.length; n++) {
+        const root = findRoot(n);
+        const f = foldTargets[n];
+        let c = clusters.get(root);
+        if (c == null) {
+            c = { sx: 0, sy: 0, sz: 0, count: 0, iLo: f.i, jHi: f.j, peakTurn: 0 };
+            clusters.set(root, c);
+        }
+        c.sx += f.mx; c.sy += f.my; c.sz += f.mz; c.count += 1;
+        if (f.i < c.iLo) c.iLo = f.i;
+        if (f.j > c.jHi) c.jHi = f.j;
+    }
+    for (const c of clusters.values()) {
+        let peak = 0;
+        for (let k = c.iLo + 1; k <= c.jHi; k++) {
+            if (vertTurn[k] > peak) peak = vertTurn[k];
+        }
+        c.peakTurn = peak;
+    }
+
+    // Bucket the strand IDs that belong to each cluster.
+    /** @type {Map<number, Set<number>>} */
+    const clusterStrands = new Map();
+    for (let n = 0; n < foldTargets.length; n++) {
+        const root = findRoot(n);
+        let s = clusterStrands.get(root);
+        if (s == null) {
+            s = new Set();
+            clusterStrands.set(root, s);
+        }
+        s.add(foldTargets[n].strand);
+    }
+
+    // Phase 2b: range-adjacency merge across clusters. One continuous
+    // bend distributed over many spine points (e.g. a 90° turn sampled
+    // densely across 6+ vertices) splits into multiple clusters because
+    // the seg-seg local-min stencil produces separate fold targets per
+    // strand per sub-region, AND because the union-find phase
+    // deliberately does NOT merge same-strand fold targets (different
+    // local minima on one strand normally mean different corners). On a
+    // continuous bend that splitting strands the inside-bend strands
+    // across two clusters, but a strand whose polyline self-intersects
+    // *twice* through the bend orphans the second half into a single-
+    // strand cluster. A single-strand snap shifts ONE cross-section
+    // vertex to the apex while the other inside-bend strands stay at
+    // their natural offsets → the cross-section becomes a wedge with
+    // overlapping boundary triangles that z-fight.
+    //
+    // Walk clusters in iLo order and merge any whose ring range begins
+    // within MERGE_GAP rings of the previous cluster's end. Strand sets,
+    // apex sums, and ring ranges all union; the peak-turn is recomputed
+    // over the full merged range so the gap between the two original
+    // ranges is also covered.
+    const MERGE_GAP = 2;
+    /** @type {Array<{sx:number, sy:number, sz:number, count:number, iLo:number, jHi:number, peakTurn:number, strands:Set<number>}>} */
+    const flat = [];
+    for (const [root, c] of clusters) {
+        flat.push({
+            sx: c.sx, sy: c.sy, sz: c.sz, count: c.count,
+            iLo: c.iLo, jHi: c.jHi, peakTurn: c.peakTurn,
+            strands: new Set(/** @type {Set<number>} */ (clusterStrands.get(root))),
+        });
+    }
+    flat.sort((a, b) => a.iLo - b.iLo);
+    /** @type {Array<{sx:number, sy:number, sz:number, count:number, iLo:number, jHi:number, peakTurn:number, strands:Set<number>}>} */
+    const merged = [];
+    for (const c of flat) {
+        const tail = merged.length > 0 ? merged[merged.length - 1] : null;
+        if (tail && c.iLo - tail.jHi <= MERGE_GAP) {
+            tail.sx += c.sx; tail.sy += c.sy; tail.sz += c.sz;
+            tail.count += c.count;
+            if (c.iLo < tail.iLo) tail.iLo = c.iLo;
+            if (c.jHi > tail.jHi) tail.jHi = c.jHi;
+            for (const s of c.strands) tail.strands.add(s);
+        } else {
+            merged.push(c);
+        }
+    }
+    for (const c of merged) {
+        let peak = 0;
+        for (let k = c.iLo + 1; k <= c.jHi; k++) {
+            if (vertTurn[k] > peak) peak = vertTurn[k];
+        }
+        c.peakTurn = peak;
+    }
+
+    // Phase 2b': extend each cluster's ring range outward while the
+    // adjacent ring still has significant turn. The seg-seg fold-target
+    // stencil sometimes pins the strand polyline's local min to one
+    // part of a continuous bend and never produces a fold target
+    // spanning the trailing rings. Without extension, those trailing
+    // high-turn rings keep their natural mitered positions while the
+    // snap range's last ring is at the apex — the boundary triangle
+    // bridging them traverses the bend's sharpest curvature and
+    // visibly protrudes as a cuboid/flap.
+    //
+    // EXTEND_THRESH is half the peak-turn gate so the walk only stops
+    // where the bend has truly faded; EXTEND_CAP bounds the walk so
+    // unrelated curvature further out can't be swept in.
+    const EXTEND_THRESH = MIN_FOLD_PEAK_TURN * 0.5;
+    const EXTEND_CAP = 5;
+    for (const c of merged) {
+        let extLo = 0;
+        while (c.iLo > 0 && extLo < EXTEND_CAP && vertTurn[c.iLo] > EXTEND_THRESH) {
+            c.iLo--;
+            extLo++;
+        }
+        let extHi = 0;
+        while (c.jHi < nSpine - 1 && extHi < EXTEND_CAP && vertTurn[c.jHi + 1] > EXTEND_THRESH) {
+            c.jHi++;
+            extHi++;
+        }
+    }
+    for (const c of merged) {
+        let peak = 0;
+        for (let k = c.iLo + 1; k <= c.jHi; k++) {
+            if (vertTurn[k] > peak) peak = vertTurn[k];
+        }
+        c.peakTurn = peak;
+    }
+
+    // Phase 2c: expand each cluster's strand set with cross-section
+    // neighbors of already-clustered strands that sit on the inside-
+    // bend half of the bead. A strand whose un-mitered polyline
+    // narrowly misses the seg-seg fold-target threshold (e.g. strand 3
+    // sitting between two clustered chamfer-corner strands 2 and 4 on
+    // a wide-bead bend — its offset is shorter so its self-
+    // intersection is just inside tol²) won't appear in the cluster,
+    // and its absence leaves a "tent" cross-section between the two
+    // snapped strands.
+    //
+    // Two-pronged guard against over-snap:
+    //   - "must be a cross-section neighbor of an already-clustered
+    //     strand" prevents the expansion from sweeping in arbitrary
+    //     inside-bend strands far from the cluster's contiguous arc.
+    //   - dot(offset, spine→apex) > 0 ensures the strand is
+    //     geometrically on the inside-bend half. The dot-product
+    //     formulation (unlike a distance-based test) is independent
+    //     of bend magnitude — works on sharp 90° corners and gentler
+    //     bends where the apex sits only a small distance from the
+    //     spine.
+    const sectionScratchEx = new Float32Array(nCs * 2);
+    for (const c of merged) {
+        if (c.peakTurn < MIN_FOLD_PEAK_TURN) continue;
+        if (c.strands.size < 2 || c.strands.size >= nCs) continue;
+        const apexX = c.sx / c.count, apexY = c.sy / c.count, apexZ = c.sz / c.count;
+        const rMid = (c.iLo + c.jHi) >> 1;
+        const sx = spine[rMid * 3], sy = spine[rMid * 3 + 1], sz = spine[rMid * 3 + 2];
+        const dxA = apexX - sx, dyA = apexY - sy, dzA = apexZ - sz;
+        if (dxA * dxA + dyA * dyA + dzA * dzA < 1e-24) continue;
+        sampleChamferedRect(sectionScratchEx, widths[rMid], heights[rMid]);
+        const Ux = localFrames[rMid * 6],     Uy = localFrames[rMid * 6 + 1], Uz = localFrames[rMid * 6 + 2];
+        const Vx = localFrames[rMid * 6 + 3], Vy = localFrames[rMid * 6 + 4], Vz = localFrames[rMid * 6 + 5];
+        /** @type {Set<number>} */
+        const addSet = new Set();
+        for (const cs of c.strands) {
+            const neighbours = [(cs + nCs - 1) % nCs, (cs + 1) % nCs];
+            for (const sCand of neighbours) {
+                if (c.strands.has(sCand) || addSet.has(sCand)) continue;
+                const u = sectionScratchEx[sCand * 2];
+                const v = sectionScratchEx[sCand * 2 + 1];
+                const ox = u * Ux + v * Vx;
+                const oy = u * Uy + v * Vy;
+                const oz = u * Uz + v * Vz;
+                if (ox * dxA + oy * dyA + oz * dzA > 0) addSet.add(sCand);
+            }
+        }
+        for (const s of addSet) c.strands.add(s);
+    }
+
+    // Phase 3: snap each cluster's strands across its merged ring range
+    // to the cluster's averaged apex. The 2-strand wedge guard rejects
+    // orphan single-strand clusters whose adjacent cluster (if any) was
+    // already absorbed during the range-merge step — leaving the strand
+    // at its natural mitered position (a small self-intersection fold
+    // ribbon) is the lesser visual evil versus a one-vertex-snapped
+    // wedge cross-section.
+    for (const c of merged) {
+        if (c.peakTurn < MIN_FOLD_PEAK_TURN) continue;
+        if (c.strands.size < 2) continue;
+        const ux = c.sx / c.count;
+        const uy = c.sy / c.count;
+        const uz = c.sz / c.count;
+        const sLo = Math.max(1, c.iLo + 1);
+        const sHi = Math.min(nSpine - 2, c.jHi);
+        for (const strand of c.strands) {
+            for (let r = sLo; r <= sHi; r++) {
+                const ip = r * ringStride + strand * 3;
+                positions[ip] = ux;
+                positions[ip + 1] = uy;
+                positions[ip + 2] = uz;
             }
         }
     }
