@@ -186,7 +186,11 @@ def capture(
                 spine, widths, heights, ring, half=radius_steps
             )
             tx, ty, tz = float(target[0]), float(target[1]), float(target[2])
-            hx, hy, hz = float(half_extents[0]), float(half_extents[1]), float(half_extents[2])
+            hx, hy, hz = (
+                float(half_extents[0]),
+                float(half_extents[1]),
+                float(half_extents[2]),
+            )
         else:
             tx = ty = tz = hx = hy = hz = 0.0  # unused in overview mode
         page.evaluate(
