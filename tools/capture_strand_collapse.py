@@ -165,36 +165,67 @@ def capture(
                 const s = Math.max(sx, sy, sz);
                 const mode = "{mode}";
                 if (mode === "corner") {{
-                    // Target the cross-section centroid at this ring. That's
-                    // the "center of the bead" at the corner, which is what
-                    // a viewer would aim a camera at to inspect the bend.
+                    // Camera is aimed at the corner ring's centroid and
+                    // pulled back along the chosen direction by `dist`,
+                    // where `dist` is computed from the per-axis half-
+                    // extent of the surrounding rings *measured from the
+                    // corner ring centroid*. That keeps the corner at
+                    // screen center for asymmetric spine arcs (one long
+                    // arm, one short) and gives consistent visual scale
+                    // across rings regardless of how the bead is oriented.
                     const pos = obj.geometry.getAttribute('position').array;
                     const nCs = obj.userData.tubeNCs;
-                    let rx = 0, ry = 0, rz = 0;
+                    const nSpine = obj.userData.tubeNumSpinePoints;
+                    // Corner ring centroid — the camera target.
+                    let crx = 0, cry = 0, crz = 0;
                     for (let j = 0; j < nCs; j++) {{
-                        rx += pos[({ring} * nCs + j) * 3];
-                        ry += pos[({ring} * nCs + j) * 3 + 1];
-                        rz += pos[({ring} * nCs + j) * 3 + 2];
+                        crx += pos[({ring} * nCs + j) * 3];
+                        cry += pos[({ring} * nCs + j) * 3 + 1];
+                        crz += pos[({ring} * nCs + j) * 3 + 2];
                     }}
-                    rx /= nCs; ry /= nCs; rz /= nCs;
-                    // Default zoom 5 viewer units. Sits comfortably outside
-                    // the ~1.7-wide bead and frames ~7 units of context
-                    // around the corner. Tighten with the zoom arg (e.g.
-                    // 0.7) to resolve the H/2 ≈ 0.15 cube-cluster spacing
-                    // at bulb rings.
-                    const z = {zoom};
-                    // Camera offset direction. 'a' (default) is a high
-                    // 3/4-front oblique: equal azimuth + elevation gives a
-                    // ~45° down-and-to-the-side view that's flattering for
-                    // toolpath geometry. 'b' mirrors the azimuth. 'c' is
-                    // top-down with a slight tilt.
+                    crx /= nCs; cry /= nCs; crz /= nCs;
+                    // Half-extents in the local neighbourhood. Measured as
+                    // max(|p - centroid|) so the bbox is symmetric around
+                    // the corner — leaves no biased empty space on either
+                    // side of the frame.
+                    const radius = Math.max(3, Math.round({zoom} * 2));
+                    const r0 = Math.max(0, {ring} - radius);
+                    const r1 = Math.min(nSpine - 1, {ring} + radius);
+                    let halfX = 0, halfY = 0, halfZ = 0;
+                    for (let r = r0; r <= r1; r++) {{
+                        for (let k = 0; k < nCs; k++) {{
+                            const i = (r * nCs + k) * 3;
+                            const ex = Math.abs(pos[i]     - crx);
+                            const ey = Math.abs(pos[i + 1] - cry);
+                            const ez = Math.abs(pos[i + 2] - crz);
+                            if (ex > halfX) halfX = ex;
+                            if (ey > halfY) halfY = ey;
+                            if (ez > halfZ) halfZ = ez;
+                        }}
+                    }}
+                    // FOV-aware fit. The viewer's perspective FOV is on the
+                    // vertical axis; horizontal half-FOV = atan(tan(vFOV/2) * aspect).
+                    // Pull back so the *worst* axis fits inside the frame.
+                    const vFov = (v._perspCamera.fov || 75) * Math.PI / 180 / 2;
+                    const aspect = v._perspCamera.aspect || (1600 / 1200);
+                    const hFov = Math.atan(Math.tan(vFov) * aspect);
+                    const distV = Math.max(halfY, halfZ) / Math.tan(vFov);
+                    const distH = Math.max(halfX, halfY) / Math.tan(hFov);
+                    const dist = Math.max(distV, distH) * 1.4;
+                    // Direction preset. Elevation > azimuth ("more down than
+                    // sideways") — ~67° elevation in 'a'/'b', steeper in 'c'.
                     const dirCode = "{cam_dir}";
                     let dx, dy, dz;
-                    if (dirCode === "b")      {{ dx =  0.7; dy =  0.7; dz =  0.7; }}
-                    else if (dirCode === "c") {{ dx =  0.2; dy = -0.2; dz =  1.0; }}
-                    else                       {{ dx =  0.7; dy = -0.7; dz =  0.7; }}
-                    v._camera.position.set(rx + dx * z, ry + dy * z, rz + dz * z);
-                    v._controls.target.set(rx, ry, rz);
+                    if (dirCode === "b")      {{ dx =  0.3; dy =  0.3; dz =  1.0; }}
+                    else if (dirCode === "c") {{ dx =  0.15; dy = -0.15; dz =  1.0; }}
+                    else                       {{ dx =  0.3; dy = -0.3; dz =  1.0; }}
+                    const dLen = Math.hypot(dx, dy, dz);
+                    dx /= dLen; dy /= dLen; dz /= dLen;
+                    v._camera.position.set(crx + dx * dist, cry + dy * dist, crz + dz * dist);
+                    v._controls.target.set(crx, cry, crz);
+                    v._camera.up.set(0, 0, 1);
+                    v._camera.lookAt(crx, cry, crz);
+                    v._controls.update();
                 }} else {{
                     v._camera.position.set(cx + 0.8 * s, cy - 0.6 * s, cz + 0.55 * s);
                     v._controls.target.set(cx, cy, cz);
