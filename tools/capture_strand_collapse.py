@@ -12,7 +12,6 @@ import base64
 import socket
 import sys
 import threading
-import time
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -97,10 +96,7 @@ def capture(out_path: Path, mode: str = "overview", ring: int = 28):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1600, "height": 1200})
-        url = (
-            f"file://{client.viewer_path.resolve()}"
-            f"?ws_port={client.port}"
-        )
+        url = f"file://{client.viewer_path.resolve()}?ws_port={client.port}"
         page.goto(url)
 
         if not client._connected_event.wait(timeout=10):
