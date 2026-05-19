@@ -80,7 +80,13 @@ def _decode_bead(scale=100.0):
     return spine, widths, heights
 
 
-def capture(out_path: Path, mode: str = "overview", ring: int = 28, cam_dir: str = "a"):
+def capture(
+    out_path: Path,
+    mode: str = "overview",
+    ring: int = 28,
+    cam_dir: str = "a",
+    zoom: float = 1.5,
+):
     port = _free_port()
     client = ViewerClient(port=port, open_browser=False)
 
@@ -122,18 +128,17 @@ def capture(out_path: Path, mode: str = "overview", ring: int = 28, cam_dir: str
             timeout=10000,
         )
 
-        # Frame + wireframe. "overview" uses combined mode (solid + black
-        # overlay) to keep the surface readable. "corner" uses pure wireframe
-        # so the H/2-stacked cube cluster vertices aren't hidden by the solid
-        # fill.
-        wire_target = 2 if mode == "overview" else 1
+        # Frame + wireframe. M pressed twice = combined mode (solid + black
+        # wireframe overlay): the surface gives shape context, the overlay
+        # exposes triangulation. Used for both overview and corner shots.
         page.evaluate(
-            f"""() => {{
+            """() => {
                 const v = window.threejsViewer;
                 v.frameAll();
                 v._shading.wireframeMode = 0;
-                for (let i = 0; i < {wire_target}; i++) v._shading.cycleWireframe();
-            }}"""
+                v._shading.cycleWireframe();  // → 1
+                v._shading.cycleWireframe();  // → 2 = combined
+            }"""
         )
         # Let LOD / framing settle.
         page.wait_for_timeout(800)
@@ -160,46 +165,34 @@ def capture(out_path: Path, mode: str = "overview", ring: int = 28, cam_dir: str
                 const s = Math.max(sx, sy, sz);
                 const mode = "{mode}";
                 if (mode === "corner") {{
+                    // Target the cross-section centroid at this ring. That's
+                    // the "center of the bead" at the corner, which is what
+                    // a viewer would aim a camera at to inspect the bend.
                     const pos = obj.geometry.getAttribute('position').array;
                     const nCs = obj.userData.tubeNCs;
-                    const ring = {ring};
-                    // Aim at the SINGLE strand vertex most likely to be the
-                    // cube-cluster apex (the one with the lowest mean distance
-                    // to its same-ring neighbours). That centers the camera
-                    // directly on the cluster instead of at the cross-section
-                    // mean (which is pulled away by the OUTER strands).
-                    let bestK = 0;
-                    let bestMean = Infinity;
-                    for (let k = 0; k < nCs; k++) {{
-                        const ax = pos[(ring * nCs + k) * 3];
-                        const ay = pos[(ring * nCs + k) * 3 + 1];
-                        const az = pos[(ring * nCs + k) * 3 + 2];
-                        let sum = 0;
-                        for (let j = 0; j < nCs; j++) {{
-                            if (j === k) continue;
-                            const dx = pos[(ring * nCs + j) * 3]     - ax;
-                            const dy = pos[(ring * nCs + j) * 3 + 1] - ay;
-                            const dz = pos[(ring * nCs + j) * 3 + 2] - az;
-                            sum += Math.sqrt(dx*dx + dy*dy + dz*dz);
-                        }}
-                        if (sum < bestMean) {{ bestMean = sum; bestK = k; }}
+                    let rx = 0, ry = 0, rz = 0;
+                    for (let j = 0; j < nCs; j++) {{
+                        rx += pos[({ring} * nCs + j) * 3];
+                        ry += pos[({ring} * nCs + j) * 3 + 1];
+                        rz += pos[({ring} * nCs + j) * 3 + 2];
                     }}
-                    const rx = pos[(ring * nCs + bestK) * 3];
-                    const ry = pos[(ring * nCs + bestK) * 3 + 1];
-                    const rz = pos[(ring * nCs + bestK) * 3 + 2];
-                    // Very tight zoom (cube spacing is ~H/2 ≈ 0.15 in viewer
-                    // units; need viewport ~1 unit to resolve it as distinct
-                    // vertices). FOV 75° => distance ≈ 0.65 for 1u span.
-                    const z = 0.7;
-                    // Camera offset direction selected by the 4th CLI arg.
-                    // 'a' (default oblique +X-Y+Z), 'b' (mirrored +X+Y+Z),
-                    // 'c' (top-down). Use 'b' or 'c' when preset 'a' puts
-                    // the target near a screen edge for a particular ring.
+                    rx /= nCs; ry /= nCs; rz /= nCs;
+                    // Default zoom 5 viewer units. Sits comfortably outside
+                    // the ~1.7-wide bead and frames ~7 units of context
+                    // around the corner. Tighten with the zoom arg (e.g.
+                    // 0.7) to resolve the H/2 ≈ 0.15 cube-cluster spacing
+                    // at bulb rings.
+                    const z = {zoom};
+                    // Camera offset direction. 'a' (default) is a high
+                    // 3/4-front oblique: equal azimuth + elevation gives a
+                    // ~45° down-and-to-the-side view that's flattering for
+                    // toolpath geometry. 'b' mirrors the azimuth. 'c' is
+                    // top-down with a slight tilt.
                     const dirCode = "{cam_dir}";
                     let dx, dy, dz;
-                    if (dirCode === "b")      {{ dx =  0.6; dy =  0.8; dz =  0.3; }}
-                    else if (dirCode === "c") {{ dx =  0.1; dy = -0.1; dz =  1.0; }}
-                    else                       {{ dx =  0.6; dy = -0.8; dz =  0.3; }}
+                    if (dirCode === "b")      {{ dx =  0.7; dy =  0.7; dz =  0.7; }}
+                    else if (dirCode === "c") {{ dx =  0.2; dy = -0.2; dz =  1.0; }}
+                    else                       {{ dx =  0.7; dy = -0.7; dz =  0.7; }}
                     v._camera.position.set(rx + dx * z, ry + dy * z, rz + dz * z);
                     v._controls.target.set(rx, ry, rz);
                 }} else {{
@@ -220,11 +213,12 @@ def capture(out_path: Path, mode: str = "overview", ring: int = 28, cam_dir: str
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or len(sys.argv) > 5:
+    if len(sys.argv) < 2 or len(sys.argv) > 6:
         print(__doc__)
         sys.exit(1)
     out = Path(sys.argv[1]).resolve()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "overview"
     ring = int(sys.argv[3]) if len(sys.argv) >= 4 else 28
-    cam_dir = sys.argv[4] if len(sys.argv) == 5 else "a"
-    capture(out, mode=mode, ring=ring, cam_dir=cam_dir)
+    cam_dir = sys.argv[4] if len(sys.argv) >= 5 else "a"
+    zoom = float(sys.argv[5]) if len(sys.argv) == 6 else 1.5
+    capture(out, mode=mode, ring=ring, cam_dir=cam_dir, zoom=zoom)
