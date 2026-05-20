@@ -22,6 +22,27 @@ def _wait_for_object(page, obj_id, timeout=5.0):
     raise TimeoutError(f"Object '{obj_id}' never appeared in viewer")
 
 
+def _wait_for_collapse(page, obj_id, timeout=20.0):
+    """Wait until the LOD worker's collapseOnly pass has stashed both buffers
+    on the tube's userData. Required before toggling strand_collapse off."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ready = page.evaluate(
+            """(id) => {
+                const obj = window.threejsViewer
+                    && window.threejsViewer._objects.get(id);
+                return !!(obj && obj.userData
+                    && obj.userData.uncollapsedPositions
+                    && obj.userData.collapsedPositions);
+            }""",
+            obj_id,
+        )
+        if ready:
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"strand_collapse buffers never landed for '{obj_id}'")
+
+
 # --- Python API unit tests ---
 
 
@@ -202,6 +223,48 @@ def test_add_parametric_tube_strand_collapse_true_sets_header():
     c.add_parametric_tube("t", spine, widths, heights, strand_collapse=True)
     header, _ = c._binary_messages[-1]
     assert header["strandCollapse"] is True
+
+
+def test_add_parametric_tube_strand_collapse_dict_max_snap_factor_in_header():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t", spine, widths, heights, strand_collapse={"max_snap_factor": 1.5}
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["strandCollapse"] == {"maxSnapFactor": 1.5}
+
+
+def test_add_parametric_tube_strand_collapse_max_snap_factor_negative_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="max_snap_factor"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, strand_collapse={"max_snap_factor": -1.0}
+        )
+
+
+def test_add_parametric_tube_strand_collapse_max_snap_factor_non_number_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="max_snap_factor"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, strand_collapse={"max_snap_factor": "big"}
+        )
+
+
+def test_add_parametric_tube_strand_collapse_unknown_key_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="unknown keys"):
+        c.add_parametric_tube("t", spine, widths, heights, strand_collapse={"foo": 1})
+
+
+def test_add_parametric_tube_strand_collapse_non_dict_non_bool_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="strand_collapse must be"):
+        c.add_parametric_tube("t", spine, widths, heights, strand_collapse="bogus")
 
 
 def test_add_parametric_tube_lod_unknown_key_rejected():
@@ -949,6 +1012,7 @@ def test_parametric_tube_strand_collapse_repro_renders_clean(
         strand_collapse=True,
     )
     _wait_for_object(viewer_page, "repro_collapsed")
+    _wait_for_collapse(viewer_page, "repro_collapsed")
 
     info = viewer_page.evaluate(
         """(ids) => {
@@ -962,11 +1026,23 @@ def test_parametric_tube_strand_collapse_repro_renders_clean(
                 }
                 obj.geometry.computeBoundingBox();
                 const bb = obj.geometry.boundingBox;
+                const u = obj.userData.uncollapsedPositions;
+                let maxMove = 0;
+                if (u && u.length === pos.length) {
+                    for (let i = 0; i < pos.length; i += 3) {
+                        const dx = pos[i] - u[i];
+                        const dy = pos[i + 1] - u[i + 1];
+                        const dz = pos[i + 2] - u[i + 2];
+                        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                        if (d > maxMove) maxMove = d;
+                    }
+                }
                 out[id] = {
                     nonFinite,
                     w: bb.max.x - bb.min.x,
                     h: bb.max.y - bb.min.y,
                     d: bb.max.z - bb.min.z,
+                    maxMove,
                 };
             }
             return out;
@@ -976,6 +1052,18 @@ def test_parametric_tube_strand_collapse_repro_renders_clean(
 
     base = info["repro_baseline"]
     coll = info["repro_collapsed"]
+
+    # The genuine fold must still fire under the default max_snap_factor=1.0
+    # guard — at least one ring vertex should have moved noticeably from its
+    # mitered baseline. Use the smallest width in the bead (~50 mm at scale)
+    # as a conservative lower bound; the actual fold pulls strands by a
+    # larger fraction of W on this dataset.
+    min_w = float(np.min(widths))
+    assert coll["maxMove"] > 0.1 * min_w, (
+        "strand_collapse fold did not fire: max ring movement "
+        f"{coll['maxMove']:.3f} ≤ 0.1·minW ({0.1 * min_w:.3f}) — "
+        "default max_snap_factor=1.0 may have over-rejected the genuine fold"
+    )
 
     assert base["nonFinite"] == 0, f"baseline has {base['nonFinite']} NaN/Inf positions"
     assert coll["nonFinite"] == 0, (
@@ -998,3 +1086,120 @@ def test_parametric_tube_strand_collapse_repro_renders_clean(
     assert abs(coll["d"] - base["d"]) < tol, (
         f"bbox depth drifted: baseline={base['d']:.3f}, collapsed={coll['d']:.3f}"
     )
+
+
+def _u_shaped_cross_toolpath(separation_factor=0.3, W=10.0, leg_n=20):
+    """Two parallel legs separated by ``separation_factor * W`` in Y.
+
+    The spines pass the existing FOLD_SEP_FACTOR=0.5 guard (separation < 0.5·W)
+    but the seg-seg midpoint between offset strands lands far from the rings,
+    which used to produce > 2·W ring displacement. The snap-distance guard
+    introduced here rejects that snap; max(|pos - uncollapsed|) must remain
+    ≤ max(W, H).
+    """
+    x_fwd = np.linspace(0.0, 50.0, leg_n, dtype=np.float32)
+    x_back = x_fwd[::-1]
+    fwd = np.column_stack([x_fwd, np.zeros_like(x_fwd), np.zeros_like(x_fwd)])
+    back = np.column_stack(
+        [x_back, np.full_like(x_back, separation_factor * W), np.zeros_like(x_back)]
+    )
+    spine = np.vstack([fwd, back]).astype(np.float32)
+    widths = np.full(spine.shape[0], W, dtype=np.float32)
+    heights = np.full(spine.shape[0], W, dtype=np.float32)
+    return spine, widths, heights
+
+
+@pytest.mark.browser
+def test_parametric_tube_strand_collapse_snap_distance_guarded(
+    viewer_client, viewer_page
+):
+    """Cross-toolpath coincidence — snap target sits far from rings.
+
+    With ``max_snap_factor=1.0`` no ring should move more than ``max(W, H)``
+    from its mitered baseline. Without the guard, this same input produced
+    displacements > 2·W on real ribweaver dumps.
+    """
+    spine, widths, heights = _u_shaped_cross_toolpath()
+    W = float(widths[0])
+
+    viewer_client.add_parametric_tube(
+        "u_guard",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        anchor="top",
+        lod=False,
+        strand_collapse={"max_snap_factor": 1.0},
+    )
+    _wait_for_object(viewer_page, "u_guard")
+    _wait_for_collapse(viewer_page, "u_guard")
+
+    max_move = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const pos = obj.geometry.getAttribute('position').array;
+            const u = obj.userData.uncollapsedPositions;
+            let maxMove = 0;
+            for (let i = 0; i < pos.length; i += 3) {
+                const dx = pos[i] - u[i];
+                const dy = pos[i + 1] - u[i + 1];
+                const dz = pos[i + 2] - u[i + 2];
+                const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (d > maxMove) maxMove = d;
+            }
+            return maxMove;
+        }""",
+        "u_guard",
+    )
+    assert max_move <= W + 1e-3, (
+        f"strand_collapse moved a ring by {max_move:.3f} mm — exceeds "
+        f"max_snap_factor * max(W, H) = {W:.3f} mm"
+    )
+
+
+@pytest.mark.browser
+def test_parametric_tube_set_strand_collapse_enabled_round_trips(
+    viewer_client, viewer_page
+):
+    """Toggling strand_collapse off then back on restores the collapsed buffer.
+
+    The viewer keeps both buffers alive in userData; toggling is an O(N)
+    copy from the right buffer into the geometry's position attribute.
+    """
+    spine, widths, heights = _decode_repro_bead()
+    tube_id = "toggle_tube"
+
+    viewer_client.add_parametric_tube(
+        tube_id,
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        anchor="top",
+        lod=False,
+        strand_collapse=True,
+    )
+    _wait_for_object(viewer_page, tube_id)
+    _wait_for_collapse(viewer_page, tube_id)
+
+    def positions():
+        return viewer_page.evaluate(
+            """(id) => Array.from(
+                window.threejsViewer._objects.get(id)
+                    .geometry.getAttribute('position').array
+            )""",
+            tube_id,
+        )
+
+    collapsed = np.asarray(positions(), dtype=np.float32)
+
+    viewer_client.set_strand_collapse_enabled(tube_id, False)
+    time.sleep(0.2)
+    uncollapsed = np.asarray(positions(), dtype=np.float32)
+    assert not np.allclose(collapsed, uncollapsed), (
+        "toggle off did not change the rendered position buffer"
+    )
+
+    viewer_client.set_strand_collapse_enabled(tube_id, True)
+    time.sleep(0.2)
+    re_collapsed = np.asarray(positions(), dtype=np.float32)
+    np.testing.assert_allclose(collapsed, re_collapsed)

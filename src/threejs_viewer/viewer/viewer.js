@@ -1034,7 +1034,7 @@ const TUBE_STRAND_COLLAPSE_TOL_FRAC = 0.04;
  * @param {number} nSpine
  * @param {number} nCs
  */
-function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs) {
+function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs, maxSnapFactor) {
     const minGap = TUBE_STRAND_COLLAPSE_MIN_GAP;
     const winMax = TUBE_STRAND_COLLAPSE_WIN;
     const stride = winMax - minGap + 1;
@@ -1090,6 +1090,26 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // the strand offset magnitude — which is the natural geometric
     // scale for fold-back distances.
     const FOLD_SEP_FACTOR = 0.5;
+
+    // Snap-distance cap. FOLD_SEP_FACTOR bounds ‖spine[j] − spine[i]‖
+    // (how far apart the two spine endpoints of a candidate fold are);
+    // it does NOT bound how far the apex-snap target sits from the rings
+    // it's about to overwrite. On real-world toolpaths with neighbouring
+    // passes whose offset polylines happen to come within tol of each
+    // other in 3D, the spine endpoints satisfy FOLD_SEP yet the seg-seg
+    // midpoint can land 5–7× bead-widths away from the ring's mitered
+    // position. Snapping those rings produces long lateral spike
+    // triangles (rings yanked sideways) or degenerate "striped gap"
+    // fans (rings collapsed to a far point, connector triangles slivered).
+    //
+    // MAX_SNAP_FACTOR · max(W, H) bounds the per-ring displacement from
+    // its mitered baseline. 1.0 = "ring may move at most one bead-width".
+    // The strand offset magnitude is ~0.5·W, so 1.0 still allows the
+    // strand to fully reach the cross-section's opposite side. Beyond
+    // that the snap is geometrically nonsensical for a fold.
+    const MAX_SNAP_FACTOR_DEFAULT = 1.0;
+    const snapFactor = (typeof maxSnapFactor === 'number' && maxSnapFactor > 0)
+        ? maxSnapFactor : MAX_SNAP_FACTOR_DEFAULT;
 
     // Minimum peak per-vertex turn (radians) inside the fold range for a
     // candidate to be considered a real corner fold. Below this, the
@@ -1504,6 +1524,20 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // at its natural mitered position (a small self-intersection fold
     // ribbon) is the lesser visual evil versus a one-vertex-snapped
     // wedge cross-section.
+    //
+    // Snap-distance guard fires in two layers:
+    //   (a) Cluster fast-reject — one distance² check per cluster comparing
+    //       the apex against spine[rMid] with 2× slack. Short-circuits
+    //       pathological cross-toolpath-coincidence clusters whose apex
+    //       sits multiple bead-widths from any ring in the range.
+    //   (b) Per-ring guard — one distance² per (ring, strand) write
+    //       against the pre-snap mitered position. Catches mixed clusters
+    //       where rings near the apex would snap cleanly but ring-range
+    //       edges (where the spine has drifted away) would not — those
+    //       edge rings stay at their mitered position, preserving partial
+    //       folds. Measured against positions[ip] (mitered + height-
+    //       anchored) rather than spine[r] so anchor="top" beads compare
+    //       in the rendered frame the user actually sees.
     for (const c of merged) {
         if (c.peakTurn < MIN_FOLD_PEAK_TURN) continue;
         if (c.strands.size < 2) continue;
@@ -1512,9 +1546,22 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         const uz = c.sz / c.count;
         const sLo = Math.max(1, c.iLo + 1);
         const sHi = Math.min(nSpine - 2, c.jHi);
+        const rMid = (c.iLo + c.jHi) >> 1;
+        const clusterCap = 2 * snapFactor * Math.max(widths[rMid], heights[rMid]);
+        const clusterCapSq = clusterCap * clusterCap;
+        const dxC = ux - spine[rMid * 3];
+        const dyC = uy - spine[rMid * 3 + 1];
+        const dzC = uz - spine[rMid * 3 + 2];
+        if (dxC * dxC + dyC * dyC + dzC * dzC > clusterCapSq) continue;
         for (const strand of c.strands) {
             for (let r = sLo; r <= sHi; r++) {
                 const ip = r * ringStride + strand * 3;
+                const cap = snapFactor * Math.max(widths[r], heights[r]);
+                const capSq = cap * cap;
+                const dx = ux - positions[ip];
+                const dy = uy - positions[ip + 1];
+                const dz = uz - positions[ip + 2];
+                if (dx * dx + dy * dy + dz * dz > capSq) continue;
                 positions[ip] = ux;
                 positions[ip + 1] = uy;
                 positions[ip + 2] = uz;
@@ -1961,7 +2008,9 @@ self.onmessage = function(e) {
             heightOffset: msg.heightOffset || 0,
             boundingRadius: msg.boundingRadius || 0,
             epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
-            strandCollapse: !!msg.strandCollapse,
+            // Stored as the original value (bool | {maxSnapFactor: number}) so
+            // the LOD-rebuild collapse call below can extract the factor.
+            strandCollapse: msg.strandCollapse,
         });
         _rdpCache.delete(msg.tubeId);
         return;
@@ -1984,9 +2033,11 @@ self.onmessage = function(e) {
     // loadToken is opaque to the worker; we round-trip it so the main
     // thread can verify the response still applies to the live mesh.
     if (msg.type === 'collapseOnly') {
+        const sc = msg.strandCollapse;
+        const msf = (sc && typeof sc === 'object') ? sc.maxSnapFactor : undefined;
         collapseTubeStrandFolds(
             msg.positions, msg.spine, msg.widths, msg.heights, msg.localFrames,
-            msg.nSpine, N_CS,
+            msg.nSpine, N_CS, msf,
         );
         self.postMessage({
             type: 'collapseOnlyResult',
@@ -2096,9 +2147,15 @@ self.onmessage = function(e) {
     // Strand-collapse pass on the reduced spine. The reduced mesh sees
     // the same fold geometry as the full-resolution main-thread build,
     // just resampled — running collapseTubeStrandFolds here keeps the
-    // crisp creases visible at every LOD level.
+    // crisp creases visible at every LOD level. We snapshot the pre-
+    // collapse positions first so the runtime toggle still has both
+    // buffers to flip between after an LOD rebuild.
+    let uncollapsedPositions = null;
     if (tube.strandCollapse) {
-        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS);
+        uncollapsedPositions = new Float32Array(geo.positions);
+        const sc = tube.strandCollapse;
+        const msf = (sc && typeof sc === 'object') ? sc.maxSnapFactor : undefined;
+        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS, msf);
     }
 
     // Transfer ownership of large buffers
@@ -2107,6 +2164,7 @@ self.onmessage = function(e) {
                       geo.endCapPattern.buffer, keptRaw.buffer, redSpine.buffer, redWidths.buffer, redHeights.buffer];
     if (geo.colors) transfer.push(geo.colors.buffer);
     if (redColors) transfer.push(redColors.buffer);
+    if (uncollapsedPositions) transfer.push(uncollapsedPositions.buffer);
 
     self.postMessage({
         tubeId, allReused: false,
@@ -2119,6 +2177,7 @@ self.onmessage = function(e) {
         keptIndices: keptRaw.subarray(0, nRed),
         reducedSpine: redSpine, reducedWidths: redWidths, reducedHeights: redHeights,
         reducedColors: redColors,
+        uncollapsedPositions,
         minDist, maxDist, chunksReused, chunksTotal: nChunks,
     }, transfer);
 };
@@ -2668,6 +2727,23 @@ class ParametricTube {
         mesh.geometry = geometry;
         if (mesh.userData.wireframeOverlay) {
             mesh.userData.wireframeOverlay.geometry = geometry;
+        }
+
+        // Re-stash both buffers for the runtime toggle after an LOD rebuild.
+        // The worker output's `positions` is collapsed (when strand_collapse
+        // is on for this tube), `uncollapsedPositions` is the snapshot taken
+        // immediately before the collapse pass ran. If the user has toggled
+        // strand_collapse OFF on this tube, swap to the uncollapsed buffer
+        // in the live geometry so the toggle survives LOD rebuilds.
+        if (msg.uncollapsedPositions) {
+            mesh.userData.uncollapsedPositions = msg.uncollapsedPositions;
+            mesh.userData.collapsedPositions = new Float32Array(msg.positions);
+            if (mesh.userData.strandCollapseEnabled === false) {
+                const dst = /** @type {Float32Array} */ (msg.positions);
+                const src = mesh.userData.uncollapsedPositions;
+                dst.set(src.subarray(0, Math.min(dst.length, src.length)));
+                geometry.getAttribute('position').needsUpdate = true;
+            }
         }
 
         const ud = mesh.userData;
@@ -3848,7 +3924,19 @@ export class ThreeJSViewer {
                 const dst = /** @type {Float32Array} */ (posAttr.array);
                 const src = /** @type {Float32Array} */ (msg.positions);
                 const copyLen = Math.min(dst.length, src.length);
-                dst.set(src.subarray(0, copyLen));
+                // Stash a separate copy of the collapsed positions so the
+                // runtime toggle can swap between collapsed and uncollapsed
+                // without re-running the worker. The runtime state lives in
+                // userData.strandCollapseEnabled (initialized to true at
+                // tube creation); if the user has already toggled it off
+                // before this message arrives we honor that by writing
+                // the *uncollapsed* buffer into the live geometry instead.
+                meshObj.userData.collapsedPositions = new Float32Array(src.subarray(0, copyLen));
+                const showCollapsed = meshObj.userData.strandCollapseEnabled !== false;
+                const showSrc = showCollapsed
+                    ? meshObj.userData.collapsedPositions
+                    : /** @type {Float32Array} */ (meshObj.userData.uncollapsedPositions);
+                dst.set(showSrc.subarray(0, copyLen));
                 posAttr.needsUpdate = true;
                 if (meshObj.geometry.boundingSphere) meshObj.geometry.computeBoundingSphere();
                 return;
@@ -4355,6 +4443,64 @@ export class ThreeJSViewer {
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
             btn.classList.remove('active');
         });
+    }
+
+    // ========== Strand-collapse runtime toggle ==========
+    //
+    // strand_collapse modifies the position buffer in place during the LOD
+    // worker's collapseOnly pass; toggling it off after creation would
+    // normally require re-running the worker. Instead the parametric_tube
+    // case stashes a copy of the pre-collapse positions
+    // (`userData.uncollapsedPositions`), and the collapseOnlyResult
+    // handler stashes a copy of the post-collapse positions
+    // (`userData.collapsedPositions`). Toggling is then an O(N) buffer
+    // copy with no worker round-trip.
+
+    /**
+     * Swap the visible positions for a single tube between collapsed and
+     * uncollapsed. Silently no-ops when either stash is missing — happens
+     * for tubes created without strand_collapse, or before the collapseOnly
+     * worker has responded.
+     *
+     * @param {string} tubeId
+     * @param {boolean} enabled
+     */
+    setStrandCollapseEnabled(tubeId, enabled) {
+        const obj = this._objects.get(tubeId);
+        if (!obj || !obj.userData.uncollapsedPositions || !obj.userData.collapsedPositions) return;
+        const src = enabled
+            ? /** @type {Float32Array} */ (obj.userData.collapsedPositions)
+            : /** @type {Float32Array} */ (obj.userData.uncollapsedPositions);
+        const posAttr = /** @type {THREE.BufferAttribute | undefined} */ (
+            obj.geometry && obj.geometry.getAttribute && obj.geometry.getAttribute('position')
+        );
+        if (!posAttr) return;
+        const dst = /** @type {Float32Array} */ (posAttr.array);
+        const copyLen = Math.min(dst.length, src.length);
+        dst.set(src.subarray(0, copyLen));
+        posAttr.needsUpdate = true;
+        if (obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
+        obj.userData.strandCollapseEnabled = enabled;
+    }
+
+    /**
+     * Global toggle bound to the `S` key. Walks every tube that has both
+     * uncollapsed and collapsed buffers stashed, picks the target state by
+     * majority (ties → disable), and applies it.
+     */
+    _toggleAllStrandCollapse() {
+        let on = 0, off = 0;
+        for (const obj of this._objects.values()) {
+            if (!obj.userData.uncollapsedPositions || !obj.userData.collapsedPositions) continue;
+            if (obj.userData.strandCollapseEnabled) on++; else off++;
+        }
+        if (on === 0 && off === 0) return;
+        const target = on > off ? false : true;
+        for (const [id, obj] of this._objects) {
+            if (!obj.userData.uncollapsedPositions || !obj.userData.collapsedPositions) continue;
+            this.setStrandCollapseEnabled(id, target);
+        }
+        this._lodDirty = true;
     }
 
     // ========== Lighting Panel ==========
@@ -5580,6 +5726,13 @@ export class ThreeJSViewer {
                 this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
                 return;
             }
+            // KeyS toggles strand_collapse on every tube that has both buffers
+            // stashed. Gated on clip being disabled so the existing slab-mode
+            // shortcut (clip-S) still works when the clip panel is open.
+            if (e.code === 'KeyS' && !e.ctrlKey && !e.metaKey && !this._clipEnabled) {
+                this._toggleAllStrandCollapse();
+                return;
+            }
             if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey) {
                 this.resetView();
                 return;
@@ -6382,7 +6535,22 @@ export class ThreeJSViewer {
                                     // LOD initial reduction logged at debug level only
                                 }
 
-                                const strandCollapse = !!data.strandCollapse;
+                                // strand_collapse accepts true or {maxSnapFactor: N}. Normalize
+                                // here so the worker messages and the runtime toggle see a
+                                // single canonical shape — and so the LOD-rebuild path in
+                                // the worker can extract the snap factor without re-parsing.
+                                let strandCollapse = false;
+                                let strandCollapseCfg = null;
+                                if (data.strandCollapse === true) {
+                                    strandCollapse = true;
+                                    strandCollapseCfg = true;
+                                } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
+                                    strandCollapse = true;
+                                    const msf = data.strandCollapse.maxSnapFactor;
+                                    strandCollapseCfg = (typeof msf === 'number' && msf > 0)
+                                        ? { maxSnapFactor: msf }
+                                        : true;
+                                }
                                 const { geometry, ringPairs, indicesPerRingPair, localFrames, miterScales, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                                     buildSpine, buildWidths, buildHeights,
                                     buildOrientations, upVector, buildRingColors, heightOffset,
@@ -6457,7 +6625,7 @@ export class ThreeJSViewer {
                                         heightOffset: heightOffset,
                                         boundingRadius: tubeLOD.boundingRadius,
                                         epsilonDivisor: tubeLOD.epsilonDivisor,
-                                        strandCollapse,
+                                        strandCollapse: strandCollapseCfg,
                                     });
                                 }
                                 // Async strand-collapse offload: post the un-collapsed
@@ -6475,6 +6643,14 @@ export class ThreeJSViewer {
                                 if (strandCollapse) {
                                     const posAttr = /** @type {THREE.BufferAttribute} */ (geometry.getAttribute('position'));
                                     const posClone = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+                                    // Stash an independent copy of the pre-collapse positions
+                                    // so the runtime toggle (press S) can flip back to it
+                                    // without re-running the worker. posClone is transferred
+                                    // into the worker on the next postMessage, so this must
+                                    // be a separate Float32Array allocation.
+                                    mesh.userData.uncollapsedPositions = new Float32Array(posClone);
+                                    mesh.userData.strandCollapseEnabled = true;
+                                    mesh.userData.strandCollapseConfig = strandCollapseCfg;
                                     const spineForWorker = new Float32Array(buildSpine);
                                     const widthsForWorker = new Float32Array(buildWidths);
                                     const heightsForWorker = new Float32Array(buildHeights);
@@ -6490,6 +6666,7 @@ export class ThreeJSViewer {
                                         heights: heightsForWorker,
                                         localFrames: localFramesForWorker,
                                         nSpine: buildN,
+                                        strandCollapse: strandCollapseCfg,
                                     }, [
                                         posClone.buffer,
                                         spineForWorker.buffer,
@@ -6703,6 +6880,10 @@ export class ThreeJSViewer {
                         break;
                     case 'set_draw_range':
                         this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
+                        break;
+                    case 'set_strand_collapse_enabled':
+                        this._withObject(data.id, 'set_strand_collapse_enabled', () =>
+                            this.setStrandCollapseEnabled(data.id, !!data.enabled));
                         break;
                     case 'set_clipping_plane': {
                         this._clipEnabled = true;
