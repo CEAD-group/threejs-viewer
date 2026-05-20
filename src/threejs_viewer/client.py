@@ -90,6 +90,51 @@ def _serialize_lod(lod):
     return out
 
 
+_STRAND_COLLAPSE_ALLOWED_KEYS = {"max_snap_factor"}
+
+
+def _serialize_strand_collapse(sc):
+    """Validate the ``strand_collapse`` kwarg and convert it to the wire payload.
+
+    Returns `False` to mean "omit / no collapse", `True` to mean "collapse with
+    defaults", or a camelCase dict (`{"maxSnapFactor": float}`) for tuned
+    parameters. Raises `ValueError` on unknown keys or invalid value types.
+    """
+    if sc is None or sc is False:
+        return False
+    if sc is True:
+        return True
+    if not isinstance(sc, dict):
+        raise ValueError(
+            "strand_collapse must be a bool or a dict with keys "
+            f"{sorted(_STRAND_COLLAPSE_ALLOWED_KEYS)} (got {sc!r})"
+        )
+    unknown = set(sc) - _STRAND_COLLAPSE_ALLOWED_KEYS
+    if unknown:
+        raise ValueError(
+            f"strand_collapse has unknown keys {sorted(unknown)}; "
+            f"allowed: {sorted(_STRAND_COLLAPSE_ALLOWED_KEYS)}"
+        )
+    out: Dict[str, float] = {}
+    if "max_snap_factor" in sc:
+        msf = sc["max_snap_factor"]
+        if isinstance(msf, bool) or not isinstance(msf, numbers.Real):
+            raise ValueError(
+                f"strand_collapse.max_snap_factor must be a number (got {msf!r})"
+            )
+        msf = float(msf)
+        if not math.isfinite(msf) or msf <= 0:
+            raise ValueError(
+                "strand_collapse.max_snap_factor must be a positive finite "
+                f"number (got {msf!r})"
+            )
+        out["maxSnapFactor"] = msf
+    # Empty dict (or dict with no recognised settings) means "enabled with
+    # defaults". Returning {} would be falsy at the caller and silently
+    # disable collapse, which is the opposite of what the user asked for.
+    return out or True
+
+
 class _BlobHandler(BaseHTTPRequestHandler):
     """Serves binary blobs over HTTP for fast transfer to browser."""
 
@@ -830,7 +875,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         lod: Optional[Union[bool, dict]] = None,
-        strand_collapse: bool = False,
+        strand_collapse: Union[bool, dict] = False,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -895,6 +940,30 @@ class ViewerClient:
                 main thread never blocks — and is re-applied on every
                 reduced-spine rebuild for LOD-enabled tubes, so creases
                 stay crisp at every camera distance.
+
+                Accepts a dict for tuned parameters:
+
+                    add_parametric_tube(
+                        "bead", spine, w, h,
+                        strand_collapse={"max_snap_factor": 1.0},
+                    )
+
+                ``max_snap_factor`` (default ``1.0``) bounds how far a ring
+                may be displaced from its mitered baseline by the snap
+                pass, measured in units of ``max(width, height)``. On
+                real-world toolpaths whose neighbouring passes place
+                offset strands within tolerance of each other in 3D,
+                the seg-seg midpoint can land multiple bead-widths from
+                where the spine put the ring — those snaps render as
+                lateral spike triangles or degenerate striped-gap fans.
+                The guard rejects them while leaving genuine inside-
+                bend folds (where the apex sits within one bead-width)
+                intact. Use lower values (e.g. 0.5) to be more
+                aggressive about rejecting outliers, higher values
+                (e.g. 2.0) to catch only the most pathological cases.
+                The current bead can be toggled in the live viewer
+                with the ``S`` key, or via
+                ``set_strand_collapse_enabled``.
         """
         lod_header = _serialize_lod(lod)
 
@@ -953,8 +1022,9 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
-        if strand_collapse:
-            header["strandCollapse"] = True
+        sc_header = _serialize_strand_collapse(strand_collapse)
+        if sc_header:
+            header["strandCollapse"] = sc_header
         if lod_header is not _LOD_DEFAULT:
             header["lod"] = lod_header
         # The viewer applies heightOffset as a *shift* to section cv values,
@@ -1297,6 +1367,26 @@ class ViewerClient:
     def set_draw_range(self, id: str, value: float) -> None:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
+
+    def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
+        """Toggle strand_collapse on a parametric_tube without re-uploading geometry.
+
+        The viewer keeps both pre- and post-collapse position buffers alive for
+        tubes created with ``strand_collapse=True`` (or a dict), so the swap is
+        an O(N) buffer copy. Silently no-ops on tubes without strand_collapse
+        or whose ``collapseOnly`` worker pass has not yet completed.
+
+        Also bound to the ``S`` key in the live viewer (toggles every eligible
+        tube globally; the key is gated on the clipping panel being closed so
+        the existing clip-S slab-mode shortcut still works).
+        """
+        self._send(
+            {
+                "type": "set_strand_collapse_enabled",
+                "id": id,
+                "enabled": bool(enabled),
+            }
+        )
 
     def set_clipping_plane(
         self,
