@@ -129,7 +129,10 @@ def _serialize_strand_collapse(sc):
                 f"number (got {msf!r})"
             )
         out["maxSnapFactor"] = msf
-    return out
+    # Empty dict (or dict with no recognised settings) means "enabled with
+    # defaults". Returning {} would be falsy at the caller and silently
+    # disable collapse, which is the opposite of what the user asked for.
+    return out or True
 
 
 class _BlobHandler(BaseHTTPRequestHandler):

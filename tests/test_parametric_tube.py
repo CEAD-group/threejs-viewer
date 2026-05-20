@@ -253,6 +253,16 @@ def test_add_parametric_tube_strand_collapse_max_snap_factor_non_number_rejected
         )
 
 
+def test_add_parametric_tube_strand_collapse_empty_dict_enables_defaults():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, strand_collapse={})
+    header, _ = c._binary_messages[-1]
+    # `{}` means "enabled with defaults", not "disabled" — must serialize
+    # as True so the worker runs the collapse pass.
+    assert header["strandCollapse"] is True
+
+
 def test_add_parametric_tube_strand_collapse_unknown_key_rejected():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()

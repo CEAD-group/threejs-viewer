@@ -5566,7 +5566,7 @@ class ThreeJSViewer {
             if (obj.userData.strandCollapseEnabled) on++; else off++;
         }
         if (on === 0 && off === 0) return;
-        const target = on > off ? false : true;
+        const target = on >= off ? false : true;
         for (const [id, obj] of this._objects) {
             if (!obj.userData.uncollapsedPositions || !obj.userData.collapsedPositions) continue;
             this.setStrandCollapseEnabled(id, target);
