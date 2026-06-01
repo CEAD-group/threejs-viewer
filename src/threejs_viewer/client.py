@@ -744,9 +744,10 @@ class ViewerClient:
                 ``line_width``. ``False`` renders a native ``THREE.Line`` —
                 one vertex per point, ~1px, one draw call. The native path is
                 far lighter for very large toolpaths (millions of points) but
-                WebGL ignores line width, so the perspective-width and haloed
-                depth-cue modes don't apply (fog / cool-warm / auto-rotate /
-                eye-dome lighting still do). Per-vertex ``colors`` work in both.
+                WebGL clamps native line width to 1px, so ``line_width`` is
+                ignored; the fog and eye-dome-lighting depth cues
+                (``set_depth_cue``) still apply. Per-vertex ``colors`` work in
+                both.
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:

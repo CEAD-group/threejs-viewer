@@ -4697,26 +4697,20 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
 // For very dense / complex toolpaths the caller falls back to flat line
 // drawing (add_polyline), which loses all shading and with it every depth
 // cue. A viewer-global DepthCueController re-introduces depth on otherwise-flat
-// white lines via two controls:
+// white lines via two composable controls:
 //
-//   `D`        cycles a mutually-exclusive BASE appearance:
-//                0 off         plain as-authored
-//                1 fog         classic CAD depth cueing — far lines dim to black
-//                2 width       perspective line width (worldUnits): far thinner
-//                3 coolwarm    aerial-perspective tint — far lines fade to blue
-//                4 autorotate  structure-from-motion turntable spin
-//                5 halo        haloed lines — a dark gap is carved around the
-//                              nearer strand at crossings (Appel 1979)
+//   `D`        toggles DISTANCE FOG — classic CAD depth cueing; far lines dim
+//              toward near-black via THREE.Fog whose near/far track the scene
+//              bounds + camera distance.
 //
-//   `Shift+D`  toggles EYE-DOME LIGHTING as an independent overlay: a
-//              screen-space post-process (Potree/CloudCompare) that darkens
-//              fragments sitting behind their neighbours, sculpting flat-white
-//              line bundles into legible 3D. Because it operates on the final
-//              rendered colour it COMPOSES with any base mode — e.g. fog+EDL
-//              gives global distance dimming plus local surface shading.
+//   `Shift+D`  toggles EYE-DOME LIGHTING: a screen-space post-process
+//              (Potree/CloudCompare) that darkens fragments sitting behind
+//              their neighbours, sculpting flat-white line bundles into legible
+//              3D. Because it operates on the final rendered colour it COMPOSES
+//              with fog — fog dims globally, EDL adds local crossing contrast.
 //
-// Purely viewer-side, applies to every polyline present at toggle time — there
-// is no Python API.
+// Both are also reachable from Python via set_depth_cue(fog, edl). Fog applies
+// to every polyline in the scene; EDL is an independent screen-space overlay.
 
 /** Eye-dome lighting post-process. Darkens a fragment in proportion to how
  *  much farther it sits than its 4 screen-space neighbours (log-depth), which
@@ -4765,12 +4759,16 @@ const EDL_SHADER = {
         uniform float fogNear;
         uniform float fogFar;
 
-        float linearDist(vec2 uv) {
-            float d = texture2D(tDepth, uv).x;
+        // Linear distance in front of the camera from a raw [0,1] depth sample.
+        float rawToDist(float d) {
             float viewZ = (isPerspective == 1)
                 ? perspectiveDepthToViewZ(d, cameraNear, cameraFar)
                 : orthographicDepthToViewZ(d, cameraNear, cameraFar);
             return -viewZ; // positive distance in front of the camera
+        }
+
+        float neighbourDist(vec2 uv) {
+            return rawToDist(texture2D(tDepth, uv).x);
         }
 
         void main() {
@@ -4779,7 +4777,8 @@ const EDL_SHADER = {
             // Nothing drawn here → leave the background untouched.
             if (centerRaw >= 1.0) { gl_FragColor = color; return; }
 
-            float distC = linearDist(vUv);
+            // Reuse the centre depth we already sampled (no second fetch).
+            float distC = rawToDist(centerRaw);
             float logC = log2(distC + 1e-6);
             vec2 texel = edlRadius / resolution;
             vec2 offs[4];
@@ -4791,7 +4790,7 @@ const EDL_SHADER = {
             float sum = 0.0;
             for (int i = 0; i < 4; i++) {
                 // Only neighbours NEARER than us push us darker (we sit behind them).
-                sum += max(0.0, logC - log2(linearDist(vUv + offs[i]) + 1e-6));
+                sum += max(0.0, logC - log2(neighbourDist(vUv + offs[i]) + 1e-6));
             }
             float shade = exp(-(sum * 0.25) * edlStrength);
             vec3 rgb = color.rgb * shade;
@@ -4808,9 +4807,7 @@ const EDL_SHADER = {
     `,
 };
 
-// Base appearance modes cycled by `D`. Eye-dome lighting is NOT here — it is an
-// independent overlay (Shift+D) that composes with whichever base is active.
-// Distant lines dim toward this near-black for classic CAD depth cueing.
+// Distant lines dim toward this near-black for classic CAD depth cueing (`D`).
 const DEPTH_CUE_FOG_COLOR = 0x0a0a0f;
 
 // Depth perception for flat line drawings (the add_polyline fallback for
@@ -4859,7 +4856,7 @@ class DepthCueController {
         this._showToast(this.edlActive ? 'Eye-dome lighting on' : 'Eye-dome lighting off');
     }
 
-    /** Programmatic fog on/off (idempotent). */
+    /** Programmatic fog on/off (idempotent). @param {boolean} on */
     setFog(on) {
         const want = !!on;
         if (want === this.fogActive) return;
@@ -4876,7 +4873,7 @@ class DepthCueController {
         }
     }
 
-    /** Programmatic EDL on/off (idempotent). */
+    /** Programmatic EDL on/off (idempotent). @param {boolean} on */
     setEdl(on) {
         const want = !!on;
         if (want === this.edlActive) return;
@@ -4976,15 +4973,9 @@ class DepthCueController {
 
     /** @param {number} width @param {number} height CSS px */
     onResize(width, height) {
-        if (this._composer) {
-            this._composer.setSize(width, height);
-            const db = this.v._renderer.getDrawingBufferSize(this._tmpV2);
-            if (this._depthTexture) {
-                this._depthTexture.image.width = db.x;
-                this._depthTexture.image.height = db.y;
-                this._depthTexture.needsUpdate = true;
-            }
-        }
+        // setSize resizes renderTarget2 and its attached depthTexture in place,
+        // so the shared EDL depth texture follows automatically.
+        if (this._composer) this._composer.setSize(width, height);
     }
 
     /** @param {string} text */
@@ -5105,8 +5096,8 @@ class ThreeJSViewer {
         // Camera objects themselves live on the viewer.
         this._camController = new CameraController(this);
 
-        // D-key depth-cue cycle for flat white line drawings (fog / perspective
-        // width / cool-warm tint / auto-rotate / haloed lines / eye-dome lighting).
+        // Depth cues for flat white line drawings: `D` toggles distance fog,
+        // `Shift+D` toggles eye-dome lighting (composable). Also set_depth_cue().
         this._depthCue = new DepthCueController(this);
 
         // Clipping state
@@ -7668,6 +7659,10 @@ class ThreeJSViewer {
                                             resolution: new THREE.Vector2(w, h),
                                         });
                                     }
+                                    // LineMaterial defaults fog=false; match the
+                                    // current fog state so polylines added while fog
+                                    // is already on don't render unfogged.
+                                    material.fog = this._depthCue.fogActive;
                                     line = new Line2(geometry, material);
                                     line.computeLineDistances();
                                     line.userData.maxInstanceCount = numPoints - 1;
