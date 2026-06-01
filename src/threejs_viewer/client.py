@@ -725,6 +725,7 @@ class ViewerClient:
         cmax: float = None,
         line_width: int = 2,
         parent: Optional[str] = None,
+        fat: bool = True,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -737,7 +738,15 @@ class ViewerClient:
             colormap: Colormap name for scalar values
             cmin: Min value for colormap scaling
             cmax: Max value for colormap scaling
-            line_width: Width of the line in pixels
+            line_width: Width of the line in pixels (``fat=True`` only)
+            parent: Optional parent group id
+            fat: ``True`` (default) renders fat lines (``Line2``) honoring
+                ``line_width``. ``False`` renders a native ``THREE.Line`` —
+                one vertex per point, ~1px, one draw call. The native path is
+                far lighter for very large toolpaths (millions of points) but
+                WebGL ignores line width, so the perspective-width and haloed
+                depth-cue modes don't apply (fog / cool-warm / auto-rotate /
+                eye-dome lighting still do). Per-vertex ``colors`` work in both.
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
@@ -772,6 +781,7 @@ class ViewerClient:
             "lineWidth": line_width,
             "hasVertexColors": has_vertex_colors,
             "numPoints": n_points,
+            "fat": bool(fat),
         }
         if parent:
             header["parent"] = parent
@@ -1483,6 +1493,30 @@ class ViewerClient:
         if size is not None and divisions is not None:
             msg["size"] = size
             msg["divisions"] = divisions
+        self._send(msg)
+
+    def set_depth_cue(
+        self,
+        fog: bool | None = None,
+        edl: bool | None = None,
+    ) -> None:
+        """Toggle the viewer's depth cues for flat line drawings.
+
+        The programmatic equivalent of the ``D`` (fog) and ``Shift+D`` (eye-dome
+        lighting) viewer keys. Depth cues apply to every polyline in the scene
+        and restore a sense of depth to otherwise-flat line bundles. The two
+        compose: fog dims distant lines globally, EDL sculpts local crossings.
+
+        Args:
+            fog: Distance fog (CAD depth cueing) on/off. ``None`` leaves it
+                unchanged.
+            edl: Eye-dome lighting on/off. ``None`` leaves it unchanged.
+        """
+        msg: dict = {"type": "set_depth_cue"}
+        if fog is not None:
+            msg["fog"] = bool(fog)
+        if edl is not None:
+            msg["edl"] = bool(edl)
         self._send(msg)
 
     def clear(self) -> None:
