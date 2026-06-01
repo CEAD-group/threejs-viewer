@@ -487,3 +487,23 @@
     outline: 2px solid #66b3ff;
     outline-offset: 2px;
 }
+
+/* Transient label shown when the D-key depth-cue mode changes */
+.threejs-viewer .tjsv-depthcue-toast {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(30, 30, 30, 0.85);
+    color: #eee;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    pointer-events: none;
+    user-select: none;
+    opacity: 0;
+    transition: opacity 0.25s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    z-index: 10;
+}

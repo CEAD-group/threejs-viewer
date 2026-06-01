@@ -498,6 +498,26 @@
             outline: 2px solid #66b3ff;
             outline-offset: 2px;
         }
+
+        /* Transient label shown when the D-key depth-cue mode changes */
+        .threejs-viewer .tjsv-depthcue-toast {
+            position: absolute;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(30, 30, 30, 0.85);
+            color: #eee;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            pointer-events: none;
+            user-select: none;
+            opacity: 0;
+            transition: opacity 0.25s;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 10;
+        }
     </style>
     <script type="importmap">
     {
@@ -1085,6 +1105,10 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 import { VertexNormalsHelper } from 'three/addons/helpers/VertexNormalsHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
 
@@ -1385,6 +1409,8 @@ function makeChannelApply(viewer) {
                 }
                 if (obj.userData.isToolpathGroup) {
                     applyToolpathGroupDrawRange(obj, value, viewer._objects);
+                } else if (obj.userData.isNativeLine) {
+                    obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 } else if (obj.userData.isPolyline) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
                 } else if (obj.userData.isParametricTube) {
@@ -4666,6 +4692,306 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
     }
 }
 
+// ========== Depth cues (depth perception for flat white line drawings) ==========
+//
+// For very dense / complex toolpaths the caller falls back to flat line
+// drawing (add_polyline), which loses all shading and with it every depth
+// cue. A viewer-global DepthCueController re-introduces depth on otherwise-flat
+// white lines via two composable controls:
+//
+//   `D`        toggles DISTANCE FOG — classic CAD depth cueing; far lines dim
+//              toward near-black via THREE.Fog whose near/far track the scene
+//              bounds + camera distance.
+//
+//   `Shift+D`  toggles EYE-DOME LIGHTING: a screen-space post-process
+//              (Potree/CloudCompare) that darkens fragments sitting behind
+//              their neighbours, sculpting flat-white line bundles into legible
+//              3D. Because it operates on the final rendered colour it COMPOSES
+//              with fog — fog dims globally, EDL adds local crossing contrast.
+//
+// Both are also reachable from Python via set_depth_cue(fog, edl). Fog applies
+// to every polyline in the scene; EDL is an independent screen-space overlay.
+
+/** Eye-dome lighting post-process. Darkens a fragment in proportion to how
+ *  much farther it sits than its 4 screen-space neighbours (log-depth), which
+ *  outlines silhouettes and occluded crossings without any real lighting.
+ *  Background fragments (nothing drawn) pass through untouched so the
+ *  environment/sky is not haloed. */
+const EDL_SHADER = {
+    name: 'EDLShader',
+    uniforms: {
+        tDiffuse: { value: null },
+        tDepth: { value: null },
+        resolution: { value: new THREE.Vector2(1, 1) },
+        cameraNear: { value: 0.1 },
+        cameraFar: { value: 1000 },
+        edlStrength: { value: 40.0 },
+        edlRadius: { value: 1.6 },
+        isPerspective: { value: 1 },
+        // Fog re-applied here from depth: scene.fog does NOT reach line
+        // fragments through the EffectComposer's RenderPass, so a fog base
+        // mode would otherwise be washed out under the EDL overlay.
+        fogMode: { value: 0 },
+        fogColor: { value: new THREE.Color(0x000000) },
+        fogNear: { value: 1.0 },
+        fogFar: { value: 100.0 },
+    },
+    vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    `,
+    fragmentShader: /* glsl */ `
+        #include <packing>
+        varying vec2 vUv;
+        uniform sampler2D tDiffuse;
+        uniform sampler2D tDepth;
+        uniform vec2 resolution;
+        uniform float cameraNear;
+        uniform float cameraFar;
+        uniform float edlStrength;
+        uniform float edlRadius;
+        uniform int isPerspective;
+        uniform int fogMode;
+        uniform vec3 fogColor;
+        uniform float fogNear;
+        uniform float fogFar;
+
+        // Linear distance in front of the camera from a raw [0,1] depth sample.
+        float rawToDist(float d) {
+            float viewZ = (isPerspective == 1)
+                ? perspectiveDepthToViewZ(d, cameraNear, cameraFar)
+                : orthographicDepthToViewZ(d, cameraNear, cameraFar);
+            return -viewZ; // positive distance in front of the camera
+        }
+
+        float neighbourDist(vec2 uv) {
+            return rawToDist(texture2D(tDepth, uv).x);
+        }
+
+        void main() {
+            vec4 color = texture2D(tDiffuse, vUv);
+            float centerRaw = texture2D(tDepth, vUv).x;
+            // Nothing drawn here → leave the background untouched.
+            if (centerRaw >= 1.0) { gl_FragColor = color; return; }
+
+            // Reuse the centre depth we already sampled (no second fetch).
+            float distC = rawToDist(centerRaw);
+            float logC = log2(distC + 1e-6);
+            vec2 texel = edlRadius / resolution;
+            vec2 offs[4];
+            offs[0] = vec2( texel.x, 0.0);
+            offs[1] = vec2(-texel.x, 0.0);
+            offs[2] = vec2(0.0,  texel.y);
+            offs[3] = vec2(0.0, -texel.y);
+
+            float sum = 0.0;
+            for (int i = 0; i < 4; i++) {
+                // Only neighbours NEARER than us push us darker (we sit behind them).
+                sum += max(0.0, logC - log2(neighbourDist(vUv + offs[i]) + 1e-6));
+            }
+            float shade = exp(-(sum * 0.25) * edlStrength);
+            vec3 rgb = color.rgb * shade;
+
+            // Distance fog, matched to three.js linear fog (smoothstep on view-Z),
+            // re-applied here because scene.fog does not reach the lines through
+            // the composer's RenderPass. EDL shades locally; fog dims globally.
+            if (fogMode == 1) {
+                float fogFactor = smoothstep(fogNear, fogFar, distC);
+                rgb = mix(rgb, fogColor, fogFactor);
+            }
+            gl_FragColor = vec4(rgb, color.a);
+        }
+    `,
+};
+
+// Distant lines dim toward this near-black for classic CAD depth cueing (`D`).
+const DEPTH_CUE_FOG_COLOR = 0x0a0a0f;
+
+// Depth perception for flat line drawings (the add_polyline fallback for
+// toolpaths too complex to extrude as shaded beads). Two composable cues:
+// distance fog (`D`) dims far lines globally; eye-dome lighting (`Shift+D`)
+// sculpts local crossings in screen space. Both also drive from Python via
+// set_depth_cue(fog, edl). Owned in-file alongside ShadingDebugController.
+class DepthCueController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        this.fogActive = false;
+        this.edlActive = false;
+        // EDL pipeline — created lazily on first use.
+        this._composer = null;
+        this._edlPass = null;
+        this._renderPass = null;
+        this._depthTexture = null;
+        this._tmpV2 = new THREE.Vector2();
+        this._toastEl = null;
+        this._toastTimer = 0;
+    }
+
+    /** @param {any} obj */
+    _isPolyline(obj) {
+        return !!(obj && obj.userData && obj.userData.isPolyline && obj.material);
+    }
+
+    /** @param {(line: any) => void} fn */
+    _eachPolyline(fn) {
+        for (const obj of this.v._objects.values()) {
+            if (this._isPolyline(obj)) fn(obj);
+        }
+    }
+
+    /** `D` — toggle distance fog (CAD depth cueing). */
+    toggleFog() {
+        this.setFog(!this.fogActive);
+        this._showToast(this.fogActive ? 'Fog on' : 'Fog off');
+    }
+
+    /** `Shift+D` — toggle eye-dome lighting. A screen-space post-process, so it
+     *  composes with fog without disturbing it. */
+    toggleEdl() {
+        this.setEdl(!this.edlActive);
+        this._showToast(this.edlActive ? 'Eye-dome lighting on' : 'Eye-dome lighting off');
+    }
+
+    /** Programmatic fog on/off (idempotent). @param {boolean} on */
+    setFog(on) {
+        const want = !!on;
+        if (want === this.fogActive) return;
+        this.fogActive = want;
+        if (want) {
+            // Refresh scene bounds so the fog near/far track content.
+            try { this.v._camController.updateSceneBounds(); } catch (e) { /* best-effort */ }
+            this.v._scene.fog = new THREE.Fog(DEPTH_CUE_FOG_COLOR, 1, 100);
+            this._setLineFog(true);
+            this._updateFogRange();
+        } else {
+            this.v._scene.fog = null;
+            this._setLineFog(false);
+        }
+    }
+
+    /** Programmatic EDL on/off (idempotent). @param {boolean} on */
+    setEdl(on) {
+        const want = !!on;
+        if (want === this.edlActive) return;
+        this.edlActive = want;
+        if (want) this._ensureComposer();
+    }
+
+    /** @param {boolean} on */
+    _setLineFog(on) {
+        this._eachPolyline((line) => {
+            if (line.material.fog === on) return;
+            line.material.fog = on;
+            line.material.needsUpdate = true;
+        });
+    }
+
+    _updateFogRange() {
+        const fog = this.v._scene.fog;
+        if (!fog || !fog.isFog) return;
+        const sph = this.v._sceneSphere;
+        const r = sph && sph.radius ? sph.radius : 1;
+        const center = sph ? sph.center : this.v._controls.target;
+        const dist = this.v._camera.position.distanceTo(center);
+        fog.near = Math.max(0.01, dist - r);
+        fog.far = dist + r * 1.15;
+    }
+
+    // ----- eye-dome lighting -----
+    _ensureComposer() {
+        if (this._composer) return;
+        const v = this.v;
+        const renderer = v._renderer;
+        const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+        const depthTexture = new THREE.DepthTexture(size.x, size.y);
+        depthTexture.type = THREE.UnsignedIntType;
+        this._depthTexture = depthTexture;
+
+        const composer = new EffectComposer(renderer);
+        // Route scene depth into a sampleable texture for the EDL pass. RenderPass
+        // always renders into the composer's readBuffer (= renderTarget2, stable
+        // since the pipeline makes an even number of buffer swaps per frame), so
+        // the depth texture lives there ONLY. Attaching it to renderTarget1 too
+        // would form a GL feedback loop: the EDL pass writes renderTarget1 while
+        // sampling this very texture.
+        composer.renderTarget2.depthTexture = depthTexture;
+
+        const renderPass = new RenderPass(v._scene, v._camera);
+        const edlPass = new ShaderPass(EDL_SHADER);
+        edlPass.uniforms.tDepth.value = depthTexture;
+        // OutputPass applies tone mapping + sRGB (the scene render into the
+        // float target is linear) and tracks renderer.toneMapping at runtime.
+        const outputPass = new OutputPass();
+
+        composer.addPass(renderPass);
+        composer.addPass(edlPass);
+        composer.addPass(outputPass);
+
+        this._composer = composer;
+        this._renderPass = renderPass;
+        this._edlPass = edlPass;
+    }
+
+    renderComposer() {
+        const v = this.v;
+        const cam = v._camera;
+        this._renderPass.camera = cam;
+        this._renderPass.scene = v._scene;
+        const u = this._edlPass.uniforms;
+        u.cameraNear.value = cam.near;
+        u.cameraFar.value = cam.far;
+        u.isPerspective.value = cam.isPerspectiveCamera ? 1 : 0;
+        v._renderer.getDrawingBufferSize(this._tmpV2);
+        u.resolution.value.copy(this._tmpV2);
+        // Drive the EDL pass's own fog from the active scene fog. scene.fog is
+        // lost through RenderPass, so the EDL shader re-applies it from depth to
+        // keep the gradient (otherwise fog washes out entirely under EDL).
+        const fog = this.fogActive ? v._scene.fog : null;
+        if (fog && fog.isFog) {
+            u.fogMode.value = 1;
+            u.fogColor.value.copy(fog.color);
+            u.fogNear.value = fog.near;
+            u.fogFar.value = fog.far;
+        } else {
+            u.fogMode.value = 0;
+        }
+        this._composer.render();
+    }
+
+    // ----- per-frame + resize hooks -----
+    update() {
+        if (this.fogActive) this._updateFogRange();
+        if (this._toastTimer > 0 && performance.now() >= this._toastTimer && this._toastEl) {
+            this._toastEl.style.opacity = '0';
+            this._toastTimer = 0;
+        }
+    }
+
+    /** @param {number} width @param {number} height CSS px */
+    onResize(width, height) {
+        // setSize resizes renderTarget2 and its attached depthTexture in place,
+        // so the shared EDL depth texture follows automatically.
+        if (this._composer) this._composer.setSize(width, height);
+    }
+
+    /** @param {string} text */
+    _showToast(text) {
+        if (!this._toastEl) {
+            const el = document.createElement('div');
+            el.className = 'tjsv-depthcue-toast';
+            this.v.el.appendChild(el);
+            this._toastEl = el;
+        }
+        this._toastEl.textContent = text;
+        this._toastEl.style.opacity = '1';
+        this._toastTimer = performance.now() + 1400;
+    }
+}
+
 class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
@@ -4769,6 +5095,10 @@ class ThreeJSViewer {
         // Camera methods (persp/ortho switch, near/far, frame-to-bbox).
         // Camera objects themselves live on the viewer.
         this._camController = new CameraController(this);
+
+        // Depth cues for flat white line drawings: `D` toggles distance fog,
+        // `Shift+D` toggles eye-dome lighting (composable). Also set_depth_cue().
+        this._depthCue = new DepthCueController(this);
 
         // Clipping state
         this._clipEnabled = false;
@@ -5921,6 +6251,8 @@ class ThreeJSViewer {
         if (!obj) return;
         if (obj.userData.isToolpathGroup) {
             applyToolpathGroupDrawRange(obj, value, this._objects);
+        } else if (obj.userData.isNativeLine) {
+            obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
         } else if (obj.userData.isPolyline) {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
         } else if (obj.userData.isParametricTube) {
@@ -6793,6 +7125,11 @@ class ThreeJSViewer {
                 this._shading.cycleShading();
                 return;
             }
+            if (e.code === 'KeyD' && !e.ctrlKey && !e.metaKey) {
+                if (e.shiftKey) this._depthCue.toggleEdl();
+                else this._depthCue.toggleFog();
+                return;
+            }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
                 this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
                 return;
@@ -7052,7 +7389,11 @@ class ThreeJSViewer {
                             let drawRange = 1.0;
                             const geom = obj.geometry;
                             if (geom) {
-                                if (obj.userData.isPolyline) {
+                                if (obj.userData.isNativeLine) {
+                                    const total = obj.userData.totalPointCount;
+                                    const cnt = geom.drawRange.count;
+                                    drawRange = total > 0 && Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
+                                } else if (obj.userData.isPolyline) {
                                     const max = obj.userData.maxInstanceCount;
                                     drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
                                 } else if (obj.userData.isMesh || obj.userData.isParametricTube) {
@@ -7280,41 +7621,69 @@ class ThreeJSViewer {
 
                                 console.log(`Creating polyline ${data.id} with ${numPoints} points via HTTP`);
 
-                                const geometry = new LineGeometry();
-                                geometry.setPositions(pointData);
-
                                 const w = this.container.clientWidth;
                                 const h = this.container.clientHeight;
-                                let material;
+                                // fat=true (default) → Line2 instanced quads (any
+                                // width). fat=false → native THREE.Line: one vertex
+                                // per point, ~1px, one draw call — ~6x lighter for
+                                // million-point toolpaths, but WebGL ignores linewidth.
+                                const fat = data.fat !== false;
+
+                                /** @type {Float32Array | null} */
+                                let colorData = null;
                                 if (data.hasVertexColors) {
                                     const colorBytes = rawData.slice(positionBytes);
-                                    const colorData = new Float32Array(numPoints * 3);
-                                    for (let i = 0; i < numPoints; i++) {
-                                        colorData[i * 3] = colorBytes[i * 3] / 255;
-                                        colorData[i * 3 + 1] = colorBytes[i * 3 + 1] / 255;
-                                        colorData[i * 3 + 2] = colorBytes[i * 3 + 2] / 255;
+                                    colorData = new Float32Array(numPoints * 3);
+                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                        colorData[i] = colorBytes[i] / 255;
                                     }
-                                    geometry.setColors(colorData);
-                                    material = new LineMaterial({
-                                        color: 0xffffff,
-                                        vertexColors: true,
-                                        linewidth: data.lineWidth || 2,
-                                        resolution: new THREE.Vector2(w, h),
-                                    });
-                                } else {
-                                    material = new LineMaterial({
-                                        color: data.color || 0xffffff,
-                                        linewidth: data.lineWidth || 2,
-                                        resolution: new THREE.Vector2(w, h),
-                                    });
                                 }
 
-                                const line = new Line2(geometry, material);
-                                line.computeLineDistances();
+                                let line;
+                                if (fat) {
+                                    const geometry = new LineGeometry();
+                                    geometry.setPositions(pointData);
+                                    let material;
+                                    if (colorData) {
+                                        geometry.setColors(colorData);
+                                        material = new LineMaterial({
+                                            color: 0xffffff,
+                                            vertexColors: true,
+                                            linewidth: data.lineWidth || 2,
+                                            resolution: new THREE.Vector2(w, h),
+                                        });
+                                    } else {
+                                        material = new LineMaterial({
+                                            color: data.color || 0xffffff,
+                                            linewidth: data.lineWidth || 2,
+                                            resolution: new THREE.Vector2(w, h),
+                                        });
+                                    }
+                                    // LineMaterial defaults fog=false; match the
+                                    // current fog state so polylines added while fog
+                                    // is already on don't render unfogged.
+                                    material.fog = this._depthCue.fogActive;
+                                    line = new Line2(geometry, material);
+                                    line.computeLineDistances();
+                                    line.userData.maxInstanceCount = numPoints - 1;
+                                } else {
+                                    const geometry = new THREE.BufferGeometry();
+                                    geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
+                                    let material;
+                                    if (colorData) {
+                                        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                                        material = new THREE.LineBasicMaterial({ vertexColors: true });
+                                    } else {
+                                        material = new THREE.LineBasicMaterial({ color: data.color || 0xffffff });
+                                    }
+                                    line = new THREE.Line(geometry, material);
+                                    line.userData.isNativeLine = true;
+                                    line.userData.totalPointCount = numPoints;
+                                    geometry.setDrawRange(0, numPoints);
+                                }
                                 line.name = data.id;
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
-                                line.userData.maxInstanceCount = numPoints - 1;
                                 this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
@@ -7359,7 +7728,9 @@ class ThreeJSViewer {
                                     // is maxInstanceCount + 1. A length mismatch
                                     // would desync the new color attributes from
                                     // the existing positions.
-                                    const expected = obj.userData.maxInstanceCount + 1;
+                                    const expected = obj.userData.isNativeLine
+                                        ? obj.userData.totalPointCount
+                                        : obj.userData.maxInstanceCount + 1;
                                     if (numPoints !== expected) {
                                         console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
                                         return;
@@ -7373,9 +7744,14 @@ class ThreeJSViewer {
                                     for (let i = 0, n = numPoints * 3; i < n; i++) {
                                         colorData[i] = bytes[i] / 255;
                                     }
-                                    // setColors rebuilds the instanceColorStart/End
-                                    // instanced attributes on the LineGeometry.
-                                    obj.geometry.setColors(colorData);
+                                    if (obj.userData.isNativeLine) {
+                                        // Native line: plain per-vertex color attribute.
+                                        obj.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                                    } else {
+                                        // setColors rebuilds the instanceColorStart/End
+                                        // instanced attributes on the LineGeometry.
+                                        obj.geometry.setColors(colorData);
+                                    }
                                     // If the polyline was created without vertex colors,
                                     // the material is in flat-color mode — flip it.
                                     // Also reset the base color to white so vertex
@@ -7383,7 +7759,7 @@ class ThreeJSViewer {
                                     // flat color (e.g. red base × green vertex = 0).
                                     if (!obj.material.vertexColors) {
                                         obj.material.vertexColors = true;
-                                        obj.material.color.setHex(0xffffff);
+                                        if (obj.material.color) obj.material.color.setHex(0xffffff);
                                         obj.material.needsUpdate = true;
                                     }
                                 } catch (e) {
@@ -8016,6 +8392,11 @@ class ThreeJSViewer {
                     case 'set_clipping_defaults':
                         this._clipDefaults = { normal: data.normal, distance: data.distance };
                         break;
+                    case 'set_depth_cue':
+                        // Programmatic equivalent of the D / Shift+D keys.
+                        if (data.fog != null) this._depthCue.setFog(data.fog);
+                        if (data.edl != null) this._depthCue.setEdl(data.edl);
+                        break;
                     case 'show_grid':
                         this._gridHelper.visible = !!data.visible;
                         if (data.size != null && data.divisions != null) {
@@ -8081,6 +8462,7 @@ class ThreeJSViewer {
         }
 
         this._controls.update();
+        this._depthCue.update();
         this._updateNearFar();
 
         // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
@@ -8113,7 +8495,13 @@ class ThreeJSViewer {
             });
         }
         this._renderer.autoClear = true;
-        this._renderer.render(this._scene, this._camera);
+        if (this._depthCue.edlActive) {
+            // Eye-dome lighting routes the scene through an EffectComposer
+            // (RenderPass → EDL → OutputPass) that paints the full screen.
+            this._depthCue.renderComposer();
+        } else {
+            this._renderer.render(this._scene, this._camera);
+        }
         this._renderer.autoClear = false;
         // Lift the ViewHelper above the animation toolbar when it's visible.
         // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
@@ -8198,6 +8586,7 @@ class ThreeJSViewer {
                 obj.material.resolution.set(width, height);
             }
         });
+        this._depthCue.onResize(width, height);
     }
 
     /** @param {THREE.Object3D} object */
