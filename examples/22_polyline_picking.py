@@ -206,11 +206,11 @@ v.unload_animation()
 # Each gets its own solid colour so a pick's reported `id` is visually
 # verifiable. Grid cell (x, y) per object:
 GRID = {
-    "square": (-15.0, 7.0),
-    "mixed": (0.0, 7.0),
-    "vase": (15.0, 7.0),
-    "bead": (-15.0, -7.0),
-    "circle": (0.0, -7.0),
+    "square": (-8.0, 5.0),
+    "mixed": (0.0, 5.0),
+    "vase": (8.0, 5.0),
+    "bead": (-8.0, -5.0),
+    "circle": (0.0, -5.0),
 }
 # Distinct solid colours. The grey circle signals "inert" — it's the
 # non-pickable one.
