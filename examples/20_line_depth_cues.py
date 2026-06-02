@@ -13,6 +13,13 @@ screen-space **eye-dome lighting** (EDL).
   * EDL darkens each fragment that sits behind its screen-space neighbours,
     sculpting local crossings into legible 3D.
 
+Both cues are **scoped to polylines only**. The scene also has a solid build
+platform + corner clamps (meshes) as spatial reference, and they render exactly
+the same with the cues on or off — fog never dims them, EDL never darkens them,
+and the dark background stays the same colour. Toggle the cues to confirm: only
+the toolpath line changes. (This is what makes the cues usable in a real machine
+view, where the cell and fixtures must stay legible while the line gets depth.)
+
 Two implementation notes:
 
   * **Native line (`fat=False`)** — at a million points the fat-line renderer
@@ -75,13 +82,42 @@ points, progress = vase_toolpath()
 # which fog + EDL don't care about.
 v.add_polyline("toolpath", points, colors=progress, colormap="turbo", fat=False)
 
+# Solid mesh fixtures as spatial reference — these stay fully lit with the cues
+# on (fog/EDL are scoped to polylines), so they prove the line is the only thing
+# being depth-cued. A brushed-steel build platform just under the toolpath base,
+# plus four corner clamps holding it down.
+plate_z = -HEIGHT / 2.0 - 0.2
+v.add_box(
+    "build_plate",
+    width=8.0,
+    height=8.0,
+    depth=0.3,
+    color=0x9AA3AD,
+    roughness=0.5,
+    metalness=0.6,
+    position=[0.0, 0.0, plate_z],
+)
+for sx in (-1, 1):
+    for sy in (-1, 1):
+        v.add_box(
+            f"clamp_{sx}_{sy}",
+            width=0.9,
+            height=0.9,
+            depth=0.7,
+            color=0x33373D,
+            roughness=0.7,
+            metalness=0.3,
+            position=[sx * 3.3, sy * 3.3, plate_z + 0.35],
+        )
+
 # Open with fog + eye-dome lighting already on (the programmatic equivalent of
 # pressing D then Shift+D). The browser keeps this after the Python process exits.
 v.set_depth_cue(fog=True, edl=True)
 
 print(__doc__)
-print(f"Loaded a {len(points):,}-point rainbow toolpath (native line, fog + EDL).")
-print("Focus the viewer and press F to frame it. Shift+D toggles EDL on/off.")
+print(f"Loaded a {len(points):,}-point rainbow toolpath (native line, fog + EDL)")
+print("plus a steel build platform + clamps that the cues leave untouched.")
+print("Focus the viewer and press F to frame it. D toggles fog, Shift+D toggles EDL.")
 
 # Block until the browser has fetched the polyline, then disconnect cleanly.
 v.wait_for_assets()

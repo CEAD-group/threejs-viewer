@@ -1541,6 +1541,11 @@ class ViewerClient:
         and restore a sense of depth to otherwise-flat line bundles. The two
         compose: fog dims distant lines globally, EDL sculpts local crossings.
 
+        Both cues are scoped to polyline geometry only — meshes (primitives,
+        custom meshes, parametric tubes, loaded models) render exactly as with
+        the cues off, so the cell/fixtures stay as a clean spatial reference
+        while only the toolpath line is sculpted for depth.
+
         Args:
             fog: Distance fog (CAD depth cueing) on/off. ``None`` leaves it
                 unchanged.

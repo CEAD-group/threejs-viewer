@@ -1543,3 +1543,256 @@ def test_parametric_tube_pickable_false(viewer_client, viewer_page):
 
     assert picks == [], "pickable=False tube must be excluded from picking"
     assert "optoutbead" in viewer_client.query_scene()["objects"]
+
+
+def _get_material_fog(page, obj_id):
+    """Read the first material's `.fog` flag for an object by id, or None."""
+    return page.evaluate(
+        "(id) => {"
+        " const o = window.threejsViewer._objects.get(id);"
+        " if (!o) return null;"
+        " let fog = null;"
+        " o.traverse((c) => {"
+        "  if (fog !== null || !c.material) return;"
+        "  const m = Array.isArray(c.material) ? c.material[0] : c.material;"
+        "  if (m) fog = m.fog;"
+        " });"
+        " return fog;"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_fog_scoped_to_polylines(viewer_client, viewer_page):
+    """Distance fog must darken only polylines. `scene.fog` is global and every
+    material defaults to `fog:true`, so without scoping the mesh would dim too.
+    Assert the mesh material's `.fog` is forced off while fog is active (line
+    on), then restored to its original value when fog is turned off."""
+    viewer_client.add_box("fogbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("fogline", pts, color=0x44AAFF, line_width=4)
+
+    # Wait for the (binary-loaded) polyline to register.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "fogline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    # Mesh materials default to fog enabled.
+    assert _get_material_fog(viewer_page, "fogbox") is True
+
+    viewer_client.set_depth_cue(fog=True)
+    box_fog = line_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        box_fog = _get_material_fog(viewer_page, "fogbox")
+        line_fog = _get_material_fog(viewer_page, "fogline")
+        if box_fog is False and line_fog is True:
+            break
+    assert box_fog is False, (
+        f"mesh fog should be forced off while fog active, got {box_fog!r}"
+    )
+    assert line_fog is True, (
+        f"polyline fog should be on while fog active, got {line_fog!r}"
+    )
+
+    # Turning fog off restores the mesh material to its original fog value.
+    viewer_client.set_depth_cue(fog=False)
+    box_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        box_fog = _get_material_fog(viewer_page, "fogbox")
+        if box_fog is True:
+            break
+    assert box_fog is True, (
+        f"mesh fog should be restored after fog off, got {box_fog!r}"
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_edl_depth_is_line_only(viewer_client, viewer_page):
+    """Eye-dome lighting must sculpt only polylines. The EDL pass is fed a
+    line-only depth texture (polylines are placed on a dedicated camera layer
+    rendered alone in a depth pre-pass), with full-scene depth bound separately
+    only for the occlusion guard. Assert the polyline carries the EDL layer, the
+    mesh does not, and the EDL pass samples the line-only depth target."""
+    viewer_client.add_box("edlbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("edlline", pts, color=0x44AAFF, line_width=4)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "edlline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_client.set_depth_cue(edl=True)
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const dc = window.threejsViewer._depthCue;"
+            " const line = window.threejsViewer._objects.get('edlline');"
+            " const box = window.threejsViewer._objects.get('edlbox');"
+            " const LINE_BIT = 1 << 1;"  # EDL_LINE_LAYER = 1
+            " return {"
+            "  edlActive: dc.edlActive,"
+            "  hasComposer: !!dc._edlPass,"
+            "  lineOnEdlLayer: line ? ((line.layers.mask & LINE_BIT) !== 0) : null,"
+            "  boxOnEdlLayer: box ? ((box.layers.mask & LINE_BIT) !== 0) : null,"
+            "  tDepthIsLineOnly: (dc._edlPass && dc._lineDepthTarget)"
+            "   ? (dc._edlPass.uniforms.tDepth.value === dc._lineDepthTarget.depthTexture) : null,"
+            "  tSceneDepthBound: dc._edlPass ? (dc._edlPass.uniforms.tSceneDepth.value !== null) : null,"
+            " };"
+            "}"
+        )
+        if state and state["hasComposer"]:
+            break
+    assert state and state["edlActive"] is True
+    assert state["lineOnEdlLayer"] is True, (
+        "polyline must be on the EDL line-only layer"
+    )
+    assert state["boxOnEdlLayer"] is False, (
+        "mesh must NOT be on the EDL line-only layer"
+    )
+    assert state["tDepthIsLineOnly"] is True, (
+        "EDL pass must sample the line-only depth target"
+    )
+    assert state["tSceneDepthBound"] is True, (
+        "EDL pass must bind full-scene depth for the occlusion guard"
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
+    """Enabling EDL must not change the background colour. The EffectComposer's
+    OutputPass tone-maps everything it renders, which would darken a solid
+    background (ACES toe: #222 -> #101). The fix renders the background
+    transparent through the composer (NoBlending output pass over an alpha
+    canvas) so the untone-mapped canvas CSS background-color shows instead,
+    matching the direct render path. Assert the structural guarantees: the GL
+    context has alpha, the canvas CSS background is the #222222 clear colour, and
+    the composer's final pass replaces pixels (NoBlending) rather than blending
+    a tone-mapped background over them."""
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("bgline", pts, color=0x44AAFF, line_width=4)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "bgline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_client.set_depth_cue(edl=True)
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " const dc = v._depthCue;"
+            " const gl = v._renderer.getContext();"
+            " const passes = (dc._composer && dc._composer.passes) || [];"
+            " const out = passes[passes.length - 1];"
+            " const NO_BLENDING = 0;"  # THREE.NoBlending
+            " return {"
+            "  hasComposer: !!dc._composer,"
+            "  ctxAlpha: gl.getContextAttributes().alpha,"
+            "  canvasBg: v._renderer.domElement.style.backgroundColor,"
+            "  outNoBlend: out && out.material"
+            "   ? (out.material.blending === NO_BLENDING) : null,"
+            " };"
+            "}"
+        )
+        if state and state["hasComposer"]:
+            break
+    assert state and state["hasComposer"], "composer never built after EDL on"
+    assert state["ctxAlpha"] is True, (
+        "renderer must use an alpha context so the canvas can be transparent"
+    )
+    assert state["canvasBg"] == "rgb(34, 34, 34)", (
+        f"canvas CSS background must be the #222222 clear colour, got {state['canvasBg']!r}"
+    )
+    assert state["outNoBlend"] is True, (
+        "composer output pass must use NoBlending so background pixels are "
+        "replaced (transparent) rather than blended as a tone-mapped colour"
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_fog_rescopes_on_shading_toggle(viewer_client, viewer_page):
+    """The `M`/`N` shading-debug toggles swap a mesh's material (a shared
+    MeshNormalMaterial) or add a wireframe-overlay child mesh — both default to
+    `fog:true` and do NOT bump `_objGeneration`. With fog active the per-frame
+    `update()` must re-scope on a wireframe/shading mode change, or those newly
+    assigned/created materials dim under the global `scene.fog`, breaking the
+    polyline-only promise. Assert the swapped debug material and the added
+    wireframe overlay both end up fog-disabled while fog is active."""
+    viewer_client.add_box("fognbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("fognline", pts, color=0x44AAFF, line_width=4)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "fognline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_client.set_depth_cue(fog=True)
+    for _ in range(40):
+        time.sleep(0.05)
+        if _get_material_fog(viewer_page, "fognbox") is False:
+            break
+
+    # N -> shading mode 1 swaps in a shared MeshNormalMaterial (fog:true default).
+    cur_mat_fog = (
+        "() => {"
+        " const o = window.threejsViewer._objects.get('fognbox');"
+        " const m = Array.isArray(o.material) ? o.material[0] : o.material;"
+        " return m ? m.fog : null;"
+        "}"
+    )
+    _press_key(viewer_page, "KeyN")
+    swapped_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        swapped_fog = viewer_page.evaluate(cur_mat_fog)
+        if swapped_fog is False:
+            break
+    assert swapped_fog is False, (
+        f"swapped shading-debug material must be fog-scoped off, got {swapped_fog!r}"
+    )
+
+    # Cycle N back to mode 0 (restore original), then M twice -> combined overlay.
+    for _ in range(3):
+        _press_key(viewer_page, "KeyN")
+    _press_key(viewer_page, "KeyM")
+    _press_key(viewer_page, "KeyM")
+    overlay_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        overlay_fog = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('fognbox');"
+            " const ov = o.userData.wireframeOverlay;"
+            " return ov && ov.material ? ov.material.fog : null;"
+            "}"
+        )
+        if overlay_fog is False:
+            break
+    assert overlay_fog is False, (
+        f"wireframe overlay material must be fog-scoped off, got {overlay_fog!r}"
+    )
