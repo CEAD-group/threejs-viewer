@@ -1669,3 +1669,130 @@ def test_depth_cue_edl_depth_is_line_only(viewer_client, viewer_page):
     assert state["tSceneDepthBound"] is True, (
         "EDL pass must bind full-scene depth for the occlusion guard"
     )
+
+
+@pytest.mark.browser
+def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
+    """Enabling EDL must not change the background colour. The EffectComposer's
+    OutputPass tone-maps everything it renders, which would darken a solid
+    background (ACES toe: #222 -> #101). The fix renders the background
+    transparent through the composer (NoBlending output pass over an alpha
+    canvas) so the untone-mapped canvas CSS background-color shows instead,
+    matching the direct render path. Assert the structural guarantees: the GL
+    context has alpha, the canvas CSS background is the #222222 clear colour, and
+    the composer's final pass replaces pixels (NoBlending) rather than blending
+    a tone-mapped background over them."""
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("bgline", pts, color=0x44AAFF, line_width=4)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "bgline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_client.set_depth_cue(edl=True)
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " const dc = v._depthCue;"
+            " const gl = v._renderer.getContext();"
+            " const passes = (dc._composer && dc._composer.passes) || [];"
+            " const out = passes[passes.length - 1];"
+            " const NO_BLENDING = 0;"  # THREE.NoBlending
+            " return {"
+            "  hasComposer: !!dc._composer,"
+            "  ctxAlpha: gl.getContextAttributes().alpha,"
+            "  canvasBg: v._renderer.domElement.style.backgroundColor,"
+            "  outNoBlend: out && out.material"
+            "   ? (out.material.blending === NO_BLENDING) : null,"
+            " };"
+            "}"
+        )
+        if state and state["hasComposer"]:
+            break
+    assert state and state["hasComposer"], "composer never built after EDL on"
+    assert state["ctxAlpha"] is True, (
+        "renderer must use an alpha context so the canvas can be transparent"
+    )
+    assert state["canvasBg"] == "rgb(34, 34, 34)", (
+        f"canvas CSS background must be the #222222 clear colour, got {state['canvasBg']!r}"
+    )
+    assert state["outNoBlend"] is True, (
+        "composer output pass must use NoBlending so background pixels are "
+        "replaced (transparent) rather than blended as a tone-mapped colour"
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_fog_rescopes_on_shading_toggle(viewer_client, viewer_page):
+    """The `M`/`N` shading-debug toggles swap a mesh's material (a shared
+    MeshNormalMaterial) or add a wireframe-overlay child mesh — both default to
+    `fog:true` and do NOT bump `_objGeneration`. With fog active the per-frame
+    `update()` must re-scope on a wireframe/shading mode change, or those newly
+    assigned/created materials dim under the global `scene.fog`, breaking the
+    polyline-only promise. Assert the swapped debug material and the added
+    wireframe overlay both end up fog-disabled while fog is active."""
+    viewer_client.add_box("fognbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("fognline", pts, color=0x44AAFF, line_width=4)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "fognline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_client.set_depth_cue(fog=True)
+    for _ in range(40):
+        time.sleep(0.05)
+        if _get_material_fog(viewer_page, "fognbox") is False:
+            break
+
+    # N -> shading mode 1 swaps in a shared MeshNormalMaterial (fog:true default).
+    cur_mat_fog = (
+        "() => {"
+        " const o = window.threejsViewer._objects.get('fognbox');"
+        " const m = Array.isArray(o.material) ? o.material[0] : o.material;"
+        " return m ? m.fog : null;"
+        "}"
+    )
+    _press_key(viewer_page, "KeyN")
+    swapped_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        swapped_fog = viewer_page.evaluate(cur_mat_fog)
+        if swapped_fog is False:
+            break
+    assert swapped_fog is False, (
+        f"swapped shading-debug material must be fog-scoped off, got {swapped_fog!r}"
+    )
+
+    # Cycle N back to mode 0 (restore original), then M twice -> combined overlay.
+    for _ in range(3):
+        _press_key(viewer_page, "KeyN")
+    _press_key(viewer_page, "KeyM")
+    _press_key(viewer_page, "KeyM")
+    overlay_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        overlay_fog = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('fognbox');"
+            " const ov = o.userData.wireframeOverlay;"
+            " return ov && ov.material ? ov.material.fog : null;"
+            "}"
+        )
+        if overlay_fog is False:
+            break
+    assert overlay_fog is False, (
+        f"wireframe overlay material must be fog-scoped off, got {overlay_fog!r}"
+    )

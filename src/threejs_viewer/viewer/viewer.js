@@ -23,6 +23,13 @@ const VIEWER_VERSION = '0.0.0-dev';
 
 const ORTHO_FRUSTUM = 10;
 
+// Scene clear / background colour. Used both as scene.background (direct render
+// path) and as the canvas CSS background-color so it shows through where the
+// canvas is transparent — see renderComposer(), which renders the background
+// transparent through the EffectComposer so OutputPass never tone-maps it.
+const VIEWER_BACKGROUND_COLOR = 0x222222;
+const VIEWER_BACKGROUND_CSS = '#222222';
+
 // Logarithmic speed steps: 0.001x to 1000x
 const SPEED_STEPS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000];
 
@@ -3794,6 +3801,14 @@ class DepthCueController {
         // _objGeneration at the last fog-scope pass — re-scope when objects are
         // added/removed while fog is active (catches async model loads too).
         this._lastFogScopeGen = -1;
+        // Shading-debug (`M` wireframe, `N` shading) modes at the last fog-scope
+        // pass. Those toggles swap a mesh's material (e.g. MeshNormalMaterial) or
+        // add a wireframe-overlay child — new materials default to fog:true
+        // WITHOUT bumping _objGeneration, so re-scope when these change too or the
+        // swapped/added materials would dim under active fog. -1 forces the first
+        // scope (no real mode is negative).
+        this._lastFogScopeWireframeMode = -1;
+        this._lastFogScopeShadingMode = -1;
         this._toastEl = null;
         this._toastTimer = 0;
     }
@@ -3867,6 +3882,9 @@ class DepthCueController {
         // Polylines follow the cue directly.
         this._setLineFog(on);
         // Non-polyline materials: forced off while active, restored when off.
+        // Scoped to _objects only — scene-level helpers (grid, pivot marker) keep
+        // their default fog:true, so a user-toggled grid still fades with distance
+        // (acceptable: a fading grid is itself a depth cue, not a regression).
         for (const obj of this.v._objects.values()) {
             if (this._isPolyline(obj)) continue;
             obj.traverse((node) => {
@@ -3880,6 +3898,13 @@ class DepthCueController {
             });
         }
         this._lastFogScopeGen = this.v._objGeneration;
+        // Remember the shading-debug modes this pass scoped against, so update()
+        // re-scopes after the next `M`/`N` material swap (see constructor note).
+        const sd = this.v._shading;
+        if (sd) {
+            this._lastFogScopeWireframeMode = sd.wireframeMode;
+            this._lastFogScopeShadingMode = sd.shadingMode;
+        }
     }
 
     /** Force one non-polyline material's fog off (saving prior) / restore it.
@@ -3994,7 +4019,14 @@ class DepthCueController {
         edlPass.uniforms.tSceneDepth.value = depthTexture; // full scene
         // OutputPass applies tone mapping + sRGB (the scene render into the
         // float target is linear) and tracks renderer.toneMapping at runtime.
+        // NoBlending so its fullscreen quad REPLACES every canvas pixel (rather
+        // than alpha-blending over it): transparent-background pixels are written
+        // as (0,0,0,0) each frame instead of retaining the prior frame, and the
+        // premultiplied-alpha canvas then composites geometry over the CSS
+        // background-color cleanly. Without this, NormalBlending leaves trails
+        // where opaque geometry becomes background as the camera moves.
         const outputPass = new OutputPass();
+        outputPass.material.blending = THREE.NoBlending;
 
         composer.addPass(renderPass);
         composer.addPass(edlPass);
@@ -4029,6 +4061,19 @@ class DepthCueController {
             u.fogMode.value = 0;
         }
 
+        // Render the background TRANSPARENT for the whole composer path.
+        // OutputPass tone-maps everything it touches; left as a solid colour the
+        // background would darken (ACES toe: #222 → #101010) and no longer match
+        // the direct render path. With scene.background = null three clears to
+        // (black, alpha 0) — RenderPass inherits that, OutputPass leaves those
+        // pixels at alpha 0, and the canvas CSS background-color shows the true
+        // (untone-mapped) #222222 instead. This must wrap the line-depth pre-pass
+        // too: a Color background calls setClear(color, 1) whose GL clear state
+        // PERSISTS, so a pre-pass with the background still set would leave
+        // RenderPass clearing to an opaque #222222 (then tone-mapped) regardless.
+        const prevBg = v._scene.background;
+        v._scene.background = null;
+
         // Line-only depth pre-pass: render JUST the polyline layer into
         // _lineDepthTarget so the EDL pass (which reads tDepth) shades and
         // re-fogs only line pixels. The full-scene RenderPass below still draws
@@ -4046,6 +4091,7 @@ class DepthCueController {
         renderer.setRenderTarget(prevTarget);
 
         this._composer.render();
+        v._scene.background = prevBg;
     }
 
     // ----- per-frame + resize hooks -----
@@ -4053,8 +4099,15 @@ class DepthCueController {
         if (this.fogActive) {
             // Re-scope fog when the scene's object set changed (new mesh/tube/
             // model — including async model loads — would otherwise render
-            // fogged). Cheap generation compare; the walk only runs on change.
-            if (this.v._objGeneration !== this._lastFogScopeGen) this._applyFogScope(true);
+            // fogged), OR when the `M`/`N` shading-debug toggles swapped/added a
+            // mesh material (those default to fog:true and don't bump
+            // _objGeneration). Cheap compares; the walk only runs on change.
+            const sd = this.v._shading;
+            if (this.v._objGeneration !== this._lastFogScopeGen
+                || (sd && sd.wireframeMode !== this._lastFogScopeWireframeMode)
+                || (sd && sd.shadingMode !== this._lastFogScopeShadingMode)) {
+                this._applyFogScope(true);
+            }
             this._updateFogRange();
         }
         if (this._toastTimer > 0 && performance.now() >= this._toastTimer && this._toastEl) {
@@ -4075,6 +4128,27 @@ class DepthCueController {
             this.v._renderer.getDrawingBufferSize(this._tmpV2);
             this._lineDepthTarget.setSize(this._tmpV2.x, this._tmpV2.y);
         }
+    }
+
+    /** Release the lazily-built EDL GPU resources (composer render targets +
+     *  the standalone line-only depth target and its depth textures). Called
+     *  from ThreeJSViewer.destroy(); the renderer's own dispose() does not reach
+     *  these because the composer owns them. */
+    dispose() {
+        if (this._composer) {
+            this._composer.dispose();
+            this._composer = null;
+        }
+        if (this._lineDepthTarget) {
+            this._lineDepthTarget.dispose();
+            this._lineDepthTarget = null;
+        }
+        if (this._depthTexture) {
+            this._depthTexture.dispose();
+            this._depthTexture = null;
+        }
+        this._renderPass = null;
+        this._edlPass = null;
     }
 
     /** @param {string} text */
@@ -4839,7 +4913,7 @@ export class ThreeJSViewer {
 
         // Scene
         this._scene = new THREE.Scene();
-        this._scene.background = new THREE.Color(0x222222);
+        this._scene.background = new THREE.Color(VIEWER_BACKGROUND_COLOR);
 
         // Cameras
         this._perspCamera = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
@@ -4858,9 +4932,13 @@ export class ThreeJSViewer {
 
         this._camera = this._perspCamera;
 
-        // Renderer
-        this._renderer = new THREE.WebGLRenderer({ antialias: true });
+        // Renderer. alpha:true so the canvas can be transparent where nothing is
+        // drawn — the EDL composer path renders the background transparent (so
+        // OutputPass never tone-maps it) and the canvas CSS background-color
+        // below shows through, matching the direct path's untone-mapped clear.
+        this._renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         this._renderer.setSize(w, h);
+        this._renderer.domElement.style.backgroundColor = VIEWER_BACKGROUND_CSS;
         this._renderer.setPixelRatio(window.devicePixelRatio);
         this._renderer.toneMapping = /** @type {THREE.ToneMapping} */ (
             toneMappingModes()[this._lightingDefaults.toneMapping]
@@ -8481,6 +8559,7 @@ export class ThreeJSViewer {
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
+        if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();
