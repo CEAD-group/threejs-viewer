@@ -13,8 +13,8 @@ Python process. Enable it with ``enable_polyline_picking()`` /
   * Click (a plain left click — dragging still orbits the camera) and the
     picked location is sent to Python. Here the callback prints which object
     was hit (its ``kind`` — "line" or "tube" — and id) plus the fraction/point,
-    and drops a red sphere right on the spine, so you can watch the full
-    browser → Python → browser loop close.
+    and drops a sphere — coloured to match the item that was hit — right on the
+    spine, so you can watch the full browser → Python → browser loop close.
 
 Five objects sit in a grid, **each a distinct solid colour** so you can confirm
 at a glance that a pick reports the *right* object (the printed ``id`` should
@@ -283,11 +283,12 @@ def on_pick(pick):
     )
     log.debug("raw pick payload: %r", pick)
     # Drop a persistent (and chunky, so it's easy to see) marker on the spine
-    # where we picked.
+    # where we picked — coloured to match the item that was hit, so the marker
+    # visually confirms which object the reported `id` belongs to.
     v.add_sphere(
         f"pick_{_pick_count}",
         radius=0.4,
-        color=0xFF3344,
+        color=COLORS.get(pick["id"], 0xFFFFFF),
         roughness=0.4,
         position=pick["point"],
     )
