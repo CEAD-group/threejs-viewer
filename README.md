@@ -103,7 +103,9 @@ v.on_polyline_pick(on_pick)   # also enables picking
 
 Each click sends `{id, kind, fraction, point, local_point, segment, t}` where
 `kind` is `"line"` or `"tube"`. Movement is **continuous** — the marker never
-snaps to vertices. For a tube, `segment` indexes the full-resolution spine 1:1
+snaps to vertices. Picking is **opt-out per object** — pass `pickable=False` to
+`add_polyline` / `add_parametric_tube` to exclude one from picking (it stays
+rendered); adding objects costs nothing when picking is never enabled. For a tube, `segment` indexes the full-resolution spine 1:1
 with the per-point arrays you built it from, so it doubles as a lookup key for
 other per-point data at the picked point. A browser embedder can subscribe in
 JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)`

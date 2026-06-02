@@ -1473,3 +1473,73 @@ def test_polyline_pick_js_hook(viewer_client, viewer_page):
     # Payload point is a plain {x, y, z} object for JS consumers.
     assert abs(pick["point"]["x"]) < 0.25, pick["point"]
     assert js_hovers > 0, "JS hover hook never fired on pointer move"
+
+
+@pytest.mark.browser
+def test_polyline_pick_pickable_false(viewer_client, viewer_page):
+    """A polyline added with ``pickable=False`` is excluded from picking even
+    when picking is enabled — a click on it sends nothing back, yet the object
+    is still present and rendered (only its hit-testing is opted out)."""
+    picks = []
+    viewer_client.on_polyline_pick(lambda p: picks.append(p))
+
+    pts = np.array([[-2, 0, 0], [0, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline(
+        "optout", pts, color=0x44AAFF, line_width=6, pickable=False
+    )
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "optout" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+
+    cx, cy = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, 0.0, 0.0])
+    viewer_page.mouse.move(cx, cy)
+    time.sleep(0.05)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.25)
+
+    assert picks == [], "pickable=False object must be excluded from picking"
+    assert "optout" in viewer_client.query_scene()["objects"]
+
+
+@pytest.mark.browser
+def test_parametric_tube_pickable_false(viewer_client, viewer_page):
+    """A parametric tube added with ``pickable=False`` is likewise excluded —
+    a click on the bead body sends nothing back."""
+    picks = []
+    viewer_client.on_polyline_pick(lambda p: picks.append(p))
+
+    direction = np.array([1.0, 0.6, 0.4], dtype=np.float32)
+    spine = np.array([t * direction for t in (-2, -1, 0, 1, 2)], dtype=np.float32)
+    widths = np.full(len(spine), 0.5, dtype=np.float32)
+    heights = np.full(len(spine), 0.5, dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "optoutbead", spine, widths, heights, color=0x44AAFF, pickable=False
+    )
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "optoutbead" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("parametric tube was never created in the browser")
+
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+
+    cx, cy = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, 0.0, 0.0])
+    viewer_page.mouse.move(cx, cy)
+    time.sleep(0.05)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.25)
+
+    assert picks == [], "pickable=False tube must be excluded from picking"
+    assert "optoutbead" in viewer_client.query_scene()["objects"]

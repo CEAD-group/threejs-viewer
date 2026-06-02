@@ -741,6 +741,7 @@ class ViewerClient:
         line_width: int = 2,
         parent: Optional[str] = None,
         fat: bool = True,
+        pickable: bool = True,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -763,6 +764,14 @@ class ViewerClient:
                 ignored; the fog and eye-dome-lighting depth cues
                 (``set_depth_cue``) still apply. Per-vertex ``colors`` work in
                 both.
+            pickable: When ``True`` (default), this polyline participates in
+                interactive picking (see :meth:`enable_polyline_picking`) once
+                picking is enabled. Pass ``False`` to exclude this line
+                entirely — it won't be hit, won't show the hover marker, and
+                carries no per-hover cost (the viewer keeps no pick data for
+                it). Picking is still globally gated by
+                :meth:`enable_polyline_picking`; ``pickable`` only narrows
+                *which* objects participate.
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
@@ -798,6 +807,7 @@ class ViewerClient:
             "hasVertexColors": has_vertex_colors,
             "numPoints": n_points,
             "fat": bool(fat),
+            "pickable": bool(pickable),
         }
         if parent:
             header["parent"] = parent
@@ -902,6 +912,7 @@ class ViewerClient:
         matrix: Optional[list] = None,
         lod: Optional[Union[bool, dict]] = None,
         strand_collapse: Union[bool, dict] = False,
+        pickable: bool = True,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -990,6 +1001,12 @@ class ViewerClient:
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
+            pickable: When True (default), this tube participates in
+                polyline/tube picking once picking is enabled (see
+                ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
+                resolves a point on its full-resolution spine and reports
+                ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
+                from picking (it is then never hit-tested, at zero cost).
         """
         lod_header = _serialize_lod(lod)
 
@@ -1047,6 +1064,7 @@ class ViewerClient:
             "opacity": opacity,
             "metalness": metalness,
             "roughness": roughness,
+            "pickable": bool(pickable),
         }
         sc_header = _serialize_strand_collapse(strand_collapse)
         if sc_header:

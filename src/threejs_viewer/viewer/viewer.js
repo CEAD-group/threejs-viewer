@@ -4159,6 +4159,26 @@ class PolylinePickController {
     }
 
     /**
+     * Lazily build + cache a tube's per-point bead half-extents (half its
+     * cross-section, plus any anchor/height offset) — the world distance the
+     * pick gate projects to pixels so a click on the bead body, not just its
+     * centre-line, registers. Built on the first pick so a tube created while
+     * picking is off costs nothing.
+     * @param {any} ud
+     */
+    _ensureTubeHalfExtents(ud) {
+        if (ud.pickHalfExtents) return ud.pickHalfExtents;
+        const w = ud.pickWidths, h = ud.pickHeights;
+        if (!w || !h) return null;
+        const n = w.length;
+        const ext = new Float32Array(n);
+        const ho = Math.abs(ud.pickHeightOffset || 0);
+        for (let i = 0; i < n; i++) ext[i] = 0.5 * Math.max(w[i], h[i]) + ho;
+        ud.pickHalfExtents = ext;
+        return ext;
+    }
+
+    /**
      * Project a polyline's local node `i` into canvas pixel coordinates,
      * writing into `out` (`{x, y, ok}`). `ok` is false when the node is behind
      * a perspective camera (its projection would be a sign-flipped artifact).
@@ -4248,8 +4268,8 @@ class PolylinePickController {
             // object. A line uses its half line-width; a tube uses its bead
             // half-extent (per node, projected to pixels at that depth) so a
             // click anywhere on the bead body — not just the centre-line —
-            // registers.
-            const halfExtents = isTube ? udo.pickHalfExtents : null;
+            // registers. Tube half-extents are built lazily on first pick.
+            const halfExtents = isTube ? this._ensureTubeHalfExtents(udo) : null;
             const mat = /** @type {any} */ (o.material);
             const lineGate = this.thresholdPx + (mat && typeof mat.linewidth === 'number' ? mat.linewidth : 1) * 0.5;
 
@@ -4260,7 +4280,7 @@ class PolylinePickController {
                 this._nodeScreenInto(pts, i + 1, mw, cam, W, H, cur);
                 if (prev.ok && cur.ok) {
                     let gate = lineGate;
-                    if (isTube) {
+                    if (isTube && halfExtents) {
                         const extWorld = Math.max(halfExtents[i], halfExtents[i + 1]);
                         // Nearer node (view-Z closest to 0) → larger pixel footprint → wider gate.
                         const wpp = this._worldPerPixelAtViewZ(Math.max(prev.viewZ, cur.viewZ));
@@ -7174,8 +7194,12 @@ export class ThreeJSViewer {
                                 // arc-length fraction for a picked point. (Same
                                 // data already uploaded to the GPU; the fat path
                                 // duplicates points internally, so this N-point
-                                // copy is the lighter source of truth.)
-                                line.userData.pickPoints = pointData;
+                                // copy is the lighter source of truth.) Skipped
+                                // when pickable=False — the object is then absent
+                                // from the pick loop entirely (no cost, never hit).
+                                if (data.pickable !== false) {
+                                    line.userData.pickPoints = pointData;
+                                }
                                 this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
@@ -7522,23 +7546,19 @@ export class ThreeJSViewer {
                                 mesh.userData.tubeHeightOffset = heightOffset;
                                 // Picking: expose the FULL-resolution spine (1:1 with the
                                 // caller's per-spine-point data arrays, independent of LOD)
-                                // plus a per-point bead half-extent so the pick gate can
-                                // size the bead's screen footprint. Reuse the LOD originals
-                                // (already full-res copies) to avoid a second allocation;
-                                // otherwise reference the fetched spine/width/height views.
-                                {
-                                    const pickSpine = tubeLOD ? tubeLOD.originalSpine : spine;
-                                    const pickW = tubeLOD ? tubeLOD.originalWidths : widths;
-                                    const pickH = tubeLOD ? tubeLOD.originalHeights : heights;
-                                    const nPick = (pickSpine.length / 3) | 0;
-                                    const halfExt = new Float32Array(nPick);
-                                    const ho = Math.abs(heightOffset);
-                                    for (let i = 0; i < nPick; i++) {
-                                        halfExt[i] = 0.5 * Math.max(pickW[i], pickH[i]) + ho;
-                                    }
+                                // plus references to the width/height arrays. Everything
+                                // here is a reference to data we already hold (no copy, no
+                                // loop) — the per-point bead half-extents used by the pick
+                                // gate are built lazily on the first pick (see
+                                // PolylinePickController._ensureTubeHalfExtents), so a tube
+                                // costs nothing extra when picking is never used. Opt out
+                                // per object with pickable=False.
+                                if (data.pickable !== false) {
                                     mesh.userData.isPickableTube = true;
-                                    mesh.userData.pickPoints = pickSpine;
-                                    mesh.userData.pickHalfExtents = halfExt;
+                                    mesh.userData.pickPoints = tubeLOD ? tubeLOD.originalSpine : spine;
+                                    mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
+                                    mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
+                                    mesh.userData.pickHeightOffset = heightOffset;
                                 }
                                 mesh.userData.tubeMorphData = {
                                     spine: new Float32Array(buildSpine),

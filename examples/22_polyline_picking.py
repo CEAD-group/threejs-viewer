@@ -16,8 +16,13 @@ Python process. Enable it with ``enable_polyline_picking()`` /
     and drops a red sphere right on the spine, so you can watch the full
     browser → Python → browser loop close.
 
-Four objects of increasing density share the scene — picking works on all of
-them at once (the one nearest the cursor in screen space wins):
+Five objects sit in a grid, **each a distinct solid colour** so you can confirm
+at a glance that a pick reports the *right* object (the printed ``id`` should
+match the colour you clicked). Four are pickable — picking works on all of them
+at once, the one nearest the cursor in screen space winning — and the fifth (a
+grey **circle**) is added with ``pickable=False`` to demonstrate the per-object
+opt-out: hovering or clicking it does nothing, yet it stays drawn like any other
+line.
 
   * a **square** from just 4 corner points (closed to a 4-edge loop). With
     widely-spaced nodes it's the clearest proof that picking is *continuous*:
@@ -41,19 +46,45 @@ them at once (the one nearest the cursor in screen space wins):
     point on the tube's full-resolution spine and reports ``kind="tube"``. That
     spine index lines up 1:1 with the per-spine-point arrays you built the tube
     from, so it's the hook for reading *other* per-point data at the pick.
+  * a grey **circle** added with ``pickable=False`` — the per-object opt-out.
+    It renders identically to the other lines but is simply never hit-tested,
+    so the marker won't latch onto it and a click on it sends nothing back.
+    (Picking is opt-out: every ``add_polyline`` / ``add_parametric_tube``
+    defaults to ``pickable=True``.)
 
-Every line is coloured *by* its own arc-length fraction (turbo), so the colour
-under the cursor is roughly the value you'll get back when you pick there.
+Each pick is also logged to this terminal at DEBUG level (the full raw payload)
+on top of the human-readable summary — see ``on_pick`` below. That logging
+lives entirely in this example; it needs no change to the viewer. Browser-side
+*console* logging is a different matter: the only browser-side hook is JS
+(``viewer.onPolylinePick`` / ``onPolylineHover``), which has to be registered in
+the page, and this Python example has no channel to inject JS into the browser —
+so console logging there would require adding an "eval JS" message to the viewer
+(out of scope). Note hovers never reach Python at all (only clicks round-trip),
+so this terminal log shows clicks only.
 
 Run: uv run python examples/22_polyline_picking.py
 (then hover/click in the browser; press Ctrl+C in the terminal to quit)
 """
 
+import logging
 import time
 
 import numpy as np
 
 from threejs_viewer import viewer
+
+# Debug logging, scoped to this example's own logger so it doesn't drag in the
+# websockets library's (very chatty) DEBUG frames. INFO = the readable one-liner
+# per pick, DEBUG = the full raw payload dict. All of this is example-local — the
+# viewer is untouched.
+log = logging.getLogger("pick-demo")
+log.setLevel(logging.DEBUG)
+_handler = logging.StreamHandler()
+_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)-5s [%(name)s] %(message)s", "%H:%M:%S")
+)
+log.addHandler(_handler)
+log.propagate = False
 
 
 def square_path(half=1.6):
@@ -145,21 +176,25 @@ def helix_bead(n=400, radius=1.2, turns=3.0, height=4.0):
     return spine, widths, heights
 
 
-def arclength_fraction(pts):
-    """Cumulative arc length normalised to [0, 1] — matches the picked
-    ``fraction``, so colouring by it makes the value readable off the line."""
-    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-    cum = np.concatenate([[0.0], np.cumsum(seg)])
-    total = cum[-1]
-    return (cum / total if total > 0 else cum).astype(np.float32)
+def circle_path(radius=1.6, n=72):
+    """A closed circle standing in the XZ plane (n+1 vertices). Used for the
+    non-pickable object — a clean, obviously-interactive-looking shape that
+    nonetheless never responds to the cursor."""
+    ang = np.linspace(0.0, 2.0 * np.pi, n + 1)
+    x = radius * np.cos(ang)
+    z = radius * np.sin(ang)
+    y = np.zeros_like(ang)
+    return np.column_stack([x, y, z])
 
 
-def placed(pts, x_offset):
-    """Centre a path on its own origin, then shift it to a column at `x_offset`
-    so the objects sit side by side without overlapping."""
+def placed(pts, x_offset, y_offset=0.0):
+    """Centre a path on its own origin, then shift it to grid cell
+    ``(x_offset, y_offset)`` in the ground plane so the objects sit in a grid
+    without overlapping (every object still climbs in +Z)."""
     pts = np.asarray(pts, dtype=np.float64)
     pts = pts - pts.mean(axis=0)
     pts[:, 0] += x_offset
+    pts[:, 1] += y_offset
     return pts.astype(np.float32)
 
 
@@ -167,33 +202,56 @@ v = viewer()
 v.clear()
 v.unload_animation()
 
-# Line columns, left → right: square, mixed-detail line, dense spiral vase.
-# (A parametric-tube "bead" is added as a fourth column just below.)
-lines = {
-    "square": placed(square_path(), x_offset=-10.0),
-    "mixed": placed(mixed_detail_path(), x_offset=0.0),
-    "vase": placed(vase_path(), x_offset=11.0),
+# Five objects in a 3x2 grid (X across, Y back; every object climbs in +Z).
+# Each gets its own solid colour so a pick's reported `id` is visually
+# verifiable. Grid cell (x, y) per object:
+GRID = {
+    "square": (-15.0, 7.0),
+    "mixed": (0.0, 7.0),
+    "vase": (15.0, 7.0),
+    "bead": (-15.0, -7.0),
+    "circle": (0.0, -7.0),
 }
-for line_id, pts in lines.items():
+# Distinct solid colours. The grey circle signals "inert" — it's the
+# non-pickable one.
+COLORS = {
+    "square": 0xFF4444,  # red
+    "mixed": 0x33DD55,  # green
+    "vase": 0x4488FF,  # blue
+    "bead": 0xFFAA33,  # orange
+    "circle": 0x888888,  # grey — not pickable
+}
+
+# Four polylines: square, mixed-detail, dense vase (all pickable) + a grey
+# circle added with pickable=False to prove the per-object opt-out.
+line_paths = {
+    "square": square_path(),
+    "mixed": mixed_detail_path(),
+    "vase": vase_path(),
+    "circle": circle_path(),
+}
+for line_id, pts in line_paths.items():
+    gx, gy = GRID[line_id]
     v.add_polyline(
         line_id,
-        pts,
-        colors=arclength_fraction(pts),
-        colormap="turbo",
+        placed(pts, gx, gy),
+        color=COLORS[line_id],
         line_width=4,
+        pickable=(line_id != "circle"),  # the circle opts out of picking
     )
 
-# A fourth column: a parametric tube (the "bead"). Picking works on it too —
-# the click resolves a point on the tube's full-resolution spine and reports
-# kind="tube". The screen gate widens to the bead's body, so you can click
-# anywhere on the extrusion (not just its centre-line).
+# A parametric tube (the "bead"). Picking works on it too — the click resolves
+# a point on the tube's full-resolution spine and reports kind="tube". The
+# screen gate widens to the bead's body, so you can click anywhere on the
+# extrusion (not just its centre-line).
 bead_spine, bead_w, bead_h = helix_bead()
+gx, gy = GRID["bead"]
 v.add_parametric_tube(
     "bead",
-    placed(bead_spine, x_offset=22.0),
+    placed(bead_spine, gx, gy),
     bead_w,
     bead_h,
-    color=0x44AACC,
+    color=COLORS["bead"],
     roughness=0.5,
 )
 
@@ -207,16 +265,28 @@ _pick_count = 0
 def on_pick(pick):
     global _pick_count
     x, y, z = pick["point"]
-    print(
-        f"pick #{_pick_count}: {pick['kind']} {pick['id']!r} "
-        f"fraction={pick['fraction']:.3f} ({pick['fraction'] * 100:.1f}% along) "
-        f"point=({x:.3f}, {y:.3f}, {z:.3f})  "
-        f"[segment {pick['segment']}, t={pick['t']:.3f}]"
+    # Human-readable summary (INFO) + the full raw payload (DEBUG). Only clicks
+    # reach Python, so this fires once per click — never on hover.
+    log.info(
+        "pick #%d: %s %r fraction=%.3f (%.1f%% along) "
+        "point=(%.3f, %.3f, %.3f) [segment %d, t=%.3f]",
+        _pick_count,
+        pick["kind"],
+        pick["id"],
+        pick["fraction"],
+        pick["fraction"] * 100,
+        x,
+        y,
+        z,
+        pick["segment"],
+        pick["t"],
     )
-    # Drop a persistent marker on the spine where we picked.
+    log.debug("raw pick payload: %r", pick)
+    # Drop a persistent (and chunky, so it's easy to see) marker on the spine
+    # where we picked.
     v.add_sphere(
         f"pick_{_pick_count}",
-        radius=0.12,
+        radius=0.4,
         color=0xFF3344,
         roughness=0.4,
         position=pick["point"],
@@ -227,12 +297,14 @@ def on_pick(pick):
 # Registering the callback also enables picking in the viewer.
 v.on_polyline_pick(on_pick)
 
-total_pts = sum(len(p) for p in lines.values()) + len(bead_spine)
+total_pts = sum(len(p) for p in line_paths.values()) + len(bead_spine)
 print(__doc__)
 print(
-    f"Loaded 3 lines + 1 bead ({total_pts:,} points total): square, mixed, vase, bead."
+    f"Loaded 4 lines (1 non-pickable) + 1 bead ({total_pts:,} points total): "
+    "square, mixed, vase, circle [not pickable], bead."
 )
 print("Picking enabled. Hover for the marker; click to pick a point on any object.")
+print("The grey circle ignores the cursor — clicking it sends nothing back.")
 print("Press F to frame the scene, D / Shift+D for depth cues. Ctrl+C here to quit.")
 
 # Keep the process (and the WebSocket server) alive so picks keep arriving.
