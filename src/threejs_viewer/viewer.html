@@ -518,6 +518,22 @@
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
             z-index: 10;
         }
+
+        /* Cursor-following readout while hovering a pickable polyline (fraction + xyz) */
+        .threejs-viewer .tjsv-pick-readout {
+            position: absolute;
+            background: rgba(30, 30, 30, 0.85);
+            color: #eee;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 3px 7px;
+            border-radius: 5px;
+            pointer-events: none;
+            user-select: none;
+            white-space: nowrap;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 11;
+        }
     </style>
     <script type="importmap">
     {
@@ -4700,8 +4716,11 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
 // white lines via two composable controls:
 //
 //   `D`        toggles DISTANCE FOG — classic CAD depth cueing; far lines dim
-//              toward near-black via THREE.Fog whose near/far track the scene
-//              bounds + camera distance.
+//              toward near-black via THREE.Fog whose near/far are fitted each
+//              frame to the closest→furthest view-space depth of the visible
+//              lines (anchored to the actual content, not the looser whole-scene
+//              bounds). The content covers only FOG_DEPTH_COVERAGE of the ramp,
+//              so far lines partially fog rather than crushing to fog colour.
 //
 //   `Shift+D`  toggles EYE-DOME LIGHTING: a screen-space post-process
 //              (Potree/CloudCompare) that darkens fragments sitting behind
@@ -4810,6 +4829,18 @@ const EDL_SHADER = {
 // Distant lines dim toward this near-black for classic CAD depth cueing (`D`).
 const DEPTH_CUE_FOG_COLOR = 0x0a0a0f;
 
+// Fraction of the white→fog gradient that the visible depth span occupies.
+// The fog range is anchored to the closest visible line (full colour) but `far`
+// is pushed past the furthest line, mapping the content into the toe of the
+// smoothstep ramp. The toe is quadratic, so fog stays low across most of the
+// depth and only climbs near the far end — the bulk of the lines sit at the
+// light end of the gradient, with darkening concentrated on the farthest stretch.
+//   1.0 → furthest line fades fully to fog (white→black across the bbox)
+//   →0  → fog range stretches toward infinity, so almost nothing transitions
+// At 0.4 roughly the nearest 70% of the depth renders under ~0.2 fog (near-white)
+// while the furthest lines still reach ~0.35 — a legible cue biased toward light.
+const FOG_DEPTH_COVERAGE = 0.4;
+
 // Depth perception for flat line drawings (the add_polyline fallback for
 // toolpaths too complex to extrude as shaded beads). Two composable cues:
 // distance fog (`D`) dims far lines globally; eye-dome lighting (`Shift+D`)
@@ -4827,6 +4858,8 @@ class DepthCueController {
         this._renderPass = null;
         this._depthTexture = null;
         this._tmpV2 = new THREE.Vector2();
+        // Reused per-frame for fitting fog near/far to visible-line depth.
+        this._mvMat = new THREE.Matrix4();
         this._toastEl = null;
         this._toastTimer = 0;
     }
@@ -4890,13 +4923,67 @@ class DepthCueController {
         });
     }
 
+    /** Anchor fog near/far to the view-space depth span of the *visible* lines,
+     *  but let the content cover only FOG_DEPTH_COVERAGE of the white→fog ramp so
+     *  the nearest line stays full-colour and the furthest only partially fogs
+     *  (not crushed to fog colour). This keeps the depth cue content-relative — it
+     *  works no matter how far the drawing sits or how thin its depth extent is —
+     *  while preserving dynamic range on the far lines. A scene-sphere proxy
+     *  (dist ± radius) over-estimates the span: when the visible lines occupy a
+     *  thin slice of it they collapse to nearly one fog value, so everything dims
+     *  uniformly. Measured in view-Z (= fog depth) to match both three.js material
+     *  fog and the EDL shader's re-applied fog; falls back to the sphere proxy
+     *  when no line geometry is visible. */
     _updateFogRange() {
         const fog = this.v._scene.fog;
         if (!fog || !fog.isFog) return;
+        const cam = this.v._camera;
+        // We run before the frame's render() refreshes camera matrices, so pull
+        // matrixWorldInverse current here (cheap, camera-only) — otherwise the
+        // fitted range lags camera rotation by a frame. Object matrixWorld is
+        // left as-is (its one-frame lag during motion is imperceptible).
+        cam.updateMatrixWorld();
+        const mv = this._mvMat;
+        let near = Infinity;
+        let far = -Infinity;
+        this._eachPolyline((line) => {
+            if (!line.visible) return;
+            const geo = line.geometry;
+            if (!geo) return;
+            if (!geo.boundingBox) geo.computeBoundingBox();
+            const bb = geo.boundingBox;
+            if (!bb || bb.isEmpty()) return;
+            mv.multiplyMatrices(cam.matrixWorldInverse, line.matrixWorld);
+            const e = mv.elements;
+            // -view-Z (fog depth) of each local bounding-box corner. The box is
+            // a cheap, slightly loose bound on the true vertex extent — far
+            // tighter than the whole-scene sphere and recomputed-free per frame.
+            for (let i = 0; i < 8; i++) {
+                const x = (i & 1) ? bb.max.x : bb.min.x;
+                const y = (i & 2) ? bb.max.y : bb.min.y;
+                const z = (i & 4) ? bb.max.z : bb.min.z;
+                const d = -(e[2] * x + e[6] * y + e[10] * z + e[14]);
+                if (d < near) near = d;
+                if (d > far) far = d;
+            }
+        });
+        if (isFinite(near) && far > 0 && far > near) {
+            // Anchor the gradient to the visible depth span, but let the content
+            // cover only FOG_DEPTH_COVERAGE of the white→fog ramp: nearest line →
+            // full colour, furthest line → ~smoothstep(coverage) fogged (≈0.35 at
+            // 0.4) rather than fully crushed to fog colour. Pushing `far` past the
+            // furthest line maps the content into the smoothstep toe, keeping the
+            // bulk light and concentrating the darkening on the farthest stretch.
+            const n = Math.max(0.01, near);
+            fog.near = n;
+            fog.far = n + (far - n) / FOG_DEPTH_COVERAGE;
+            return;
+        }
+        // Fallback: no visible line geometry — track the scene bounding sphere.
         const sph = this.v._sceneSphere;
         const r = sph && sph.radius ? sph.radius : 1;
         const center = sph ? sph.center : this.v._controls.target;
-        const dist = this.v._camera.position.distanceTo(center);
+        const dist = cam.position.distanceTo(center);
         fog.near = Math.max(0.01, dist - r);
         fog.far = dist + r * 1.15;
     }
@@ -4989,6 +5076,522 @@ class DepthCueController {
         this._toastEl.textContent = text;
         this._toastEl.style.opacity = '1';
         this._toastTimer = performance.now() + 1400;
+    }
+}
+
+// ========== Polyline / tube picking ==========
+// Opt-in interactive picking of points ALONG a polyline OR a parametric tube
+// (the "bead"). Enabled from Python via set_polyline_picking (see
+// ViewerClient.enable_polyline_picking / on_polyline_pick) OR directly from JS
+// via viewer.enablePolylinePicking() + viewer.onPolylinePick(cb). Hovering near
+// a pickable object shows a marker at the closest point on its spine and a
+// cursor readout of the arc-length fraction; a click (not a drag) reports
+// {id, kind, fraction, point, localPoint, segment, t}. The report goes to (a)
+// the Python client over the WebSocket, and (b) any client-side hooks
+// registered with onPolylinePick (click) / onPolylineHover (every move) — so a
+// browser embedder can build a live tooltip without a Python round-trip. `kind`
+// is "line" or "tube".
+//
+// Picking is done in SCREEN space (not via the raycaster): every spine node is
+// projected to pixels and the cursor's closest point across all segments wins.
+// This is the key to smooth, snap-free motion — at a shared node, one segment
+// ends (t→1) exactly where the next begins (t→0), so the marker hands off
+// seamlessly instead of clamping to vertices the way a per-segment 3D
+// closest-point does. It works identically for fat (`Line2`) and native
+// (`THREE.Line`) polylines and for parametric tubes, since each keeps
+// `userData.pickPoints` (a CPU copy of the local spine points, stashed at
+// creation). For a tube, pickPoints is the FULL-resolution spine (1:1 with the
+// caller's per-spine-point data, independent of LOD) and the screen gate is
+// widened by the bead's projected half-extent so clicking the bead body — not
+// just its centre-line — registers; the resolved point sits on the spine. The
+// fraction comes from a lazily-built cumulative arc-length table, so it is exact
+// for any sampling density. Trade-off: screen-space picking has no 3D depth
+// ordering between overlapping objects (the screen-nearest wins) — picking
+// already ignored mesh occlusion, so this only affects the rare overlap case.
+//
+// The marker lives in the scene like the pivot marker (NOT in `_objects`) so it
+// can't be picked or treated as a public object, and it survives clear_scene.
+class PolylinePickController {
+    /** @param {ThreeJSViewer} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        this.enabled = false;
+        this.thresholdPx = 14;
+        /** @type {{id:string, kind:string, segment:number, t:number, fraction:number, point:THREE.Vector3}|null} */
+        this.hover = null;
+
+        // Client-side hooks: fire on pick (click) and on hover (every move).
+        // Let a browser embedder react without a Python round-trip.
+        /** @type {Array<(pick:any)=>void>} */
+        this._pickHooks = [];
+        /** @type {Array<(pick:any|null)=>void>} */
+        this._hoverHooks = [];
+
+        // Marker: small sphere + a camera-facing ring, drawn on top (depthTest
+        // off, high renderOrder) so it reads even when the line is occluded.
+        const markerColor = 0x00e5ff;
+        this.marker = new THREE.Group();
+        const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.1, 20, 14),
+            new THREE.MeshBasicMaterial({ color: markerColor, depthTest: false, transparent: true, opacity: 0.95 })
+        );
+        sphere.renderOrder = 1000;
+        const ring = new THREE.Mesh(
+            new THREE.RingGeometry(0.16, 0.2, 32),
+            new THREE.MeshBasicMaterial({ color: markerColor, depthTest: false, transparent: true, opacity: 0.8, side: THREE.DoubleSide })
+        );
+        ring.renderOrder = 1000;
+        this._markerSphere = sphere;
+        this._markerRing = ring;
+        this.marker.add(sphere);
+        this.marker.add(ring);
+        this.marker.visible = false;
+        // Belt-and-suspenders: never let the marker intercept any raycast.
+        this.marker.raycast = () => {};
+        sphere.raycast = () => {};
+        ring.raycast = () => {};
+        this.v._scene.add(this.marker);
+
+        // Reusable screen-space scratch for the two endpoints of the segment
+        // currently being tested (swapped, not reallocated, per node). `viewZ`
+        // carries the view-space depth so the tube gate can size the bead's
+        // screen footprint per node.
+        this._ps0 = { x: 0, y: 0, viewZ: 0, ok: false };
+        this._ps1 = { x: 0, y: 0, viewZ: 0, ok: false };
+
+        /** @type {HTMLDivElement|null} */
+        this._readout = null;
+
+        // Pointer-down bookkeeping to tell a click (pick) from a drag (orbit/pan).
+        this._downX = 0;
+        this._downY = 0;
+        this._downValid = false;
+
+        this._tmpV = new THREE.Vector3();
+        this._A = new THREE.Vector3();
+        this._B = new THREE.Vector3();
+        this._AB = new THREE.Vector3();
+        // World-space scratch for resolving the parameter `t` along the chosen
+        // segment via a 3D ray↔segment closest-point (correct under perspective).
+        this._Aw = new THREE.Vector3();
+        this._Bw = new THREE.Vector3();
+        this._ABw = new THREE.Vector3();
+        this._segPt = new THREE.Vector3();
+        this._ndcV = new THREE.Vector2();
+        this._raycaster = new THREE.Raycaster();
+
+        this._onMove = this._onMove.bind(this);
+        this._onDown = this._onDown.bind(this);
+        this._onUp = this._onUp.bind(this);
+        this._onLeave = this._onLeave.bind(this);
+    }
+
+    attach() {
+        const dom = this.v._renderer.domElement;
+        dom.addEventListener('pointermove', this._onMove);
+        dom.addEventListener('pointerdown', this._onDown);
+        dom.addEventListener('pointerleave', this._onLeave);
+        // pointerup on window so a release outside the canvas still ends cleanly.
+        window.addEventListener('pointerup', this._onUp);
+    }
+
+    /** @param {{markerColor?:number, thresholdPx?:number}} [opts] */
+    enable(opts = {}) {
+        this.enabled = true;
+        if (typeof opts.thresholdPx === 'number' && isFinite(opts.thresholdPx)) {
+            this.thresholdPx = Math.max(0, opts.thresholdPx);
+        }
+        if (typeof opts.markerColor === 'number') {
+            const hex = opts.markerColor >>> 0;
+            /** @type {THREE.MeshBasicMaterial} */ (this._markerSphere.material).color.setHex(hex);
+            /** @type {THREE.MeshBasicMaterial} */ (this._markerRing.material).color.setHex(hex);
+        }
+    }
+
+    disable() {
+        this.enabled = false;
+        this.clearHover();
+        this.v._renderer.domElement.style.cursor = '';
+    }
+
+    clearHover() {
+        const wasHovering = this.hover != null;
+        this.hover = null;
+        if (this.marker) this.marker.visible = false;
+        if (this._readout) this._readout.style.display = 'none';
+        // Tell client-side hover hooks the cursor left every pickable object.
+        if (wasHovering) this._emitHover(null);
+    }
+
+    _ensureReadout() {
+        if (this._readout) return this._readout;
+        const el = document.createElement('div');
+        el.className = 'tjsv-pick-readout';
+        el.style.display = 'none';
+        this.v.el.appendChild(el);
+        this._readout = el;
+        return el;
+    }
+
+    /** World units per screen pixel at a world point (screen-constant sizing). @param {THREE.Vector3} point */
+    _worldPerPixel(point) {
+        const cam = /** @type {any} */ (this.v._camera);
+        const h = Math.max(1, this.v._renderer.domElement.clientHeight);
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(point);
+            return (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
+        }
+        return (cam.top - cam.bottom) / cam.zoom / h;
+    }
+
+    /** Build + cache cumulative arc-length for a polyline's local points. @param {any} obj */
+    _ensureArcTable(obj) {
+        const ud = obj.userData;
+        const pts = ud.pickPoints;
+        if (!pts || pts.length < 6) return null;
+        const n = (pts.length / 3) | 0;
+        if (ud.pickCumLen && ud.pickCumLen.length === n) return ud;
+        const cum = new Float32Array(n);
+        let total = 0;
+        for (let i = 1; i < n; i++) {
+            const dx = pts[i * 3] - pts[(i - 1) * 3];
+            const dy = pts[i * 3 + 1] - pts[(i - 1) * 3 + 1];
+            const dz = pts[i * 3 + 2] - pts[(i - 1) * 3 + 2];
+            total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+            cum[i] = total;
+        }
+        ud.pickCumLen = cum;
+        ud.pickTotalLen = total;
+        return ud;
+    }
+
+    /**
+     * Lazily build + cache a tube's per-point bead half-extents (half its
+     * cross-section, plus any anchor/height offset) — the world distance the
+     * pick gate projects to pixels so a click on the bead body, not just its
+     * centre-line, registers. Built on the first pick so a tube created while
+     * picking is off costs nothing.
+     * @param {any} ud
+     */
+    _ensureTubeHalfExtents(ud) {
+        if (ud.pickHalfExtents) return ud.pickHalfExtents;
+        const w = ud.pickWidths, h = ud.pickHeights;
+        if (!w || !h) return null;
+        const n = w.length;
+        const ext = new Float32Array(n);
+        const ho = Math.abs(ud.pickHeightOffset || 0);
+        for (let i = 0; i < n; i++) ext[i] = 0.5 * Math.max(w[i], h[i]) + ho;
+        ud.pickHalfExtents = ext;
+        return ext;
+    }
+
+    /**
+     * Project a polyline's local node `i` into canvas pixel coordinates,
+     * writing into `out` (`{x, y, ok}`). `ok` is false when the node is behind
+     * a perspective camera (its projection would be a sign-flipped artifact).
+     * @param {Float32Array} pts @param {number} i @param {THREE.Matrix4} mw
+     * @param {any} cam @param {number} W @param {number} H
+     * @param {{x:number,y:number,viewZ:number,ok:boolean}} out
+     */
+    _nodeScreenInto(pts, i, mw, cam, W, H, out) {
+        const p = this._tmpV.set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+        p.applyMatrix4(mw);                    // local → world
+        p.applyMatrix4(cam.matrixWorldInverse); // world → view (camera space)
+        const viewZ = p.z;                     // view-space depth (negative in front of a perspective cam)
+        if (cam.isPerspectiveCamera && p.z > -1e-4) { out.ok = false; return; }
+        p.applyMatrix4(cam.projectionMatrix);  // view → NDC (perspective divide)
+        out.x = (p.x * 0.5 + 0.5) * W;
+        out.y = (-p.y * 0.5 + 0.5) * H;
+        out.viewZ = viewZ;
+        out.ok = true;
+    }
+
+    /**
+     * World units per screen pixel at a given view-space depth — sizes a tube's
+     * bead footprint into pixels for the pick gate. (Ortho is depth-independent.)
+     * @param {number} viewZ
+     */
+    _worldPerPixelAtViewZ(viewZ) {
+        const cam = /** @type {any} */ (this.v._camera);
+        const h = Math.max(1, this.v._renderer.domElement.clientHeight);
+        if (cam.isPerspectiveCamera) {
+            const d = Math.max(1e-6, -viewZ);
+            return (2 * d * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
+        }
+        return (cam.top - cam.bottom) / cam.zoom / h;
+    }
+
+    /**
+     * Find the point on the nearest polyline to the cursor.
+     *
+     * Two stages with different metrics:
+     *  1. SELECT the segment by 2D screen distance (project both endpoints to
+     *     pixels, take the cursor's nearest segment). Picking in 2D — rather
+     *     than the raycaster's depth-sorted, per-segment clamped hit — is what
+     *     makes the marker glide smoothly: at a shared node, segment i ends
+     *     (t→1) exactly where segment i+1 begins (t→0), so the hand-off is
+     *     seamless and the marker never snaps to vertices.
+     *  2. PLACE the point on that segment via the 3D ray↔segment closest-point.
+     *     Screen-space `t` foreshortens under perspective (equal pixel spacing
+     *     ≠ equal world spacing), which would quantize the marker toward the
+     *     nearer endpoint; the world-space parameter keeps it exactly under the
+     *     cursor and the arc-length fraction metrically honest.
+     *
+     * The cost is losing 3D depth ordering between overlapping lines (the
+     * screen-nearest wins); picking already ignored mesh occlusion, so this
+     * only affects line-vs-line, which is rarely ambiguous in practice.
+     * @param {number} clientX @param {number} clientY
+     */
+    _pickAt(clientX, clientY) {
+        const cam = this.v._camera;
+        const dom = this.v._renderer.domElement;
+        const rect = dom.getBoundingClientRect();
+        const W = rect.width;
+        const H = rect.height;
+        const cursorX = clientX - rect.left;
+        const cursorY = clientY - rect.top;
+
+        cam.updateMatrixWorld();
+        cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+
+        let bestObj = null;
+        let bestUd = null;
+        let bestSeg = 0;
+        let bestIsTube = false;
+        let bestDist = Infinity;
+
+        for (const o of this.v._objects.values()) {
+            const udo = o && o.userData;
+            const pickable = udo && udo.pickPoints && (udo.isPolyline || udo.isPickableTube);
+            if (!(o && o.visible && pickable)) continue;
+            const ud = this._ensureArcTable(o);
+            if (!ud) continue;
+            const pts = ud.pickPoints;
+            const n = (pts.length / 3) | 0;
+            o.updateWorldMatrix(true, false);
+            const mw = o.matrixWorld;
+            const isTube = !!udo.isPickableTube;
+            // Gate = how close (px) the cursor must be to count as "on" this
+            // object. A line uses its half line-width; a tube uses its bead
+            // half-extent (per node, projected to pixels at that depth) so a
+            // click anywhere on the bead body — not just the centre-line —
+            // registers. Tube half-extents are built lazily on first pick.
+            const halfExtents = isTube ? this._ensureTubeHalfExtents(udo) : null;
+            const mat = /** @type {any} */ (o.material);
+            const lineGate = this.thresholdPx + (mat && typeof mat.linewidth === 'number' ? mat.linewidth : 1) * 0.5;
+
+            let prev = this._ps0;
+            let cur = this._ps1;
+            this._nodeScreenInto(pts, 0, mw, cam, W, H, prev);
+            for (let i = 0; i < n - 1; i++) {
+                this._nodeScreenInto(pts, i + 1, mw, cam, W, H, cur);
+                if (prev.ok && cur.ok) {
+                    let gate = lineGate;
+                    if (isTube && halfExtents) {
+                        const extWorld = Math.max(halfExtents[i], halfExtents[i + 1]);
+                        // Nearer node (view-Z closest to 0) → larger pixel footprint → wider gate.
+                        const wpp = this._worldPerPixelAtViewZ(Math.max(prev.viewZ, cur.viewZ));
+                        gate = this.thresholdPx + extWorld / wpp;
+                    }
+                    const abx = cur.x - prev.x;
+                    const aby = cur.y - prev.y;
+                    const ab2 = abx * abx + aby * aby;
+                    let t = ab2 > 0 ? ((cursorX - prev.x) * abx + (cursorY - prev.y) * aby) / ab2 : 0;
+                    t = t < 0 ? 0 : t > 1 ? 1 : t;
+                    const dx = cursorX - (prev.x + abx * t);
+                    const dy = cursorY - (prev.y + aby * t);
+                    const d = Math.sqrt(dx * dx + dy * dy);
+                    if (d <= gate && d < bestDist) {
+                        bestDist = d;
+                        bestObj = o;
+                        bestUd = ud;
+                        bestSeg = i;
+                        bestIsTube = isTube;
+                    }
+                }
+                const tmp = prev;
+                prev = cur;
+                cur = tmp;
+            }
+        }
+
+        if (!bestObj) return null;
+
+        // Segment chosen by screen distance; now place the point by the 3D
+        // ray↔segment closest-point. Screen-space `t` would be wrong under
+        // perspective (equal world spacing ≠ equal pixel spacing), so the
+        // parameter is recomputed in world space — the marker lands exactly on
+        // the line under the cursor, and the fraction stays metrically honest.
+        const ud = bestUd;
+        const pts = ud.pickPoints;
+        const mw = bestObj.matrixWorld;
+        this._A.set(pts[bestSeg * 3], pts[bestSeg * 3 + 1], pts[bestSeg * 3 + 2]);
+        this._B.set(pts[(bestSeg + 1) * 3], pts[(bestSeg + 1) * 3 + 1], pts[(bestSeg + 1) * 3 + 2]);
+        this._Aw.copy(this._A).applyMatrix4(mw);
+        this._Bw.copy(this._B).applyMatrix4(mw);
+
+        this._ndcV.set((cursorX / W) * 2 - 1, -(cursorY / H) * 2 + 1);
+        this._raycaster.setFromCamera(this._ndcV, cam);
+        // Writes the closest point ON the segment (clamped to its ends) to _segPt.
+        this._raycaster.ray.distanceSqToSegment(this._Aw, this._Bw, null, this._segPt);
+
+        this._ABw.subVectors(this._Bw, this._Aw);
+        const abw2 = this._ABw.lengthSq();
+        let t = abw2 > 0 ? this._tmpV.subVectors(this._segPt, this._Aw).dot(this._ABw) / abw2 : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+
+        this._AB.subVectors(this._B, this._A);
+        const localPoint = this._A.clone().addScaledVector(this._AB, t);
+        const world = bestObj.localToWorld(localPoint.clone());
+
+        const segLen = ud.pickCumLen[bestSeg + 1] - ud.pickCumLen[bestSeg];
+        const arc = ud.pickCumLen[bestSeg] + t * segLen;
+        const fraction = ud.pickTotalLen > 0 ? arc / ud.pickTotalLen : 0;
+
+        return {
+            id: bestObj.userData.id,
+            kind: bestIsTube ? 'tube' : 'line',
+            segment: bestSeg,
+            t,
+            fraction,
+            point: world,
+            localPoint,
+        };
+    }
+
+    /** @param {PointerEvent} e */
+    _onMove(e) {
+        if (!this.enabled) return;
+        const pick = this._pickAt(e.clientX, e.clientY);
+        const dom = this.v._renderer.domElement;
+        if (!pick) {
+            this.clearHover();
+            dom.style.cursor = '';
+            return;
+        }
+        this.hover = { id: pick.id, kind: pick.kind, segment: pick.segment, t: pick.t, fraction: pick.fraction, point: pick.point.clone() };
+        this.marker.position.copy(pick.point);
+        this.marker.visible = true;
+        dom.style.cursor = 'crosshair';
+
+        const el = this._ensureReadout();
+        const rect = dom.getBoundingClientRect();
+        const p = pick.point;
+        el.textContent = `${(pick.fraction * 100).toFixed(1)}%  (${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`;
+        el.style.left = (e.clientX - rect.left + 14) + 'px';
+        el.style.top = (e.clientY - rect.top + 14) + 'px';
+        el.style.display = 'block';
+
+        // Notify client-side hover hooks (live tooltip without a Python round-trip).
+        this._emitHover(pick);
+    }
+
+    /** @param {PointerEvent} e */
+    _onDown(e) {
+        // Only a plain left press is a pick candidate; right/middle and pan
+        // modifiers (shift) are reserved for the camera controls.
+        this._downValid = this.enabled && e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey;
+        this._downX = e.clientX;
+        this._downY = e.clientY;
+    }
+
+    /** @param {PointerEvent} e */
+    _onUp(e) {
+        if (!this._downValid) return;
+        this._downValid = false;
+        if (!this.enabled) return;
+        // A drag (the pointer travelled) is an orbit/pan, not a pick.
+        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > 5) return;
+        // Re-pick at the release position rather than trusting stale hover state.
+        const pick = this._pickAt(e.clientX, e.clientY);
+        if (pick) {
+            this._send(pick);     // → Python over the WebSocket
+            this._emitPick(pick); // → client-side hooks
+        }
+    }
+
+    _onLeave() {
+        if (!this.enabled) return;
+        this.clearHover();
+        this.v._renderer.domElement.style.cursor = '';
+    }
+
+    /** @param {{id:string,kind:string,fraction:number,point:THREE.Vector3,localPoint:THREE.Vector3,segment:number,t:number}} pick */
+    _send(pick) {
+        const ws = this.v._ws;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({
+            type: 'polyline_pick',
+            id: pick.id,
+            kind: pick.kind,
+            fraction: pick.fraction,
+            point: [pick.point.x, pick.point.y, pick.point.z],
+            localPoint: [pick.localPoint.x, pick.localPoint.y, pick.localPoint.z],
+            segment: pick.segment,
+            t: pick.t,
+        }));
+    }
+
+    /**
+     * Register a JS hook fired on each pick (click). Auto-enables picking.
+     * @param {(pick:any)=>void} cb @returns {() => void} unsubscribe
+     */
+    onPick(cb) {
+        if (typeof cb !== 'function') throw new Error('onPick: callback must be a function');
+        this._pickHooks.push(cb);
+        if (!this.enabled) this.enable();
+        return () => { const i = this._pickHooks.indexOf(cb); if (i >= 0) this._pickHooks.splice(i, 1); };
+    }
+
+    /**
+     * Register a JS hook fired on every hover move over a pickable line/tube
+     * (receives the pick payload, or null when the cursor leaves). Auto-enables.
+     * @param {(pick:any|null)=>void} cb @returns {() => void} unsubscribe
+     */
+    onHover(cb) {
+        if (typeof cb !== 'function') throw new Error('onHover: callback must be a function');
+        this._hoverHooks.push(cb);
+        if (!this.enabled) this.enable();
+        return () => { const i = this._hoverHooks.indexOf(cb); if (i >= 0) this._hoverHooks.splice(i, 1); };
+    }
+
+    /** Build a plain, framework-free pick payload for JS hooks. @param {any} pick */
+    _payload(pick) {
+        return {
+            id: pick.id,
+            kind: pick.kind,
+            fraction: pick.fraction,
+            segment: pick.segment,
+            t: pick.t,
+            point: { x: pick.point.x, y: pick.point.y, z: pick.point.z },
+            localPoint: { x: pick.localPoint.x, y: pick.localPoint.y, z: pick.localPoint.z },
+        };
+    }
+
+    /** @param {any} pick */
+    _emitPick(pick) {
+        if (!this._pickHooks.length) return;
+        const payload = this._payload(pick);
+        for (const cb of this._pickHooks.slice()) {
+            try { cb(payload); } catch (err) { console.error('polyline pick hook error', err); }
+        }
+    }
+
+    /** @param {any|null} pick */
+    _emitHover(pick) {
+        if (!this._hoverHooks.length) return;
+        const payload = pick ? this._payload(pick) : null;
+        for (const cb of this._hoverHooks.slice()) {
+            try { cb(payload); } catch (err) { console.error('polyline hover hook error', err); }
+        }
+    }
+
+    // Per-frame: keep the marker a constant ~5px screen size, ring faces camera.
+    update() {
+        if (!this.enabled || !this.marker.visible) return;
+        const wpp = this._worldPerPixel(this.marker.position);
+        this.marker.scale.setScalar(wpp * 50);
+        this._markerRing.quaternion.copy(this.v._camera.quaternion);
     }
 }
 
@@ -5471,6 +6074,12 @@ class ThreeJSViewer {
             if (!target) { this.resetView(); return; }
             this.frameObject(target);
         });
+
+        // Polyline point-picking (opt-in; enabled from Python via
+        // set_polyline_picking). Hover shows a marker on the nearest line, a
+        // click sends the picked arc-length fraction + coordinate back.
+        this._polylinePick = new PolylinePickController(this);
+        this._polylinePick.attach();
 
         // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
@@ -6436,6 +7045,9 @@ class ThreeJSViewer {
         for (const id of this._objects.keys()) {
             this._deleteObject(id);
         }
+        // The pick marker lives in the scene (not in _objects), so a clear
+        // would otherwise leave it floating over the now-deleted line.
+        if (this._polylinePick) this._polylinePick.clearHover();
     }
 
     /** @param {Record<string, any>} transforms */
@@ -7684,6 +8296,17 @@ class ThreeJSViewer {
                                 line.name = data.id;
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
+                                // Retain a CPU copy of the local spine points so
+                                // PolylinePickController can resolve an exact
+                                // arc-length fraction for a picked point. (Same
+                                // data already uploaded to the GPU; the fat path
+                                // duplicates points internally, so this N-point
+                                // copy is the lighter source of truth.) Skipped
+                                // when pickable=False — the object is then absent
+                                // from the pick loop entirely (no cost, never hit).
+                                if (data.pickable !== false) {
+                                    line.userData.pickPoints = pointData;
+                                }
                                 this._deleteObject(data.id, { preserveInflight: true });
                                 this._addToParentOrScene(line, data.parent);
                                 this._objects.set(data.id, line);
@@ -8028,6 +8651,22 @@ class ThreeJSViewer {
                                 mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
                                 mesh.userData.tubeEndCapBase = endCapBase;
                                 mesh.userData.tubeHeightOffset = heightOffset;
+                                // Picking: expose the FULL-resolution spine (1:1 with the
+                                // caller's per-spine-point data arrays, independent of LOD)
+                                // plus references to the width/height arrays. Everything
+                                // here is a reference to data we already hold (no copy, no
+                                // loop) — the per-point bead half-extents used by the pick
+                                // gate are built lazily on the first pick (see
+                                // PolylinePickController._ensureTubeHalfExtents), so a tube
+                                // costs nothing extra when picking is never used. Opt out
+                                // per object with pickable=False.
+                                if (data.pickable !== false) {
+                                    mesh.userData.isPickableTube = true;
+                                    mesh.userData.pickPoints = tubeLOD ? tubeLOD.originalSpine : spine;
+                                    mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
+                                    mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
+                                    mesh.userData.pickHeightOffset = heightOffset;
+                                }
                                 mesh.userData.tubeMorphData = {
                                     spine: new Float32Array(buildSpine),
                                     widths: new Float32Array(buildWidths),
@@ -8397,6 +9036,16 @@ class ThreeJSViewer {
                         if (data.fog != null) this._depthCue.setFog(data.fog);
                         if (data.edl != null) this._depthCue.setEdl(data.edl);
                         break;
+                    case 'set_polyline_picking':
+                        if (data.enabled) {
+                            this._polylinePick.enable({
+                                markerColor: data.markerColor,
+                                thresholdPx: data.thresholdPx,
+                            });
+                        } else {
+                            this._polylinePick.disable();
+                        }
+                        break;
                     case 'show_grid':
                         this._gridHelper.visible = !!data.visible;
                         if (data.size != null && data.divisions != null) {
@@ -8484,6 +9133,9 @@ class ThreeJSViewer {
                 this._pivotMarker.visible = false;
             }
         }
+
+        // Polyline-pick hover marker: keep it a constant screen size.
+        if (this._polylinePick) this._polylinePick.update();
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
         if (this._shading.shadingMode === 3) {
@@ -8722,6 +9374,36 @@ class ThreeJSViewer {
         visit(this._scene);
         return bbox;
     }
+
+    // ----- Picking (client-side API) -----
+    // Lets a browser embedder drive picking and react to picks/hovers directly,
+    // without a Python WebSocket round-trip. Picks are also still sent to Python
+    // when connected. `kind` in the payload is 'line' or 'tube'.
+
+    /**
+     * Enable interactive picking of points along polylines and parametric tubes.
+     * @param {{markerColor?:number, thresholdPx?:number}} [opts]
+     */
+    enablePolylinePicking(opts) { this._polylinePick.enable(opts || {}); }
+
+    /** Disable interactive picking and hide the hover marker. */
+    disablePolylinePicking() { this._polylinePick.disable(); }
+
+    /**
+     * Register a hook fired when the user picks (clicks) a point on a polyline
+     * or tube. Auto-enables picking. The payload is
+     * `{id, kind, fraction, segment, t, point:{x,y,z}, localPoint:{x,y,z}}`.
+     * @param {(pick:any)=>void} cb @returns {() => void} unsubscribe
+     */
+    onPolylinePick(cb) { return this._polylinePick.onPick(cb); }
+
+    /**
+     * Register a hook fired on every hover move over a pickable line/tube
+     * (same payload as onPolylinePick, or null when the cursor leaves). Useful
+     * for a live readout/tooltip. Auto-enables picking.
+     * @param {(pick:any|null)=>void} cb @returns {() => void} unsubscribe
+     */
+    onPolylineHover(cb) { return this._polylinePick.onHover(cb); }
 
     resetView() {
         // Canonical home view: world-Z up, isometric-ish direction

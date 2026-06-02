@@ -238,6 +238,11 @@ class ViewerClient:
         self._current_animation = None  # Stored for re-sending on reconnect
         self._http_server = None
         self._blob_store: Dict[str, bytes] = {}
+        # Polyline picking: callbacks invoked when the user clicks a point on a
+        # polyline in the viewer, and the desired enable state (re-sent on
+        # reconnect so picking survives a browser refresh).
+        self._pick_callbacks: List = []
+        self._polyline_picking: Optional[dict] = None
 
     def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect.
@@ -354,6 +359,14 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-enable polyline picking if it was on (the viewer forgets across a
+        # refresh; the polyline itself is re-added by the user's script).
+        if self._polyline_picking is not None:
+            try:
+                websocket.send(json.dumps(self._polyline_picking))
+            except Exception:
+                pass
+
         try:
             for message in websocket:
                 try:
@@ -363,6 +376,8 @@ class ViewerClient:
                         self._handle_hello(websocket, data)
                     elif msg_type == "assets_loaded":
                         self._assets_loaded_event.set()
+                    elif msg_type == "polyline_pick":
+                        self._dispatch_polyline_pick(data)
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -726,6 +741,7 @@ class ViewerClient:
         line_width: int = 2,
         parent: Optional[str] = None,
         fat: bool = True,
+        pickable: bool = True,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -748,6 +764,14 @@ class ViewerClient:
                 ignored; the fog and eye-dome-lighting depth cues
                 (``set_depth_cue``) still apply. Per-vertex ``colors`` work in
                 both.
+            pickable: When ``True`` (default), this polyline participates in
+                interactive picking (see :meth:`enable_polyline_picking`) once
+                picking is enabled. Pass ``False`` to exclude this line
+                entirely — it won't be hit, won't show the hover marker, and
+                carries no per-hover cost (the viewer keeps no pick data for
+                it). Picking is still globally gated by
+                :meth:`enable_polyline_picking`; ``pickable`` only narrows
+                *which* objects participate.
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
@@ -783,6 +807,7 @@ class ViewerClient:
             "hasVertexColors": has_vertex_colors,
             "numPoints": n_points,
             "fat": bool(fat),
+            "pickable": bool(pickable),
         }
         if parent:
             header["parent"] = parent
@@ -887,6 +912,7 @@ class ViewerClient:
         matrix: Optional[list] = None,
         lod: Optional[Union[bool, dict]] = None,
         strand_collapse: Union[bool, dict] = False,
+        pickable: bool = True,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -975,6 +1001,12 @@ class ViewerClient:
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
+            pickable: When True (default), this tube participates in
+                polyline/tube picking once picking is enabled (see
+                ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
+                resolves a point on its full-resolution spine and reports
+                ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
+                from picking (it is then never hit-tested, at zero cost).
         """
         lod_header = _serialize_lod(lod)
 
@@ -1032,6 +1064,7 @@ class ViewerClient:
             "opacity": opacity,
             "metalness": metalness,
             "roughness": roughness,
+            "pickable": bool(pickable),
         }
         sc_header = _serialize_strand_collapse(strand_collapse)
         if sc_header:
@@ -1519,6 +1552,116 @@ class ViewerClient:
         if edl is not None:
             msg["edl"] = bool(edl)
         self._send(msg)
+
+    # === Polyline picking ===
+
+    def enable_polyline_picking(
+        self,
+        marker_color: int = 0x00E5FF,
+        threshold_px: float = 14.0,
+    ) -> None:
+        """Enable interactive picking of points *along* polylines and parametric
+        tubes (beads) in the viewer.
+
+        Once enabled, hovering the cursor near any polyline or tube shows a
+        marker at the closest point on its spine and a small readout of the
+        arc-length fraction; a click (as opposed to an orbit drag) sends the
+        picked location back to Python, where it is delivered to every callback
+        registered with :meth:`on_polyline_pick`. For a tube the click resolves
+        a point on its full-resolution spine, so ``segment`` indexes the spine
+        1:1 with the per-spine-point arrays you passed to
+        :meth:`add_parametric_tube` (independent of LOD simplification) — handy
+        for looking up other per-point data dimensions at the picked point.
+
+        Picking is opt-in: when disabled (the default) the viewer does no
+        per-hover raycasting, so there is zero cost until you turn it on. The
+        enabled state is re-sent automatically if the browser reconnects.
+
+        Args:
+            marker_color: Hover-marker color (hex ``0xRRGGBB``).
+            threshold_px: How close (in screen pixels) the cursor must be to a
+                line for it to register as a hover. Larger values make thin
+                lines easier to grab.
+
+        Notes:
+            Each pick is delivered as a dict with keys:
+
+            - ``id`` — the picked object's id.
+            - ``kind`` — ``"line"`` for a polyline, ``"tube"`` for a
+              parametric tube.
+            - ``fraction`` — position along the spine as a fraction of its
+              total arc length, in ``[0, 1]``.
+            - ``point`` — ``[x, y, z]`` world-space coordinate of the picked
+              point (exactly on the line).
+            - ``local_point`` — ``[x, y, z]`` in the polyline's local frame
+              (differs from ``point`` only when the polyline has a transform
+              or a parent).
+            - ``segment`` — index of the spine segment the point lies on.
+            - ``t`` — interpolation parameter within that segment, in
+              ``[0, 1]``.
+        """
+        self._polyline_picking = {
+            "type": "set_polyline_picking",
+            "enabled": True,
+            "markerColor": int(marker_color),
+            "thresholdPx": float(threshold_px),
+        }
+        # Send now if connected; otherwise the connect handler replays it.
+        if self._ws is not None:
+            self._send(self._polyline_picking)
+
+    def disable_polyline_picking(self) -> None:
+        """Turn off polyline picking and hide the hover marker in the viewer.
+
+        Registered callbacks are left in place; call again via
+        :meth:`enable_polyline_picking` (or :meth:`on_polyline_pick`) to resume.
+        """
+        self._polyline_picking = None
+        if self._ws is not None:
+            self._send({"type": "set_polyline_picking", "enabled": False})
+
+    def on_polyline_pick(self, callback) -> None:
+        """Register a callback invoked whenever the user picks a point on a
+        polyline in the viewer, and enable picking if it isn't already.
+
+        The callback receives a single dict argument (see
+        :meth:`enable_polyline_picking` for its keys). It runs on the client's
+        WebSocket receive thread, so keep it short; it is safe to call other
+        viewer methods (e.g. :meth:`add_sphere`) from within it.
+
+        Args:
+            callback: A callable ``callback(pick: dict) -> None``.
+
+        Example::
+
+            def on_pick(pick):
+                print(f"{pick['fraction']:.1%} at {pick['point']}")
+                v.add_sphere("hit", radius=0.1, position=pick["point"])
+
+            v.on_polyline_pick(on_pick)
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._pick_callbacks.append(callback)
+        if self._polyline_picking is None:
+            self.enable_polyline_picking()
+
+    def _dispatch_polyline_pick(self, data: dict) -> None:
+        """Deliver an incoming ``polyline_pick`` message to registered callbacks."""
+        pick = {
+            "id": data.get("id"),
+            "kind": data.get("kind", "line"),
+            "fraction": data.get("fraction"),
+            "point": data.get("point"),
+            "local_point": data.get("localPoint"),
+            "segment": data.get("segment"),
+            "t": data.get("t"),
+        }
+        for cb in list(self._pick_callbacks):
+            try:
+                cb(pick)
+            except Exception:
+                logging.getLogger(__name__).exception("Error in polyline pick callback")
 
     def clear(self) -> None:
         """Clear all objects from the scene."""
