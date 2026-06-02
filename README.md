@@ -90,6 +90,26 @@ v.batch_update({
 })
 ```
 
+### Picking points on lines & beads
+
+```python
+# Click a point anywhere along any polyline or parametric tube; the pick
+# travels back to Python. Hovering glides a marker to the closest point.
+def on_pick(pick):
+    print(f"{pick['kind']} {pick['id']}: {pick['fraction']:.1%} along  at {pick['point']}")
+
+v.on_polyline_pick(on_pick)   # also enables picking
+```
+
+Each click sends `{id, kind, fraction, point, local_point, segment, t}` where
+`kind` is `"line"` or `"tube"`. Movement is **continuous** — the marker never
+snaps to vertices. For a tube, `segment` indexes the full-resolution spine 1:1
+with the per-point arrays you built it from, so it doubles as a lookup key for
+other per-point data at the picked point. A browser embedder can subscribe in
+JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)`
+(every hover move) — for a live readout with no Python round-trip. See
+[examples/22_polyline_picking.py](examples/22_polyline_picking.py).
+
 ### Animations
 
 ```python

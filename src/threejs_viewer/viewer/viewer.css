@@ -507,3 +507,19 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     z-index: 10;
 }
+
+/* Cursor-following readout while hovering a pickable polyline (fraction + xyz) */
+.threejs-viewer .tjsv-pick-readout {
+    position: absolute;
+    background: rgba(30, 30, 30, 0.85);
+    color: #eee;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    z-index: 11;
+}

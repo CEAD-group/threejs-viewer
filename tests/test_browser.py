@@ -1171,3 +1171,305 @@ def test_tone_mapping_change_flushes_materials(page):
         assert current_tm == "agx"
     finally:
         client.disconnect()
+
+
+@pytest.mark.browser
+def test_polyline_pick_roundtrip(viewer_client, viewer_page):
+    """Hovering + clicking a polyline in the browser sends a pick back to
+    Python with the right arc-length fraction and on-line coordinate."""
+    picks = []
+
+    def on_pick(p):
+        picks.append(p)
+        # Mirror the example: issue a viewer command from inside the callback.
+        # This runs on the WebSocket receive thread, so it also checks that a
+        # re-entrant send (recv loop → ws.send) doesn't deadlock.
+        viewer_client.add_sphere("hit", radius=0.1, position=p["point"])
+
+    viewer_client.on_polyline_pick(on_pick)
+
+    # A straight 3D segment, symmetric about the origin and evenly sampled, so
+    # the geometric midpoint (0,0,0) sits at fraction 0.5. The diagonal keeps it
+    # from being edge-on under the default 3/4 view.
+    direction = np.array([1.0, 0.6, 0.4], dtype=np.float32)
+    pts = np.array([t * direction for t in (-2, -1, 0, 1, 2)], dtype=np.float32)
+    viewer_client.add_polyline("pickline", pts, color=0xFF8800, line_width=6)
+
+    # Wait until the browser has fetched + created the polyline.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "pickline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    # Frame the scene so the line is on-screen, then let a frame settle.
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+
+    # Project the world midpoint (0,0,0) to client pixel coordinates using the
+    # live camera matrices (manual mat4*vec4 — THREE isn't a global here).
+    cx, cy = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const cam = v._camera;
+            cam.updateMatrixWorld();
+            cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+            const view = cam.matrixWorldInverse.elements;
+            const proj = cam.projectionMatrix.elements;
+            const apply = (m, x, y, z, w) => [
+                m[0]*x + m[4]*y + m[8]*z  + m[12]*w,
+                m[1]*x + m[5]*y + m[9]*z  + m[13]*w,
+                m[2]*x + m[6]*y + m[10]*z + m[14]*w,
+                m[3]*x + m[7]*y + m[11]*z + m[15]*w,
+            ];
+            const e = apply(view, 0, 0, 0, 1);
+            const c = apply(proj, e[0], e[1], e[2], e[3]);
+            const ndcx = c[0] / c[3], ndcy = c[1] / c[3];
+            const rect = v._renderer.domElement.getBoundingClientRect();
+            return [
+                rect.left + (ndcx * 0.5 + 0.5) * rect.width,
+                rect.top + (-ndcy * 0.5 + 0.5) * rect.height,
+            ];
+        }"""
+    )
+
+    # Hover (shows the marker), then a stationary click (down+up, no drag).
+    viewer_page.mouse.move(cx, cy)
+    time.sleep(0.05)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.25)
+
+    assert picks, "no polyline_pick was received from the browser"
+    pick = picks[-1]
+    assert pick["id"] == "pickline"
+    assert pick["kind"] == "line", pick["kind"]
+    assert 0.4 <= pick["fraction"] <= 0.6, pick["fraction"]
+    px, py, pz = pick["point"]
+    assert abs(px) < 0.25 and abs(py) < 0.25 and abs(pz) < 0.25, pick["point"]
+
+    # The sphere the callback added from the receive thread must have landed.
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if "hit" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("sphere added from the pick callback never appeared")
+
+
+@pytest.mark.browser
+def test_polyline_pick_disabled_by_default(viewer_client, viewer_page):
+    """With picking never enabled, a click on a polyline sends nothing back."""
+    picks = []
+    # Watch for picks WITHOUT enabling picking in the viewer.
+    viewer_client._pick_callbacks.append(lambda p: picks.append(p))
+
+    pts = np.array([[-2, 0, 0], [0, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("noline", pts, color=0x44AAFF, line_width=6)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "noline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+    cx, cy = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const rect = v._renderer.domElement.getBoundingClientRect();
+            return [rect.left + rect.width / 2, rect.top + rect.height / 2];
+        }"""
+    )
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.25)
+    assert picks == [], "picking should be inert until enabled"
+
+
+@pytest.mark.browser
+def test_polyline_pick_between_nodes_no_snapping(viewer_client, viewer_page):
+    """Picking resolves a continuous point BETWEEN vertices — it must not snap
+    to the nearest node. A single 2-point segment has no interior nodes, so any
+    interior fraction proves sub-segment interpolation."""
+    picks = []
+    viewer_client.on_polyline_pick(lambda p: picks.append(p))
+
+    a = np.array([-2.0, -1.2, 0.0])
+    b = np.array([2.0, 1.2, 0.0])
+    pts = np.array([a, b], dtype=np.float32)  # ONE long segment, no middle node
+    viewer_client.add_polyline("seg", pts, color=0xFFAA00, line_width=6)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "seg" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created")
+
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+
+    # Aim the cursor at the world point 30% of the way along the segment.
+    target = (a + 0.30 * (b - a)).tolist()
+    cx, cy = viewer_page.evaluate(
+        """(target) => {
+            const v = window.threejsViewer;
+            const cam = v._camera;
+            cam.updateMatrixWorld();
+            cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+            const view = cam.matrixWorldInverse.elements;
+            const proj = cam.projectionMatrix.elements;
+            const apply = (m, x, y, z, w) => [
+                m[0]*x + m[4]*y + m[8]*z  + m[12]*w,
+                m[1]*x + m[5]*y + m[9]*z  + m[13]*w,
+                m[2]*x + m[6]*y + m[10]*z + m[14]*w,
+                m[3]*x + m[7]*y + m[11]*z + m[15]*w,
+            ];
+            const e = apply(view, target[0], target[1], target[2], 1);
+            const c = apply(proj, e[0], e[1], e[2], e[3]);
+            const ndcx = c[0] / c[3], ndcy = c[1] / c[3];
+            const rect = v._renderer.domElement.getBoundingClientRect();
+            return [
+                rect.left + (ndcx * 0.5 + 0.5) * rect.width,
+                rect.top + (-ndcy * 0.5 + 0.5) * rect.height,
+            ];
+        }""",
+        target,
+    )
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.25)
+
+    assert picks, "no pick received"
+    pick = picks[-1]
+    # Interior fraction (not snapped to 0.0 or 1.0), and the on-line point sits
+    # at ~30% — i.e. the picker interpolated within the segment.
+    assert 0.22 <= pick["fraction"] <= 0.38, pick["fraction"]
+    assert pick["segment"] == 0
+    px, py, pz = pick["point"]
+    assert abs(px - target[0]) < 0.3 and abs(py - target[1]) < 0.3, pick["point"]
+    # And it's genuinely between the endpoints, not on either node.
+    assert abs(px - a[0]) > 0.3 and abs(px - b[0]) > 0.3, pick["point"]
+
+
+# Project a world point to client pixel coordinates using the live camera
+# matrices (manual mat4*vec4 — THREE isn't a global on the page).
+_PROJECT_WORLD_TO_PIXELS = """(target) => {
+    const v = window.threejsViewer;
+    const cam = v._camera;
+    cam.updateMatrixWorld();
+    cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+    const view = cam.matrixWorldInverse.elements;
+    const proj = cam.projectionMatrix.elements;
+    const apply = (m, x, y, z, w) => [
+        m[0]*x + m[4]*y + m[8]*z  + m[12]*w,
+        m[1]*x + m[5]*y + m[9]*z  + m[13]*w,
+        m[2]*x + m[6]*y + m[10]*z + m[14]*w,
+        m[3]*x + m[7]*y + m[11]*z + m[15]*w,
+    ];
+    const e = apply(view, target[0], target[1], target[2], 1);
+    const c = apply(proj, e[0], e[1], e[2], e[3]);
+    const ndcx = c[0] / c[3], ndcy = c[1] / c[3];
+    const rect = v._renderer.domElement.getBoundingClientRect();
+    return [
+        rect.left + (ndcx * 0.5 + 0.5) * rect.width,
+        rect.top + (-ndcy * 0.5 + 0.5) * rect.height,
+    ];
+}"""
+
+
+@pytest.mark.browser
+def test_parametric_tube_pick(viewer_client, viewer_page):
+    """A click on a parametric tube (the bead) reports a pick with
+    ``kind == "tube"``, resolved on the tube's full-resolution spine."""
+    picks = []
+    viewer_client.on_polyline_pick(lambda p: picks.append(p))
+
+    # A straight bead along a diagonal, symmetric about the origin and evenly
+    # sampled, so the geometric midpoint (0,0,0) sits at fraction 0.5.
+    direction = np.array([1.0, 0.6, 0.4], dtype=np.float32)
+    spine = np.array([t * direction for t in (-2, -1, 0, 1, 2)], dtype=np.float32)
+    widths = np.full(len(spine), 0.5, dtype=np.float32)
+    heights = np.full(len(spine), 0.5, dtype=np.float32)
+    viewer_client.add_parametric_tube("bead", spine, widths, heights, color=0x44AAFF)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "bead" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("parametric tube was never created in the browser")
+
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+
+    # Aim at the bead's midpoint (0,0,0).
+    cx, cy = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, 0.0, 0.0])
+    viewer_page.mouse.move(cx, cy)
+    time.sleep(0.05)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.25)
+
+    assert picks, "no pick was received from clicking the bead"
+    pick = picks[-1]
+    assert pick["id"] == "bead"
+    assert pick["kind"] == "tube", pick["kind"]
+    assert 0.4 <= pick["fraction"] <= 0.6, pick["fraction"]
+    # The resolved point sits on the spine at ~the midpoint.
+    px, py, pz = pick["point"]
+    assert abs(px) < 0.4 and abs(py) < 0.4 and abs(pz) < 0.4, pick["point"]
+
+
+@pytest.mark.browser
+def test_polyline_pick_js_hook(viewer_client, viewer_page):
+    """A client-side JS hook (``viewer.onPolylinePick`` / ``onPolylineHover``)
+    receives picks directly in the browser — no Python round-trip — and
+    auto-enables picking."""
+    pts = np.array([[-2, 0, 0], [0, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("jsline", pts, color=0x44AAFF, line_width=6)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "jsline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    # Register hooks purely in the browser; this also enables picking (no
+    # enable_polyline_picking() call from Python).
+    viewer_page.evaluate(
+        """() => {
+            window.__jsPicks = [];
+            window.__jsHovers = 0;
+            window.threejsViewer.onPolylinePick(p => window.__jsPicks.push(p));
+            window.threejsViewer.onPolylineHover(p => { if (p) window.__jsHovers++; });
+        }"""
+    )
+
+    viewer_page.evaluate("() => window.threejsViewer.resetView()")
+    time.sleep(0.4)
+
+    cx, cy = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, 0.0, 0.0])
+    viewer_page.mouse.move(cx, cy)
+    time.sleep(0.05)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    time.sleep(0.2)
+
+    js_picks = viewer_page.evaluate("() => window.__jsPicks")
+    js_hovers = viewer_page.evaluate("() => window.__jsHovers")
+    assert js_picks, "JS pick hook never fired"
+    pick = js_picks[-1]
+    assert pick["id"] == "jsline"
+    assert pick["kind"] == "line", pick["kind"]
+    assert 0.4 <= pick["fraction"] <= 0.6, pick["fraction"]
+    # Payload point is a plain {x, y, z} object for JS consumers.
+    assert abs(pick["point"]["x"]) < 0.25, pick["point"]
+    assert js_hovers > 0, "JS hover hook never fired on pointer move"
