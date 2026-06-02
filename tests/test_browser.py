@@ -1543,3 +1543,129 @@ def test_parametric_tube_pickable_false(viewer_client, viewer_page):
 
     assert picks == [], "pickable=False tube must be excluded from picking"
     assert "optoutbead" in viewer_client.query_scene()["objects"]
+
+
+def _get_material_fog(page, obj_id):
+    """Read the first material's `.fog` flag for an object by id, or None."""
+    return page.evaluate(
+        "(id) => {"
+        " const o = window.threejsViewer._objects.get(id);"
+        " if (!o) return null;"
+        " let fog = null;"
+        " o.traverse((c) => {"
+        "  if (fog !== null || !c.material) return;"
+        "  const m = Array.isArray(c.material) ? c.material[0] : c.material;"
+        "  if (m) fog = m.fog;"
+        " });"
+        " return fog;"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_fog_scoped_to_polylines(viewer_client, viewer_page):
+    """Distance fog must darken only polylines. `scene.fog` is global and every
+    material defaults to `fog:true`, so without scoping the mesh would dim too.
+    Assert the mesh material's `.fog` is forced off while fog is active (line
+    on), then restored to its original value when fog is turned off."""
+    viewer_client.add_box("fogbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("fogline", pts, color=0x44AAFF, line_width=4)
+
+    # Wait for the (binary-loaded) polyline to register.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "fogline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    # Mesh materials default to fog enabled.
+    assert _get_material_fog(viewer_page, "fogbox") is True
+
+    viewer_client.set_depth_cue(fog=True)
+    box_fog = line_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        box_fog = _get_material_fog(viewer_page, "fogbox")
+        line_fog = _get_material_fog(viewer_page, "fogline")
+        if box_fog is False and line_fog is True:
+            break
+    assert box_fog is False, (
+        f"mesh fog should be forced off while fog active, got {box_fog!r}"
+    )
+    assert line_fog is True, (
+        f"polyline fog should be on while fog active, got {line_fog!r}"
+    )
+
+    # Turning fog off restores the mesh material to its original fog value.
+    viewer_client.set_depth_cue(fog=False)
+    box_fog = None
+    for _ in range(40):
+        time.sleep(0.05)
+        box_fog = _get_material_fog(viewer_page, "fogbox")
+        if box_fog is True:
+            break
+    assert box_fog is True, (
+        f"mesh fog should be restored after fog off, got {box_fog!r}"
+    )
+
+
+@pytest.mark.browser
+def test_depth_cue_edl_depth_is_line_only(viewer_client, viewer_page):
+    """Eye-dome lighting must sculpt only polylines. The EDL pass is fed a
+    line-only depth texture (polylines are placed on a dedicated camera layer
+    rendered alone in a depth pre-pass), with full-scene depth bound separately
+    only for the occlusion guard. Assert the polyline carries the EDL layer, the
+    mesh does not, and the EDL pass samples the line-only depth target."""
+    viewer_client.add_box("edlbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("edlline", pts, color=0x44AAFF, line_width=4)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "edlline" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("polyline was never created in the browser")
+
+    viewer_client.set_depth_cue(edl=True)
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const dc = window.threejsViewer._depthCue;"
+            " const line = window.threejsViewer._objects.get('edlline');"
+            " const box = window.threejsViewer._objects.get('edlbox');"
+            " const LINE_BIT = 1 << 1;"  # EDL_LINE_LAYER = 1
+            " return {"
+            "  edlActive: dc.edlActive,"
+            "  hasComposer: !!dc._edlPass,"
+            "  lineOnEdlLayer: line ? ((line.layers.mask & LINE_BIT) !== 0) : null,"
+            "  boxOnEdlLayer: box ? ((box.layers.mask & LINE_BIT) !== 0) : null,"
+            "  tDepthIsLineOnly: (dc._edlPass && dc._lineDepthTarget)"
+            "   ? (dc._edlPass.uniforms.tDepth.value === dc._lineDepthTarget.depthTexture) : null,"
+            "  tSceneDepthBound: dc._edlPass ? (dc._edlPass.uniforms.tSceneDepth.value !== null) : null,"
+            " };"
+            "}"
+        )
+        if state and state["hasComposer"]:
+            break
+    assert state and state["edlActive"] is True
+    assert state["lineOnEdlLayer"] is True, (
+        "polyline must be on the EDL line-only layer"
+    )
+    assert state["boxOnEdlLayer"] is False, (
+        "mesh must NOT be on the EDL line-only layer"
+    )
+    assert state["tDepthIsLineOnly"] is True, (
+        "EDL pass must sample the line-only depth target"
+    )
+    assert state["tSceneDepthBound"] is True, (
+        "EDL pass must bind full-scene depth for the occlusion guard"
+    )

@@ -3621,8 +3621,25 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
 //              3D. Because it operates on the final rendered colour it COMPOSES
 //              with fog — fog dims globally, EDL adds local crossing contrast.
 //
-// Both are also reachable from Python via set_depth_cue(fog, edl). Fog applies
-// to every polyline in the scene; EDL is an independent screen-space overlay.
+// Both are also reachable from Python via set_depth_cue(fog, edl).
+//
+// BOTH cues are SCOPED TO POLYLINE GEOMETRY ONLY — meshes (robot cell, fixtures,
+// shaded beads, models) render exactly as with the cues off. A typical "Line"
+// view draws the toolpath as a thin native line while keeping the cell/fixtures
+// visible for spatial reference; the cues must sculpt the *line* for depth
+// perception without dimming that reference geometry. Two mechanisms:
+//   - Fog: scene.fog is global and every material defaults to fog:true, so the
+//     controller force-disables fog on non-polyline materials (saving the prior
+//     value to restore) and enables it only on polylines — see _applyFogScope.
+//   - EDL: the pass is fed a LINE-ONLY depth texture (polylines render to a
+//     dedicated camera layer in a depth pre-pass), and the shader additionally
+//     checks full-scene depth so a line occluded by a mesh leaves that mesh
+//     pixel untouched. See EDL_LINE_LAYER, _lineDepthTarget, renderComposer.
+
+// Polylines render to this extra camera layer (in addition to layer 0) so the
+// EDL depth pre-pass can capture LINE-ONLY depth by rendering just this layer.
+// First and only use of THREE layers in this file (layer 0 = everything normal).
+const EDL_LINE_LAYER = 1;
 
 /** Eye-dome lighting post-process. Darkens a fragment in proportion to how
  *  much farther it sits than its 4 screen-space neighbours (log-depth), which
@@ -3633,7 +3650,12 @@ const EDL_SHADER = {
     name: 'EDLShader',
     uniforms: {
         tDiffuse: { value: null },
+        // LINE-ONLY depth (polyline layer rendered alone) — drives the EDL
+        // darkening and the re-applied fog, so both touch only line pixels.
         tDepth: { value: null },
+        // FULL-SCENE depth — used only to detect a mesh in front of a line, so
+        // an occluded line leaves that mesh pixel untouched.
+        tSceneDepth: { value: null },
         resolution: { value: new THREE.Vector2(1, 1) },
         cameraNear: { value: 0.1 },
         cameraFar: { value: 1000 },
@@ -3660,6 +3682,7 @@ const EDL_SHADER = {
         varying vec2 vUv;
         uniform sampler2D tDiffuse;
         uniform sampler2D tDepth;
+        uniform sampler2D tSceneDepth;
         uniform vec2 resolution;
         uniform float cameraNear;
         uniform float cameraFar;
@@ -3686,11 +3709,21 @@ const EDL_SHADER = {
         void main() {
             vec4 color = texture2D(tDiffuse, vUv);
             float centerRaw = texture2D(tDepth, vUv).x;
-            // Nothing drawn here → leave the background untouched.
+            // No LINE here (line-only depth is far) → leave the pixel untouched.
+            // This is how meshes / background pass through: only polylines render
+            // into tDepth, so every non-line pixel reads 1.0 and short-circuits.
             if (centerRaw >= 1.0) { gl_FragColor = color; return; }
 
             // Reuse the centre depth we already sampled (no second fetch).
             float distC = rawToDist(centerRaw);
+
+            // Occlusion guard: if the full scene has something meaningfully
+            // NEARER than the line at this pixel (a mesh in front of the line),
+            // the visible fragment is the mesh — leave it exactly as rendered.
+            // 2% relative slack so the line's own fragment (present in both
+            // depth buffers) is never mistaken for an occluder.
+            float distScene = rawToDist(texture2D(tSceneDepth, vUv).x);
+            if (distScene < distC - distC * 0.02) { gl_FragColor = color; return; }
             float logC = log2(distC + 1e-6);
             vec2 texel = edlRadius / resolution;
             vec2 offs[4];
@@ -3750,9 +3783,17 @@ class DepthCueController {
         this._edlPass = null;
         this._renderPass = null;
         this._depthTexture = null;
+        // Line-only depth target for the EDL depth pre-pass (created with the
+        // composer). Rendering just the polyline layer into this gives the EDL
+        // pass line-only depth, scoping the effect (and its re-applied fog) to
+        // polylines.
+        this._lineDepthTarget = null;
         this._tmpV2 = new THREE.Vector2();
         // Reused per-frame for fitting fog near/far to visible-line depth.
         this._mvMat = new THREE.Matrix4();
+        // _objGeneration at the last fog-scope pass — re-scope when objects are
+        // added/removed while fog is active (catches async model loads too).
+        this._lastFogScopeGen = -1;
         this._toastEl = null;
         this._toastTimer = 0;
     }
@@ -3791,11 +3832,11 @@ class DepthCueController {
             // Refresh scene bounds so the fog near/far track content.
             try { this.v._camController.updateSceneBounds(); } catch (e) { /* best-effort */ }
             this.v._scene.fog = new THREE.Fog(DEPTH_CUE_FOG_COLOR, 1, 100);
-            this._setLineFog(true);
+            this._applyFogScope(true);
             this._updateFogRange();
         } else {
             this.v._scene.fog = null;
-            this._setLineFog(false);
+            this._applyFogScope(false);
         }
     }
 
@@ -3814,6 +3855,45 @@ class DepthCueController {
             line.material.fog = on;
             line.material.needsUpdate = true;
         });
+    }
+
+    /** Scope fog to polylines only. `scene.fog` is global and every material
+     *  defaults to `fog:true`, so meshes/tubes/models would dim with the lines.
+     *  Enable fog on polyline materials and force it OFF on every non-polyline
+     *  material (saving the prior value on the material so it can be restored).
+     *  Idempotent — re-run after objects are added while fog is active.
+     *  @param {boolean} on */
+    _applyFogScope(on) {
+        // Polylines follow the cue directly.
+        this._setLineFog(on);
+        // Non-polyline materials: forced off while active, restored when off.
+        for (const obj of this.v._objects.values()) {
+            if (this._isPolyline(obj)) continue;
+            obj.traverse((node) => {
+                const mat = node.material;
+                if (!mat) return;
+                if (Array.isArray(mat)) {
+                    for (const m of mat) this._scopeMeshMaterialFog(m, on);
+                } else {
+                    this._scopeMeshMaterialFog(mat, on);
+                }
+            });
+        }
+        this._lastFogScopeGen = this.v._objGeneration;
+    }
+
+    /** Force one non-polyline material's fog off (saving prior) / restore it.
+     *  The saved value lives on `material.userData` so it is GC'd with the
+     *  material — no controller-side map pinning disposed materials alive.
+     *  @param {any} m @param {boolean} on */
+    _scopeMeshMaterialFog(m, on) {
+        if (on) {
+            if (m.userData._fogScopeSaved === undefined) m.userData._fogScopeSaved = m.fog;
+            if (m.fog !== false) { m.fog = false; m.needsUpdate = true; }
+        } else if (m.userData._fogScopeSaved !== undefined) {
+            if (m.fog !== m.userData._fogScopeSaved) { m.fog = m.userData._fogScopeSaved; m.needsUpdate = true; }
+            delete m.userData._fogScopeSaved;
+        }
     }
 
     /** Anchor fog near/far to the view-space depth span of the *visible* lines,
@@ -3892,17 +3972,26 @@ class DepthCueController {
         this._depthTexture = depthTexture;
 
         const composer = new EffectComposer(renderer);
-        // Route scene depth into a sampleable texture for the EDL pass. RenderPass
-        // always renders into the composer's readBuffer (= renderTarget2, stable
-        // since the pipeline makes an even number of buffer swaps per frame), so
-        // the depth texture lives there ONLY. Attaching it to renderTarget1 too
-        // would form a GL feedback loop: the EDL pass writes renderTarget1 while
-        // sampling this very texture.
+        // Route FULL-SCENE depth into a sampleable texture for the EDL pass'
+        // occlusion guard. RenderPass always renders into the composer's
+        // readBuffer (= renderTarget2, stable since the pipeline makes an even
+        // number of buffer swaps per frame), so the depth texture lives there
+        // ONLY. Attaching it to renderTarget1 too would form a GL feedback loop:
+        // the EDL pass writes renderTarget1 while sampling this very texture.
         composer.renderTarget2.depthTexture = depthTexture;
+
+        // Separate LINE-ONLY depth target, filled by a pre-pass in renderComposer
+        // that renders just the polyline layer. It is never a pass write target,
+        // so sampling it in the EDL pass forms no feedback loop.
+        const lineDepthTarget = new THREE.WebGLRenderTarget(size.x, size.y);
+        lineDepthTarget.depthTexture = new THREE.DepthTexture(size.x, size.y);
+        lineDepthTarget.depthTexture.type = THREE.UnsignedIntType;
+        this._lineDepthTarget = lineDepthTarget;
 
         const renderPass = new RenderPass(v._scene, v._camera);
         const edlPass = new ShaderPass(EDL_SHADER);
-        edlPass.uniforms.tDepth.value = depthTexture;
+        edlPass.uniforms.tDepth.value = lineDepthTarget.depthTexture; // line-only
+        edlPass.uniforms.tSceneDepth.value = depthTexture; // full scene
         // OutputPass applies tone mapping + sRGB (the scene render into the
         // float target is linear) and tracks renderer.toneMapping at runtime.
         const outputPass = new OutputPass();
@@ -3939,12 +4028,35 @@ class DepthCueController {
         } else {
             u.fogMode.value = 0;
         }
+
+        // Line-only depth pre-pass: render JUST the polyline layer into
+        // _lineDepthTarget so the EDL pass (which reads tDepth) shades and
+        // re-fogs only line pixels. The full-scene RenderPass below still draws
+        // everything for colour (tDiffuse); the shader's occlusion guard
+        // (tSceneDepth) keeps meshes in front of a line untouched. Colour output
+        // of this pass is discarded — only its depth attachment is sampled.
+        const renderer = v._renderer;
+        const prevTarget = renderer.getRenderTarget();
+        const prevMask = cam.layers.mask;
+        cam.layers.set(EDL_LINE_LAYER);
+        renderer.setRenderTarget(this._lineDepthTarget);
+        renderer.clear();
+        renderer.render(v._scene, cam);
+        cam.layers.mask = prevMask;
+        renderer.setRenderTarget(prevTarget);
+
         this._composer.render();
     }
 
     // ----- per-frame + resize hooks -----
     update() {
-        if (this.fogActive) this._updateFogRange();
+        if (this.fogActive) {
+            // Re-scope fog when the scene's object set changed (new mesh/tube/
+            // model — including async model loads — would otherwise render
+            // fogged). Cheap generation compare; the walk only runs on change.
+            if (this.v._objGeneration !== this._lastFogScopeGen) this._applyFogScope(true);
+            this._updateFogRange();
+        }
         if (this._toastTimer > 0 && performance.now() >= this._toastTimer && this._toastEl) {
             this._toastEl.style.opacity = '0';
             this._toastTimer = 0;
@@ -3954,8 +4066,15 @@ class DepthCueController {
     /** @param {number} width @param {number} height CSS px */
     onResize(width, height) {
         // setSize resizes renderTarget2 and its attached depthTexture in place,
-        // so the shared EDL depth texture follows automatically.
+        // so the shared full-scene EDL depth texture follows automatically.
         if (this._composer) this._composer.setSize(width, height);
+        // The line-only depth target is a standalone WebGLRenderTarget — resize
+        // it to the same drawing-buffer (device px) resolution so its samples
+        // align with the composer's read buffer in the EDL pass.
+        if (this._lineDepthTarget) {
+            this.v._renderer.getDrawingBufferSize(this._tmpV2);
+            this._lineDepthTarget.setSize(this._tmpV2.x, this._tmpV2.y);
+        }
     }
 
     /** @param {string} text */
@@ -7189,6 +7308,11 @@ export class ThreeJSViewer {
                                 line.name = data.id;
                                 line.userData.id = data.id;
                                 line.userData.isPolyline = true;
+                                // Also place the line on the EDL line-only layer
+                                // (it stays on layer 0 for the normal render) so
+                                // the EDL depth pre-pass can capture line-only
+                                // depth and scope the effect to polylines.
+                                line.layers.enable(EDL_LINE_LAYER);
                                 // Retain a CPU copy of the local spine points so
                                 // PolylinePickController can resolve an exact
                                 // arc-length fraction for a picked point. (Same
