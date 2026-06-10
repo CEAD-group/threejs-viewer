@@ -1213,3 +1213,354 @@ def test_parametric_tube_set_strand_collapse_enabled_round_trips(
     time.sleep(0.2)
     re_collapsed = np.asarray(positions(), dtype=np.float32)
     np.testing.assert_allclose(collapsed, re_collapsed)
+
+
+# --- Corner / reversal rendering regressions (directional miter, frame
+# freeze, miter limit, deposition bias) ---
+
+
+def _elbow_spine(step=0.5, leg=2.0):
+    """L in the x-z plane: horizontal leg along +x, then vertical leg up."""
+    n_leg = int(leg / step)
+    pts = [(i * step, 0.0, 0.0) for i in range(n_leg + 1)]
+    pts += [(leg, 0.0, (i + 1) * step) for i in range(n_leg)]
+    return np.array(pts, dtype=np.float32)
+
+
+@pytest.mark.browser
+def test_parametric_tube_vertical_elbow_no_lateral_flare(viewer_client, viewer_page):
+    """A turn in the vertical plane miters along V (the turn plane), not U:
+    the bead must not flare sideways at a layer-change elbow. The old
+    u-axis-only miter inflated the corner ring's lateral extent by
+    1/cos(45 deg) ~ 1.41x."""
+    spine = _elbow_spine()
+    n = len(spine)
+    w, h = 0.4, 0.2
+    viewer_client.add_parametric_tube(
+        "elbow",
+        spine=spine,
+        widths=np.full(n, w, dtype=np.float32),
+        heights=np.full(n, h, dtype=np.float32),
+    )
+    _wait_for_object(viewer_page, "elbow")
+    info = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const pos = obj.geometry.getAttribute('position').array;
+            let maxAbsY = 0, nonFinite = 0;
+            for (let i = 0; i < pos.length; i += 3) {
+                const y = Math.abs(pos[i + 1]);
+                if (y > maxAbsY) maxAbsY = y;
+                if (!Number.isFinite(pos[i]) || !Number.isFinite(pos[i+1])
+                    || !Number.isFinite(pos[i+2])) nonFinite++;
+            }
+            return { maxAbsY, nonFinite };
+        }""",
+        "elbow",
+    )
+    assert info["nonFinite"] == 0
+    # Lateral extent stays at half-width everywhere (+ deposition bias and
+    # fp slack). Old behavior: 0.5 * w * 1.414 = 0.283.
+    assert info["maxAbsY"] < 0.5 * w * 1.02, info
+
+
+@pytest.mark.browser
+def test_parametric_tube_dense_riser_frames_frozen(viewer_client, viewer_page):
+    """Interior riser samples (vertical tangent, |T.up| > 0.99) must inherit a
+    neighboring out-of-cone frame instead of the fallback-axis seed. The old
+    seed flip planted V ~90-135 deg away from the neighbors (crumple knots)."""
+    spine = _elbow_spine(step=0.1)
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "riser",
+        spine=spine,
+        widths=np.full(n, 0.4, dtype=np.float32),
+        heights=np.full(n, 0.2, dtype=np.float32),
+    )
+    _wait_for_object(viewer_page, "riser")
+    worst = viewer_page.evaluate(
+        """([id, n]) => {
+            const md = window.threejsViewer._objects.get(id).userData.tubeMorphData;
+            const lf = md.localFrames, tg = md.tangents;
+            const cone = (i) => Math.abs(tg[i * 3 + 2]) > 0.99;
+            // Every in-cone ring's V must equal a *bracketing out-of-cone*
+            // ring's V verbatim (frame freeze). In-cone neighbors don't
+            // count: a run touching the spine end has only one valid side.
+            let worst = 1;
+            for (let i = 0; i < n; i++) {
+                if (!cone(i)) continue;
+                let a = i; while (a > 0 && cone(a)) a--;
+                let b = i; while (b < n - 1 && cone(b)) b++;
+                const dot = (j, k) =>
+                    lf[j*6+3]*lf[k*6+3] + lf[j*6+4]*lf[k*6+4] + lf[j*6+5]*lf[k*6+5];
+                let best = -1;
+                if (!cone(a)) best = Math.max(best, dot(i, a));
+                if (!cone(b)) best = Math.max(best, dot(i, b));
+                if (best === -1) continue; // whole spine in cone: not this test
+                if (best < worst) worst = best;
+            }
+            return worst;
+        }""",
+        ["riser", n],
+    )
+    # Frozen frames are copied verbatim from a run-bracketing ring. Old
+    # behavior: fallback-seeded V at ~45-135 deg from both sides (dot <= 0.71).
+    assert worst > 0.999, f"in-cone ring V matches no bracketing frame: dot={worst}"
+
+
+@pytest.mark.browser
+def test_parametric_tube_miter_limit_bevels_sharp_corners(viewer_client, viewer_page):
+    """Turns sharper than 120 deg (miter ratio > TUBE_MITER_LIMIT = 2) drop to
+    a bevel; a 119 deg turn keeps its ~2x miter. The old limit of 4 let a
+    150 deg corner grow a 3.86x blade."""
+
+    def corner_spine(turn_deg):
+        a = np.radians(turn_deg)
+        d_in = np.array([1.0, 0.0, 0.0])
+        d_out = np.array([np.cos(a), np.sin(a), 0.0])
+        pts = [(-2 + i * 0.5) * d_in for i in range(5)]  # ... -> origin
+        pts += [(i * 0.5) * d_out for i in range(1, 5)]
+        return np.array(pts, dtype=np.float32)
+
+    w, h = 0.8, 0.3
+    results = {}
+    for name, deg in [("c150", 150.0), ("c119", 119.0)]:
+        spine = corner_spine(deg)
+        n = len(spine)
+        viewer_client.add_parametric_tube(
+            name,
+            spine=spine,
+            widths=np.full(n, w, dtype=np.float32),
+            heights=np.full(n, h, dtype=np.float32),
+        )
+        _wait_for_object(viewer_page, name)
+        # corner ring = index 4 (origin); max planar offset of its verts
+        results[name] = viewer_page.evaluate(
+            """([id, ringIdx]) => {
+                const obj = window.threejsViewer._objects.get(id);
+                const pos = obj.geometry.getAttribute('position').array;
+                const nCs = obj.userData.tubeNCs;
+                let maxR = 0;
+                for (let j = 0; j < nCs; j++) {
+                    const k = (ringIdx * nCs + j) * 3;
+                    const r = Math.hypot(pos[k], pos[k + 1]);
+                    if (r > maxR) maxR = r;
+                }
+                return maxR;
+            }""",
+            [name, 4],
+        )
+    hw = w / 2
+    # 150 deg: beveled -> corner verts stay within the unmitered half-width.
+    assert results["c150"] < hw * 1.05, results
+    # 119 deg: mitered -> widest vert sits at ~1.97x half-width along the
+    # bisector (old and new behavior agree here; guards the limit boundary).
+    assert hw * 1.8 < results["c119"] < hw * 2.1, results
+
+
+@pytest.mark.browser
+def test_parametric_tube_retrace_nests_by_deposition_bias(viewer_client, viewer_page):
+    """An exact retrace A->B->A renders the return leg strictly nested outside
+    the forward leg (later-deposited wins) instead of two coincident,
+    tie-breaking surfaces."""
+    n_half = 21
+    fwd = np.linspace(0.0, 4.0, n_half, dtype=np.float32)
+    xs = np.concatenate([fwd, fwd[-2::-1]])
+    spine = np.column_stack([xs, np.zeros_like(xs), np.zeros_like(xs)])
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "retrace",
+        spine=spine,
+        widths=np.full(n, 0.8, dtype=np.float32),
+        heights=np.full(n, 0.3, dtype=np.float32),
+    )
+    _wait_for_object(viewer_page, "retrace")
+    i_fwd = 10  # x = 2.0 forward
+    i_ret = n - 1 - i_fwd  # same x on the return leg
+    d = viewer_page.evaluate(
+        """([id, iF, iR]) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const pos = obj.geometry.getAttribute('position').array;
+            const nCs = obj.userData.tubeNCs;
+            const ext = (i) => {
+                let zTop = -Infinity, yMax = -Infinity;
+                for (let j = 0; j < nCs; j++) {
+                    const k = (i * nCs + j) * 3;
+                    if (pos[k + 2] > zTop) zTop = pos[k + 2];
+                    if (Math.abs(pos[k + 1]) > yMax) yMax = Math.abs(pos[k + 1]);
+                }
+                return { zTop, yMax };
+            };
+            return { f: ext(iF), r: ext(iR) };
+        }""",
+        ["retrace", i_fwd, i_ret],
+    )
+    dz = d["r"]["zTop"] - d["f"]["zTop"]
+    dy = d["r"]["yMax"] - d["f"]["yMax"]
+    assert dz > 1e-6, f"return top not above forward top: dz={dz}"
+    assert dy > 1e-6, f"return side not outside forward side: dy={dy}"
+    # and the bias stays sub-visual (< 0.1% of the bead size)
+    assert dz < 0.3 * 1e-3 and dy < 0.8 * 1e-3, (dz, dy)
+
+
+@pytest.mark.browser
+def test_parametric_tube_retrace_anchor_top_nests_on_all_faces(
+    viewer_client, viewer_page
+):
+    """anchor="top" retrace must nest on the TOP face too. The bias used to
+    scale the section about the spine point — which sits ON the top face for
+    anchor="top", so both legs kept their top facet at exactly v=0 and the
+    face seen from above still z-fought. The anchor offset is now captured
+    from the unbiased heights (scale about the anchored section centre)."""
+    n_half = 21
+    fwd = np.linspace(0.0, 4.0, n_half, dtype=np.float32)
+    xs = np.concatenate([fwd, fwd[-2::-1]])
+    spine = np.column_stack([xs, np.zeros_like(xs), np.zeros_like(xs)])
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "retrace_top",
+        spine=spine,
+        widths=np.full(n, 0.8, dtype=np.float32),
+        heights=np.full(n, 0.3, dtype=np.float32),
+        anchor="top",
+    )
+    _wait_for_object(viewer_page, "retrace_top")
+    i_fwd = 10
+    i_ret = n - 1 - i_fwd  # same x on the return leg
+    d = viewer_page.evaluate(
+        """([id, iF, iR]) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const pos = obj.geometry.getAttribute('position').array;
+            const nCs = obj.userData.tubeNCs;
+            const ext = (i) => {
+                let zTop = -Infinity, zBot = Infinity, yMax = -Infinity;
+                for (let j = 0; j < nCs; j++) {
+                    const k = (i * nCs + j) * 3;
+                    if (pos[k + 2] > zTop) zTop = pos[k + 2];
+                    if (pos[k + 2] < zBot) zBot = pos[k + 2];
+                    if (Math.abs(pos[k + 1]) > yMax) yMax = Math.abs(pos[k + 1]);
+                }
+                return { zTop, zBot, yMax };
+            };
+            return { f: ext(iF), r: ext(iR) };
+        }""",
+        ["retrace_top", i_fwd, i_ret],
+    )
+    dz_top = d["r"]["zTop"] - d["f"]["zTop"]
+    dz_bot = d["f"]["zBot"] - d["r"]["zBot"]
+    dy = d["r"]["yMax"] - d["f"]["yMax"]
+    assert dz_top > 1e-6, f"anchored top face did not separate: dz={dz_top}"
+    assert dz_bot > 1e-6, f"return bottom not below forward bottom: dz={dz_bot}"
+    assert dy > 1e-6, f"return side not outside forward side: dy={dy}"
+    # sub-visual: the whole bias is <= 0.1% of the bead size
+    assert dz_top < 0.3 * 1e-3 and dz_bot < 0.5 * 1e-3 and dy < 0.8 * 1e-3, d
+
+
+@pytest.mark.browser
+def test_parametric_tube_anchor_top_bias_survives_lod(viewer_client, viewer_page):
+    """The anchor-top deposition bias must hold on the LOD-reduced build too:
+    vOffs (anchor offsets from the unbiased heights) are subset alongside
+    widths/heights through RDP, so each kept ring's top face sits above its
+    spine point by (k-1)*h/2 — zero at the start, ~1.5e-4 (h*1e-3/2) at the
+    end. The old spine-point scaling kept every top face at exactly v=0."""
+    n = 2000
+    x = np.linspace(0.0, 8.0, n, dtype=np.float32)
+    y = 0.5 * np.sin(np.linspace(0, 6 * np.pi, n)).astype(np.float32)
+    spine = np.column_stack([x, y, np.full(n, 1.0, dtype=np.float32)])
+    viewer_client.add_parametric_tube(
+        "lod_top",
+        spine=spine,
+        widths=np.full(n, 0.8, dtype=np.float32),
+        heights=np.full(n, 0.3, dtype=np.float32),
+        anchor="top",
+        lod={"threshold": 0},
+    )
+    _wait_for_object(viewer_page, "lod_top")
+    d = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const md = obj.userData.tubeMorphData;
+            const pos = obj.geometry.getAttribute('position').array;
+            const nCs = obj.userData.tubeNCs;
+            const nRed = obj.userData.tubeNumSpinePoints;
+            const topExcess = (i) => {
+                let zTop = -Infinity;
+                for (let j = 0; j < nCs; j++) {
+                    const k = (i * nCs + j) * 3;
+                    if (pos[k + 2] > zTop) zTop = pos[k + 2];
+                }
+                return zTop - md.spine[i * 3 + 2];
+            };
+            return { nRed, first: topExcess(0), last: topExcess(nRed - 1) };
+        }""",
+        "lod_top",
+    )
+    assert d["nRed"] >= 2
+    ramp = d["last"] - d["first"]
+    assert 5e-5 < ramp < 3e-4, (
+        f"anchored top face does not ramp with deposition bias through LOD: {d}"
+    )
+
+
+def test_add_parametric_tube_bias_index_validation():
+    """Negative offsets would scale rings down/negative in the viewer; a total
+    smaller than offset + n means the ramp overshoots its own range. Both are
+    caller bugs — reject in Python before anything hits the wire."""
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="bias_index_offset"):
+        c.add_parametric_tube("t", spine, widths, heights, bias_index_offset=-1)
+    with pytest.raises(ValueError, match="bias_index_total"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, bias_index_offset=10, bias_index_total=12
+        )
+    # exact fit is allowed: total == offset + n
+    c._binary_messages = []
+    c._send_binary = lambda h, p: c._binary_messages.append((h, p))
+    c.add_parametric_tube(
+        "t", spine, widths, heights, bias_index_offset=10, bias_index_total=14
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["biasIndexOffset"] == 10
+    assert header["biasIndexTotal"] == 14
+
+
+def test_add_toolpath_threads_bias_ramp_across_segments():
+    """A toolpath split at travel moves must thread ONE deposition-bias ramp
+    across its segment tubes (global spine index), so a deposit/travel/retrace
+    toolpath still nests later-deposited-outside across the split."""
+    from threejs_viewer import ViewerClient
+    from threejs_viewer.toolpath import Toolpath
+
+    c = ViewerClient(port=0, open_browser=False)
+    c._binary_messages = []
+    c._send_binary = lambda h, p: c._binary_messages.append((h, p))
+    c._sent = []
+    c._send = lambda h: c._sent.append(h)
+
+    # columns [t, x, y, z, w, h]; width 0 at index 3 = travel point
+    t = np.arange(7, dtype=np.float32)
+    x = np.arange(7, dtype=np.float32)
+    zeros = np.zeros(7, dtype=np.float32)
+    w = np.array([1, 1, 1, 0, 1, 1, 1], dtype=np.float32)
+    h = np.full(7, 0.5, dtype=np.float32)
+    tp = Toolpath(np.column_stack([t, x, zeros, zeros, w, h]))
+
+    c.add_toolpath("tp", tp)
+
+    headers = [hdr for hdr, _ in c._binary_messages]
+    assert len(headers) == 2, [h["id"] for h in headers]
+    seg0, seg1 = headers
+    assert seg0["id"] == "tp_seg_0"
+    # offset 0 is omitted (falsy) but the total must pin the global ramp
+    assert "biasIndexOffset" not in seg0
+    assert seg0["biasIndexTotal"] == 7
+    assert seg1["id"] == "tp_seg_1"
+    assert seg1["biasIndexOffset"] == 4
+    assert seg1["biasIndexTotal"] == 7

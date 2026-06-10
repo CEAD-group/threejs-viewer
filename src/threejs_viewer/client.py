@@ -913,6 +913,8 @@ class ViewerClient:
         lod: Optional[Union[bool, dict]] = None,
         strand_collapse: Union[bool, dict] = False,
         pickable: bool = True,
+        bias_index_offset: int = 0,
+        bias_index_total: Optional[int] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -1007,6 +1009,14 @@ class ViewerClient:
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
                 from picking (it is then never hit-tested, at zero cost).
+            bias_index_offset / bias_index_total: Deposition-order bias ramp
+                continuation for tubes that are segments of one logical
+                toolpath (used by :meth:`add_toolpath` when splitting at
+                travel moves). The viewer scales ring ``i`` up by
+                ``1 + 1e-3 * (offset + i) / (total - 1)`` so a retrace that
+                crosses a travel split still nests deterministically
+                (later-deposited outside). Leave at the defaults for a
+                standalone tube (ramp over its own spine).
         """
         lod_header = _serialize_lod(lod)
 
@@ -1014,6 +1024,17 @@ class ViewerClient:
         n = spine_arr.shape[0]
         if n < 2:
             raise ValueError(f"parametric_tube needs >= 2 spine points, got {n}")
+
+        # The viewer multiplies widths/heights by 1 + BIAS*(offset+i)/(total-1);
+        # a negative offset would scale rings *down* (or negative), and a total
+        # smaller than offset+n would mean the ramp overshoots its own range.
+        if bias_index_offset < 0:
+            raise ValueError(f"bias_index_offset must be >= 0, got {bias_index_offset}")
+        if bias_index_total is not None and bias_index_total < bias_index_offset + n:
+            raise ValueError(
+                f"bias_index_total ({bias_index_total}) must be >= "
+                f"bias_index_offset + n_spine_points ({bias_index_offset} + {n})"
+            )
 
         widths_arr = np.ascontiguousarray(widths, dtype=np.float32).reshape(-1)
         heights_arr = np.ascontiguousarray(heights, dtype=np.float32).reshape(-1)
@@ -1071,6 +1092,10 @@ class ViewerClient:
             header["strandCollapse"] = sc_header
         if lod_header is not _LOD_DEFAULT:
             header["lod"] = lod_header
+        if bias_index_offset:
+            header["biasIndexOffset"] = int(bias_index_offset)
+        if bias_index_total is not None:
+            header["biasIndexTotal"] = int(bias_index_total)
         # The viewer applies heightOffset as a *shift* to section cv values,
         # where +cv is the "up" direction (anchored to up_vector, default +Z).
         # anchor="top" means spine at top of bead → bead extends down → subtract h/2.
@@ -1230,6 +1255,8 @@ class ViewerClient:
                 spine=toolpath.points[s:e],
                 widths=widths[s:e],
                 heights=heights[s:e],
+                bias_index_offset=s,
+                bias_index_total=len(toolpath),
                 **({"colors": seg_colors} if seg_colors is not None else {}),
                 **kwargs,
             )
@@ -1249,12 +1276,17 @@ class ViewerClient:
             seg_ids.append(seg_id)
             seg_ranges.append([s / n_total, (e - 1) / n_total])
             seg_colors = colors[s:e] if colors is not None else None
+            # Thread the deposition-order bias ramp across the whole toolpath
+            # (global spine index, not per-segment) so a retrace that crosses
+            # a travel split still nests later-deposited-outside.
             self.add_parametric_tube(
                 seg_id,
                 spine=toolpath.points[s:e],
                 widths=widths[s:e],
                 heights=heights[s:e],
                 parent=id,
+                bias_index_offset=s,
+                bias_index_total=n_total,
                 **({"colors": seg_colors} if seg_colors is not None else {}),
                 **kwargs,
             )
