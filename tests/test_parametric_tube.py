@@ -1502,6 +1502,35 @@ def test_parametric_tube_anchor_top_bias_survives_lod(viewer_client, viewer_page
     )
 
 
+def test_add_parametric_tube_bias_index_validation():
+    """Negative offsets would scale rings down/negative in the viewer; a total
+    smaller than offset + n means the ramp overshoots its own range. Both are
+    caller bugs — reject in Python before anything hits the wire."""
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    spine = np.zeros((4, 3), dtype=np.float32)
+    spine[:, 0] = [0, 1, 2, 3]
+    widths = np.ones(4, dtype=np.float32)
+    heights = np.ones(4, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="bias_index_offset"):
+        c.add_parametric_tube("t", spine, widths, heights, bias_index_offset=-1)
+    with pytest.raises(ValueError, match="bias_index_total"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, bias_index_offset=10, bias_index_total=12
+        )
+    # exact fit is allowed: total == offset + n
+    c._binary_messages = []
+    c._send_binary = lambda h, p: c._binary_messages.append((h, p))
+    c.add_parametric_tube(
+        "t", spine, widths, heights, bias_index_offset=10, bias_index_total=14
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["biasIndexOffset"] == 10
+    assert header["biasIndexTotal"] == 14
+
+
 def test_add_toolpath_threads_bias_ramp_across_segments():
     """A toolpath split at travel moves must thread ONE deposition-bias ramp
     across its segment tubes (global spine index), so a deposit/travel/retrace

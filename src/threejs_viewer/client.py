@@ -1025,6 +1025,17 @@ class ViewerClient:
         if n < 2:
             raise ValueError(f"parametric_tube needs >= 2 spine points, got {n}")
 
+        # The viewer multiplies widths/heights by 1 + BIAS*(offset+i)/(total-1);
+        # a negative offset would scale rings *down* (or negative), and a total
+        # smaller than offset+n would mean the ramp overshoots its own range.
+        if bias_index_offset < 0:
+            raise ValueError(f"bias_index_offset must be >= 0, got {bias_index_offset}")
+        if bias_index_total is not None and bias_index_total < bias_index_offset + n:
+            raise ValueError(
+                f"bias_index_total ({bias_index_total}) must be >= "
+                f"bias_index_offset + n_spine_points ({bias_index_offset} + {n})"
+            )
+
         widths_arr = np.ascontiguousarray(widths, dtype=np.float32).reshape(-1)
         heights_arr = np.ascontiguousarray(heights, dtype=np.float32).reshape(-1)
         if widths_arr.shape[0] != n or heights_arr.shape[0] != n:
