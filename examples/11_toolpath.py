@@ -84,7 +84,7 @@ def spiral_vase(
     # by a fixed number of cycles per rotation; a non-integer count (e.g. 100.5)
     # advances the phase by an extra half-wave each turn, so consecutive layers
     # land staggered by half a wavelength (brick pattern).
-    bead_w = HEIGHT / N_TURNS * 4
+    bead_w = height / n_turns * 4
     amplitude = 0.2 * bead_w
     phase = WAVES_PER_ROTATION * angle
     r = r + amplitude * t * np.sin(phase)  # ramp: 0 at base → max at top
