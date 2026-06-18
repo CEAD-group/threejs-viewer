@@ -20,8 +20,9 @@ from threejs_viewer import Animation, Toolpath, viewer
 
 
 N_POINTS = 1_000_000
-N_TURNS = 1_000
+N_TURNS = 300
 HEIGHT = 9.0
+WAVES_PER_ROTATION = 100.5  # cross-bead sine cycles per layer (.5 → brick stagger)
 
 
 def spiral_vase(
@@ -77,6 +78,17 @@ def spiral_vase(
     ripple_strength = 1.0 - 0.6 * np.abs(t - 0.45) ** 0.8
     r += r * ripple * ripple_strength
 
+    # Cross-bead modulation: a sine wiggling the spine in the cross-bead
+    # (radial) direction.  Amplitude = a fraction of bead width, ramped from 0
+    # on the first layer to full strength on the top layer.  The wave is driven
+    # by a fixed number of cycles per rotation; a non-integer count (e.g. 100.5)
+    # advances the phase by an extra half-wave each turn, so consecutive layers
+    # land staggered by half a wavelength (brick pattern).
+    bead_w = HEIGHT / N_TURNS * 4
+    amplitude = 0.2 * bead_w
+    phase = WAVES_PER_ROTATION * angle
+    r = r + amplitude * t * np.sin(phase)  # ramp: 0 at base → max at top
+
     # Slight ellipse squash for asymmetry
     x = r * 1.08 * np.cos(angle)
     y = r * 0.93 * np.sin(angle)
@@ -105,7 +117,7 @@ tp = Toolpath.from_points(
 
 # Bead (parametric tube — chamfered hex cross-section, built client-side)
 tp.colorize("viridis")
-v.add_toolpath("path_tube", tp, roughness=0.4, metalness=0.15)
+v.add_toolpath("path_tube", tp, roughness=0.55, metalness=0.75)
 
 # Nozzle: tapered cylinder hovering above the path tip
 bead_width = HEIGHT / N_TURNS * 4
@@ -139,7 +151,7 @@ transforms[:, 1, 13] = tips[:, 1]
 transforms[:, 1, 14] = nz_z
 
 # Build animation — fully binary, linear interpolation fills in 60 fps
-animation = Animation(loop=True, camera_follow="nozzle")
+animation = Animation(loop=True, camera_follow=None)
 animation.set_frame_times(frame_times)
 animation.set_transform_data(["path_tube", "nozzle"], transforms)
 animation.set_draw_range_data(["path_tube"], draw_fracs[:, None])
