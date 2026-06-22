@@ -1831,11 +1831,12 @@ def test_fov_url_param_overrides_default(viewer_client, page):
 
 
 @pytest.mark.browser
-def test_fov_url_param_clamped_to_range(viewer_client, page):
-    """An out-of-range `fov` query param is clamped (not thrown) in the browser."""
+@pytest.mark.parametrize("raw", ["500", "Infinity", "-5"])
+def test_fov_url_param_clamped_to_range(viewer_client, page, raw):
+    """Out-of-range `fov` params — including ±Infinity — are clamped (not thrown)."""
     viewer_path = viewer_client.viewer_path.resolve()
-    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}&fov=500")
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}&fov={raw}")
     page.wait_for_function(
         "() => window.threejsViewer && window.threejsViewer._perspCamera"
     )
-    assert _read_persp_fov(page) == 179
+    assert _read_persp_fov(page) == (1 if raw == "-5" else 179)

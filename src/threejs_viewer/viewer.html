@@ -1539,8 +1539,9 @@ const FOV_MAX = 179;
  * Precedence — URL `fov` query param > `fov` option > hard default — mirroring
  * the lighting defaults' "URL pins, then option, then default" model (FOV has
  * no in-viewer panel, so there is no localStorage layer and no Reset baseline).
- * Out-of-range and non-finite values are clamped to [1, 179] rather than thrown
- * — Python validates its kwarg eagerly, and a stray URL value should degrade,
+ * Out-of-range values — including ±Infinity — are clamped to [1, 179] rather
+ * than thrown; only NaN and empty/absent values fall through to the next level.
+ * Python validates its kwarg eagerly, and a stray URL value should degrade,
  * not break the page.
  *
  * @param {ThreeJSViewerOptions} options
@@ -1552,7 +1553,7 @@ function resolveFov(options, urlParams) {
     const parse = (raw) => {
         if (raw === null || raw === undefined || raw === '') return null;
         const n = typeof raw === 'number' ? raw : parseFloat(raw);
-        if (!Number.isFinite(n)) return null;
+        if (Number.isNaN(n)) return null;   // NaN/unparseable fall through; ±Infinity clamps
         return Math.min(FOV_MAX, Math.max(FOV_MIN, n));
     };
     const urlFov = parse(urlParams.get('fov'));
