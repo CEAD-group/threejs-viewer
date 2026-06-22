@@ -1820,19 +1820,25 @@ _GIZMO_PROJECT_ORIGIN = """() => {
 
 def _wait_for(page, js_predicate, timeout=5000):
     """Wait until a JS predicate (an arrow-function string returning truthy)
-    holds in the page. Raises on timeout, so it doubles as an assertion."""
-    page.wait_for_function(js_predicate, timeout=timeout)
+    holds in the page. A throw inside the predicate (e.g. touching viewer state
+    that isn't constructed yet) is treated as "not ready" so the poll keeps
+    going, rather than failing the wait. Raises on timeout, so it doubles as an
+    assertion."""
+    guarded = f"() => {{ try {{ return ({js_predicate})(); }} catch (e) {{ return false; }} }}"
+    page.wait_for_function(guarded, timeout=timeout)
 
 
 def _wait_until(predicate, timeout=5.0, interval=0.02):
-    """Poll a Python-side predicate until truthy — for state delivered on the
-    client's WS receive thread (e.g. move-callback dispatch). Returns the result."""
+    """Poll a Python-side predicate until it returns truthy — for state delivered
+    on the client's WS receive thread (e.g. move-callback dispatch). Returns True
+    if it became truthy within `timeout`, else False (one last check is made at
+    the deadline)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
             return True
         time.sleep(interval)
-    return predicate()
+    return bool(predicate())
 
 
 @pytest.mark.browser
