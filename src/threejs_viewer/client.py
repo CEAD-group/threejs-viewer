@@ -274,6 +274,11 @@ class ViewerClient:
         # gizmo survives a browser refresh).
         self._move_callbacks: List = []
         self._move_gizmo: Optional[dict] = None
+        # Per-axis constraint for the move gizmo (e.g. Z-only rail). Re-sent on
+        # reconnect after the gizmo-enable message so it re-applies to the
+        # freshly-enabled gizmo. Cleared when the gizmo is disabled (the viewer
+        # resets axes to all-true on detach).
+        self._gizmo_axes: Optional[dict] = None
 
     def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect.
@@ -404,6 +409,14 @@ class ViewerClient:
         if self._move_gizmo is not None:
             try:
                 websocket.send(json.dumps(self._move_gizmo))
+            except Exception:
+                pass
+
+        # Re-apply any gizmo axis constraint after the enable above (detach on
+        # the viewer side reset it to all-true).
+        if self._gizmo_axes is not None:
+            try:
+                websocket.send(json.dumps(self._gizmo_axes))
             except Exception:
                 pass
 
@@ -1820,8 +1833,38 @@ class ViewerClient:
         (or :meth:`on_object_move`) again to resume.
         """
         self._move_gizmo = None
+        self._gizmo_axes = None  # viewer resets axes to all-true on detach
         if self._ws is not None:
             self._send({"type": "set_move_gizmo", "enabled": False})
+
+    def set_gizmo_axes(self, *, x: bool = True, y: bool = True, z: bool = True) -> None:
+        """Constrain which axes the move gizmo exposes (translate arrows / rotate
+        rings).
+
+        Useful for single-axis manipulators — e.g. ``set_gizmo_axes(x=False,
+        y=False, z=True)`` for a vertical rail. An axis passed ``False`` is
+        hidden; the default (all ``True``) shows every axis, so calling
+        :meth:`set_gizmo_axes` with no arguments restores the full gizmo.
+
+        The constraint applies to whichever object the gizmo is (or becomes)
+        attached to, and is re-sent automatically if the browser reconnects. The
+        viewer resets to all-axes whenever the gizmo detaches (target deleted,
+        scene cleared, or :meth:`disable_move_gizmo`), so re-apply it after a new
+        attach if needed.
+
+        Args:
+            x: Show the X axis handle (default ``True``).
+            y: Show the Y axis handle (default ``True``).
+            z: Show the Z axis handle (default ``True``).
+        """
+        self._gizmo_axes = {
+            "type": "set_gizmo_axes",
+            "x": bool(x),
+            "y": bool(y),
+            "z": bool(z),
+        }
+        if self._ws is not None:
+            self._send(self._gizmo_axes)
 
     def on_object_move(self, callback) -> None:
         """Register a callback fired while the user drags an object with the
