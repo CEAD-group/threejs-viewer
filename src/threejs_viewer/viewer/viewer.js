@@ -4862,6 +4862,283 @@ class PolylinePickController {
     }
 }
 
+// ========== Move / Rotate Gizmo ==========
+// A translate+rotate manipulator built on three's TransformControls, so all the
+// drag / rotate / snap math is the library's (battle-tested). The wrapper adds:
+//   • a refined look — TransformControls re-themes its handles every frame from a
+//     cached material._color/_opacity, so we overwrite that cache each frame;
+//     geometry tweaks (enlarged plane chips) + added children (plane outlines)
+//     persist because the library only re-TRANSFORMS handles, never rebuilding
+//     their geometry or pruning children.
+//   • held-modifier control: Alt = rotate mode, Shift = snap (sampled live).
+//   • orbit suppression during a drag + a transform report back to Python / JS.
+//   • target selection by id (Python) or by clicking the object (browser).
+// Lives in the scene like the pivot / pick markers; never enters _objects, so it
+// can't be picked or cleared and survives `clear`.
+
+const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
+const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
+const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
+
+/** TransformControls handle name → palette hex, or null to leave it untouched. */
+function gizmoAxisColor(name) {
+    if (name === 'X' || name === 'YZ') return GIZMO_PALETTE.x;
+    if (name === 'Y' || name === 'XZ') return GIZMO_PALETTE.y;
+    if (name === 'Z' || name === 'XY') return GIZMO_PALETTE.z;
+    if (name === 'E' || name === 'XYZ' || name === 'XYZE') return GIZMO_PALETTE.n;
+    return null;
+}
+
+class TransformGizmoController {
+    /** @param {ThreeJSViewer} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        this.enabled = false;
+        this.clickSelect = true;
+        /** @type {THREE.Object3D|null} */
+        this.object = null;
+        this.objectId = /** @type {string|null} */ (null);
+        this.mode = 'translate';                                  // 'translate' | 'rotate'
+        this.translateSnap = 1.0;                                 // world units
+        this.rotateSnap = THREE.MathUtils.degToRad(15);           // radians
+        this._reportHooks = /** @type {Array<(m:any)=>void>} */ ([]);
+        this._lastReport = 0;
+        this._interacted = false;                                 // a handle drag just happened
+        this._sizedPlanes = new WeakSet();
+        this._raycaster = new THREE.Raycaster();
+        this._ndc = new THREE.Vector2();
+        this._downX = 0; this._downY = 0;
+
+        const ctrl = /** @type {any} */ (new TransformControls(viewer._camera, viewer._renderer.domElement));
+        ctrl.setMode('translate');
+        ctrl.setSpace('world');
+        ctrl.enabled = false;
+        this.control = ctrl;
+        this.helper = ctrl.getHelper();
+        this.helper.visible = false;
+        viewer._scene.add(this.helper);
+
+        // Orbit off while dragging a handle; flush the final transform on release.
+        ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => {
+            this.v._controls.enabled = !e.value;
+            if (e.value) this._interacted = true;
+            else this._report(true);
+        });
+        // Continuous transform during a drag (throttled).
+        ctrl.addEventListener('objectChange', () => this._report(false));
+
+        this._onKey = (/** @type {KeyboardEvent} */ e) => this._syncModifiers(e);
+        this._onPointerDown = (/** @type {PointerEvent} */ e) => this._selectDown(e);
+        this._onPointerUp = (/** @type {PointerEvent} */ e) => this._selectUp(e);
+
+        this._restyle();   // prime colour caches / build outlines up front
+    }
+
+    /** Alt → rotate mode (never mid-drag); Shift → snap (live, read per move). */
+    _syncModifiers(e) {
+        if (!this.enabled) return;
+        if (!this.control.dragging) {
+            const want = e.altKey ? 'rotate' : 'translate';
+            if (want !== this.mode) this.setMode(want);
+        }
+        if (e.shiftKey) {
+            this.control.setTranslationSnap(this.translateSnap);
+            this.control.setRotationSnap(this.rotateSnap);
+        } else {
+            this.control.setTranslationSnap(null);
+            this.control.setRotationSnap(null);
+        }
+    }
+
+    /** @param {string} mode */
+    setMode(mode) {
+        if (mode !== 'translate' && mode !== 'rotate') return;
+        this.mode = mode;
+        this.control.setMode(mode);
+        this._restyle();
+    }
+
+    // Refined look. Runs every frame (cheap traverse) so our resting palette
+    // survives TransformControls' per-frame re-theme; the plane resize + outline
+    // are guarded so they only happen once per handle.
+    _restyle() {
+        this.helper.traverse((/** @type {any} */ o) => {
+            const m = o.material;
+            if (!m || o.userData.__gizmoOutline) return;
+            const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
+            // Enlarge both the visible plane chip and its invisible picker so the
+            // clickable area matches the larger visual. Scale about the geometry's
+            // own centroid because the stock handle bakes its corner offset in.
+            if (planar && !this._sizedPlanes.has(o)) {
+                this._sizedPlanes.add(o);
+                const g = o.geometry;
+                g.computeBoundingBox();
+                const c = new THREE.Vector3();
+                g.boundingBox.getCenter(c);
+                g.translate(-c.x, -c.y, -c.z);
+                g.scale(GIZMO_PLANE_SCALE, GIZMO_PLANE_SCALE, GIZMO_PLANE_SCALE);
+                g.translate(c.x, c.y, c.z);
+            }
+            if (m.visible === false) return;          // pickers: resized, not recoloured
+            const hex = gizmoAxisColor(o.name);
+            if (hex == null) return;
+            const col = new THREE.Color(hex);
+            m._color = (m._color || new THREE.Color()).copy(col);
+            m.color.copy(col);
+            if (planar) {
+                m._opacity = 0.22; m.opacity = 0.22; m.transparent = true;
+                if (!o.userData.__hasOutline) {
+                    o.userData.__hasOutline = true;
+                    const edge = new THREE.LineSegments(
+                        new THREE.EdgesGeometry(o.geometry),
+                        new THREE.LineBasicMaterial({
+                            color: col.clone().offsetHSL(0, 0, 0.18),
+                            transparent: true, opacity: 0.95, depthTest: false, depthWrite: false,
+                        })
+                    );
+                    edge.renderOrder = 1000;
+                    edge.userData.__gizmoOutline = true;
+                    o.add(edge);
+                }
+            } else {
+                m._opacity = 0.92; m.opacity = 0.92; m.transparent = true;
+            }
+        });
+    }
+
+    /** @param {boolean} flush  true = drag ended, always send. */
+    _report(flush) {
+        if (!this.object) return;
+        const now = performance.now();
+        if (!flush && now - this._lastReport < 1000 / GIZMO_REPORT_HZ) return;
+        this._lastReport = now;
+        const o = this.object;
+        o.updateMatrixWorld();
+        const payload = {
+            id: this.objectId,
+            position: [o.position.x, o.position.y, o.position.z],
+            quaternion: [o.quaternion.x, o.quaternion.y, o.quaternion.z, o.quaternion.w],
+            scale: [o.scale.x, o.scale.y, o.scale.z],
+            matrix: Array.from(o.matrix.elements),
+            phase: flush ? 'end' : 'move',
+        };
+        const ws = this.v._ws;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'transform_gizmo', ...payload }));
+        }
+        for (const cb of this._reportHooks.slice()) {
+            try { cb(payload); } catch (err) { console.error('move gizmo hook error', err); }
+        }
+    }
+
+    /** @param {THREE.Object3D} object @param {string|null} [id] */
+    attach(object, id) {
+        if (!object) return;
+        this.object = object;
+        this.objectId = id != null ? id : this._lookupId(object);
+        this.control.attach(object);
+        this.control.enabled = true;
+        this.helper.visible = true;
+        this.control.setMode(this.mode);
+        this._restyle();
+    }
+
+    detach() {
+        this.control.detach();
+        this.control.enabled = false;
+        this.helper.visible = false;
+        this.object = null;
+        this.objectId = null;
+    }
+
+    /** @param {THREE.Object3D} object @returns {string|null} */
+    _lookupId(object) {
+        for (const [k, val] of this.v._objects) if (val === object) return k;
+        return null;
+    }
+
+    /** @param {any} [opts] */
+    enable(opts = {}) {
+        if (opts.mode === 'rotate' || opts.mode === 'translate') this.mode = opts.mode;
+        if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
+        if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
+        if (typeof opts.clickSelect === 'boolean') this.clickSelect = opts.clickSelect;
+        if (!this.enabled) {
+            this.enabled = true;
+            window.addEventListener('keydown', this._onKey);
+            window.addEventListener('keyup', this._onKey);
+            const dom = this.v._renderer.domElement;
+            dom.addEventListener('pointerdown', this._onPointerDown);
+            window.addEventListener('pointerup', this._onPointerUp);
+        }
+        this.control.setMode(this.mode);
+        if (opts.id != null) {
+            const obj = this.v._objects.get(opts.id);
+            if (obj) this.attach(obj, opts.id);
+        }
+    }
+
+    disable() {
+        if (!this.enabled) return;
+        this.enabled = false;
+        window.removeEventListener('keydown', this._onKey);
+        window.removeEventListener('keyup', this._onKey);
+        const dom = this.v._renderer.domElement;
+        dom.removeEventListener('pointerdown', this._onPointerDown);
+        window.removeEventListener('pointerup', this._onPointerUp);
+        this.detach();
+    }
+
+    /** @param {(m:any)=>void} cb @returns {() => void} unsubscribe */
+    onMove(cb) {
+        this._reportHooks.push(cb);
+        return () => { const i = this._reportHooks.indexOf(cb); if (i >= 0) this._reportHooks.splice(i, 1); };
+    }
+
+    /** @param {PointerEvent} e */
+    _selectDown(e) {
+        if (!this.enabled || !this.clickSelect || e.button !== 0) return;
+        this._downX = e.clientX;
+        this._downY = e.clientY;
+    }
+
+    /** @param {PointerEvent} e */
+    _selectUp(e) {
+        if (!this.enabled || !this.clickSelect) return;
+        // A handle drag was the gesture, not a select-click — consume it.
+        if (this._interacted) { this._interacted = false; return; }
+        if (this.control.dragging || this.control.axis != null) return;
+        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > 5) return;   // a drag = orbit
+        const hit = this._pickObject(e.clientX, e.clientY);
+        if (hit) this.attach(hit.object, hit.id);
+    }
+
+    /** @param {number} clientX @param {number} clientY */
+    _pickObject(clientX, clientY) {
+        const dom = this.v._renderer.domElement;
+        const rect = dom.getBoundingClientRect();
+        this._ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        this._ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        this._raycaster.setFromCamera(this._ndc, /** @type {any} */ (this.v._camera));
+        const roots = [];
+        const map = new Map();
+        for (const [id, o] of this.v._objects) if (o && o.visible) { roots.push(o); map.set(o, id); }
+        const hits = this._raycaster.intersectObjects(roots, true);
+        if (!hits.length) return null;
+        let n = hits[0].object;
+        while (n && !map.has(n)) n = n.parent;
+        return n ? { object: n, id: map.get(n) } : null;
+    }
+
+    // Per-frame: keep our palette alive and drop a stale selection if the object
+    // left the scene (deleted / cleared).
+    update() {
+        if (!this.enabled) return;
+        if (this.object && !this.object.parent) { this.detach(); return; }
+        if (this.object) this._restyle();
+    }
+}
+
 export class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
@@ -5351,6 +5628,10 @@ export class ThreeJSViewer {
         // click sends the picked arc-length fraction + coordinate back.
         this._polylinePick = new PolylinePickController(this);
         this._polylinePick.attach();
+
+        // Move/rotate gizmo (opt-in; enabled from Python via enable_move_gizmo or
+        // from JS via enableMoveGizmo). Inert until enabled.
+        this._transformGizmo = new TransformGizmoController(this);
 
         // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
@@ -8371,6 +8652,19 @@ export class ThreeJSViewer {
                             this._polylinePick.disable();
                         }
                         break;
+                    case 'set_move_gizmo':
+                        if (data.enabled) {
+                            this._transformGizmo.enable({
+                                id: data.id,
+                                mode: data.mode,
+                                translateSnap: data.translateSnap,
+                                rotateSnap: data.rotateSnap,   // radians
+                                clickSelect: data.clickSelect,
+                            });
+                        } else {
+                            this._transformGizmo.disable();
+                        }
+                        break;
                     case 'show_grid':
                         this._gridHelper.visible = !!data.visible;
                         if (data.size != null && data.divisions != null) {
@@ -8461,6 +8755,9 @@ export class ThreeJSViewer {
 
         // Polyline-pick hover marker: keep it a constant screen size.
         if (this._polylinePick) this._polylinePick.update();
+
+        // Move/rotate gizmo: keep the refined palette alive, prune stale selection.
+        if (this._transformGizmo) this._transformGizmo.update();
 
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
         if (this._shading.shadingMode === 3) {
@@ -8729,6 +9026,29 @@ export class ThreeJSViewer {
      * @param {(pick:any|null)=>void} cb @returns {() => void} unsubscribe
      */
     onPolylineHover(cb) { return this._polylinePick.onHover(cb); }
+
+    /**
+     * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
+     * translate), Shift to snap. With `clickSelect` (default) clicking an object
+     * attaches the gizmo to it; pass `id` to attach immediately.
+     * @param {{id?:string, mode?:string, translateSnap?:number, rotateSnap?:number, clickSelect?:boolean}} [opts]
+     *   `rotateSnap` is in radians.
+     */
+    enableMoveGizmo(opts) { this._transformGizmo.enable(opts || {}); }
+
+    /** Disable the move/rotate gizmo and detach it from its target. */
+    disableMoveGizmo() { this._transformGizmo.disable(); }
+
+    /** @param {string} mode - 'translate' | 'rotate' */
+    setGizmoMode(mode) { this._transformGizmo.setMode(mode); }
+
+    /**
+     * Register a hook fired as the gizmo moves/rotates its target. Payload:
+     * `{id, position:[x,y,z], quaternion:[x,y,z,w], scale:[x,y,z], matrix:[16], phase}`
+     * where `phase` is `'move'` (throttled, mid-drag) or `'end'` (on release).
+     * @param {(m:any)=>void} cb @returns {() => void} unsubscribe
+     */
+    onObjectMove(cb) { return this._transformGizmo.onMove(cb); }
 
     resetView() {
         // Canonical home view: world-Z up, isometric-ish direction

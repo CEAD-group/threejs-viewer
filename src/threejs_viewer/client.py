@@ -26,6 +26,8 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
     {"none", "linear", "reinhard", "cineon", "aces", "agx", "neutral"}
 )
 
+_ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
+
 
 def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     """Reject NaN/Inf so they never leak into the query string."""
@@ -243,6 +245,11 @@ class ViewerClient:
         # reconnect so picking survives a browser refresh).
         self._pick_callbacks: List = []
         self._polyline_picking: Optional[dict] = None
+        # Move/rotate gizmo: callbacks invoked when the user drags an object in
+        # the viewer, and the desired enable state (re-sent on reconnect so the
+        # gizmo survives a browser refresh).
+        self._move_callbacks: List = []
+        self._move_gizmo: Optional[dict] = None
 
     def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect.
@@ -367,6 +374,13 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-enable the move/rotate gizmo if it was on (same reasoning).
+        if self._move_gizmo is not None:
+            try:
+                websocket.send(json.dumps(self._move_gizmo))
+            except Exception:
+                pass
+
         try:
             for message in websocket:
                 try:
@@ -378,6 +392,8 @@ class ViewerClient:
                         self._assets_loaded_event.set()
                     elif msg_type == "polyline_pick":
                         self._dispatch_polyline_pick(data)
+                    elif msg_type == "transform_gizmo":
+                        self._dispatch_object_move(data)
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -1699,6 +1715,128 @@ class ViewerClient:
                 cb(pick)
             except Exception:
                 logging.getLogger(__name__).exception("Error in polyline pick callback")
+
+    # === Move / rotate gizmo ===
+
+    def enable_move_gizmo(
+        self,
+        id: Optional[str] = None,
+        *,
+        mode: str = "translate",
+        translate_snap: float = 1.0,
+        rotate_snap_deg: float = 15.0,
+        click_select: bool = True,
+    ) -> None:
+        """Show an interactive move/rotate gizmo for transforming objects.
+
+        The gizmo is built on three.js ``TransformControls``. Once enabled,
+        **hold Alt** while dragging to rotate (otherwise it translates), and
+        **hold Shift** to snap — translations to a ``translate_snap`` grid,
+        rotations to ``rotate_snap_deg`` increments. Snapping is sampled live,
+        so Shift can be toggled mid-drag.
+
+        Selection (which object the gizmo manipulates):
+
+        - Pass ``id`` to attach the gizmo to that object immediately.
+        - With ``click_select=True`` (default), clicking any object in the
+          viewer attaches the gizmo to it.
+
+        As the user drags, the object's new transform is sent back to every
+        callback registered with :meth:`on_object_move` (throttled while
+        dragging, plus a final report on release). The enabled state is re-sent
+        automatically if the browser reconnects.
+
+        Args:
+            id: Object id to attach to immediately, or ``None`` to wait for a
+                click (when ``click_select`` is on).
+            mode: Initial mode, ``"translate"`` (default) or ``"rotate"``.
+                Alt overrides this live while held.
+            translate_snap: Grid size (world units) used while Shift is held.
+                Must be a positive, finite number.
+            rotate_snap_deg: Rotation increment in degrees used while Shift is
+                held. Must be a positive, finite number.
+            click_select: When ``True`` (default), clicking an object attaches
+                the gizmo to it.
+
+        Raises:
+            ValueError: For an unknown ``mode`` or non-positive / non-finite
+                snap values.
+        """
+        if mode not in _ALLOWED_GIZMO_MODES:
+            allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
+            raise ValueError(f"mode must be one of: {allowed} (got {mode!r})")
+        ts = _validate_finite("translate_snap", translate_snap)
+        rs = _validate_finite("rotate_snap_deg", rotate_snap_deg)
+        if ts is None or ts <= 0:
+            raise ValueError(
+                f"translate_snap must be a positive number (got {translate_snap!r})"
+            )
+        if rs is None or rs <= 0:
+            raise ValueError(
+                f"rotate_snap_deg must be a positive number (got {rotate_snap_deg!r})"
+            )
+        self._move_gizmo = {
+            "type": "set_move_gizmo",
+            "enabled": True,
+            "id": id,
+            "mode": mode,
+            "translateSnap": ts,
+            "rotateSnap": math.radians(rs),
+            "clickSelect": bool(click_select),
+        }
+        if self._ws is not None:
+            self._send(self._move_gizmo)
+
+    def disable_move_gizmo(self) -> None:
+        """Hide the move/rotate gizmo and detach it from its target.
+
+        Registered callbacks are left in place; call :meth:`enable_move_gizmo`
+        (or :meth:`on_object_move`) again to resume.
+        """
+        self._move_gizmo = None
+        if self._ws is not None:
+            self._send({"type": "set_move_gizmo", "enabled": False})
+
+    def on_object_move(self, callback) -> None:
+        """Register a callback fired while the user drags an object with the
+        gizmo, and enable the gizmo if it isn't already.
+
+        The callback receives one dict argument with keys:
+
+        - ``id`` — id of the moved object.
+        - ``position`` — ``[x, y, z]`` local position.
+        - ``quaternion`` — ``[x, y, z, w]`` local rotation.
+        - ``scale`` — ``[x, y, z]`` local scale.
+        - ``matrix`` — the object's 16-element local matrix (column-major).
+        - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).
+
+        It runs on the client's WebSocket receive thread, so keep it short; it
+        is safe to call other viewer methods from within it.
+
+        Args:
+            callback: A callable ``callback(move: dict) -> None``.
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._move_callbacks.append(callback)
+        if self._move_gizmo is None:
+            self.enable_move_gizmo()
+
+    def _dispatch_object_move(self, data: dict) -> None:
+        """Deliver an incoming ``transform_gizmo`` message to registered callbacks."""
+        move = {
+            "id": data.get("id"),
+            "position": data.get("position"),
+            "quaternion": data.get("quaternion"),
+            "scale": data.get("scale"),
+            "matrix": data.get("matrix"),
+            "phase": data.get("phase"),
+        }
+        for cb in list(self._move_callbacks):
+            try:
+                cb(move)
+            except Exception:
+                logging.getLogger(__name__).exception("Error in object move callback")
 
     def clear(self) -> None:
         """Clear all objects from the scene."""
