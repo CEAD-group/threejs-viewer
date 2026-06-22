@@ -1,5 +1,6 @@
 """Tests for ViewerClient."""
 
+import math
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -114,6 +115,86 @@ def test_viewer_client_rejects_non_finite_floats(kwarg):
         ViewerClient(**{kwarg: float("nan")})
     with pytest.raises(ValueError, match="must be a finite number"):
         ViewerClient(**{kwarg: float("inf")})
+
+
+def test_enable_move_gizmo_payload():
+    """enable_move_gizmo builds the wire payload (degrees → radians)."""
+    client = ViewerClient()
+    client.enable_move_gizmo(
+        "box", mode="rotate", translate_snap=2.0, rotate_snap_deg=30, click_select=False
+    )
+    g = client._move_gizmo
+    assert g["type"] == "set_move_gizmo"
+    assert g["enabled"] is True
+    assert g["id"] == "box"
+    assert g["mode"] == "rotate"
+    assert g["translateSnap"] == 2.0
+    assert g["clickSelect"] is False
+    assert g["rotateSnap"] == pytest.approx(math.radians(30))
+
+
+def test_enable_move_gizmo_defaults():
+    """No-arg enable uses translate / 1.0 grid / 15° snap / click-select on."""
+    client = ViewerClient()
+    client.enable_move_gizmo()
+    g = client._move_gizmo
+    assert g["id"] is None
+    assert g["mode"] == "translate"
+    assert g["translateSnap"] == 1.0
+    assert g["clickSelect"] is True
+    assert g["rotateSnap"] == pytest.approx(math.radians(15))
+
+
+def test_disable_move_gizmo_clears_state():
+    client = ViewerClient()
+    client.enable_move_gizmo("box")
+    client.disable_move_gizmo()
+    assert client._move_gizmo is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "scale"},
+        {"translate_snap": 0},
+        {"translate_snap": -1},
+        {"translate_snap": float("inf")},
+        {"rotate_snap_deg": 0},
+        {"rotate_snap_deg": float("nan")},
+    ],
+)
+def test_enable_move_gizmo_rejects_bad_args(kwargs):
+    client = ViewerClient()
+    with pytest.raises(ValueError):
+        client.enable_move_gizmo(**kwargs)
+
+
+def test_on_object_move_enables_and_dispatches():
+    """Registering a callback enables the gizmo and receives moves."""
+    client = ViewerClient()
+    got = []
+    client.on_object_move(got.append)
+    assert client._move_gizmo is not None and client._move_gizmo["enabled"]
+    client._dispatch_object_move(
+        {
+            "id": "box",
+            "position": [1, 2, 3],
+            "quaternion": [0, 0, 0, 1],
+            "scale": [1, 1, 1],
+            "matrix": list(range(16)),
+            "phase": "end",
+        }
+    )
+    assert len(got) == 1
+    assert got[0]["id"] == "box"
+    assert got[0]["position"] == [1, 2, 3]
+    assert got[0]["phase"] == "end"
+
+
+def test_on_object_move_rejects_non_callable():
+    client = ViewerClient()
+    with pytest.raises(TypeError):
+        client.on_object_move(42)
 
 
 def _mini_animation():

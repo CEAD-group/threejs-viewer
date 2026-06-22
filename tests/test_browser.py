@@ -1798,6 +1798,135 @@ def test_depth_cue_fog_rescopes_on_shading_toggle(viewer_client, viewer_page):
     )
 
 
+# Move/rotate gizmo: top-down camera so a horizontal drag maps to world +X.
+_GIZMO_TOPDOWN = """() => {
+  const v = window.threejsViewer;
+  v._camera.position.set(0,0,8); v._camera.up.set(0,1,0);
+  v._controls.target.set(0,0,0); v._camera.lookAt(0,0,0);
+  v._controls.update(); v._camera.updateMatrixWorld(true);
+}"""
+
+_GIZMO_PROJECT_ORIGIN = """() => {
+  const v = window.threejsViewer;
+  const w = v._renderer.domElement.clientWidth, h = v._renderer.domElement.clientHeight;
+  const ndc = v._camera.position.clone().set(0,0,0).project(v._camera);
+  return { x: (ndc.x*0.5+0.5)*w, y: (-ndc.y*0.5+0.5)*h };
+}"""
+
+
+@pytest.mark.browser
+def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
+    """enable_move_gizmo(id) attaches the gizmo; dragging the X arrow moves the
+    object in +X and reports the new transform back to on_object_move."""
+    moves = []
+    viewer_client.on_object_move(moves.append)
+    viewer_client.add_box("box")
+    time.sleep(0.2)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    time.sleep(0.1)
+    viewer_client.enable_move_gizmo("box")
+    time.sleep(0.3)
+
+    state = viewer_page.evaluate(
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return { id: g.objectId, vis: g.helper.visible, mode: g.control.mode }; }"
+    )
+    assert state == {"id": "box", "vis": True, "mode": "translate"}
+
+    # Re-assert the top-down camera right before dragging (so the projection is
+    # current), then grab the centre screen-plane handle, which sits exactly at
+    # the projected origin — at this camera it translates in world XY, so a
+    # rightward drag is +X. Deterministic regardless of viewport size.
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    cx, cy = proj["x"], proj["y"]
+    x0 = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('box').position.x"
+    )
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    for i in range(1, 13):
+        viewer_page.mouse.move(cx + i * 12, cy)
+    viewer_page.mouse.up()
+    time.sleep(0.3)
+    x1 = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('box').position.x"
+    )
+
+    assert x1 > x0 + 0.1, f"box did not move in +X ({x0} -> {x1})"
+    assert moves, "on_object_move never fired"
+    assert moves[-1]["id"] == "box"
+    assert moves[-1]["phase"] == "end"
+
+
+@pytest.mark.browser
+def test_move_gizmo_mode_switch_and_disable(viewer_client, viewer_page):
+    """setGizmoMode swaps to rotate; disable_move_gizmo detaches and hides it."""
+    viewer_client.add_box("box")
+    time.sleep(0.2)
+    viewer_client.enable_move_gizmo("box", mode="translate")
+    time.sleep(0.2)
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
+    mode = viewer_page.evaluate(
+        "() => window.threejsViewer._transformGizmo.control.mode"
+    )
+    assert mode == "rotate"
+
+    viewer_client.disable_move_gizmo()
+    time.sleep(0.2)
+    st = viewer_page.evaluate(
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return { hasObj: !!g.object, vis: g.helper.visible, enabled: g.enabled }; }"
+    )
+    assert st == {"hasObj": False, "vis": False, "enabled": False}
+
+
+@pytest.mark.browser
+def test_move_gizmo_click_to_select(viewer_client, viewer_page):
+    """With click-select on, clicking an object attaches the gizmo to it."""
+    viewer_client.add_box("box")
+    time.sleep(0.2)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.enable_move_gizmo()  # no id → wait for a click
+    time.sleep(0.2)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer._transformGizmo.objectId")
+        is None
+    )
+
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    # The gizmo isn't attached yet (no handles drawn), so a click on the box body
+    # near screen-centre selects it. Small offset keeps it well within the box.
+    viewer_page.mouse.click(proj["x"] - 15, proj["y"] + 15)
+    time.sleep(0.2)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer._transformGizmo.objectId")
+        == "box"
+    )
+
+
+@pytest.mark.browser
+def test_move_gizmo_tracks_camera_switch(viewer_client, viewer_page):
+    """The gizmo follows the active camera when the viewer switches persp↔ortho,
+    so hit-testing/projection don't break (TransformControls keeps its own camera
+    ref). Regression for the construction-time-camera bug."""
+    viewer_client.add_box("box")
+    time.sleep(0.2)
+    viewer_client.enable_move_gizmo("box")
+    time.sleep(0.2)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._transformGizmo.control.camera.isPerspectiveCamera === true"
+    )
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")  # → ortho
+    time.sleep(0.2)
+    synced = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return v._transformGizmo.control.camera === v._camera"
+        " && v._camera.isOrthographicCamera === true; }"
+    )
+    assert synced, "gizmo did not follow the camera switch to orthographic"
+
+
 def _read_persp_fov(page):
     """Read the live perspective camera's vertical FOV (degrees), or None."""
     return page.evaluate(
