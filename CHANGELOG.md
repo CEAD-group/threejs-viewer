@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.35
+
+### Camera
+
+- **Perspective camera default FOV narrowed 75° → 40°, and now configurable.** The hard-coded 75° vertical field-of-view read wide and "gamey" — it exaggerated near/far size falloff, which looks wrong for the CAD-ish robot-cell / toolpath scenes this viewer is built for. The default is now **40°**, which reads flat and natural while still giving honest depth. The value is exposed as a setting at three layers, mirroring the lighting overrides: a `fov` option on `ThreeJSViewer(container, {fov})` for browser embedders, a `fov` URL query param that wins over the option (so a single page can be re-pointed without rebuilding), and a `ViewerClient(fov=…)` Python kwarg that forwards as that query param. Precedence is **URL param > option > 40° default** (no localStorage / panel layer — FOV has no in-viewer control). Browser-side values are clamped to `[1, 179]°` (a stray URL value degrades, never throws); the Python kwarg validates eagerly and raises `ValueError` for non-finite or out-of-`(0, 180)` values so a bad FOV never reaches the URL. The world↔pixel math (depth cues, picking gates, framing) already reads `camera.fov` live, so it follows the configured value automatically. Regression covered by `tests/test_client.py` (URL round-trip + validation) and `tests/test_browser.py::test_fov_defaults_to_40` / `::test_fov_url_param_overrides_default` / `::test_fov_url_param_clamped_to_range`.
+
 ## 0.0.34
 
 ### Parametric tubes: sharp corners, layer-up reversals, exact retraces

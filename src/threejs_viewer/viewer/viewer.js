@@ -61,6 +61,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
+ * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  */
 
 /**
@@ -418,6 +419,40 @@ function toneMappingModes() {
     };
 }
 const TONE_MAPPING_MODE_NAMES = ['none', 'linear', 'reinhard', 'cineon', 'aces', 'agx', 'neutral'];
+
+// Perspective camera default field-of-view (degrees). 40° reads flat and
+// natural for CAD-ish scenes; the old 75° exaggerated perspective ("gamey").
+const DEFAULT_FOV = 40;
+const FOV_MIN = 1;
+const FOV_MAX = 179;
+
+/**
+ * Resolve the perspective camera's vertical FOV (degrees) at construction.
+ *
+ * Precedence — URL `fov` query param > `fov` option > hard default — mirroring
+ * the lighting defaults' "URL pins, then option, then default" model (FOV has
+ * no in-viewer panel, so there is no localStorage layer and no Reset baseline).
+ * Out-of-range values — including ±Infinity — are clamped to [1, 179] rather
+ * than thrown; only NaN and empty/absent values fall through to the next level.
+ * Python validates its kwarg eagerly, and a stray URL value should degrade,
+ * not break the page.
+ *
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {number}
+ */
+function resolveFov(options, urlParams) {
+    /** @type {(raw: (string|null|number|undefined)) => (number|null)} */
+    const parse = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const n = typeof raw === 'number' ? raw : parseFloat(raw);
+        if (Number.isNaN(n)) return null;   // NaN/unparseable fall through; ±Infinity clamps
+        return Math.min(FOV_MAX, Math.max(FOV_MIN, n));
+    };
+    const urlFov = parse(urlParams.get('fov'));
+    const optFov = parse(options.fov);
+    return urlFov != null ? urlFov : optFov != null ? optFov : DEFAULT_FOV;
+}
 
 /**
  * Resolve lighting values with two layered views:
@@ -4922,6 +4957,9 @@ export class ThreeJSViewer {
         // localStorage but don't override a URL-provided value on reload.
         this._lightingDefaults = resolveLightingDefaults(options, urlParams);
 
+        // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
+        this._fov = resolveFov(options, urlParams);
+
         // State
         this._objects = new Map();
         this._mixers = new Map();
@@ -5097,7 +5135,7 @@ export class ThreeJSViewer {
         this._scene.background = new THREE.Color(VIEWER_BACKGROUND_COLOR);
 
         // Cameras
-        this._perspCamera = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
+        this._perspCamera = new THREE.PerspectiveCamera(this._fov, w / h, 0.1, 1000);
         this._perspCamera.position.set(5, -5, 5);
         this._perspCamera.up.set(0, 0, 1);
         this._perspCamera.lookAt(0, 0, 0);
