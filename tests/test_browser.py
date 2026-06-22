@@ -1925,3 +1925,47 @@ def test_move_gizmo_tracks_camera_switch(viewer_client, viewer_page):
         " && v._camera.isOrthographicCamera === true; }"
     )
     assert synced, "gizmo did not follow the camera switch to orthographic"
+
+
+def _read_persp_fov(page):
+    """Read the live perspective camera's vertical FOV (degrees), or None."""
+    return page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " return v && v._perspCamera ? v._perspCamera.fov : null;"
+        "}"
+    )
+
+
+@pytest.mark.browser
+def test_fov_defaults_to_40(viewer_client, page):
+    """With no `fov` query param the perspective camera uses the 40° default."""
+    viewer_path = viewer_client.viewer_path.resolve()
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}")
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._perspCamera"
+    )
+    assert _read_persp_fov(page) == 40
+
+
+@pytest.mark.browser
+def test_fov_url_param_overrides_default(viewer_client, page):
+    """A `fov` query param sets the perspective camera's FOV at construction."""
+    viewer_path = viewer_client.viewer_path.resolve()
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}&fov=28")
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._perspCamera"
+    )
+    assert _read_persp_fov(page) == 28
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("raw", ["500", "Infinity", "-5"])
+def test_fov_url_param_clamped_to_range(viewer_client, page, raw):
+    """Out-of-range `fov` params — including ±Infinity — are clamped (not thrown)."""
+    viewer_path = viewer_client.viewer_path.resolve()
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}&fov={raw}")
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._perspCamera"
+    )
+    assert _read_persp_fov(page) == (1 if raw == "-5" else 179)

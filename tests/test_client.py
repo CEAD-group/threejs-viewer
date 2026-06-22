@@ -75,9 +75,35 @@ def test_viewer_url_partial_overrides():
     assert params["environment_intensity"] == ["1.25"]
 
 
+def test_viewer_url_default_omits_fov():
+    """No fov kwarg → no fov param (viewer uses its own default)."""
+    client = ViewerClient()
+    params = _params(client.viewer_url)
+    assert "fov" not in params
+
+
+def test_viewer_url_with_fov():
+    """An explicit fov round-trips through the URL."""
+    client = ViewerClient(fov=35)
+    params = _params(client.viewer_url)
+    assert params["fov"] == ["35.0"]
+
+
 def test_viewer_client_rejects_invalid_tone_mapping():
     with pytest.raises(ValueError, match="tone_mapping must be one of"):
         ViewerClient(tone_mapping="bogus")
+
+
+@pytest.mark.parametrize("bad_fov", [0, 180, -10, 200])
+def test_viewer_client_rejects_out_of_range_fov(bad_fov):
+    with pytest.raises(ValueError, match=r"fov must be in the open interval"):
+        ViewerClient(fov=bad_fov)
+
+
+@pytest.mark.parametrize("bad_fov", [float("nan"), float("inf")])
+def test_viewer_client_rejects_non_finite_fov(bad_fov):
+    with pytest.raises(ValueError, match="fov must be a finite number"):
+        ViewerClient(fov=bad_fov)
 
 
 @pytest.mark.parametrize(
