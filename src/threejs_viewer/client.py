@@ -37,6 +37,19 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     return f
 
 
+def _validate_fov(value: Optional[float]) -> Optional[float]:
+    """Validate a perspective FOV (degrees): finite and within (0, 180)."""
+    if value is None:
+        return None
+    f = _validate_finite("fov", value)
+    assert f is not None  # for type-checkers; None handled above
+    if not 0 < f < 180:
+        raise ValueError(
+            f"fov must be in the open interval (0, 180) degrees (got {value!r})"
+        )
+    return f
+
+
 _LOD_DEFAULT = object()  # sentinel: header "lod" key omitted
 _LOD_ALLOWED_KEYS = {"epsilon_divisor", "threshold"}
 
@@ -170,6 +183,7 @@ class ViewerClient:
         environment_intensity: Optional[float] = None,
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
+        fov: Optional[float] = None,
     ):
         """Create a viewer client.
 
@@ -188,15 +202,23 @@ class ViewerClient:
                 ``"reinhard"``, ``"cineon"``, ``"aces"`` (default), ``"agx"``,
                 ``"neutral"``. Case-insensitive; stored lowercase. Invalid
                 values raise ``ValueError``.
+            fov: Perspective camera vertical field-of-view in degrees (default
+                ``40``). Narrower values (e.g. ``35``) read flatter and more
+                CAD-like; wider values exaggerate perspective. Must be finite
+                and within the open interval ``(0, 180)``; other values raise
+                ``ValueError``.
 
-        The four lighting kwargs are forwarded to the viewer as snake-case
-        query parameters on ``viewer_url``. They act as authoritative initial
-        values — they win over any value the user previously persisted via the
-        in-browser Lighting panel. Leave them as ``None`` to let the viewer
-        pick its default or restore the panel's last ``localStorage`` value.
+        The lighting kwargs and ``fov`` are forwarded to the viewer as
+        snake-case query parameters on ``viewer_url``. They act as authoritative
+        initial values — the lighting ones win over any value the user
+        previously persisted via the in-browser Lighting panel. Leave them as
+        ``None`` to let the viewer pick its default (or, for lighting, restore
+        the panel's last ``localStorage`` value).
 
         Precedence for initial lighting values in the browser:
         URL param > ``ThreeJSViewer`` option > ``localStorage`` > hard default.
+        FOV has no in-viewer panel, so its precedence is simply
+        URL param > ``ThreeJSViewer`` option > hard default.
         """
         self.host = host
         self.port = port
@@ -227,6 +249,8 @@ class ViewerClient:
             self.tone_mapping = normalized
         else:
             self.tone_mapping = None
+        # Perspective camera FOV (degrees). `None` means "use the viewer default".
+        self.fov = _validate_fov(fov)
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -309,10 +333,10 @@ class ViewerClient:
         """Full file:// URL to the viewer.
 
         Always includes `ws_port`. Appends `tone_mapping`,
-        `tone_mapping_exposure`, `environment_intensity`, and/or
-        `ambient_intensity` query params when the caller passed explicit
-        lighting overrides — those act as authoritative defaults in the
-        browser (they win over the panel's localStorage on reload).
+        `tone_mapping_exposure`, `environment_intensity`, `ambient_intensity`,
+        and/or `fov` query params when the caller passed explicit overrides —
+        those act as authoritative defaults in the browser (the lighting ones
+        win over the panel's localStorage on reload).
         """
         params: list[tuple[str, str]] = [("ws_port", str(self.port))]
         if self.tone_mapping is not None:
@@ -323,6 +347,8 @@ class ViewerClient:
             params.append(("environment_intensity", str(self.environment_intensity)))
         if self.ambient_intensity is not None:
             params.append(("ambient_intensity", str(self.ambient_intensity)))
+        if self.fov is not None:
+            params.append(("fov", str(self.fov)))
         return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
     def _run_server(self):

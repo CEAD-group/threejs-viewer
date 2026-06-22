@@ -1796,3 +1796,46 @@ def test_depth_cue_fog_rescopes_on_shading_toggle(viewer_client, viewer_page):
     assert overlay_fog is False, (
         f"wireframe overlay material must be fog-scoped off, got {overlay_fog!r}"
     )
+
+
+def _read_persp_fov(page):
+    """Read the live perspective camera's vertical FOV (degrees), or None."""
+    return page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " return v && v._perspCamera ? v._perspCamera.fov : null;"
+        "}"
+    )
+
+
+@pytest.mark.browser
+def test_fov_defaults_to_40(viewer_client, page):
+    """With no `fov` query param the perspective camera uses the 40° default."""
+    viewer_path = viewer_client.viewer_path.resolve()
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}")
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._perspCamera"
+    )
+    assert _read_persp_fov(page) == 40
+
+
+@pytest.mark.browser
+def test_fov_url_param_overrides_default(viewer_client, page):
+    """A `fov` query param sets the perspective camera's FOV at construction."""
+    viewer_path = viewer_client.viewer_path.resolve()
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}&fov=28")
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._perspCamera"
+    )
+    assert _read_persp_fov(page) == 28
+
+
+@pytest.mark.browser
+def test_fov_url_param_clamped_to_range(viewer_client, page):
+    """An out-of-range `fov` query param is clamped (not thrown) in the browser."""
+    viewer_path = viewer_client.viewer_path.resolve()
+    page.goto(f"file://{viewer_path}?ws_port={viewer_client.port}&fov=500")
+    page.wait_for_function(
+        "() => window.threejsViewer && window.threejsViewer._perspCamera"
+    )
+    assert _read_persp_fov(page) == 179
