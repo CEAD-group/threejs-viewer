@@ -1813,6 +1813,33 @@ _GIZMO_PROJECT_ORIGIN = """() => {
   return { x: (ndc.x*0.5+0.5)*w, y: (-ndc.y*0.5+0.5)*h };
 }"""
 
+# Browser viewer state lands asynchronously (WS round-trip from the Python client,
+# plus a render-loop tick for things like camera-sync). Poll the actual condition
+# instead of sleeping a fixed interval, which races under CPU contention.
+
+
+def _wait_for(page, js_predicate, timeout=5000):
+    """Wait until a JS predicate (an arrow-function string returning truthy)
+    holds in the page. A throw inside the predicate (e.g. touching viewer state
+    that isn't constructed yet) is treated as "not ready" so the poll keeps
+    going, rather than failing the wait. Raises on timeout, so it doubles as an
+    assertion."""
+    guarded = f"() => {{ try {{ return ({js_predicate})(); }} catch (e) {{ return false; }} }}"
+    page.wait_for_function(guarded, timeout=timeout)
+
+
+def _wait_until(predicate, timeout=5.0, interval=0.02):
+    """Poll a Python-side predicate until it returns truthy — for state delivered
+    on the client's WS receive thread (e.g. move-callback dispatch). Returns True
+    if it became truthy within `timeout`, else False (one last check is made at
+    the deadline)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
+
 
 @pytest.mark.browser
 def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
@@ -1821,11 +1848,14 @@ def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
     moves = []
     viewer_client.on_object_move(moves.append)
     viewer_client.add_box("box")
-    time.sleep(0.2)
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_page.evaluate(_GIZMO_TOPDOWN)
-    time.sleep(0.1)
     viewer_client.enable_move_gizmo("box")
-    time.sleep(0.3)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.objectId === 'box' && g.helper.visible; }",
+    )
 
     state = viewer_page.evaluate(
         "() => { const g = window.threejsViewer._transformGizmo;"
@@ -1848,24 +1878,28 @@ def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
     for i in range(1, 13):
         viewer_page.mouse.move(cx + i * 12, cy)
     viewer_page.mouse.up()
-    time.sleep(0.3)
+    assert _wait_until(lambda: bool(moves) and moves[-1]["phase"] == "end"), (
+        "on_object_move never delivered an 'end' report"
+    )
     x1 = viewer_page.evaluate(
         "() => window.threejsViewer._objects.get('box').position.x"
     )
 
     assert x1 > x0 + 0.1, f"box did not move in +X ({x0} -> {x1})"
-    assert moves, "on_object_move never fired"
     assert moves[-1]["id"] == "box"
-    assert moves[-1]["phase"] == "end"
 
 
 @pytest.mark.browser
 def test_move_gizmo_mode_switch_and_disable(viewer_client, viewer_page):
     """setGizmoMode swaps to rotate; disable_move_gizmo detaches and hides it."""
     viewer_client.add_box("box")
-    time.sleep(0.2)
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_client.enable_move_gizmo("box", mode="translate")
-    time.sleep(0.2)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.objectId === 'box' && g.helper.visible; }",
+    )
     viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
     mode = viewer_page.evaluate(
         "() => window.threejsViewer._transformGizmo.control.mode"
@@ -1873,7 +1907,11 @@ def test_move_gizmo_mode_switch_and_disable(viewer_client, viewer_page):
     assert mode == "rotate"
 
     viewer_client.disable_move_gizmo()
-    time.sleep(0.2)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return !g.object && !g.helper.visible && !g.enabled; }",
+    )
     st = viewer_page.evaluate(
         "() => { const g = window.threejsViewer._transformGizmo;"
         " return { hasObj: !!g.object, vis: g.helper.visible, enabled: g.enabled }; }"
@@ -1885,10 +1923,10 @@ def test_move_gizmo_mode_switch_and_disable(viewer_client, viewer_page):
 def test_move_gizmo_click_to_select(viewer_client, viewer_page):
     """With click-select on, clicking an object attaches the gizmo to it."""
     viewer_client.add_box("box")
-    time.sleep(0.2)
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_page.evaluate(_GIZMO_TOPDOWN)
     viewer_client.enable_move_gizmo()  # no id → wait for a click
-    time.sleep(0.2)
+    _wait_for(viewer_page, "() => window.threejsViewer._transformGizmo.enabled")
     assert (
         viewer_page.evaluate("() => window.threejsViewer._transformGizmo.objectId")
         is None
@@ -1898,10 +1936,9 @@ def test_move_gizmo_click_to_select(viewer_client, viewer_page):
     # The gizmo isn't attached yet (no handles drawn), so a click on the box body
     # near screen-centre selects it. Small offset keeps it well within the box.
     viewer_page.mouse.click(proj["x"] - 15, proj["y"] + 15)
-    time.sleep(0.2)
-    assert (
-        viewer_page.evaluate("() => window.threejsViewer._transformGizmo.objectId")
-        == "box"
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
     )
 
 
@@ -1911,20 +1948,133 @@ def test_move_gizmo_tracks_camera_switch(viewer_client, viewer_page):
     so hit-testing/projection don't break (TransformControls keeps its own camera
     ref). Regression for the construction-time-camera bug."""
     viewer_client.add_box("box")
-    time.sleep(0.2)
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_client.enable_move_gizmo("box")
-    time.sleep(0.2)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
+    )
     assert viewer_page.evaluate(
         "() => window.threejsViewer._transformGizmo.control.camera.isPerspectiveCamera === true"
     )
     viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")  # → ortho
-    time.sleep(0.2)
-    synced = viewer_page.evaluate(
+    # control.camera is synced in the render-loop update(), a frame or two later.
+    _wait_for(
+        viewer_page,
         "() => { const v = window.threejsViewer;"
         " return v._transformGizmo.control.camera === v._camera"
-        " && v._camera.isOrthographicCamera === true; }"
+        " && v._camera.isOrthographicCamera === true; }",
     )
-    assert synced, "gizmo did not follow the camera switch to orthographic"
+
+
+@pytest.mark.browser
+def test_attach_move_gizmo_reaches_untracked_object(viewer_client, viewer_page):
+    """attachMoveGizmo attaches the gizmo to a bare Object3D the viewer never
+    tracked in _objects (the embedder's sentinel case) and auto-enables the
+    controller — enableMoveGizmo({id}) can only reach _objects members."""
+    state = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const g = v._transformGizmo;
+            const wasEnabled = g.enabled;   // never enabled in this test → false
+            // Reach the real Object3D class via the scene's prototype chain
+            // (THREE is module-scoped, not exposed on window).
+            const Object3D = Object.getPrototypeOf(Object.getPrototypeOf(v._scene)).constructor;
+            const obj = new Object3D();
+            obj.position.set(1, 2, 3);
+            v._scene.add(obj);
+            v.attachMoveGizmo(obj);
+            return {
+                wasEnabled,
+                enabled: g.enabled,
+                vis: g.helper.visible,
+                isTarget: g.object === obj,
+                objectId: g.objectId,
+                tracked: [...v._objects.values()].includes(obj),
+            };
+        }"""
+    )
+    assert state == {
+        "wasEnabled": False,
+        "enabled": True,  # attach auto-activated the controller
+        "vis": True,
+        "isTarget": True,
+        "objectId": None,  # not in _objects → reverse lookup is null
+        "tracked": False,
+    }
+
+
+@pytest.mark.browser
+def test_move_gizmo_alt_is_momentary(viewer_client, viewer_page):
+    """Alt is a momentary rotate override: from a translate base it switches to
+    rotate while held and back on release; from a caller-set rotate base an Alt
+    tap leaves the base untouched (regression — Alt release used to hard-reset to
+    translate, clobbering setGizmoMode('rotate'))."""
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_client.enable_move_gizmo("box")  # base mode = translate
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.enabled && g.objectId === 'box'; }",
+    )
+
+    # Dispatch an Alt keydown/keyup (with altKey set) to the gizmo's window
+    # listener and read back the effective control mode + the persistent base.
+    alt = """(down) => {
+        const el = window.threejsViewer.container;
+        el.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', {
+            key: 'Alt', code: 'AltLeft', altKey: down, bubbles: true }));
+        const g = window.threejsViewer._transformGizmo;
+        return { control: g.control.getMode(), base: g.mode };
+    }"""
+
+    # Translate base: Alt down → rotate, Alt up → translate (normal toggle intact).
+    assert viewer_page.evaluate(alt, True) == {"control": "rotate", "base": "translate"}
+    assert viewer_page.evaluate(alt, False) == {
+        "control": "translate",
+        "base": "translate",
+    }
+
+    # Caller sets a rotate base; an Alt tap must not clobber it back to translate.
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
+    assert viewer_page.evaluate(alt, True) == {"control": "rotate", "base": "rotate"}
+    assert viewer_page.evaluate(alt, False) == {"control": "rotate", "base": "rotate"}
+
+
+_GIZMO_AXES = (
+    "() => { const c = window.threejsViewer._transformGizmo.control;"
+    " return { x: c.showX, y: c.showY, z: c.showZ }; }"
+)
+
+
+@pytest.mark.browser
+def test_set_gizmo_axes_constrains_and_resets_on_detach(viewer_client, viewer_page):
+    """set_gizmo_axes drives TransformControls.showX/Y/Z over the wire; detaching
+    the gizmo (disable) restores all axes so the next attach isn't constrained."""
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
+    )
+
+    viewer_client.set_gizmo_axes(x=False, y=False, z=True)
+    _wait_for(
+        viewer_page,
+        "() => { const c = window.threejsViewer._transformGizmo.control;"
+        " return c.showX === false && c.showY === false && c.showZ === true; }",
+    )
+    assert viewer_page.evaluate(_GIZMO_AXES) == {"x": False, "y": False, "z": True}
+
+    viewer_client.disable_move_gizmo()
+    _wait_for(
+        viewer_page,
+        "() => { const c = window.threejsViewer._transformGizmo.control;"
+        " return c.showX && c.showY && c.showZ; }",
+    )
+    assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
 
 
 def _read_persp_fov(page):

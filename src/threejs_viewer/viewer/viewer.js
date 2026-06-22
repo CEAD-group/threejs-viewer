@@ -4984,8 +4984,15 @@ class TransformGizmoController {
     _syncModifiers(e) {
         if (!this.enabled) return;
         if (!this.control.dragging) {
-            const want = e.altKey ? 'rotate' : 'translate';
-            if (want !== this.mode) this.setMode(want);
+            // Alt is a momentary override → rotate; releasing it falls back to the
+            // caller-set base mode (`this.mode`), not a hard-coded 'translate', so
+            // an Alt tap can't clobber a `setGizmoMode('rotate')`. Apply straight to
+            // the control (not via `setMode`) so `this.mode` stays the persistent base.
+            const want = e.altKey ? 'rotate' : this.mode;
+            if (want !== this.control.getMode()) {
+                this.control.setMode(want);
+                this._restyle();
+            }
         }
         if (e.shiftKey) {
             this.control.setTranslationSnap(this.translateSnap);
@@ -5002,6 +5009,21 @@ class TransformGizmoController {
         this.mode = mode;
         this.control.setMode(mode);
         this._restyle();
+    }
+
+    /**
+     * Constrain which axis handles the gizmo exposes (e.g. Z-only for a vertical
+     * rail). A key set explicitly to `false` hides that axis; omitted keys and a
+     * `null`/missing mask show all axes. Additive — `_restyle()` never touches
+     * `showX/Y/Z`, and `detach()` restores all axes so a later attach isn't
+     * silently constrained.
+     * @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask]
+     */
+    setAxes(mask) {
+        const m = mask || {};
+        this.control.showX = m.x !== false;
+        this.control.showY = m.y !== false;
+        this.control.showZ = m.z !== false;
     }
 
     // Refined look. Runs every frame (cheap traverse) so our resting palette
@@ -5080,6 +5102,7 @@ class TransformGizmoController {
     /** @param {THREE.Object3D} object @param {string|null} [id] */
     attach(object, id) {
         if (!object) return;
+        this._activate();   // wire modifiers + the per-frame update loop, even for a direct (programmatic) attach
         this.object = object;
         this.objectId = id != null ? id : this._lookupId(object);
         this.control.attach(object);
@@ -5095,6 +5118,7 @@ class TransformGizmoController {
         this.helper.visible = false;
         this.object = null;
         this.objectId = null;
+        this.setAxes(null);   // restore all axes so a subsequent attach isn't left constrained
     }
 
     /** @param {THREE.Object3D} object @returns {string|null} */
@@ -5109,19 +5133,23 @@ class TransformGizmoController {
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
         if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
         if (typeof opts.clickSelect === 'boolean') this.clickSelect = opts.clickSelect;
-        if (!this.enabled) {
-            this.enabled = true;
-            window.addEventListener('keydown', this._onKey);
-            window.addEventListener('keyup', this._onKey);
-            const dom = this.v._renderer.domElement;
-            dom.addEventListener('pointerdown', this._onPointerDown);
-            window.addEventListener('pointerup', this._onPointerUp);
-        }
+        this._activate();
         this.control.setMode(this.mode);
         if (opts.id != null) {
             const obj = this.v._objects.get(opts.id);
             if (obj) this.attach(obj, opts.id);
         }
+    }
+
+    /** Register the window/dom listeners and mark enabled. Idempotent. */
+    _activate() {
+        if (this.enabled) return;
+        this.enabled = true;
+        window.addEventListener('keydown', this._onKey);
+        window.addEventListener('keyup', this._onKey);
+        const dom = this.v._renderer.domElement;
+        dom.addEventListener('pointerdown', this._onPointerDown);
+        window.addEventListener('pointerup', this._onPointerUp);
     }
 
     disable() {
@@ -8716,6 +8744,9 @@ export class ThreeJSViewer {
                             this._transformGizmo.disable();
                         }
                         break;
+                    case 'set_gizmo_axes':
+                        this._transformGizmo.setAxes({ x: data.x, y: data.y, z: data.z });
+                        break;
                     case 'show_grid':
                         this._gridHelper.visible = !!data.visible;
                         if (data.size != null && data.divisions != null) {
@@ -9087,11 +9118,31 @@ export class ThreeJSViewer {
      */
     enableMoveGizmo(opts) { this._transformGizmo.enable(opts || {}); }
 
+    /**
+     * Attach the move/rotate gizmo to any `Object3D` — including a bare sentinel
+     * the viewer never tracked in its object map (unlike `enableMoveGizmo({id})`,
+     * which can only reach `_objects` members). Enables the gizmo if it wasn't
+     * already, so modifier keys, the per-frame update loop, and move reporting are
+     * all live. `id` labels reported transforms; omit it for a reverse lookup
+     * (null if the object isn't a tracked one).
+     * @param {THREE.Object3D} object3D @param {string|null} [id]
+     */
+    attachMoveGizmo(object3D, id = null) { this._transformGizmo.attach(object3D, id); }
+
     /** Disable the move/rotate gizmo and detach it from its target. */
     disableMoveGizmo() { this._transformGizmo.disable(); }
 
     /** @param {string} mode - 'translate' | 'rotate' */
     setGizmoMode(mode) { this._transformGizmo.setMode(mode); }
+
+    /**
+     * Constrain which translate/rotate axes the move gizmo exposes — e.g.
+     * `{x:false, y:false, z:true}` for a Z-only rail. A key set to `false` hides
+     * that axis; omitted keys (or `setGizmoAxes(null)`) show all axes. Resets to
+     * all-axes automatically when the gizmo detaches.
+     * @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask]
+     */
+    setGizmoAxes(mask) { this._transformGizmo.setAxes(mask); }
 
     /**
      * Register a hook fired as the gizmo moves/rotates its target. Payload:

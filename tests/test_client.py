@@ -169,6 +169,31 @@ def test_enable_move_gizmo_rejects_bad_args(kwargs):
         client.enable_move_gizmo(**kwargs)
 
 
+def test_set_gizmo_axes_payload_and_defaults():
+    """set_gizmo_axes builds the wire payload; no-arg restores all axes."""
+    client = ViewerClient()
+    client.set_gizmo_axes(x=False, y=False, z=True)
+    a = client._gizmo_axes
+    assert a == {"type": "set_gizmo_axes", "x": False, "y": False, "z": True}
+    client.set_gizmo_axes()
+    assert client._gizmo_axes == {
+        "type": "set_gizmo_axes",
+        "x": True,
+        "y": True,
+        "z": True,
+    }
+
+
+def test_disable_move_gizmo_clears_axis_constraint():
+    """Disabling the gizmo drops any stored axis constraint (the viewer resets
+    axes to all-true on detach, so the stale state must not replay)."""
+    client = ViewerClient()
+    client.enable_move_gizmo("box")
+    client.set_gizmo_axes(x=True, y=False, z=False)
+    client.disable_move_gizmo()
+    assert client._gizmo_axes is None
+
+
 def test_on_object_move_enables_and_dispatches():
     """Registering a callback enables the gizmo and receives moves."""
     client = ViewerClient()
