@@ -1903,3 +1903,25 @@ def test_move_gizmo_click_to_select(viewer_client, viewer_page):
         viewer_page.evaluate("() => window.threejsViewer._transformGizmo.objectId")
         == "box"
     )
+
+
+@pytest.mark.browser
+def test_move_gizmo_tracks_camera_switch(viewer_client, viewer_page):
+    """The gizmo follows the active camera when the viewer switches persp↔ortho,
+    so hit-testing/projection don't break (TransformControls keeps its own camera
+    ref). Regression for the construction-time-camera bug."""
+    viewer_client.add_box("box")
+    time.sleep(0.2)
+    viewer_client.enable_move_gizmo("box")
+    time.sleep(0.2)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._transformGizmo.control.camera.isPerspectiveCamera === true"
+    )
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")  # → ortho
+    time.sleep(0.2)
+    synced = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return v._transformGizmo.control.camera === v._camera"
+        " && v._camera.isOrthographicCamera === true; }"
+    )
+    assert synced, "gizmo did not follow the camera switch to orthographic"

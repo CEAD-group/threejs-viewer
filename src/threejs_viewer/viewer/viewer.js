@@ -4889,6 +4889,17 @@ function gizmoAxisColor(name) {
     return null;
 }
 
+// Cached THREE.Color per palette hex — `_restyle()` runs every frame while the
+// gizmo is attached, so we reuse instances instead of allocating per handle.
+// Never mutate a returned colour (callers .copy()/.clone() it).
+const _gizmoColorCache = new Map();
+/** @param {number} hex @returns {THREE.Color} */
+function gizmoColor(hex) {
+    let c = _gizmoColorCache.get(hex);
+    if (!c) { c = new THREE.Color(hex); _gizmoColorCache.set(hex, c); }
+    return c;
+}
+
 class TransformGizmoController {
     /** @param {ThreeJSViewer} viewer */
     constructor(viewer) {
@@ -4982,7 +4993,7 @@ class TransformGizmoController {
             if (m.visible === false) return;          // pickers: resized, not recoloured
             const hex = gizmoAxisColor(o.name);
             if (hex == null) return;
-            const col = new THREE.Color(hex);
+            const col = gizmoColor(hex);              // cached; do not mutate
             m._color = (m._color || new THREE.Color()).copy(col);
             m.color.copy(col);
             if (planar) {
@@ -5130,10 +5141,12 @@ class TransformGizmoController {
         return n ? { object: n, id: map.get(n) } : null;
     }
 
-    // Per-frame: keep our palette alive and drop a stale selection if the object
-    // left the scene (deleted / cleared).
+    // Per-frame: track the active camera (the viewer swaps persp ↔ ortho, like
+    // the clip gizmo's camera sync), keep our palette alive, and drop a stale
+    // selection if the object left the scene (deleted / cleared).
     update() {
         if (!this.enabled) return;
+        if (this.control.camera !== this.v._camera) this.control.camera = this.v._camera;
         if (this.object && !this.object.parent) { this.detach(); return; }
         if (this.object) this._restyle();
     }
