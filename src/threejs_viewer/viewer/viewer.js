@@ -4952,6 +4952,7 @@ class TransformGizmoController {
         this._changeHooks = /** @type {Array<(p:{object3D:THREE.Object3D|null, id:string|null})=>void>} */ ([]);
         this._snapOrigin = new THREE.Vector3();                   // object position at drag-start (relative snap + positionStart)
         this._snapQuat = new THREE.Quaternion();                  // object rotation at drag-start (quaternionStart)
+        this._snapDelta = new THREE.Vector3();                    // reusable scratch for the per-frame relative-snap delta
         this._lastReport = 0;
         this._interacted = false;                                 // a handle drag just happened
         this._sizedPlanes = new WeakSet();
@@ -5025,12 +5026,15 @@ class TransformGizmoController {
     //   3. throttled WS / onMove report (samples the final pose → payload)
     // so a hook and the report both observe the snapped position. Relative snap is
     // always-on during a translate drag (not Shift-gated) — disable it via
-    // setTranslateSnap(null); the absolute Shift-to-snap path is unchanged.
+    // setTranslateSnap(null); the absolute Shift-to-snap path is unchanged. The
+    // quantise is applied to the object's LOCAL position (its parent frame), matching
+    // the embedder's hand-rolled gizmo this feature replaces — for a target whose
+    // parent is identity / translation-only (the usual case) that is the world grid.
     _onObjectChange() {
         const s = this.translateSnap;
-        if (s && this.translateSnapRelative && this.object && this.control.dragging
+        if (s && this.translateSnapRelative && this.object
             && this.control.getMode() === 'translate') {
-            const d = this.object.position.clone().sub(this._snapOrigin);
+            const d = this._snapDelta.copy(this.object.position).sub(this._snapOrigin);
             d.set(Math.round(d.x / s) * s, Math.round(d.y / s) * s, Math.round(d.z / s) * s);
             this.object.position.copy(this._snapOrigin).add(d);
         }
@@ -5054,6 +5058,10 @@ class TransformGizmoController {
     setTranslateSnap(step, opts = {}) {
         this.translateSnap = (typeof step === 'number' && step > 0) ? step : null;
         if (typeof opts.relative === 'boolean') this.translateSnapRelative = opts.relative;
+        // Relative mode quantises by hand in _onObjectChange, so clear any native
+        // absolute snap a prior Shift event left engaged — otherwise a switch to
+        // relative mid-drag would quantise twice until the next key event.
+        if (this.translateSnapRelative) this.control.setTranslationSnap(null);
     }
 
     /** @param {string} mode */
@@ -9230,7 +9238,9 @@ export class ThreeJSViewer {
      * position (clean steps from wherever the object was picked up) and applies it
      * on every drag frame, suppressing the native Shift-held absolute grid; with
      * `{relative:false}` it restores the absolute world-grid snap. Omit `opts` to
-     * change only the step and keep the current mode.
+     * change only the step and keep the current mode. The relative step is applied
+     * in the target's local (parent) frame — the world grid for an identity /
+     * translation-only parent, which is the usual case.
      * @param {number|null} step @param {{relative?:boolean}} [opts]
      */
     setGizmoTranslateSnap(step, opts) { this._transformGizmo.setTranslateSnap(step, opts || {}); }

@@ -2175,10 +2175,17 @@ def test_move_gizmo_object_change_hook_runs_before_report(viewer_client, viewer_
     )
     state = viewer_page.evaluate(
         """() => {
+            const moves = window.__moves.filter(m => m.phase === 'move');
             const end = window.__moves.filter(m => m.phase === 'end').at(-1);
             return {
                 n: window.__chg.n,
                 lastId: window.__chg.lastId,
+                // A 'move' report is sampled inside _onObjectChange, AFTER the hook
+                // runs that frame — so it pins the hook-runs-before-report contract
+                // (the 'end' report is fired separately and only reads the carried
+                // pose). Require at least one and that its y is the hook's mutation.
+                moveCount: moves.length,
+                moveY: moves.length ? moves.at(-1).position[1] : null,
                 endY: end.position[1],
                 startLen: (end.positionStart || []).length,
                 quatStartLen: (end.quaternionStart || []).length,
@@ -2187,7 +2194,10 @@ def test_move_gizmo_object_change_hook_runs_before_report(viewer_client, viewer_
     )
     assert state["n"] >= 1, "onObjectChange never fired"
     assert state["lastId"] == "box"
-    # The hook mutated y before the report sampled it.
+    # The hook mutated y before the report sampled it (verified on the move path,
+    # which routes through _onObjectChange; end carries the last hooked pose too).
+    assert state["moveCount"] >= 1, "no mid-drag 'move' report was sampled"
+    assert state["moveY"] == 5
     assert state["endY"] == 5
     assert state["startLen"] == 3 and state["quatStartLen"] == 4
 

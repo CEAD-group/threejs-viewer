@@ -1779,7 +1779,10 @@ class ViewerClient:
         drag *delta* from the grab-time position (so an item at ``347`` nudged a
         step lands at ``447``, not on the nearest absolute grid line), and is
         applied on every drag frame rather than only while Shift is held. The
-        native absolute Shift-to-snap grid is suppressed in this mode.
+        native absolute Shift-to-snap grid is suppressed in this mode. The step is
+        applied in the target's *local* frame (its parent's axes); for a target
+        whose parent is identity or translation-only — the common case — that is
+        the world grid.
 
         Selection (which object the gizmo manipulates):
 
