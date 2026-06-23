@@ -1763,6 +1763,7 @@ class ViewerClient:
         *,
         mode: str = "translate",
         translate_snap: float = 1.0,
+        translate_snap_relative: bool = False,
         rotate_snap_deg: float = 15.0,
         click_select: bool = True,
     ) -> None:
@@ -1773,6 +1774,12 @@ class ViewerClient:
         **hold Shift** to snap — translations to a ``translate_snap`` grid,
         rotations to ``rotate_snap_deg`` increments. Snapping is sampled live,
         so Shift can be toggled mid-drag.
+
+        With ``translate_snap_relative=True`` the translation snap quantises the
+        drag *delta* from the grab-time position (so an item at ``347`` nudged a
+        step lands at ``447``, not on the nearest absolute grid line), and is
+        applied on every drag frame rather than only while Shift is held. The
+        native absolute Shift-to-snap grid is suppressed in this mode.
 
         Selection (which object the gizmo manipulates):
 
@@ -1790,8 +1797,12 @@ class ViewerClient:
                 click (when ``click_select`` is on).
             mode: Initial mode, ``"translate"`` (default) or ``"rotate"``.
                 Alt overrides this live while held.
-            translate_snap: Grid size (world units) used while Shift is held.
-                Must be a positive, finite number.
+            translate_snap: Grid size (world units) used while Shift is held
+                (or always, when ``translate_snap_relative`` is set). Must be a
+                positive, finite number.
+            translate_snap_relative: When ``True``, snap the drag delta relative
+                to the grab-time position instead of an absolute world grid, and
+                apply it on every drag frame (not only while Shift is held).
             rotate_snap_deg: Rotation increment in degrees used while Shift is
                 held. Must be a positive, finite number.
             click_select: When ``True`` (default), clicking an object attaches
@@ -1820,6 +1831,7 @@ class ViewerClient:
             "id": id,
             "mode": mode,
             "translateSnap": ts,
+            "translateSnapRelative": bool(translate_snap_relative),
             "rotateSnap": math.radians(rs),
             "clickSelect": bool(click_select),
         }
@@ -1877,6 +1889,9 @@ class ViewerClient:
         - ``quaternion`` — ``[x, y, z, w]`` local rotation.
         - ``scale`` — ``[x, y, z]`` local scale.
         - ``matrix`` — the object's 16-element local matrix (column-major).
+        - ``position_start`` — ``[x, y, z]`` local position captured at
+          drag-start (the grab-time pose).
+        - ``quaternion_start`` — ``[x, y, z, w]`` local rotation at drag-start.
         - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).
 
         It runs on the client's WebSocket receive thread, so keep it short; it
@@ -1899,6 +1914,8 @@ class ViewerClient:
             "quaternion": data.get("quaternion"),
             "scale": data.get("scale"),
             "matrix": data.get("matrix"),
+            "position_start": data.get("positionStart"),
+            "quaternion_start": data.get("quaternionStart"),
             "phase": data.get("phase"),
         }
         for cb in list(self._move_callbacks):

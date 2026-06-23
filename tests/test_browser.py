@@ -2077,6 +2077,121 @@ def test_set_gizmo_axes_constrains_and_resets_on_detach(viewer_client, viewer_pa
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
 
 
+# Project the 'box' object's world position to screen pixels (its gizmo's centre
+# handle sits there once attached). Like _GIZMO_PROJECT_ORIGIN but for the object.
+_GIZMO_PROJECT_BOX = """() => {
+  const v = window.threejsViewer;
+  const w = v._renderer.domElement.clientWidth, h = v._renderer.domElement.clientHeight;
+  const o = v._objects.get('box');
+  o.updateMatrixWorld(true);
+  const ndc = o.position.clone().setFromMatrixPosition(o.matrixWorld).project(v._camera);
+  return { x: (ndc.x*0.5+0.5)*w, y: (-ndc.y*0.5+0.5)*h };
+}"""
+
+
+@pytest.mark.browser
+def test_move_gizmo_relative_snap_steps_from_grab(viewer_client, viewer_page):
+    """translate_snap_relative quantises the drag delta from the grab-time
+    position, not an absolute world grid: a box starting at a non-grid x lands on
+    start + k*step (preserving its off-grid offset), proving relative snapping."""
+    start_x, step = 0.347, 0.1
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.enable_move_gizmo(
+        "box", translate_snap=step, translate_snap_relative=True
+    )
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.objectId === 'box' && g.helper.visible; }",
+    )
+    # Park the box at an off-grid x, then grab its (now off-origin) centre handle.
+    viewer_page.evaluate(
+        f"() => window.threejsViewer._objects.get('box').position.set({start_x}, 0, 0)"
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_BOX)
+    cx, cy = proj["x"], proj["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    for i in range(1, 13):
+        viewer_page.mouse.move(cx + i * 12, cy)
+    viewer_page.mouse.up()
+    assert _wait_until(
+        lambda: viewer_page.evaluate(
+            "() => !window.threejsViewer._transformGizmo.control.dragging"
+        )
+    )
+    x1 = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('box').position.x"
+    )
+    steps = round((x1 - start_x) / step)
+    assert steps >= 1, f"box did not move in +X ({start_x} -> {x1})"
+    # Lands exactly on a relative step (offset 0.047 preserved); absolute snapping
+    # would instead land on a multiple of 0.1, ~0.047 away from this.
+    assert abs(x1 - (start_x + steps * step)) < 1e-6, (
+        f"x1={x1} is not start+{steps}*{step}; relative snap not applied"
+    )
+
+
+@pytest.mark.browser
+def test_move_gizmo_object_change_hook_runs_before_report(viewer_client, viewer_page):
+    """onObjectChange fires per drag-frame before the report is sampled, and a
+    mutation it makes is reflected in the onObjectMove payload (ordering: snap →
+    change hooks → report). Also asserts positionStart is carried in the report."""
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.objectId === 'box' && g.helper.visible; }",
+    )
+    # A change hook that forces y=5 each frame, plus a move-report collector.
+    viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            window.__chg = { n: 0, lastId: null };
+            window.__moves = [];
+            v.onObjectChange(p => { window.__chg.n++; window.__chg.lastId = p.id;
+                                    p.object3D.position.y = 5; });
+            v.onObjectMove(m => { window.__moves.push(m); });
+        }"""
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_BOX)
+    cx, cy = proj["x"], proj["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    for i in range(1, 13):
+        viewer_page.mouse.move(cx + i * 12, cy)
+    viewer_page.mouse.up()
+    assert _wait_until(
+        lambda: viewer_page.evaluate(
+            "() => (window.__moves || []).some(m => m.phase === 'end')"
+        )
+    )
+    state = viewer_page.evaluate(
+        """() => {
+            const end = window.__moves.filter(m => m.phase === 'end').at(-1);
+            return {
+                n: window.__chg.n,
+                lastId: window.__chg.lastId,
+                endY: end.position[1],
+                startLen: (end.positionStart || []).length,
+                quatStartLen: (end.quaternionStart || []).length,
+            };
+        }"""
+    )
+    assert state["n"] >= 1, "onObjectChange never fired"
+    assert state["lastId"] == "box"
+    # The hook mutated y before the report sampled it.
+    assert state["endY"] == 5
+    assert state["startLen"] == 3 and state["quatStartLen"] == 4
+
+
 def _read_persp_fov(page):
     """Read the live perspective camera's vertical FOV (degrees), or None."""
     return page.evaluate(

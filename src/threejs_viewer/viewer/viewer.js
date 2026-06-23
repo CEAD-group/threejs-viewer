@@ -4945,9 +4945,13 @@ class TransformGizmoController {
         this.object = null;
         this.objectId = /** @type {string|null} */ (null);
         this.mode = 'translate';                                  // 'translate' | 'rotate'
-        this.translateSnap = 1.0;                                 // world units
+        this.translateSnap = /** @type {number|null} */ (1.0);    // world units; null = no snap
+        this.translateSnapRelative = false;                       // snap drag delta from grab-time pos, not world grid
         this.rotateSnap = THREE.MathUtils.degToRad(15);           // radians
         this._reportHooks = /** @type {Array<(m:any)=>void>} */ ([]);
+        this._changeHooks = /** @type {Array<(p:{object3D:THREE.Object3D|null, id:string|null})=>void>} */ ([]);
+        this._snapOrigin = new THREE.Vector3();                   // object position at drag-start (relative snap + positionStart)
+        this._snapQuat = new THREE.Quaternion();                  // object rotation at drag-start (quaternionStart)
         this._lastReport = 0;
         this._interacted = false;                                 // a handle drag just happened
         this._sizedPlanes = new WeakSet();
@@ -4967,11 +4971,21 @@ class TransformGizmoController {
         // Orbit off while dragging a handle; flush the final transform on release.
         ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => {
             this.v._controls.enabled = !e.value;
-            if (e.value) this._interacted = true;
-            else this._report(true);
+            if (e.value) {
+                this._interacted = true;
+                // Snapshot the grab-time pose: the origin for relative translation snap
+                // and the `positionStart`/`quaternionStart` reported on release.
+                if (this.object) {
+                    this._snapOrigin.copy(this.object.position);
+                    this._snapQuat.copy(this.object.quaternion);
+                }
+            } else {
+                this._report(true);
+            }
         });
-        // Continuous transform during a drag (throttled).
-        ctrl.addEventListener('objectChange', () => this._report(false));
+        // Continuous transform during a drag — relative-snap, then per-frame hooks,
+        // then the throttled report (see _onObjectChange for the ordering contract).
+        ctrl.addEventListener('objectChange', () => this._onObjectChange());
 
         this._onKey = (/** @type {KeyboardEvent} */ e) => this._syncModifiers(e);
         this._onPointerDown = (/** @type {PointerEvent} */ e) => this._selectDown(e);
@@ -4995,12 +5009,51 @@ class TransformGizmoController {
             }
         }
         if (e.shiftKey) {
-            this.control.setTranslationSnap(this.translateSnap);
+            // In relative mode the native absolute grid is suppressed — the quantise
+            // runs by hand in _onObjectChange, keyed off the grab-time origin.
+            this.control.setTranslationSnap(this.translateSnapRelative ? null : this.translateSnap);
             this.control.setRotationSnap(this.rotateSnap);
         } else {
             this.control.setTranslationSnap(null);
             this.control.setRotationSnap(null);
         }
+    }
+
+    // objectChange fires every rendered frame of a drag. Ordering contract:
+    //   1. relative-snap quantise (built-in, when translateSnapRelative + step set)
+    //   2. per-frame change hooks (a consumer reads/mutates the already-snapped pose)
+    //   3. throttled WS / onMove report (samples the final pose → payload)
+    // so a hook and the report both observe the snapped position. Relative snap is
+    // always-on during a translate drag (not Shift-gated) — disable it via
+    // setTranslateSnap(null); the absolute Shift-to-snap path is unchanged.
+    _onObjectChange() {
+        const s = this.translateSnap;
+        if (s && this.translateSnapRelative && this.object && this.control.dragging
+            && this.control.getMode() === 'translate') {
+            const d = this.object.position.clone().sub(this._snapOrigin);
+            d.set(Math.round(d.x / s) * s, Math.round(d.y / s) * s, Math.round(d.z / s) * s);
+            this.object.position.copy(this._snapOrigin).add(d);
+        }
+        if (this._changeHooks.length) {
+            for (const cb of this._changeHooks.slice()) {
+                try { cb({ object3D: this.object, id: this.objectId }); }
+                catch (err) { console.error('objectChange hook error', err); }
+            }
+        }
+        this._report(false);
+    }
+
+    /**
+     * Set the translation snap step and mode at runtime (e.g. to toggle snapping
+     * after enabling). A positive `step` enables snap; `null` (or a non-positive
+     * value) disables translation snap entirely. `opts.relative` switches between
+     * absolute world-grid snap and grab-relative delta snap; omit it to leave the
+     * current mode unchanged.
+     * @param {number|null} step @param {{relative?:boolean}} [opts]
+     */
+    setTranslateSnap(step, opts = {}) {
+        this.translateSnap = (typeof step === 'number' && step > 0) ? step : null;
+        if (typeof opts.relative === 'boolean') this.translateSnapRelative = opts.relative;
     }
 
     /** @param {string} mode */
@@ -5082,12 +5135,18 @@ class TransformGizmoController {
         this._lastReport = now;
         const o = this.object;
         o.updateMatrixWorld();
+        const sq = this._snapQuat;
+        const so = this._snapOrigin;
         const payload = {
             id: this.objectId,
             position: [o.position.x, o.position.y, o.position.z],
             quaternion: [o.quaternion.x, o.quaternion.y, o.quaternion.z, o.quaternion.w],
             scale: [o.scale.x, o.scale.y, o.scale.z],
             matrix: Array.from(o.matrix.elements),
+            // Grab-time pose, captured on drag-start: lets a consumer reconstruct the
+            // original world matrix from the report instead of snapshotting it itself.
+            positionStart: [so.x, so.y, so.z],
+            quaternionStart: [sq.x, sq.y, sq.z, sq.w],
             phase: flush ? 'end' : 'move',
         };
         const ws = this.v._ws;
@@ -5131,6 +5190,7 @@ class TransformGizmoController {
     enable(opts = {}) {
         if (opts.mode === 'rotate' || opts.mode === 'translate') this.mode = opts.mode;
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
+        if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
         if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
         if (typeof opts.clickSelect === 'boolean') this.clickSelect = opts.clickSelect;
         this._activate();
@@ -5167,6 +5227,12 @@ class TransformGizmoController {
     onMove(cb) {
         this._reportHooks.push(cb);
         return () => { const i = this._reportHooks.indexOf(cb); if (i >= 0) this._reportHooks.splice(i, 1); };
+    }
+
+    /** @param {(p:{object3D:THREE.Object3D|null, id:string|null})=>void} cb @returns {() => void} unsubscribe */
+    onChange(cb) {
+        this._changeHooks.push(cb);
+        return () => { const i = this._changeHooks.indexOf(cb); if (i >= 0) this._changeHooks.splice(i, 1); };
     }
 
     /** @param {PointerEvent} e */
@@ -8737,6 +8803,7 @@ export class ThreeJSViewer {
                                 id: data.id,
                                 mode: data.mode,
                                 translateSnap: data.translateSnap,
+                                translateSnapRelative: data.translateSnapRelative,
                                 rotateSnap: data.rotateSnap,   // radians
                                 clickSelect: data.clickSelect,
                             });
@@ -9112,8 +9179,11 @@ export class ThreeJSViewer {
     /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
      * translate), Shift to snap. With `clickSelect` (default) clicking an object
-     * attaches the gizmo to it; pass `id` to attach immediately.
-     * @param {{id?:string, mode?:string, translateSnap?:number, rotateSnap?:number, clickSelect?:boolean}} [opts]
+     * attaches the gizmo to it; pass `id` to attach immediately. With
+     * `translateSnapRelative:true` the translation snap quantises the drag delta
+     * from the grab-time position (always-on during a translate drag, not
+     * Shift-gated) instead of an absolute world grid — see `setGizmoTranslateSnap`.
+     * @param {{id?:string, mode?:string, translateSnap?:number, translateSnapRelative?:boolean, rotateSnap?:number, clickSelect?:boolean}} [opts]
      *   `rotateSnap` is in radians.
      */
     enableMoveGizmo(opts) { this._transformGizmo.enable(opts || {}); }
@@ -9151,6 +9221,32 @@ export class ThreeJSViewer {
      * @param {(m:any)=>void} cb @returns {() => void} unsubscribe
      */
     onObjectMove(cb) { return this._transformGizmo.onMove(cb); }
+
+    /**
+     * Set the move gizmo's translation snap step and mode at runtime — e.g. to
+     * toggle snapping on/off after enabling. A positive `step` (world units)
+     * enables snap; `null` disables translation snap entirely. With
+     * `{relative:true}` the gizmo quantises the drag *delta* from the grab-time
+     * position (clean steps from wherever the object was picked up) and applies it
+     * on every drag frame, suppressing the native Shift-held absolute grid; with
+     * `{relative:false}` it restores the absolute world-grid snap. Omit `opts` to
+     * change only the step and keep the current mode.
+     * @param {number|null} step @param {{relative?:boolean}} [opts]
+     */
+    setGizmoTranslateSnap(step, opts) { this._transformGizmo.setTranslateSnap(step, opts || {}); }
+
+    /**
+     * Register a hook fired on every gizmo `objectChange` — synchronously, on each
+     * rendered drag frame, before the throttled `onObjectMove` report is sampled
+     * (and after the built-in relative snap, if enabled). The hook may mutate
+     * `object3D.position` / `.quaternion`; the change is reflected in the
+     * subsequent `onObjectMove` / `transform_gizmo` payload. Use it to track the
+     * dragged pose every frame without a WS round-trip (the 30 Hz report is
+     * visibly jittery for live numeric readouts). Payload: `{object3D, id}`.
+     * Returns an unsubscribe function.
+     * @param {(p:{object3D:THREE.Object3D|null, id:string|null})=>void} cb @returns {() => void}
+     */
+    onObjectChange(cb) { return this._transformGizmo.onChange(cb); }
 
     resetView() {
         // Canonical home view: world-Z up, isometric-ish direction
