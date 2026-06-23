@@ -141,8 +141,16 @@ def test_enable_move_gizmo_defaults():
     assert g["id"] is None
     assert g["mode"] == "translate"
     assert g["translateSnap"] == 1.0
+    assert g["translateSnapRelative"] is False
     assert g["clickSelect"] is True
     assert g["rotateSnap"] == pytest.approx(math.radians(15))
+
+
+def test_enable_move_gizmo_relative_snap_flag():
+    """translate_snap_relative is forwarded as translateSnapRelative."""
+    client = ViewerClient()
+    client.enable_move_gizmo("box", translate_snap=0.1, translate_snap_relative=True)
+    assert client._move_gizmo["translateSnapRelative"] is True
 
 
 def test_disable_move_gizmo_clears_state():
@@ -207,12 +215,16 @@ def test_on_object_move_enables_and_dispatches():
             "quaternion": [0, 0, 0, 1],
             "scale": [1, 1, 1],
             "matrix": list(range(16)),
+            "positionStart": [0, 2, 3],
+            "quaternionStart": [0, 0, 0, 1],
             "phase": "end",
         }
     )
     assert len(got) == 1
     assert got[0]["id"] == "box"
     assert got[0]["position"] == [1, 2, 3]
+    assert got[0]["position_start"] == [0, 2, 3]
+    assert got[0]["quaternion_start"] == [0, 0, 0, 1]
     assert got[0]["phase"] == "end"
 
 
