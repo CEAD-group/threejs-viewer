@@ -234,6 +234,81 @@ def test_on_object_move_rejects_non_callable():
         client.on_object_move(42)
 
 
+def test_add_gizmo_payload_and_accumulates():
+    """add_gizmo builds a spec per call and accumulates them (multiple pinned
+    gizmos), defaulting to all axes / translate / world space."""
+    client = ViewerClient()
+    client.add_gizmo("rail", x=False, y=False, z=True)
+    client.add_gizmo("cube", space="local", mode="rotate")
+    assert client._gizmos == [
+        {
+            "type": "add_gizmo",
+            "id": "rail",
+            "x": False,
+            "y": False,
+            "z": True,
+            "mode": "translate",
+            "space": "world",
+        },
+        {
+            "type": "add_gizmo",
+            "id": "cube",
+            "x": True,
+            "y": True,
+            "z": True,
+            "mode": "rotate",
+            "space": "local",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"mode": "spin"}, {"space": "object"}, {"space": "World"}]
+)
+def test_add_gizmo_rejects_bad_args(kwargs):
+    client = ViewerClient()
+    with pytest.raises(ValueError):
+        client.add_gizmo("box", **kwargs)
+
+
+def test_clear_gizmos_and_disable_reset_pinned_state():
+    """clear_gizmos empties the pinned list; disable_move_gizmo also clears it
+    (the viewer's disable() removes pinned gizmos too)."""
+    client = ViewerClient()
+    client.add_gizmo("a")
+    client.add_gizmo("b")
+    client.clear_gizmos()
+    assert client._gizmos == []
+    client.add_gizmo("c")
+    client.disable_move_gizmo()
+    assert client._gizmos == []
+
+
+def test_on_object_move_skips_primary_when_pinned_present():
+    """With a pinned gizmo already present, registering a move callback does not
+    also turn on the click-select interactive gizmo (which would draw an extra)."""
+    client = ViewerClient()
+    client.add_gizmo("box", x=False, y=False, z=True)
+    client.on_object_move(lambda m: None)
+    assert client._move_gizmo is None  # primary not auto-enabled
+    assert len(client._gizmos) == 1
+
+
+def test_clear_scene_drops_pinned_gizmos():
+    """A scene clear forgets pinned gizmos so a reconnect can't re-pin them to
+    ids that no longer exist."""
+
+    class _StubWS:
+        def send(self, _data):
+            pass
+
+    client = ViewerClient()
+    client.add_gizmo("box")
+    client._ws = _StubWS()  # clear() always sends; give it a no-op socket
+    client.clear()
+    assert client._gizmos == []
+
+
 def _mini_animation():
     """Two-frame animation, just enough for load_animation's validation path."""
     return Animation(

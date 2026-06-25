@@ -2202,6 +2202,271 @@ def test_move_gizmo_object_change_hook_runs_before_report(viewer_client, viewer_
     assert state["startLen"] == 3 and state["quatStartLen"] == 4
 
 
+# Locate a pinned (add_gizmo) gizmo handle by name and return its screen-pixel
+# centre, so a drag can grab the actual arrow / plane chip (not just the gizmo
+# origin). Searches only the *translate* gizmo group (so the huge "infinite axis"
+# helper lines and the other-mode handles are out of scope) and picks the
+# matching handle whose geometry sits furthest from the gizmo centre — for an
+# arrow that's a point on a cone, for a plane chip there's only the one. Reads
+# the visible handle; the picker shares its geometry, so the hover hit lands.
+_GIZMO_HANDLE_PX = """(args) => {
+  const [idx, name] = args;
+  const v = window.threejsViewer;
+  const g = v._transformGizmo._extra[idx];
+  if (!g) return null;
+  g.helper.updateMatrixWorld(true);
+  const V = v._camera.position.constructor;
+  const group = g.control._gizmo.gizmo.translate;
+  let best = null, bestLen = -1;
+  group.traverse(o => {
+    if (o.name !== name || o.tag === 'helper' || !o.geometry
+        || !o.material || o.material.visible === false) return;
+    o.geometry.computeBoundingBox();
+    const c = o.geometry.boundingBox.getCenter(new V());
+    const len = c.length();
+    if (len > bestLen) { bestLen = len; best = o; }
+  });
+  if (!best) return null;
+  best.geometry.computeBoundingBox();
+  const c = best.geometry.boundingBox.getCenter(new V());
+  c.applyMatrix4(best.matrixWorld);
+  const w = v._renderer.domElement.clientWidth, h = v._renderer.domElement.clientHeight;
+  c.project(v._camera);
+  return { x: (c.x * 0.5 + 0.5) * w, y: (-c.y * 0.5 + 0.5) * h };
+}"""
+
+# Count / read the drag ghost (the translucent clone left at the start pose).
+_GHOST_COUNT = (
+    "() => { let n = 0; window.threejsViewer._scene.traverse("
+    "o => { if (o.userData && o.userData.__gizmoGhost) n++; }); return n; }"
+)
+_GHOST_X = (
+    "() => { let g = null; window.threejsViewer._scene.traverse("
+    "o => { if (o.userData && o.userData.__gizmoGhost) g = o; });"
+    " return g ? g.position.x : null; }"
+)
+
+
+def _box_pos(page, axis):
+    return page.evaluate(
+        f"() => window.threejsViewer._objects.get('box').position.{axis}"
+    )
+
+
+def _drag_handle(page, idx, name, dx, dy, steps=12):
+    """Grab pinned-gizmo `idx`'s `name` handle and drag it by `steps` increments
+    of (dx, dy) screen pixels, then wait for the drag to finish."""
+    page.evaluate(_GIZMO_TOPDOWN)
+    p = page.evaluate(_GIZMO_HANDLE_PX, [idx, name])
+    assert p is not None, f"could not locate gizmo handle {name!r}"
+    cx, cy = p["x"], p["y"]
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    for i in range(1, steps + 1):
+        page.mouse.move(cx + i * dx, cy + i * dy)
+    page.mouse.up()
+    assert _wait_until(
+        lambda: page.evaluate(
+            f"() => !window.threejsViewer._transformGizmo._extra[{idx}].control.dragging"
+        )
+    )
+
+
+@pytest.mark.browser
+def test_add_gizmo_multi_dof_and_plane_margin(viewer_client, viewer_page):
+    """add_gizmo pins several gizmos at once, each with its own axis constraint
+    (1-DOF rail / 2-DOF plane / 3-DOF free), and the plane chips are pushed out
+    from the gizmo centre by the margin."""
+    for name in ("rail", "tile", "cube"):
+        viewer_client.add_box(name)
+    _wait_for(
+        viewer_page,
+        "() => ['rail','tile','cube'].every(n => window.threejsViewer._objects.has(n))",
+    )
+    viewer_client.add_gizmo("rail", x=False, y=False, z=True)  # 1D
+    viewer_client.add_gizmo("tile", x=True, y=True, z=False)  # 2D
+    viewer_client.add_gizmo("cube")  # 3D
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo._extra.length === 3",
+    )
+
+    axes = viewer_page.evaluate(
+        "() => window.threejsViewer._transformGizmo._extra.map(g => ({"
+        " id: g.id, x: g.control.showX, y: g.control.showY, z: g.control.showZ,"
+        " vis: g.helper.visible }))"
+    )
+    assert axes == [
+        {"id": "rail", "x": False, "y": False, "z": True, "vis": True},
+        {"id": "tile", "x": True, "y": True, "z": False, "vis": True},
+        {"id": "cube", "x": True, "y": True, "z": True, "vis": True},
+    ]
+
+    # The XY plane chip's geometry centroid: stock sits at ~0.21 from the gizmo
+    # centre; the margin pushes it past 0.30 (scale alone keeps the centroid put).
+    off = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const g = v._transformGizmo._extra[1];  // 'tile' XY-plane gizmo
+            const V = v._camera.position.constructor;
+            let chip = null;
+            g.control._gizmo.gizmo.translate.traverse(o => {
+                if (chip) return;
+                if (o.name === 'XY' && o.geometry && o.material
+                    && o.material.visible !== false) chip = o;
+            });
+            chip.geometry.computeBoundingBox();
+            return chip.geometry.boundingBox.getCenter(new V()).length();
+        }"""
+    )
+    assert off > 0.30, f"XY plane chip not pushed out by the margin (len={off})"
+
+
+@pytest.mark.browser
+def test_add_gizmo_space_and_refined_handles(viewer_client, viewer_page):
+    """space='local' orients the handles to the object (TransformControls space),
+    'world' (default) keeps them world-aligned; and the one-time handle refinement
+    strips the bulky rotate handles (E / XYZE) and shades the translate cones."""
+    viewer_client.add_box("w")
+    viewer_client.add_box("l")
+    _wait_for(
+        viewer_page,
+        "() => ['w','l'].every(n => window.threejsViewer._objects.has(n))",
+    )
+    viewer_client.add_gizmo("w")  # default → world
+    viewer_client.add_gizmo("l", space="local")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo._extra.length === 2",
+    )
+
+    spaces = viewer_page.evaluate(
+        "() => window.threejsViewer._transformGizmo._extra.map(g => g.control.space)"
+    )
+    assert spaces == ["world", "local"]
+
+    refined = viewer_page.evaluate(
+        """() => {
+            const g = window.threejsViewer._transformGizmo._extra[0];
+            const gm = g.control._gizmo;
+            const rotNames = grp => grp.children.map(o => o.name);
+            // Translate arrows (single-axis, coloured) are swapped to a lit material.
+            let litArrows = 0, basicArrows = 0;
+            gm.gizmo.translate.children.forEach(o => {
+                if (!o.name || o.name.length !== 1) return;  // arrows only
+                if (o.material && o.material.isMeshStandardMaterial) litArrows++;
+                else if (o.material && o.material.isMeshBasicMaterial) basicArrows++;
+            });
+            return {
+                gizmoRot: rotNames(gm.gizmo.rotate),
+                pickerRot: rotNames(gm.picker.rotate),
+                helperRot: rotNames(gm.helper.rotate),
+                litArrows, basicArrows,
+            };
+        }"""
+    )
+    # The outer screen-space ring (E), the gray backdrop circle (XYZE), and the
+    # gray AXIS helper line are gone; the three coloured rings remain.
+    assert "E" not in refined["gizmoRot"] and "XYZE" not in refined["gizmoRot"]
+    assert "E" not in refined["pickerRot"] and "XYZE" not in refined["pickerRot"]
+    assert set(refined["gizmoRot"]) == {"X", "Y", "Z"}
+    assert "AXIS" not in refined["helperRot"]
+    # The cones are lit (shaded) now, not flat MeshBasicMaterial.
+    assert refined["litArrows"] >= 3 and refined["basicArrows"] == 0
+
+
+@pytest.mark.browser
+def test_gizmo_arrow_drag_both_directions(viewer_client, viewer_page):
+    """A 1-DOF (X-only) pinned gizmo: dragging the X arrow right moves the box in
+    +X, dragging it left moves it back in -X (the arrow works from both sides)."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_gizmo("box", x=True, y=False, z=False)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._extra[0];"
+        " return g && g.helper.visible && g.control.showX"
+        " && !g.control.showY && !g.control.showZ; }",
+    )
+
+    x0 = _box_pos(viewer_page, "x")
+    _drag_handle(viewer_page, 0, "X", +14, 0)
+    x1 = _box_pos(viewer_page, "x")
+    assert x1 > x0 + 0.15, f"+X arrow drag did not increase x ({x0} -> {x1})"
+
+    _drag_handle(viewer_page, 0, "X", -14, 0)
+    x2 = _box_pos(viewer_page, "x")
+    assert x2 < x1 - 0.15, f"-X arrow drag did not decrease x ({x1} -> {x2})"
+    # Constrained to X: y stays put throughout.
+    assert abs(_box_pos(viewer_page, "y")) < 1e-6
+
+
+@pytest.mark.browser
+def test_gizmo_plane_drag_both_directions(viewer_client, viewer_page):
+    """A 2-DOF (XY) pinned gizmo: dragging the XY plane chip moves the box in both
+    X and Y at once, and reverses cleanly when dragged the other way."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_gizmo("box", x=True, y=True, z=False)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._extra[0];"
+        " return g && g.helper.visible && g.control.showX"
+        " && g.control.showY && !g.control.showZ; }",
+    )
+
+    x0, y0 = _box_pos(viewer_page, "x"), _box_pos(viewer_page, "y")
+    # Top-down: screen right = +X, screen up (dy<0) = +Y.
+    _drag_handle(viewer_page, 0, "XY", +11, -11, steps=10)
+    x1, y1 = _box_pos(viewer_page, "x"), _box_pos(viewer_page, "y")
+    assert x1 > x0 + 0.15 and y1 > y0 + 0.15, (
+        f"plane +drag did not move both axes ({x0},{y0} -> {x1},{y1})"
+    )
+
+    _drag_handle(viewer_page, 0, "XY", -11, +11, steps=10)
+    x2, y2 = _box_pos(viewer_page, "x"), _box_pos(viewer_page, "y")
+    assert x2 < x1 - 0.15 and y2 < y1 - 0.15, (
+        f"plane -drag did not reverse both axes ({x1},{y1} -> {x2},{y2})"
+    )
+
+
+@pytest.mark.browser
+def test_gizmo_drag_ghost_present_until_release(viewer_client, viewer_page):
+    """A translucent ghost is dropped at the grab-time pose while dragging and
+    removed on release; it stays at the original location as the box moves."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_gizmo("box", x=True, y=False, z=False)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._extra[0];"
+        " return g && g.helper.visible; }",
+    )
+
+    assert viewer_page.evaluate(_GHOST_COUNT) == 0  # none before a drag
+
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    p = viewer_page.evaluate(_GIZMO_HANDLE_PX, [0, "X"])
+    cx, cy = p["x"], p["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    viewer_page.mouse.move(cx + 30, cy)
+    viewer_page.mouse.move(cx + 60, cy)
+
+    # Mid-drag: exactly one ghost, frozen at the start x≈0 while the box moved off.
+    assert viewer_page.evaluate(_GHOST_COUNT) == 1
+    assert abs(viewer_page.evaluate(_GHOST_X)) < 1e-3, "ghost drifted from start"
+    assert _box_pos(viewer_page, "x") > 0.15, "box did not move during drag"
+
+    viewer_page.mouse.up()
+    assert _wait_until(lambda: viewer_page.evaluate(_GHOST_COUNT) == 0), (
+        "ghost was not removed on release"
+    )
+
+
 def _read_persp_fov(page):
     """Read the live perspective camera's vertical FOV (degrees), or None."""
     return page.evaluate(

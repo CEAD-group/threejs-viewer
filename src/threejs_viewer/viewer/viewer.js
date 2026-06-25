@@ -4913,7 +4913,9 @@ class PolylinePickController {
 
 const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
 const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
+const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
+const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
 
 /** TransformControls handle name → palette hex, or null to leave it untouched. */
 function gizmoAxisColor(name) {
@@ -4924,7 +4926,7 @@ function gizmoAxisColor(name) {
     return null;
 }
 
-// Cached THREE.Color per palette hex — `_restyle()` runs every frame while the
+// Cached THREE.Color per palette hex — `_restyleGizmo()` runs every frame while a
 // gizmo is attached, so we reuse instances instead of allocating per handle.
 // Never mutate a returned colour (callers .copy()/.clone() it).
 const _gizmoColorCache = new Map();
@@ -4935,88 +4937,151 @@ function gizmoColor(hex) {
     return c;
 }
 
-class TransformGizmoController {
-    /** @param {ThreeJSViewer} viewer */
-    constructor(viewer) {
-        this.v = viewer;
-        this.enabled = false;
-        this.clickSelect = true;
+// A drag ghost reuses the dragged object's geometry but needs its own faint,
+// depth-write-free material so it never disturbs the source material. Clone so
+// per-material flags (maps, vertex colours, …) carry over.
+/** @param {any} src @returns {any} */
+function ghostGizmoMaterial(src) {
+    const m = src.clone();
+    m.transparent = true;
+    m.opacity = GIZMO_GHOST_OPACITY;
+    m.depthWrite = false;
+    return m;
+}
+
+// One TransformControls instance bound to (at most) one object — the unit the
+// controller manages. The controller owns a `_primary` interactive gizmo (the
+// click-select / `enable({id})` target, always present so the legacy
+// `control`/`helper`/`object`/`objectId` surface keeps working) plus any number
+// of pinned `_extra` gizmos, each persistent with its own axis constraint and
+// base mode. All share the controller's modifier handling, snap settings, drag
+// ghost, and report/change hooks.
+class Gizmo {
+    /** @param {TransformGizmoController} owner */
+    constructor(owner) {
+        this.owner = owner;
         /** @type {THREE.Object3D|null} */
         this.object = null;
-        this.objectId = /** @type {string|null} */ (null);
-        this.mode = 'translate';                                  // 'translate' | 'rotate'
-        this.translateSnap = /** @type {number|null} */ (1.0);    // world units; null = no snap
-        this.translateSnapRelative = false;                       // snap drag delta from grab-time pos, not world grid
-        this.rotateSnap = THREE.MathUtils.degToRad(15);           // radians
-        this._reportHooks = /** @type {Array<(m:any)=>void>} */ ([]);
-        this._changeHooks = /** @type {Array<(p:{object3D:THREE.Object3D|null, id:string|null})=>void>} */ ([]);
+        this.id = /** @type {string|null} */ (null);
+        this.mode = 'translate';                                  // base mode (Alt overrides live)
+        this.axes = { x: true, y: true, z: true };
+        /** @type {THREE.Object3D|null} */
+        this.ghost = null;                                        // translucent clone at the grab-time pose
         this._snapOrigin = new THREE.Vector3();                   // object position at drag-start (relative snap + positionStart)
         this._snapQuat = new THREE.Quaternion();                  // object rotation at drag-start (quaternionStart)
-        this._snapDelta = new THREE.Vector3();                    // reusable scratch for the per-frame relative-snap delta
-        this._lastReport = 0;
-        this._interacted = false;                                 // a handle drag just happened
-        this._sizedPlanes = new WeakSet();
-        this._raycaster = new THREE.Raycaster();
-        this._ndc = new THREE.Vector2();
-        this._downX = 0; this._downY = 0;
+        this._sizedPlanes = new WeakSet();                        // plane chips already resized/margined
 
-        const ctrl = /** @type {any} */ (new TransformControls(viewer._camera, viewer._renderer.domElement));
+        const v = owner.v;
+        const ctrl = /** @type {any} */ (new TransformControls(v._camera, v._renderer.domElement));
         ctrl.setMode('translate');
         ctrl.setSpace('world');
         ctrl.enabled = false;
         this.control = ctrl;
         this.helper = ctrl.getHelper();
         this.helper.visible = false;
-        viewer._scene.add(this.helper);
+        v._scene.add(this.helper);
 
-        // Orbit off while dragging a handle; flush the final transform on release.
-        ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => {
-            this.v._controls.enabled = !e.value;
-            if (e.value) {
-                this._interacted = true;
-                // Snapshot the grab-time pose: the origin for relative translation snap
-                // and the `positionStart`/`quaternionStart` reported on release.
-                if (this.object) {
-                    this._snapOrigin.copy(this.object.position);
-                    this._snapQuat.copy(this.object.quaternion);
-                }
-            } else {
-                this._report(true);
-            }
-        });
-        // Continuous transform during a drag — relative-snap, then per-frame hooks,
-        // then the throttled report (see _onObjectChange for the ordering contract).
-        ctrl.addEventListener('objectChange', () => this._onObjectChange());
+        // Orbit off while dragging a handle; spawn/clear the ghost and flush the
+        // final transform on release (see _onDragChange / _onObjectChange).
+        ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => owner._onDragChange(this, e.value));
+        ctrl.addEventListener('objectChange', () => owner._onObjectChange(this));
+
+        owner._refineHandles(this);  // strip the bulky rotate handles + shade the cones (one-time)
+        owner._restyleGizmo(this);   // prime colour caches / build outlines up front
+    }
+
+    dispose() {
+        const v = this.owner.v;
+        this.owner._clearGhost(this);
+        this.control.detach();
+        this.control.dispose();
+        v._scene.remove(this.helper);
+    }
+}
+
+class TransformGizmoController {
+    /** @param {ThreeJSViewer} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        this.enabled = false;
+        this.clickSelect = false;                                 // inert until enable() turns it on (default true there)
+        this.translateSnap = /** @type {number|null} */ (1.0);    // world units; null = no snap
+        this.translateSnapRelative = false;                       // snap drag delta from grab-time pos, not world grid
+        this.rotateSnap = THREE.MathUtils.degToRad(15);           // radians
+        this._reportHooks = /** @type {Array<(m:any)=>void>} */ ([]);
+        this._changeHooks = /** @type {Array<(p:{object3D:THREE.Object3D|null, id:string|null})=>void>} */ ([]);
+        this._snapDelta = new THREE.Vector3();                    // reusable scratch for the per-frame relative-snap delta
+        this._lastReport = 0;
+        this._interacted = false;                                 // a handle drag just happened
+        this._raycaster = new THREE.Raycaster();
+        this._ndc = new THREE.Vector2();
+        this._downX = 0; this._downY = 0;
+
+        this._extra = /** @type {Gizmo[]} */ ([]);                // pinned, persistent gizmos
+        this._primary = new Gizmo(this);                          // interactive / click-select gizmo (always present)
 
         this._onKey = (/** @type {KeyboardEvent} */ e) => this._syncModifiers(e);
         this._onPointerDown = (/** @type {PointerEvent} */ e) => this._selectDown(e);
         this._onPointerUp = (/** @type {PointerEvent} */ e) => this._selectUp(e);
-
-        this._restyle();   // prime colour caches / build outlines up front
     }
 
-    /** Alt → rotate mode (never mid-drag); Shift → snap (live, read per move). */
+    // Legacy single-gizmo surface — the interactive gizmo's fields read through
+    // here so existing callers (Python set_gizmo_axes / set_move_gizmo, tests)
+    // keep working unchanged.
+    get control() { return this._primary.control; }
+    get helper() { return this._primary.helper; }
+    get object() { return this._primary.object; }
+    get objectId() { return this._primary.id; }
+    get mode() { return this._primary.mode; }
+    set mode(m) { this._primary.mode = m; }
+
+    /** @returns {Gizmo[]} the interactive gizmo plus every pinned one. */
+    _allGizmos() { return [this._primary, ...this._extra]; }
+
+    /** Alt → rotate mode (never mid-drag); Shift → snap (live, read per move).
+     * Applied across every attached gizmo so modifiers are global. */
     _syncModifiers(e) {
         if (!this.enabled) return;
-        if (!this.control.dragging) {
-            // Alt is a momentary override → rotate; releasing it falls back to the
-            // caller-set base mode (`this.mode`), not a hard-coded 'translate', so
-            // an Alt tap can't clobber a `setGizmoMode('rotate')`. Apply straight to
-            // the control (not via `setMode`) so `this.mode` stays the persistent base.
-            const want = e.altKey ? 'rotate' : this.mode;
-            if (want !== this.control.getMode()) {
-                this.control.setMode(want);
-                this._restyle();
+        for (const g of this._allGizmos()) {
+            if (!g.object) continue;
+            if (!g.control.dragging) {
+                // Alt is a momentary override → rotate; releasing it falls back to
+                // this gizmo's caller-set base mode (`g.mode`), not a hard-coded
+                // 'translate', so an Alt tap can't clobber a setGizmoMode('rotate').
+                const want = e.altKey ? 'rotate' : g.mode;
+                if (want !== g.control.getMode()) {
+                    g.control.setMode(want);
+                    this._restyleGizmo(g);
+                }
+            }
+            if (e.shiftKey) {
+                // In relative mode the native absolute grid is suppressed — the
+                // quantise runs by hand in _onObjectChange, keyed off the origin.
+                g.control.setTranslationSnap(this.translateSnapRelative ? null : this.translateSnap);
+                g.control.setRotationSnap(this.rotateSnap);
+            } else {
+                g.control.setTranslationSnap(null);
+                g.control.setRotationSnap(null);
             }
         }
-        if (e.shiftKey) {
-            // In relative mode the native absolute grid is suppressed — the quantise
-            // runs by hand in _onObjectChange, keyed off the grab-time origin.
-            this.control.setTranslationSnap(this.translateSnapRelative ? null : this.translateSnap);
-            this.control.setRotationSnap(this.rotateSnap);
+    }
+
+    /** @param {Gizmo} g @param {boolean} dragging */
+    _onDragChange(g, dragging) {
+        this.v._controls.enabled = !dragging;
+        if (dragging) {
+            this._interacted = true;
+            // Snapshot the grab-time pose: the origin for relative translation snap
+            // and the `positionStart`/`quaternionStart` reported on release, and
+            // drop a translucent ghost there so the original location stays visible.
+            if (g.object) {
+                g._snapOrigin.copy(g.object.position);
+                g._snapQuat.copy(g.object.quaternion);
+                this._spawnGhost(g);
+            }
         } else {
-            this.control.setTranslationSnap(null);
-            this.control.setRotationSnap(null);
+            this._clearGhost(g);
+            this._report(g, true);
         }
     }
 
@@ -5030,21 +5095,22 @@ class TransformGizmoController {
     // quantise is applied to the object's LOCAL position (its parent frame), matching
     // the embedder's hand-rolled gizmo this feature replaces — for a target whose
     // parent is identity / translation-only (the usual case) that is the world grid.
-    _onObjectChange() {
+    /** @param {Gizmo} g */
+    _onObjectChange(g) {
         const s = this.translateSnap;
-        if (s && this.translateSnapRelative && this.object
-            && this.control.getMode() === 'translate') {
-            const d = this._snapDelta.copy(this.object.position).sub(this._snapOrigin);
+        if (s && this.translateSnapRelative && g.object
+            && g.control.getMode() === 'translate') {
+            const d = this._snapDelta.copy(g.object.position).sub(g._snapOrigin);
             d.set(Math.round(d.x / s) * s, Math.round(d.y / s) * s, Math.round(d.z / s) * s);
-            this.object.position.copy(this._snapOrigin).add(d);
+            g.object.position.copy(g._snapOrigin).add(d);
         }
         if (this._changeHooks.length) {
             for (const cb of this._changeHooks.slice()) {
-                try { cb({ object3D: this.object, id: this.objectId }); }
+                try { cb({ object3D: g.object, id: g.id }); }
                 catch (err) { console.error('objectChange hook error', err); }
             }
         }
-        this._report(false);
+        this._report(g, false);
     }
 
     /**
@@ -5061,54 +5127,144 @@ class TransformGizmoController {
         // Relative mode quantises by hand in _onObjectChange, so clear any native
         // absolute snap a prior Shift event left engaged — otherwise a switch to
         // relative mid-drag would quantise twice until the next key event.
-        if (this.translateSnapRelative) this.control.setTranslationSnap(null);
+        if (this.translateSnapRelative) {
+            for (const g of this._allGizmos()) g.control.setTranslationSnap(null);
+        }
     }
 
-    /** @param {string} mode */
+    /** @param {string} mode  set the interactive gizmo's base mode. */
     setMode(mode) {
         if (mode !== 'translate' && mode !== 'rotate') return;
-        this.mode = mode;
-        this.control.setMode(mode);
-        this._restyle();
+        this._primary.mode = mode;
+        this._primary.control.setMode(mode);
+        this._restyleGizmo(this._primary);
     }
 
     /**
-     * Constrain which axis handles the gizmo exposes (e.g. Z-only for a vertical
-     * rail). A key set explicitly to `false` hides that axis; omitted keys and a
-     * `null`/missing mask show all axes. Additive — `_restyle()` never touches
-     * `showX/Y/Z`, and `detach()` restores all axes so a later attach isn't
-     * silently constrained.
-     * @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask]
+     * Constrain which axis handles a gizmo exposes (e.g. Z-only for a vertical
+     * rail, or X+Y for an in-plane manipulator). A key set explicitly to `false`
+     * hides that axis; omitted keys and a `null`/missing mask show all axes.
+     * Additive — `_restyleGizmo()` never touches `showX/Y/Z`.
+     * @param {Gizmo} g @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask]
      */
-    setAxes(mask) {
+    _applyAxes(g, mask) {
         const m = mask || {};
-        this.control.showX = m.x !== false;
-        this.control.showY = m.y !== false;
-        this.control.showZ = m.z !== false;
+        g.axes = { x: m.x !== false, y: m.y !== false, z: m.z !== false };
+        g.control.showX = g.axes.x;
+        g.control.showY = g.axes.y;
+        g.control.showZ = g.axes.z;
     }
 
-    // Refined look. Runs every frame (cheap traverse) so our resting palette
-    // survives TransformControls' per-frame re-theme; the plane resize + outline
-    // are guarded so they only happen once per handle.
-    _restyle() {
-        this.helper.traverse((/** @type {any} */ o) => {
+    /** Constrain the interactive gizmo's axes (Python set_gizmo_axes / JS setGizmoAxes).
+     * `detach()` restores all axes so a later attach isn't silently constrained.
+     * @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask] */
+    setAxes(mask) { this._applyAxes(this._primary, mask); }
+
+    // One-time structural refinement of a gizmo's stock handles (the per-frame
+    // `_restyleGizmo` only re-themes/resizes what survives this). Two parts:
+    //   1. Slim the rotate gizmo down to just the three coloured axis rings —
+    //      remove the bulky outer screen-space ring (`E`), the gray full-circle
+    //      backdrop (`XYZE`, the "double circle"), and the gray `AXIS` helper line.
+    //   2. Give the translate arrowheads real shading: the stock arrows use a flat
+    //      unlit `MeshBasicMaterial`, so the cones read as 2D triangles. Swap to a
+    //      lit `MeshStandardMaterial` tinted to the axis colour so scene lighting /
+    //      environment sculpt the cone. The lib's per-frame re-theme + highlight
+    //      only touch `.color`/`.opacity` (which Standard supports), so they keep
+    //      working; `_restyleGizmo` re-applies our `_color` each frame regardless.
+    /** @param {Gizmo} g */
+    _refineHandles(g) {
+        const gm = /** @type {any} */ (g.control)._gizmo;
+        if (!gm) return;
+        for (const grp of [gm.gizmo && gm.gizmo.rotate, gm.picker && gm.picker.rotate]) {
+            if (!grp) continue;
+            for (const child of grp.children.slice()) {
+                if (child.name === 'E' || child.name === 'XYZE') grp.remove(child);
+            }
+        }
+        const helperRot = gm.helper && gm.helper.rotate;
+        if (helperRot) {
+            for (const child of helperRot.children.slice()) {
+                if (child.name === 'AXIS') helperRot.remove(child);
+            }
+        }
+        const arrows = gm.gizmo && gm.gizmo.translate;
+        if (arrows) {
+            for (const o of arrows.children) {
+                const hex = gizmoAxisColor(o.name);
+                // Single-axis handles only (X/Y/Z arrows + shaft); skip plane chips
+                // and the centre, which stay flat/transparent.
+                if (hex == null || o.name.length !== 1 || o.userData.__litArrow) continue;
+                o.userData.__litArrow = true;
+                const col = gizmoColor(hex);
+                const lit = /** @type {any} */ (new THREE.MeshStandardMaterial({
+                    color: col.clone(),
+                    emissive: col.clone().multiplyScalar(0.1),  // small floor so the dark side keeps its hue
+                    roughness: 0.28,                             // a touch glossy → a highlight that sells the curve
+                    metalness: 0.0,
+                    transparent: true,
+                    opacity: 0.95,
+                    depthTest: false,
+                    depthWrite: false,
+                    toneMapped: false,
+                }));
+                lit._color = col.clone();
+                lit._opacity = 0.95;
+                o.material = lit;
+            }
+        }
+    }
+
+    // Refined look for one gizmo's handles. Runs every frame (cheap traverse) so
+    // our resting palette survives TransformControls' per-frame re-theme; the
+    // plane resize + margin + outline are guarded so they only happen once per handle.
+    /** @param {Gizmo} g */
+    _restyleGizmo(g) {
+        g.helper.traverse((/** @type {any} */ o) => {
             const m = o.material;
             if (!m || o.userData.__gizmoOutline) return;
             const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
             // Enlarge both the visible plane chip and its invisible picker so the
-            // clickable area matches the larger visual. Scale about the geometry's
-            // own centroid because the stock handle bakes its corner offset in.
-            if (planar && !this._sizedPlanes.has(o)) {
-                this._sizedPlanes.add(o);
-                const g = o.geometry;
-                g.computeBoundingBox();
+            // clickable area matches the larger visual, then push the chip outward
+            // along its own offset direction so the three planes leave a margin
+            // around the gizmo centre instead of all meeting at the origin. Scale
+            // about the geometry's own centroid because the stock handle bakes its
+            // corner offset into the geometry.
+            if (planar && !g._sizedPlanes.has(o)) {
+                g._sizedPlanes.add(o);
+                const geo = o.geometry;
+                geo.computeBoundingBox();
                 const c = new THREE.Vector3();
-                g.boundingBox.getCenter(c);
-                g.translate(-c.x, -c.y, -c.z);
-                g.scale(GIZMO_PLANE_SCALE, GIZMO_PLANE_SCALE, GIZMO_PLANE_SCALE);
-                g.translate(c.x, c.y, c.z);
+                geo.boundingBox.getCenter(c);
+                const size = new THREE.Vector3();
+                geo.boundingBox.getSize(size);
+                geo.translate(-c.x, -c.y, -c.z);
+                // The stock chip is a thin BOX (depth 0.01), which reads as a 3D
+                // slab — its sides catch light and its edge outline draws a back
+                // rectangle too. Scale the two broad axes up, but collapse the thin
+                // (normal) axis to zero so the chip is a flat quad. The thin axis is
+                // whichever bbox dimension is smallest (it varies per chip — the box
+                // is pre-rotated, baked into geometry — so detect it, don't hardcode).
+                const minDim = Math.min(size.x, size.y, size.z);
+                geo.scale(
+                    size.x === minDim ? 0 : GIZMO_PLANE_SCALE,
+                    size.y === minDim ? 0 : GIZMO_PLANE_SCALE,
+                    size.z === minDim ? 0 : GIZMO_PLANE_SCALE,
+                );
+                const len = c.length();
+                if (len > 1e-6) {
+                    const f = (len + GIZMO_PLANE_MARGIN) / len;   // push centroid out by the margin
+                    geo.translate(c.x * f, c.y * f, c.z * f);
+                } else {
+                    geo.translate(c.x, c.y, c.z);
+                }
             }
-            if (m.visible === false) return;          // pickers: resized, not recoloured
+            // Pickers live in a permanently-hidden group (and the non-current
+            // mode's gizmo handles in a hidden one): resized above so the hit area
+            // matches, but not recoloured / outlined. `matInvisible` is opacity-
+            // based, not `visible:false`, so test the parent group — an outline on
+            // a picker would be raycast-hit before the chip and report an empty
+            // axis, breaking plane-chip dragging.
+            if (!o.parent || o.parent.visible === false) return;
             const hex = gizmoAxisColor(o.name);
             if (hex == null) return;
             const col = gizmoColor(hex);              // cached; do not mutate
@@ -5135,18 +5291,57 @@ class TransformGizmoController {
         });
     }
 
-    /** @param {boolean} flush  true = drag ended, always send. */
-    _report(flush) {
-        if (!this.object) return;
+    // Drop a translucent clone of the dragged object at its grab-time world pose,
+    // parented to the scene root so it stays put while the object moves. The clone
+    // shares the source geometry but gets its own faint materials, and never
+    // raycasts (it's not in _objects and TransformControls ignores the scene, but
+    // belt-and-suspenders so a stray picker can't grab it).
+    /** @param {Gizmo} g */
+    _spawnGhost(g) {
+        if (!g.object) return;
+        this._clearGhost(g);
+        g.object.updateMatrixWorld(true);
+        const ghost = g.object.clone(true);
+        ghost.matrixAutoUpdate = true;
+        ghost.matrix.copy(g.object.matrixWorld);
+        ghost.matrix.decompose(ghost.position, ghost.quaternion, ghost.scale);
+        ghost.traverse((/** @type {any} */ o) => {
+            if (o.material) {
+                o.material = Array.isArray(o.material)
+                    ? o.material.map((/** @type {any} */ mm) => ghostGizmoMaterial(mm))
+                    : ghostGizmoMaterial(o.material);
+            }
+            o.castShadow = false; o.receiveShadow = false;
+            o.raycast = () => {};
+        });
+        ghost.userData = { __gizmoGhost: true };
+        this.v._scene.add(ghost);
+        g.ghost = ghost;
+    }
+
+    /** @param {Gizmo} g */
+    _clearGhost(g) {
+        if (!g.ghost) return;
+        this.v._scene.remove(g.ghost);
+        g.ghost.traverse((/** @type {any} */ o) => {
+            const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+            for (const mm of mats) mm.dispose();
+        });
+        g.ghost = null;
+    }
+
+    /** @param {Gizmo} g @param {boolean} flush  true = drag ended, always send. */
+    _report(g, flush) {
+        if (!g.object) return;
         const now = performance.now();
         if (!flush && now - this._lastReport < 1000 / GIZMO_REPORT_HZ) return;
         this._lastReport = now;
-        const o = this.object;
+        const o = g.object;
         o.updateMatrixWorld();
-        const sq = this._snapQuat;
-        const so = this._snapOrigin;
+        const sq = g._snapQuat;
+        const so = g._snapOrigin;
         const payload = {
-            id: this.objectId,
+            id: g.id,
             position: [o.position.x, o.position.y, o.position.z],
             quaternion: [o.quaternion.x, o.quaternion.y, o.quaternion.z, o.quaternion.w],
             scale: [o.scale.x, o.scale.y, o.scale.z],
@@ -5166,26 +5361,65 @@ class TransformGizmoController {
         }
     }
 
-    /** @param {THREE.Object3D} object @param {string|null} [id] */
+    /** Attach the interactive gizmo to an object (click-select / enable({id})).
+     * @param {THREE.Object3D} object @param {string|null} [id] */
     attach(object, id) {
         if (!object) return;
         this._activate();   // wire modifiers + the per-frame update loop, even for a direct (programmatic) attach
-        this.object = object;
-        this.objectId = id != null ? id : this._lookupId(object);
-        this.control.attach(object);
-        this.control.enabled = true;
-        this.helper.visible = true;
-        this.control.setMode(this.mode);
-        this._restyle();
+        const g = this._primary;
+        g.object = object;
+        g.id = id != null ? id : this._lookupId(object);
+        g.control.attach(object);
+        g.control.enabled = true;
+        g.helper.visible = true;
+        g.control.setMode(g.mode);
+        this._restyleGizmo(g);
     }
 
     detach() {
-        this.control.detach();
-        this.control.enabled = false;
-        this.helper.visible = false;
-        this.object = null;
-        this.objectId = null;
-        this.setAxes(null);   // restore all axes so a subsequent attach isn't left constrained
+        const g = this._primary;
+        this._clearGhost(g);
+        g.control.detach();
+        g.control.enabled = false;
+        g.helper.visible = false;
+        g.object = null;
+        g.id = null;
+        this._applyAxes(g, null);   // restore all axes so a subsequent attach isn't left constrained
+    }
+
+    /**
+     * Pin a persistent gizmo to `object` with its own axis constraint, base mode,
+     * and orientation space — independent of the interactive gizmo, and one of any
+     * number. `space: 'local'` orients the handles to the object's own rotation
+     * (the gizmo turns with the object); `'world'` (default) keeps them
+     * world-axis-aligned. Moves report through the same hooks. Activates the
+     * controller if it wasn't already.
+     * @param {THREE.Object3D} object
+     * @param {{id?:string|null, mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, space?:string}} [opts]
+     * @returns {Gizmo|null}
+     */
+    addGizmo(object, opts = {}) {
+        if (!object) return null;
+        this._activate();
+        const g = new Gizmo(this);
+        g.object = object;
+        g.id = (opts.id != null) ? opts.id : this._lookupId(object);
+        if (opts.mode === 'rotate' || opts.mode === 'translate') g.mode = opts.mode;
+        if (opts.space === 'local' || opts.space === 'world') g.control.setSpace(opts.space);
+        g.control.attach(object);
+        g.control.enabled = true;
+        g.helper.visible = true;
+        g.control.setMode(g.mode);
+        this._applyAxes(g, opts.axes || null);
+        this._restyleGizmo(g);
+        this._extra.push(g);
+        return g;
+    }
+
+    /** Remove every pinned gizmo (the interactive one is untouched). */
+    clearGizmos() {
+        for (const g of this._extra) g.dispose();
+        this._extra.length = 0;
     }
 
     /** @param {THREE.Object3D} object @returns {string|null} */
@@ -5196,13 +5430,13 @@ class TransformGizmoController {
 
     /** @param {any} [opts] */
     enable(opts = {}) {
-        if (opts.mode === 'rotate' || opts.mode === 'translate') this.mode = opts.mode;
+        if (opts.mode === 'rotate' || opts.mode === 'translate') this._primary.mode = opts.mode;
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
         if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
-        if (typeof opts.clickSelect === 'boolean') this.clickSelect = opts.clickSelect;
+        this.clickSelect = (typeof opts.clickSelect === 'boolean') ? opts.clickSelect : true;
         this._activate();
-        this.control.setMode(this.mode);
+        this._primary.control.setMode(this._primary.mode);
         if (opts.id != null) {
             const obj = this.v._objects.get(opts.id);
             if (obj) this.attach(obj, opts.id);
@@ -5228,6 +5462,7 @@ class TransformGizmoController {
         const dom = this.v._renderer.domElement;
         dom.removeEventListener('pointerdown', this._onPointerDown);
         window.removeEventListener('pointerup', this._onPointerUp);
+        this.clearGizmos();
         this.detach();
     }
 
@@ -5279,13 +5514,19 @@ class TransformGizmoController {
     }
 
     // Per-frame: track the active camera (the viewer swaps persp ↔ ortho, like
-    // the clip gizmo's camera sync), keep our palette alive, and drop a stale
-    // selection if the object left the scene (deleted / cleared).
+    // the clip gizmo's camera sync), keep our palette alive, and drop any gizmo
+    // whose object left the scene (deleted / cleared).
     update() {
         if (!this.enabled) return;
-        if (this.control.camera !== this.v._camera) this.control.camera = this.v._camera;
-        if (this.object && !this.object.parent) { this.detach(); return; }
-        if (this.object) this._restyle();
+        for (let i = this._extra.length - 1; i >= 0; i--) {
+            const g = this._extra[i];
+            if (g.object && !g.object.parent) { g.dispose(); this._extra.splice(i, 1); }
+        }
+        for (const g of this._allGizmos()) {
+            if (g.control.camera !== this.v._camera) g.control.camera = this.v._camera;
+            if (g === this._primary && g.object && !g.object.parent) { this.detach(); continue; }
+            if (g.object) this._restyleGizmo(g);
+        }
     }
 }
 
@@ -6759,6 +7000,9 @@ export class ThreeJSViewer {
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
+        // Pinned gizmos target now-deleted objects; drop them (and their helpers)
+        // rather than waiting for the per-frame prune.
+        if (this._transformGizmo) this._transformGizmo.clearGizmos();
     }
 
     /** @param {Record<string, any>} transforms */
@@ -8822,6 +9066,19 @@ export class ThreeJSViewer {
                     case 'set_gizmo_axes':
                         this._transformGizmo.setAxes({ x: data.x, y: data.y, z: data.z });
                         break;
+                    case 'add_gizmo': {
+                        const target = this._objects.get(data.id);
+                        if (target) this._transformGizmo.addGizmo(target, {
+                            id: data.id,
+                            mode: data.mode,
+                            axes: { x: data.x, y: data.y, z: data.z },
+                            space: data.space,
+                        });
+                        break;
+                    }
+                    case 'clear_gizmos':
+                        this._transformGizmo.clearGizmos();
+                        break;
                     case 'show_grid':
                         this._gridHelper.visible = !!data.visible;
                         if (data.size != null && data.divisions != null) {
@@ -9206,6 +9463,29 @@ export class ThreeJSViewer {
      * @param {THREE.Object3D} object3D @param {string|null} [id]
      */
     attachMoveGizmo(object3D, id = null) { this._transformGizmo.attach(object3D, id); }
+
+    /**
+     * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
+     * its own axis constraint and base mode. Independent of the interactive gizmo
+     * and stackable, so several objects can each carry their own 1-axis / plane /
+     * free gizmo at once (e.g. a Z-only rail, an XY-plane slider, and a free
+     * gizmo). Moves report through `onObjectMove` like the interactive gizmo.
+     * `axes` follows `setGizmoAxes` semantics (a key set `false` hides that axis).
+     * Enables the gizmo subsystem if it wasn't already.
+     * @param {string|THREE.Object3D} objectOrId
+     * @param {{mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, id?:string|null, space?:string}} [opts]
+     * @returns {any} the created gizmo, or null if the object can't be resolved.
+     */
+    addGizmo(objectOrId, opts = {}) {
+        let obj = /** @type {any} */ (objectOrId);
+        let id = opts.id;
+        if (typeof objectOrId === 'string') { id = objectOrId; obj = this._objects.get(objectOrId); }
+        if (!obj) return null;
+        return this._transformGizmo.addGizmo(obj, { mode: opts.mode, axes: opts.axes, id, space: opts.space });
+    }
+
+    /** Remove every pinned gizmo added with `addGizmo` (the interactive gizmo is untouched). */
+    clearGizmos() { this._transformGizmo.clearGizmos(); }
 
     /** Disable the move/rotate gizmo and detach it from its target. */
     disableMoveGizmo() { this._transformGizmo.disable(); }
