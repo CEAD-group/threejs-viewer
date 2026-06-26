@@ -27,6 +27,7 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 )
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
+_ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
 
 
 def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
@@ -279,6 +280,11 @@ class ViewerClient:
         # freshly-enabled gizmo. Cleared when the gizmo is disabled (the viewer
         # resets axes to all-true on detach).
         self._gizmo_axes: Optional[dict] = None
+        # Pinned (persistent) gizmos added with add_gizmo — a list of
+        # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
+        # interactive gizmo above; any number can be active at once, each with its
+        # own axis constraint. Re-sent on reconnect so they survive a refresh.
+        self._gizmos: List[dict] = []
 
     def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect.
@@ -417,6 +423,14 @@ class ViewerClient:
         if self._gizmo_axes is not None:
             try:
                 websocket.send(json.dumps(self._gizmo_axes))
+            except Exception:
+                pass
+
+        # Re-pin any persistent gizmos (add_gizmo); each message re-activates the
+        # gizmo subsystem on the viewer side, so no separate enable is needed.
+        for spec in self._gizmos:
+            try:
+                websocket.send(json.dumps(spec))
             except Exception:
                 pass
 
@@ -1766,6 +1780,7 @@ class ViewerClient:
         translate_snap_relative: bool = False,
         rotate_snap_deg: float = 15.0,
         click_select: bool = True,
+        snap_default: bool = False,
     ) -> None:
         """Show an interactive move/rotate gizmo for transforming objects.
 
@@ -1810,6 +1825,8 @@ class ViewerClient:
                 held. Must be a positive, finite number.
             click_select: When ``True`` (default), clicking an object attaches
                 the gizmo to it.
+            snap_default: When ``True``, snap is the resting state and holding
+                Shift moves freely (the inverse of the default free / Shift-to-snap).
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
@@ -1837,20 +1854,108 @@ class ViewerClient:
             "translateSnapRelative": bool(translate_snap_relative),
             "rotateSnap": math.radians(rs),
             "clickSelect": bool(click_select),
+            "snapDefault": bool(snap_default),
         }
         if self._ws is not None:
             self._send(self._move_gizmo)
 
     def disable_move_gizmo(self) -> None:
-        """Hide the move/rotate gizmo and detach it from its target.
+        """Turn off the whole move/rotate gizmo subsystem.
 
-        Registered callbacks are left in place; call :meth:`enable_move_gizmo`
-        (or :meth:`on_object_move`) again to resume.
+        Detaches the interactive gizmo and removes any pinned gizmos (added with
+        :meth:`add_gizmo`). Registered callbacks are left in place; call
+        :meth:`enable_move_gizmo`, :meth:`add_gizmo`, or :meth:`on_object_move`
+        again to resume.
         """
         self._move_gizmo = None
         self._gizmo_axes = None  # viewer resets axes to all-true on detach
+        self._gizmos = []  # the viewer's disable() also clears pinned gizmos
         if self._ws is not None:
             self._send({"type": "set_move_gizmo", "enabled": False})
+
+    def add_gizmo(
+        self,
+        id: str,
+        *,
+        x: bool = True,
+        y: bool = True,
+        z: bool = True,
+        mode: str = "translate",
+        space: str = "world",
+        snap_default: bool = False,
+    ) -> None:
+        """Pin a persistent move/rotate gizmo to object ``id``.
+
+        Unlike :meth:`enable_move_gizmo` (a single interactive gizmo you attach by
+        clicking or by ``id``), every call here adds *another* gizmo, so several
+        objects can each carry their own manipulator at once — for example a
+        1-axis rail, an in-plane slider, and a free gizmo on three different
+        objects. The ``x``/``y``/``z`` flags constrain which axes the gizmo
+        exposes (same meaning as :meth:`set_gizmo_axes`):
+
+        - ``x=False, y=False, z=True`` → a single Z-axis arrow (1-DOF rail).
+        - ``x=True, y=True, z=False`` → X and Y arrows plus the XY plane chip
+          (2-DOF in-plane drag).
+        - all ``True`` (default) → the full 3-DOF gizmo.
+
+        As with the interactive gizmo, dragging reports the new transform to every
+        callback registered with :meth:`on_object_move`, holding Alt rotates, and a
+        translucent ghost marks the start pose until release. By default the gizmo
+        moves freely and holding Shift snaps; pass ``snap_default=True`` to flip
+        that — snap becomes the resting state and holding Shift releases it for free
+        placement. Pinned gizmos are re-created automatically if the browser
+        reconnects, and are removed by :meth:`clear_gizmos`,
+        :meth:`disable_move_gizmo`, or clearing the scene.
+
+        The snap *step* (and rotation increment) come from the interactive gizmo's
+        configuration, so call :meth:`enable_move_gizmo` with ``translate_snap`` /
+        ``rotate_snap_deg`` to size the grid; ``snap_default`` only controls whether
+        snapping is on by default for this gizmo.
+
+        Args:
+            id: Object id to attach the gizmo to (must already exist in the scene).
+            x: Expose the X axis handle (default ``True``).
+            y: Expose the Y axis handle (default ``True``).
+            z: Expose the Z axis handle (default ``True``).
+            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Alt
+                overrides this live while held.
+            space: Handle orientation, ``"world"`` (default — axes stay aligned
+                to the world) or ``"local"`` (the gizmo turns with the object's
+                own rotation, so the arrows follow a tilted object).
+            snap_default: When ``True``, snap is the resting state (and Shift moves
+                freely) instead of the default free-with-Shift-to-snap.
+
+        Raises:
+            ValueError: For an unknown ``mode`` or ``space``.
+        """
+        if mode not in _ALLOWED_GIZMO_MODES:
+            allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
+            raise ValueError(f"mode must be one of: {allowed} (got {mode!r})")
+        if space not in _ALLOWED_GIZMO_SPACES:
+            allowed = ", ".join(sorted(_ALLOWED_GIZMO_SPACES))
+            raise ValueError(f"space must be one of: {allowed} (got {space!r})")
+        spec = {
+            "type": "add_gizmo",
+            "id": id,
+            "x": bool(x),
+            "y": bool(y),
+            "z": bool(z),
+            "mode": mode,
+            "space": space,
+            "snapDefault": bool(snap_default),
+        }
+        self._gizmos.append(spec)
+        if self._ws is not None:
+            self._send(spec)
+
+    def clear_gizmos(self) -> None:
+        """Remove every pinned gizmo added with :meth:`add_gizmo`.
+
+        The interactive gizmo (:meth:`enable_move_gizmo`) is unaffected.
+        """
+        self._gizmos = []
+        if self._ws is not None:
+            self._send({"type": "clear_gizmos"})
 
     def set_gizmo_axes(self, *, x: bool = True, y: bool = True, z: bool = True) -> None:
         """Constrain which axes the move gizmo exposes (translate arrows / rotate
@@ -1883,7 +1988,13 @@ class ViewerClient:
 
     def on_object_move(self, callback) -> None:
         """Register a callback fired while the user drags an object with the
-        gizmo, and enable the gizmo if it isn't already.
+        gizmo.
+
+        If no gizmo is configured yet — neither the interactive gizmo
+        (:meth:`enable_move_gizmo`) nor any pinned gizmo (:meth:`add_gizmo`) — this
+        also turns on the interactive click-select gizmo so there is something to
+        drag. When pinned gizmos are already present, it just registers the
+        callback (those gizmos report through it).
 
         The callback receives one dict argument with keys:
 
@@ -1906,7 +2017,7 @@ class ViewerClient:
         if not callable(callback):
             raise TypeError("callback must be callable")
         self._move_callbacks.append(callback)
-        if self._move_gizmo is None:
+        if self._move_gizmo is None and not self._gizmos:
             self.enable_move_gizmo()
 
     def _dispatch_object_move(self, data: dict) -> None:
@@ -1929,6 +2040,10 @@ class ViewerClient:
 
     def clear(self) -> None:
         """Clear all objects from the scene."""
+        # Pinned gizmos target now-removed objects; the viewer drops them on a
+        # scene clear, so forget them here too (else a reconnect would re-pin them
+        # to ids that no longer exist).
+        self._gizmos = []
         self._send({"type": "clear_scene"})
 
     # === Animation ===
