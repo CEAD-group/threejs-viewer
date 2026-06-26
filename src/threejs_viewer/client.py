@@ -1780,6 +1780,7 @@ class ViewerClient:
         translate_snap_relative: bool = False,
         rotate_snap_deg: float = 15.0,
         click_select: bool = True,
+        snap_default: bool = False,
     ) -> None:
         """Show an interactive move/rotate gizmo for transforming objects.
 
@@ -1824,6 +1825,8 @@ class ViewerClient:
                 held. Must be a positive, finite number.
             click_select: When ``True`` (default), clicking an object attaches
                 the gizmo to it.
+            snap_default: When ``True``, snap is the resting state and holding
+                Shift moves freely (the inverse of the default free / Shift-to-snap).
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
@@ -1851,6 +1854,7 @@ class ViewerClient:
             "translateSnapRelative": bool(translate_snap_relative),
             "rotateSnap": math.radians(rs),
             "clickSelect": bool(click_select),
+            "snapDefault": bool(snap_default),
         }
         if self._ws is not None:
             self._send(self._move_gizmo)
@@ -1878,6 +1882,7 @@ class ViewerClient:
         z: bool = True,
         mode: str = "translate",
         space: str = "world",
+        snap_default: bool = False,
     ) -> None:
         """Pin a persistent move/rotate gizmo to object ``id``.
 
@@ -1894,11 +1899,18 @@ class ViewerClient:
         - all ``True`` (default) → the full 3-DOF gizmo.
 
         As with the interactive gizmo, dragging reports the new transform to every
-        callback registered with :meth:`on_object_move`, holding Alt rotates,
-        holding Shift snaps, and a translucent ghost marks the start pose until
-        release. Pinned gizmos are re-created automatically if the browser
+        callback registered with :meth:`on_object_move`, holding Alt rotates, and a
+        translucent ghost marks the start pose until release. By default the gizmo
+        moves freely and holding Shift snaps; pass ``snap_default=True`` to flip
+        that — snap becomes the resting state and holding Shift releases it for free
+        placement. Pinned gizmos are re-created automatically if the browser
         reconnects, and are removed by :meth:`clear_gizmos`,
         :meth:`disable_move_gizmo`, or clearing the scene.
+
+        The snap *step* (and rotation increment) come from the interactive gizmo's
+        configuration, so call :meth:`enable_move_gizmo` with ``translate_snap`` /
+        ``rotate_snap_deg`` to size the grid; ``snap_default`` only controls whether
+        snapping is on by default for this gizmo.
 
         Args:
             id: Object id to attach the gizmo to (must already exist in the scene).
@@ -1910,6 +1922,8 @@ class ViewerClient:
             space: Handle orientation, ``"world"`` (default — axes stay aligned
                 to the world) or ``"local"`` (the gizmo turns with the object's
                 own rotation, so the arrows follow a tilted object).
+            snap_default: When ``True``, snap is the resting state (and Shift moves
+                freely) instead of the default free-with-Shift-to-snap.
 
         Raises:
             ValueError: For an unknown ``mode`` or ``space``.
@@ -1928,6 +1942,7 @@ class ViewerClient:
             "z": bool(z),
             "mode": mode,
             "space": space,
+            "snapDefault": bool(snap_default),
         }
         self._gizmos.append(spec)
         if self._ws is not None:

@@ -2511,6 +2511,68 @@ def test_gizmo_drag_ghost_survives_circular_userdata(viewer_client, viewer_page)
     assert _wait_until(lambda: viewer_page.evaluate(_GHOST_COUNT) == 0)
 
 
+@pytest.mark.browser
+def test_gizmo_snap_default_inverts_shift(viewer_client, viewer_page):
+    """snap_default=True makes snap the resting state: a plain drag lands on the
+    grid, and holding Shift releases snap for free movement (the inverse of the
+    default free / Shift-to-snap)."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.enable_move_gizmo(translate_snap=0.5, click_select=False)
+    viewer_client.add_gizmo("box", x=True, y=False, z=False, snap_default=True)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._extra[0];"
+        " return g && g.helper.visible && g.snapDefault === true; }",
+    )
+
+    snap_live = (
+        "() => window.threejsViewer._transformGizmo._extra[0].control.translationSnap"
+    )
+
+    # Plain drag (no modifier): snap is engaged and the box lands on the 0.5 grid.
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    p = viewer_page.evaluate(_GIZMO_HANDLE_PX, [0, "X"])
+    cx, cy = p["x"], p["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    assert viewer_page.evaluate(snap_live) == 0.5, "snap not engaged by default"
+    for i in range(1, 15):
+        viewer_page.mouse.move(cx + i * 16, cy)
+    viewer_page.mouse.up()
+    assert _wait_until(
+        lambda: viewer_page.evaluate(
+            "() => !window.threejsViewer._transformGizmo._extra[0].control.dragging"
+        )
+    )
+    x = _box_pos(viewer_page, "x")
+    assert x > 0.4, f"box did not move ({x})"
+    assert abs(round(x / 0.5) * 0.5 - x) < 1e-6, (
+        f"default drag not snapped to grid: {x}"
+    )
+
+    # Now hold Shift while dragging → snap released → free (snap state is null).
+    viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('box').position.set(0, 0, 0)"
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    p = viewer_page.evaluate(_GIZMO_HANDLE_PX, [0, "X"])
+    cx, cy = p["x"], p["y"]
+    viewer_page.keyboard.down("Shift")
+    try:
+        viewer_page.mouse.move(cx, cy)
+        viewer_page.mouse.down()
+        assert viewer_page.evaluate(snap_live) is None, (
+            "Shift did not release snap on a snap_default gizmo"
+        )
+        for i in range(1, 15):
+            viewer_page.mouse.move(cx + i * 16, cy)
+        viewer_page.mouse.up()
+    finally:
+        viewer_page.keyboard.up("Shift")
+
+
 def _read_persp_fov(page):
     """Read the live perspective camera's vertical FOV (degrees), or None."""
     return page.evaluate(

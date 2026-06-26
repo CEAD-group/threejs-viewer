@@ -6072,6 +6072,7 @@ class Gizmo {
         this.id = /** @type {string|null} */ (null);
         this.mode = 'translate';                                  // base mode (Alt overrides live)
         this.axes = { x: true, y: true, z: true };
+        this.snapDefault = false;                                 // snap is the resting state (Shift → free) instead of free (Shift → snap)
         /** @type {THREE.Object3D|null} */
         this.ghost = null;                                        // translucent clone at the grab-time pose
         this._snapOrigin = new THREE.Vector3();                   // object position at drag-start (relative snap + positionStart)
@@ -6120,6 +6121,7 @@ class TransformGizmoController {
         this._snapDelta = new THREE.Vector3();                    // reusable scratch for the per-frame relative-snap delta
         this._lastReport = 0;
         this._interacted = false;                                 // a handle drag just happened
+        this._shiftHeld = false;                                  // last-seen Shift state (drives snap at drag-start)
         this._raycaster = new THREE.Raycaster();
         this._ndc = new THREE.Vector2();
         this._downX = 0; this._downY = 0;
@@ -6145,10 +6147,12 @@ class TransformGizmoController {
     /** @returns {Gizmo[]} the interactive gizmo plus every pinned one. */
     _allGizmos() { return [this._primary, ...this._extra]; }
 
-    /** Alt → rotate mode (never mid-drag); Shift → snap (live, read per move).
-     * Applied across every attached gizmo so modifiers are global. */
+    /** Alt → rotate mode (never mid-drag); Shift → toggle snap from the gizmo's
+     * resting state (live, read per move). Applied across every attached gizmo so
+     * modifiers are global. */
     _syncModifiers(e) {
         if (!this.enabled) return;
+        this._shiftHeld = e.shiftKey;
         for (const g of this._allGizmos()) {
             if (!g.object) continue;
             if (!g.control.dragging) {
@@ -6161,15 +6165,25 @@ class TransformGizmoController {
                     this._restyleGizmo(g);
                 }
             }
-            if (e.shiftKey) {
-                // In relative mode the native absolute grid is suppressed — the
-                // quantise runs by hand in _onObjectChange, keyed off the origin.
-                g.control.setTranslationSnap(this.translateSnapRelative ? null : this.translateSnap);
-                g.control.setRotationSnap(this.rotateSnap);
-            } else {
-                g.control.setTranslationSnap(null);
-                g.control.setRotationSnap(null);
-            }
+            // Shift toggles snap relative to the gizmo's resting state: a normal
+            // gizmo is free at rest and Shift enables snap; a `snapDefault` gizmo
+            // snaps at rest and Shift releases it for free placement. (Same key,
+            // inverted — and Shift dodges the Mac "Ctrl-click = right-click" trap.)
+            this._applySnap(g, g.snapDefault ? !e.shiftKey : e.shiftKey);
+        }
+    }
+
+    /** Engage/clear translation + rotation snap on one gizmo's control.
+     * @param {Gizmo} g @param {boolean} on */
+    _applySnap(g, on) {
+        if (on) {
+            // In relative mode the native absolute grid is suppressed — the
+            // quantise runs by hand in _onObjectChange, keyed off the origin.
+            g.control.setTranslationSnap(this.translateSnapRelative ? null : this.translateSnap);
+            g.control.setRotationSnap(this.rotateSnap);
+        } else {
+            g.control.setTranslationSnap(null);
+            g.control.setRotationSnap(null);
         }
     }
 
@@ -6178,6 +6192,12 @@ class TransformGizmoController {
         this.v._controls.enabled = !dragging;
         if (dragging) {
             this._interacted = true;
+            // Engage the resting snap state up front, using the live snap step and
+            // last-seen Shift state — so a `snapDefault` gizmo snaps from the very
+            // first drag even if no key was ever pressed (and even though the step
+            // may have been set after the gizmo was pinned). _syncModifiers keeps
+            // it live if Shift is toggled mid-drag.
+            this._applySnap(g, g.snapDefault ? !this._shiftHeld : this._shiftHeld);
             // Snapshot the grab-time pose: the origin for relative translation snap
             // and the `positionStart`/`quaternionStart` reported on release, and
             // drop a translucent ghost there so the original location stays visible.
@@ -6514,10 +6534,12 @@ class TransformGizmoController {
      * and orientation space — independent of the interactive gizmo, and one of any
      * number. `space: 'local'` orients the handles to the object's own rotation
      * (the gizmo turns with the object); `'world'` (default) keeps them
-     * world-axis-aligned. Moves report through the same hooks. Activates the
-     * controller if it wasn't already.
+     * world-axis-aligned. `snapDefault: true` flips the snap convention for this
+     * gizmo — snap is the resting state and Shift releases it for free placement.
+     * Moves report through the same hooks. Activates the controller if it wasn't
+     * already.
      * @param {THREE.Object3D} object
-     * @param {{id?:string|null, mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, space?:string}} [opts]
+     * @param {{id?:string|null, mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, space?:string, snapDefault?:boolean}} [opts]
      * @returns {Gizmo|null}
      */
     addGizmo(object, opts = {}) {
@@ -6527,6 +6549,7 @@ class TransformGizmoController {
         g.object = object;
         g.id = (opts.id != null) ? opts.id : this._lookupId(object);
         if (opts.mode === 'rotate' || opts.mode === 'translate') g.mode = opts.mode;
+        if (typeof opts.snapDefault === 'boolean') g.snapDefault = opts.snapDefault;
         if (opts.space === 'local' || opts.space === 'world') g.control.setSpace(opts.space);
         g.control.attach(object);
         g.control.enabled = true;
@@ -6556,6 +6579,7 @@ class TransformGizmoController {
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
         if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
+        if (typeof opts.snapDefault === 'boolean') this._primary.snapDefault = opts.snapDefault;
         this.clickSelect = (typeof opts.clickSelect === 'boolean') ? opts.clickSelect : true;
         this._activate();
         this._primary.control.setMode(this._primary.mode);
@@ -10180,6 +10204,7 @@ class ThreeJSViewer {
                                 translateSnapRelative: data.translateSnapRelative,
                                 rotateSnap: data.rotateSnap,   // radians
                                 clickSelect: data.clickSelect,
+                                snapDefault: data.snapDefault,
                             });
                         } else {
                             this._transformGizmo.disable();
@@ -10195,6 +10220,7 @@ class ThreeJSViewer {
                             mode: data.mode,
                             axes: { x: data.x, y: data.y, z: data.z },
                             space: data.space,
+                            snapDefault: data.snapDefault,
                         });
                         break;
                     }
@@ -10592,10 +10618,12 @@ class ThreeJSViewer {
      * and stackable, so several objects can each carry their own 1-axis / plane /
      * free gizmo at once (e.g. a Z-only rail, an XY-plane slider, and a free
      * gizmo). Moves report through `onObjectMove` like the interactive gizmo.
-     * `axes` follows `setGizmoAxes` semantics (a key set `false` hides that axis).
-     * Enables the gizmo subsystem if it wasn't already.
+     * `axes` follows `setGizmoAxes` semantics (a key set `false` hides that axis);
+     * `space:'local'` turns the handles with the object; `snapDefault:true` makes
+     * snap the resting state (hold Shift to move freely). Enables the gizmo
+     * subsystem if it wasn't already.
      * @param {string|THREE.Object3D} objectOrId
-     * @param {{mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, id?:string|null, space?:string}} [opts]
+     * @param {{mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, id?:string|null, space?:string, snapDefault?:boolean}} [opts]
      * @returns {any} the created gizmo, or null if the object can't be resolved.
      */
     addGizmo(objectOrId, opts = {}) {
@@ -10603,7 +10631,7 @@ class ThreeJSViewer {
         let id = opts.id;
         if (typeof objectOrId === 'string') { id = objectOrId; obj = this._objects.get(objectOrId); }
         if (!obj) return null;
-        return this._transformGizmo.addGizmo(obj, { mode: opts.mode, axes: opts.axes, id, space: opts.space });
+        return this._transformGizmo.addGizmo(obj, { mode: opts.mode, axes: opts.axes, id, space: opts.space, snapDefault: opts.snapDefault });
     }
 
     /** Remove every pinned gizmo added with `addGizmo` (the interactive gizmo is untouched). */

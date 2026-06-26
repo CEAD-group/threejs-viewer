@@ -236,10 +236,10 @@ def test_on_object_move_rejects_non_callable():
 
 def test_add_gizmo_payload_and_accumulates():
     """add_gizmo builds a spec per call and accumulates them (multiple pinned
-    gizmos), defaulting to all axes / translate / world space."""
+    gizmos), defaulting to all axes / translate / world space / free snap."""
     client = ViewerClient()
     client.add_gizmo("rail", x=False, y=False, z=True)
-    client.add_gizmo("cube", space="local", mode="rotate")
+    client.add_gizmo("cube", space="local", mode="rotate", snap_default=True)
     assert client._gizmos == [
         {
             "type": "add_gizmo",
@@ -249,6 +249,7 @@ def test_add_gizmo_payload_and_accumulates():
             "z": True,
             "mode": "translate",
             "space": "world",
+            "snapDefault": False,
         },
         {
             "type": "add_gizmo",
@@ -258,8 +259,18 @@ def test_add_gizmo_payload_and_accumulates():
             "z": True,
             "mode": "rotate",
             "space": "local",
+            "snapDefault": True,
         },
     ]
+
+
+def test_enable_move_gizmo_snap_default_flag():
+    """enable_move_gizmo forwards snap_default into the wire payload."""
+    client = ViewerClient()
+    client.enable_move_gizmo("box", snap_default=True)
+    assert client._move_gizmo["snapDefault"] is True
+    client.enable_move_gizmo("box")
+    assert client._move_gizmo["snapDefault"] is False
 
 
 @pytest.mark.parametrize(

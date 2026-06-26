@@ -21,8 +21,10 @@ While you drag, a **translucent ghost** stays behind at the grab-time pose so
 you can see how far the block has travelled; it disappears on release. The plane
 chips are flat quads spaced a little out from the gizmo centre.
 
-Each release is reported back here through ``on_object_move`` and logged. Hold
-**Alt** to rotate instead of translate, **Shift** to snap (grid ``0.5`` / 15°).
+These gizmos pin with ``snap_default=True``, so drags snap to the grid (``0.5`` /
+15°) by default — hold **Shift** to move freely (the inverse of the usual
+free / Shift-to-snap). Hold **Alt** to rotate instead of translate. Each release
+is reported back here through ``on_object_move`` and logged.
 
 Run: uv run python examples/24_gizmo_dimensions.py
 (then drag the blocks in the browser; press F to frame, Ctrl+C to quit)
@@ -99,23 +101,26 @@ def on_move(m):
 # Pin the gizmos first, *then* register the callback. With pinned gizmos already
 # present, on_object_move only registers the callback (it doesn't also turn on the
 # click-select interactive gizmo, which would draw an extra gizmo).
+# snap_default=True → drags snap to the grid by default; hold Shift to move freely.
 # Back row — world-aligned (the default space).
-v.add_gizmo("rail", x=False, y=False, z=True)  # 1-DOF: Z rail
-v.add_gizmo("tile", x=True, y=True, z=False)  # 2-DOF: XY plane
-v.add_gizmo("cube")  # 3-DOF: free
+v.add_gizmo("rail", x=False, y=False, z=True, snap_default=True)  # 1-DOF: Z rail
+v.add_gizmo("tile", x=True, y=True, z=False, snap_default=True)  # 2-DOF: XY plane
+v.add_gizmo("cube", snap_default=True)  # 3-DOF: free
 # Front row — object-local (handles turn with the rotated blocks).
-v.add_gizmo("rail_l", x=False, y=False, z=True, space="local")
-v.add_gizmo("tile_l", x=True, y=True, z=False, space="local")
-v.add_gizmo("cube_l", space="local")
+v.add_gizmo("rail_l", x=False, y=False, z=True, space="local", snap_default=True)
+v.add_gizmo("tile_l", x=True, y=True, z=False, space="local", snap_default=True)
+v.add_gizmo("cube_l", space="local", snap_default=True)
 
-# Snap grid 0.5 units / 15°, applied while Shift is held.
+# Snap grid 0.5 units / 15°. With snap_default on, this is the resting behaviour.
 v.enable_move_gizmo(translate_snap=0.5, rotate_snap_deg=15, click_select=False)
 v.on_object_move(on_move)
 
 print(__doc__)
 print("6 pinned gizmos · columns = 1D/2D/3D · back row = world, front = local.")
 print("Drag a block; a ghost stays at the start until you release.")
-print("  Alt = rotate · Shift = snap (0.5 units / 15°). Press F to frame.")
+print(
+    "  Snap on by default (0.5 / 15°) · Shift = free · Alt = rotate. Press F to frame."
+)
 print("Ctrl+C here to quit.")
 
 try:
