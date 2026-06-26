@@ -2467,6 +2467,50 @@ def test_gizmo_drag_ghost_present_until_release(viewer_client, viewer_page):
     )
 
 
+@pytest.mark.browser
+def test_gizmo_drag_ghost_survives_circular_userdata(viewer_client, viewer_page):
+    """Regression: many objects stash circular / class-instance refs in userData
+    (e.g. a tube's userData.parametricTube points back at its mesh). Object3D
+    clone() deep-copies userData via JSON.stringify, which would throw on those —
+    _spawnGhost blanks userData across the subtree while cloning, so the ghost
+    still spawns and the drag isn't broken."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_gizmo("box", x=True, y=False, z=False)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._extra[0];"
+        " return g && g.helper.visible; }",
+    )
+    # Plant a circular ref + a fake class-instance back-ref on the box's userData,
+    # exactly the shape that makes JSON.stringify(userData) throw.
+    viewer_page.evaluate(
+        """() => {
+            const o = window.threejsViewer._objects.get('box');
+            o.userData.self = o;                       // direct cycle
+            o.userData.fake = { mesh: o, big: new Float32Array(8) };
+        }"""
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    p = viewer_page.evaluate(_GIZMO_HANDLE_PX, [0, "X"])
+    cx, cy = p["x"], p["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    viewer_page.mouse.move(cx + 30, cy)
+    viewer_page.mouse.move(cx + 60, cy)
+    # Clone didn't throw → a ghost exists; the drag still moved the box; the
+    # source userData is restored intact (the cycle survives the round-trip).
+    assert viewer_page.evaluate(_GHOST_COUNT) == 1, "ghost did not spawn"
+    assert _box_pos(viewer_page, "x") > 0.15, "drag broke (box did not move)"
+    assert viewer_page.evaluate(
+        "() => { const o = window.threejsViewer._objects.get('box');"
+        " return o.userData.self === o && o.userData.fake.mesh === o; }"
+    ), "source userData was not restored after cloning"
+    viewer_page.mouse.up()
+    assert _wait_until(lambda: viewer_page.evaluate(_GHOST_COUNT) == 0)
+
+
 def _read_persp_fov(page):
     """Read the live perspective camera's vertical FOV (degrees), or None."""
     return page.evaluate(

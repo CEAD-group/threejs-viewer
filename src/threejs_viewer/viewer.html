@@ -6402,28 +6402,43 @@ class TransformGizmoController {
     // parented to the scene root so it stays put while the object moves. The clone
     // shares the source geometry but gets its own faint materials, and never
     // raycasts (it's not in _objects and TransformControls ignores the scene, but
-    // belt-and-suspenders so a stray picker can't grab it).
+    // belt-and-suspenders so a stray picker can't grab it). Wrapped so a failure
+    // can never abort the drag gesture — the ghost is a nicety, not essential.
     /** @param {Gizmo} g */
     _spawnGhost(g) {
         if (!g.object) return;
         this._clearGhost(g);
-        g.object.updateMatrixWorld(true);
-        const ghost = g.object.clone(true);
-        ghost.matrixAutoUpdate = true;
-        ghost.matrix.copy(g.object.matrixWorld);
-        ghost.matrix.decompose(ghost.position, ghost.quaternion, ghost.scale);
-        ghost.traverse((/** @type {any} */ o) => {
-            if (o.material) {
-                o.material = Array.isArray(o.material)
-                    ? o.material.map((/** @type {any} */ mm) => ghostGizmoMaterial(mm))
-                    : ghostGizmoMaterial(o.material);
-            }
-            o.castShadow = false; o.receiveShadow = false;
-            o.raycast = () => {};
-        });
-        ghost.userData = { __gizmoGhost: true };
-        this.v._scene.add(ghost);
-        g.ghost = ghost;
+        try {
+            g.object.updateMatrixWorld(true);
+            // `Object3D.copy()` deep-copies userData via JSON.parse(JSON.stringify),
+            // which throws on the circular / class-instance refs many objects stash
+            // there (e.g. `userData.parametricTube`, a ParametricTube that points
+            // back at its mesh). Blank userData across the source subtree so the
+            // clone is structural only, then restore it (the ghost doesn't need it).
+            const saved = [];
+            g.object.traverse((/** @type {any} */ o) => { saved.push([o, o.userData]); o.userData = {}; });
+            let ghost;
+            try { ghost = g.object.clone(true); }
+            finally { for (const [o, ud] of saved) o.userData = ud; }
+            ghost.matrixAutoUpdate = true;
+            ghost.matrix.copy(g.object.matrixWorld);
+            ghost.matrix.decompose(ghost.position, ghost.quaternion, ghost.scale);
+            ghost.traverse((/** @type {any} */ o) => {
+                if (o.material) {
+                    o.material = Array.isArray(o.material)
+                        ? o.material.map((/** @type {any} */ mm) => ghostGizmoMaterial(mm))
+                        : ghostGizmoMaterial(o.material);
+                }
+                o.castShadow = false; o.receiveShadow = false;
+                o.raycast = () => {};
+            });
+            ghost.userData = { __gizmoGhost: true };
+            this.v._scene.add(ghost);
+            g.ghost = ghost;
+        } catch (err) {
+            console.error('move gizmo: ghost spawn failed (drag continues)', err);
+            g.ghost = null;
+        }
     }
 
     /** @param {Gizmo} g */
