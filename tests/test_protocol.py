@@ -368,6 +368,84 @@ def test_add_points_no_parent(client):
     assert "parent" not in header
 
 
+# === add_swept_tool ===
+
+
+def _swept_args():
+    pos = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    axes = np.array([[0, 0, 1], [0, 0, 1], [0, 0, 1]], dtype=np.float32)
+    profile = np.array([[0, 0.0], [0.5, 0.5], [0.5, 0.4], [4.0, 0.4]], dtype=np.float32)
+    return pos, axes, profile
+
+
+def test_add_swept_tool_header_and_payload(client):
+    pos, axes, profile = _swept_args()
+    client.add_swept_tool("tool", pos, axes, profile, sections=20)
+    header, payload = client._binary_messages[0]
+    assert header["type"] == "add_swept_tool_binary"
+    assert header["numStations"] == 3
+    assert header["numProfile"] == 4
+    assert header["sections"] == 20
+    assert header["hasColors"] is False
+    # positions (3×3 f32) + axes (3×3 f32) + profile (4×2 f32), no colors.
+    assert len(payload) == 3 * 3 * 4 + 3 * 3 * 4 + 4 * 2 * 4
+
+
+def test_add_swept_tool_normalizes_axes(client):
+    pos, _, profile = _swept_args()
+    axes = np.array([[0, 0, 5], [0, 0, 5], [0, 0, 5]], dtype=np.float32)
+    client.add_swept_tool("tool", pos, axes, profile)
+    _, payload = client._binary_messages[0]
+    # The axis block is the second 3×3 f32 section; each axis must be unit-length.
+    axis_block = np.frombuffer(payload[36:72], dtype=np.float32).reshape(3, 3)
+    assert np.allclose(np.linalg.norm(axis_block, axis=1), 1.0, atol=1e-5)
+
+
+def test_add_swept_tool_colors_packed(client):
+    pos, axes, profile = _swept_args()
+    colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype=np.uint32)
+    client.add_swept_tool("tool", pos, axes, profile, colors=colors)
+    header, payload = client._binary_messages[0]
+    assert header["hasColors"] is True
+    tail = np.frombuffer(payload[-12:], dtype=np.uint32)
+    assert list(tail) == [0xFF0000, 0x00FF00, 0x0000FF]
+
+
+def test_add_swept_tool_material_and_transform(client):
+    pos, axes, profile = _swept_args()
+    client.add_swept_tool(
+        "tool",
+        pos,
+        axes,
+        profile,
+        opacity=0.5,
+        metalness=0.2,
+        roughness=0.7,
+        parent="g",
+        position=[1, 2, 3],
+    )
+    header, _ = client._binary_messages[0]
+    assert header["opacity"] == 0.5
+    assert header["metalness"] == 0.2
+    assert header["roughness"] == 0.7
+    assert header["parent"] == "g"
+    assert header["transform"] == {"position": [1, 2, 3]}
+
+
+def test_add_swept_tool_validates(client):
+    pos, axes, profile = _swept_args()
+    with pytest.raises(ValueError, match="stations"):
+        client.add_swept_tool("t", pos[:1], axes[:1], profile)
+    with pytest.raises(ValueError, match="profile"):
+        client.add_swept_tool("t", pos, axes, np.array([[0, 1.0]], dtype=np.float32))
+    with pytest.raises(ValueError, match="non-zero"):
+        client.add_swept_tool("t", pos, np.zeros((3, 3), dtype=np.float32), profile)
+    with pytest.raises(ValueError, match="sections"):
+        client.add_swept_tool("t", pos, axes, profile, sections=2)
+    with pytest.raises(ValueError, match="length"):
+        client.add_swept_tool("t", pos, axes[:2], profile)
+
+
 # === Toolpath.add_toolpath ===
 
 
