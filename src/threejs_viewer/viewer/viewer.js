@@ -6859,6 +6859,8 @@ export class ThreeJSViewer {
             applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+        } else if (obj.userData.isPoints) {
+            obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
         }
     }
 
@@ -8000,7 +8002,7 @@ export class ThreeJSViewer {
                             let drawRange = 1.0;
                             const geom = obj.geometry;
                             if (geom) {
-                                if (obj.userData.isNativeLine) {
+                                if (obj.userData.isNativeLine || obj.userData.isPoints) {
                                     const total = obj.userData.totalPointCount;
                                     const cnt = geom.drawRange.count;
                                     drawRange = total > 0 && Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
@@ -8318,6 +8320,88 @@ export class ThreeJSViewer {
                                 deferred.resolve();
                             } catch (e) {
                                 console.error(`Error creating polyline via HTTP:`, e);
+                                deferred.reject(e);
+                            } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
+                    case 'add_points_binary': {
+                        this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale points fetch');
+                                    deferred.reject(new Error('stale'));
+                                    return;
+                                }
+                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                                    console.log(`Discarding stale points fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
+                                    return;
+                                }
+                                const rawData = new Uint8Array(buffer);
+                                const numPoints = data.numPoints || (rawData.length / 12);
+                                const positionBytes = numPoints * 12;
+
+                                const posBuffer = new ArrayBuffer(positionBytes);
+                                new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
+                                const pointData = new Float32Array(posBuffer);
+
+                                console.log(`Creating point cloud ${data.id} with ${numPoints} points via HTTP`);
+
+                                const geometry = new THREE.BufferGeometry();
+                                geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
+
+                                // Native THREE.PointsMaterial: one draw call for the
+                                // whole cloud. sizeAttenuation gives the perspective
+                                // shrink-with-distance (viewport-aware, unlike a
+                                // hardcoded falloff constant); per-point colors flip
+                                // the material into vertexColors mode.
+                                /** @type {any} */
+                                const matOpts = {
+                                    size: data.size || 2.0,
+                                    sizeAttenuation: data.sizeAttenuation !== false,
+                                };
+                                if (data.hasVertexColors) {
+                                    const colorBytes = rawData.slice(positionBytes);
+                                    const colorData = new Float32Array(numPoints * 3);
+                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                        colorData[i] = colorBytes[i] / 255;
+                                    }
+                                    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                                    matOpts.vertexColors = true;
+                                } else {
+                                    matOpts.color = data.color || 0xffffff;
+                                }
+                                const material = new THREE.PointsMaterial(matOpts);
+                                const points = new THREE.Points(geometry, material);
+                                points.name = data.id;
+                                points.userData.id = data.id;
+                                points.userData.isPoints = true;
+                                points.userData.totalPointCount = numPoints;
+                                // setDrawRange counts vertices for THREE.Points, so a
+                                // draw_range fraction reveals the leading frac*N points.
+                                geometry.setDrawRange(0, numPoints);
+
+                                this._deleteObject(data.id, { preserveInflight: true });
+                                this._addToParentOrScene(points, data.parent);
+                                this._objects.set(data.id, points);
+                                this._objGeneration++;
+                                deferred.resolve();
+                            } catch (e) {
+                                console.error(`Error creating point cloud via HTTP:`, e);
                                 deferred.reject(e);
                             } finally {
                                 if (this._inflightLoads.get(data.id) === deferred) {

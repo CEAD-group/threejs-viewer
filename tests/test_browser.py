@@ -268,6 +268,42 @@ def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_add_points_appears_in_scene(viewer_client, viewer_page):
+    """add_points creates a THREE.Points cloud in the browser scene graph."""
+    pts = np.random.default_rng(0).random((500, 3)).astype(np.float32)
+    scalars = pts[:, 2]
+    viewer_client.add_points("cloud", pts, colors=scalars, colormap="turbo")
+    obj = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "cloud" in objects:
+            obj = objects["cloud"]
+            break
+    assert obj is not None, "point cloud never landed in the scene"
+    assert obj["type"] == "Points"
+
+
+@pytest.mark.browser
+def test_set_draw_range_on_points(viewer_client, viewer_page):
+    """set_draw_range reveals a leading fraction of a point cloud."""
+    pts = np.random.default_rng(1).random((1000, 3)).astype(np.float32)
+    viewer_client.add_points("cloud", pts)
+    viewer_client.set_draw_range("cloud", 0.5)
+    dr = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "cloud" in objects:
+            dr = objects["cloud"]["drawRange"]
+            if abs(dr - 0.5) < 1e-3:
+                break
+    assert dr is not None and abs(dr - 0.5) < 1e-3, (
+        f"expected drawRange 0.5, got {dr!r}"
+    )
+
+
+@pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
     viewer_client.add_box("a")

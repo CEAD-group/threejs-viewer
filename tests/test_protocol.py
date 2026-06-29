@@ -298,6 +298,76 @@ def test_add_mesh_no_transform(client):
     assert "transform" not in header
 
 
+# === add_points ===
+
+
+def test_add_points_flat_color(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]], dtype=np.float32)
+    client.add_points("pc", pts, color=0xFF8800, size=3.0)
+    header, payload = client._binary_messages[0]
+    assert header["type"] == "add_points_binary"
+    assert header["id"] == "pc"
+    assert header["numPoints"] == 3
+    assert header["hasVertexColors"] is False
+    assert header["color"] == 0xFF8800
+    assert header["size"] == 3.0
+    assert header["sizeAttenuation"] is True
+    # No vertex colors → payload is positions only (3 points × 3 × float32).
+    assert len(payload) == 3 * 3 * 4
+
+
+def test_add_points_size_attenuation_off(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points("pc", pts, size_attenuation=False)
+    header, _ = client._binary_messages[0]
+    assert header["sizeAttenuation"] is False
+
+
+def test_add_points_rgb_colors(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    rgb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    client.add_points("pc", pts, colors=rgb)
+    header, payload = client._binary_messages[0]
+    assert header["hasVertexColors"] is True
+    assert header["numPoints"] == 2
+    # positions (2×3 float32 = 24 bytes) then colors (2×3 uint8 = 6 bytes).
+    assert len(payload) == 24 + 6
+    assert payload[24:] == bytes([255, 0, 0, 0, 0, 255])
+
+
+def test_add_points_scalar_colors_use_colormap(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    scalars = np.array([0.0, 1.0], dtype=np.float32)
+    client.add_points("pc", pts, colors=scalars, colormap="viridis")
+    header, payload = client._binary_messages[0]
+    assert header["hasVertexColors"] is True
+    color_bytes = payload[24:]
+    assert len(color_bytes) == 6
+    # First and last viridis stops differ on every channel.
+    assert color_bytes[:3] != color_bytes[3:]
+
+
+def test_add_points_rejects_bad_color_shape(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    rgba = np.zeros((2, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="N, 3"):
+        client.add_points("pc", pts, colors=rgba)
+
+
+def test_add_points_with_parent(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points("pc", pts, parent="g")
+    header, _ = client._binary_messages[0]
+    assert header["parent"] == "g"
+
+
+def test_add_points_no_parent(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points("pc", pts)
+    header, _ = client._binary_messages[0]
+    assert "parent" not in header
+
+
 # === Toolpath.add_toolpath ===
 
 
