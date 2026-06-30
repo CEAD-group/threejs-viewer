@@ -1010,6 +1010,11 @@ class ViewerClient:
         has_vertex_colors = False
         if colors is not None:
             colors = np.asarray(colors)
+            if colors.shape[0] != n_points:
+                raise ValueError(
+                    f"colors must have length {n_points} (one per point), "
+                    f"got {colors.shape[0]}"
+                )
             if colors.ndim == 1:
                 if cmin is None:
                     cmin = float(colors.min())

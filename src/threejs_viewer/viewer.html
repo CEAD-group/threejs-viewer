@@ -5045,33 +5045,23 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
         }
     }
 
-    // --- Indices. Station-major so draw_range advances along the path. ---
-    // Side faces: per level l, connect station k ring to station k+1 ring.
+    // --- Indices. Order: start cap → side loft (station-major) → end cap, so a
+    // partial draw_range reveal shows a body closed at its origin that grows
+    // along the path, with only the far (frontier) cap appearing last. ---
     const indicesPerRingPair = L * sections * 6;
     const ringPairCount = N - 1;
-    // End caps: revolution wall (L-1 bands) + a fan for any open end ring.
+    // End caps: revolution wall (L-1 bands) + a triangle fan (sections-2 tris)
+    // for any open end ring.
     const r0End = pr[0], r1End = pr[L - 1];
     const capBandsPerEnd = (L - 1) * sections * 6;
-    const cap0Fan = r0End > 1e-9 ? sections * 3 : 0;
-    const cap1Fan = r1End > 1e-9 ? sections * 3 : 0;
+    const cap0Fan = r0End > 1e-9 ? (sections - 2) * 3 : 0;
+    const cap1Fan = r1End > 1e-9 ? (sections - 2) * 3 : 0;
     const capIndexCount = 2 * capBandsPerEnd + cap0Fan + cap1Fan;
     const indices = new Uint32Array(ringPairCount * indicesPerRingPair + capIndexCount);
     let w = 0;
     const ringStart = (k, l) => (k * L + l) * sections;
-    // Side loft (station-major).
-    for (let k = 0; k < N - 1; k++) {
-        for (let l = 0; l < L; l++) {
-            const a0 = ringStart(k, l), b0 = ringStart(k + 1, l);
-            for (let s = 0; s < sections; s++) {
-                const s1 = (s + 1) % sections;
-                const a = a0 + s, an = a0 + s1, b = b0 + s, bn = b0 + s1;
-                indices[w++] = a; indices[w++] = b; indices[w++] = bn;
-                indices[w++] = a; indices[w++] = bn; indices[w++] = an;
-            }
-        }
-    }
-    // End-cap revolution walls + fans. Appended after the side faces so a
-    // partial draw_range grows the body before the far cap appears.
+    // Revolution wall closing the tool-body shell at one station (connects
+    // consecutive profile levels around the axis).
     const addCap = (k, flip) => {
         for (let l = 0; l < L - 1; l++) {
             const a0 = ringStart(k, l), b0 = ringStart(k, l + 1);
@@ -5089,8 +5079,8 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
         }
     };
     const addFan = (k, l, flip) => {
-        // Fan the open ring at level l to its centre (a fresh vertex appended
-        // to positions/colors is avoided by triangulating around vertex 0).
+        // Fan the open ring at level l to its centre, triangulating around
+        // vertex 0 (sections-2 triangles) so no extra centre vertex is needed.
         const base = ringStart(k, l);
         for (let s = 1; s < sections - 1; s++) {
             const a = base, b = base + s, c = base + s + 1;
@@ -5098,9 +5088,23 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
             else { indices[w++] = a; indices[w++] = c; indices[w++] = b; }
         }
     };
+    // Start cap first, so the origin end is closed from the first reveal frame.
     addCap(0, true);             // start cap faces inward (toward -path)
-    addCap(N - 1, false);        // end cap faces outward
     if (cap0Fan) addFan(0, 0, true);
+    // Side loft (station-major): per level l, connect station k ring to k+1.
+    for (let k = 0; k < N - 1; k++) {
+        for (let l = 0; l < L; l++) {
+            const a0 = ringStart(k, l), b0 = ringStart(k + 1, l);
+            for (let s = 0; s < sections; s++) {
+                const s1 = (s + 1) % sections;
+                const a = a0 + s, an = a0 + s1, b = b0 + s, bn = b0 + s1;
+                indices[w++] = a; indices[w++] = b; indices[w++] = bn;
+                indices[w++] = a; indices[w++] = bn; indices[w++] = an;
+            }
+        }
+    }
+    // End cap last (the frontier of the reveal).
+    addCap(N - 1, false);        // end cap faces outward
     if (cap1Fan) addFan(N - 1, L - 1, false);
 
     const geometry = new THREE.BufferGeometry();
@@ -9719,7 +9723,7 @@ class ThreeJSViewer {
                                 // the material into vertexColors mode.
                                 /** @type {any} */
                                 const matOpts = {
-                                    size: data.size || 2.0,
+                                    size: data.size ?? 2.0,
                                     sizeAttenuation: data.sizeAttenuation !== false,
                                 };
                                 if (data.hasVertexColors) {
@@ -9731,7 +9735,7 @@ class ThreeJSViewer {
                                     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
                                     matOpts.vertexColors = true;
                                 } else {
-                                    matOpts.color = data.color || 0xffffff;
+                                    matOpts.color = data.color ?? 0xffffff;
                                 }
                                 const material = new THREE.PointsMaterial(matOpts);
                                 const points = new THREE.Points(geometry, material);
@@ -10302,7 +10306,7 @@ class ThreeJSViewer {
                                 );
                                 const opacity = data.opacity !== undefined ? data.opacity : 1;
                                 const material = new THREE.MeshStandardMaterial({
-                                    color: hasColors ? 0xffffff : (data.color || 0x9aa0a6),
+                                    color: hasColors ? 0xffffff : (data.color ?? 0x9aa0a6),
                                     metalness: data.metalness !== undefined ? data.metalness : 0.3,
                                     roughness: data.roughness !== undefined ? data.roughness : 0.6,
                                     opacity,

@@ -354,6 +354,17 @@ def test_add_points_rejects_bad_color_shape(client):
         client.add_points("pc", pts, colors=rgba)
 
 
+def test_add_points_rejects_color_length_mismatch(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]], dtype=np.float32)
+    # 2 scalars for 3 points — would pack a misaligned color blob (NaN colors
+    # in the browser) without this guard.
+    with pytest.raises(ValueError, match="length 3"):
+        client.add_points("pc", pts, colors=np.array([0.0, 1.0], dtype=np.float32))
+    # (N, 3) RGB with the wrong row count too.
+    with pytest.raises(ValueError, match="length 3"):
+        client.add_points("pc", pts, colors=np.zeros((2, 3), dtype=np.float32))
+
+
 def test_add_points_with_parent(client):
     pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
     client.add_points("pc", pts, parent="g")
