@@ -1003,13 +1003,21 @@ class ViewerClient:
         with :meth:`set_draw_range` or the ``draw_ranges`` animation channel —
         the fraction maps onto the leading ``frac * N`` points of the buffer.
         """
-        positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1)
-        n_points = len(positions) // 3
+        # reshape(-1, 3) enforces (N, 3) or a 1D multiple of 3 — a stray length
+        # would otherwise be silently truncated by // 3.
+        positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3)
+        n_points = positions.shape[0]
+        positions = positions.reshape(-1)
 
         color_bytes = b""
         has_vertex_colors = False
         if colors is not None:
             colors = np.asarray(colors)
+            if colors.ndim == 0 or colors.shape[0] != n_points:
+                raise ValueError(
+                    f"colors must have length {n_points} (one per point), "
+                    f"got shape {colors.shape}"
+                )
             if colors.ndim == 1:
                 if cmin is None:
                     cmin = float(colors.min())
@@ -1344,7 +1352,8 @@ class ViewerClient:
             axes: (N, 3) float32 unit tool axis per station (tip -> holder).
                 Normalized on the client; a zero axis is an error.
             profile: (M, 2) float32 ``(height_along_axis, radius)`` pairs,
-                M >= 2, ascending in height. Radii must be >= 0.
+                M >= 2, non-decreasing in height (equal heights = a vertical
+                step in the silhouette). Radii must be >= 0.
             colors: Optional (N,) uint32 packed ``0x00RRGGBB``, one color per
                 station (e.g. reorientation rate or shank clearance mapped to
                 a heatmap). Linearly interpolated along the path.
@@ -1384,6 +1393,11 @@ class ViewerClient:
             raise ValueError(f"profile needs >= 2 (height, radius) rows, got {m}")
         if not np.all(np.isfinite(profile_arr)) or np.any(profile_arr[:, 1] < 0):
             raise ValueError("profile heights/radii must be finite and radii >= 0")
+        # Heights must be non-decreasing (equal is allowed — a vertical step in
+        # the silhouette, e.g. a shank shoulder). Out-of-order heights would loft
+        # a backwards/self-crossing sweep.
+        if np.any(np.diff(profile_arr[:, 0]) < 0):
+            raise ValueError("profile heights must be non-decreasing (tip -> holder)")
 
         sections = int(sections)
         if sections < 3:

@@ -2750,3 +2750,91 @@ def test_clip_tool_has_refined_rotate_and_slide_gizmos(viewer_client, viewer_pag
         if off and not off["move"]:
             break
     assert off is not None and not off["rot"] and not off["move"]
+
+
+@pytest.mark.browser
+def test_binary_draw_ranges_channel_on_swept_tool_and_points(
+    viewer_client, viewer_page
+):
+    """The binary `draw_ranges` animation channel (set_draw_range_data) drives
+    draw range on a swept tool AND a point cloud. This is a DIFFERENT code path
+    (makeChannelApply.draw_ranges) from the `set_draw_range` message
+    (_setDrawRange); a regression in the channel applier would otherwise pass
+    every other test while breaking the example reveals."""
+    n = 30
+    t = np.linspace(0, 1, n)
+    positions = np.column_stack([t * 6 - 3, 0 * t, 0 * t]).astype(np.float32)
+    axes = np.tile([0, 0, 1.0], (n, 1)).astype(np.float32)
+    profile = np.array([[0, 0.4], [4.0, 0.4]], dtype=np.float32)
+    viewer_client.add_swept_tool("shank", positions, axes, profile)
+    pts = np.random.default_rng(0).random((400, 3)).astype(np.float32)
+    viewer_client.add_points("cloud", pts)
+    time.sleep(0.4)  # let the binary HTTP loads land
+
+    n_frames = 11
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.linspace(0, 1.0, n_frames, dtype=np.float32))
+    # One channel covering both ids; values ramp 0 -> 1 so t=0.5 -> ~0.5.
+    ramp = np.tile(
+        np.linspace(0, 1, n_frames, dtype=np.float32).reshape(n_frames, 1), (1, 2)
+    )
+    anim.set_draw_range_data(["shank", "cloud"], ramp)
+    viewer_client.load_animation(anim, autoplay=False)
+    loaded = False
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._animation != null"):
+            loaded = True
+            break
+    assert loaded, "animation never loaded"
+    # Seek to mid-animation; the binary channel applier must set both draw ranges.
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    got = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objs = viewer_client.query_scene()["objects"]
+        shank = objs.get("shank", {}).get("drawRange")
+        cloud = objs.get("cloud", {}).get("drawRange")
+        if shank is not None and cloud is not None:
+            got = (shank, cloud)
+            if abs(shank - 0.5) < 0.1 and abs(cloud - 0.5) < 0.1:
+                break
+    assert got is not None, "objects never appeared"
+    assert abs(got[0] - 0.5) < 0.1, (
+        f"swept tool draw range did not advance via channel: {got[0]}"
+    )
+    assert abs(got[1] - 0.5) < 0.1, (
+        f"point cloud draw range did not advance via channel: {got[1]}"
+    )
+
+
+@pytest.mark.browser
+def test_flat_black_color_is_honored_not_falsy_substituted(viewer_client, viewer_page):
+    """color=0x000000 (no vertex colors) must render black, not the default —
+    guards the `data.color ?? default` (vs `||`) falsy-zero fix on points and
+    the swept tool."""
+    viewer_client.add_points(
+        "blackpts", np.zeros((10, 3), dtype=np.float32), color=0x000000
+    )
+    n = 6
+    positions = np.column_stack(
+        [np.linspace(0, 3, n), np.zeros(n), np.zeros(n)]
+    ).astype(np.float32)
+    axes = np.tile([0, 0, 1.0], (n, 1)).astype(np.float32)
+    profile = np.array([[0, 0.3], [2.0, 0.3]], dtype=np.float32)
+    viewer_client.add_swept_tool("blacktool", positions, axes, profile, color=0x000000)
+    got = None
+    for _ in range(40):
+        time.sleep(0.05)
+        got = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects;"
+            " const p = o.get('blackpts'), t = o.get('blacktool');"
+            " return p && t ? {pts: p.material.color.getHex(), tool: t.material.color.getHex()} : null;"
+            "}"
+        )
+        if got:
+            break
+    assert got is not None, "objects never landed"
+    assert got["pts"] == 0x000000, f"black point cloud rendered {got['pts']:#08x}"
+    assert got["tool"] == 0x000000, f"black swept tool rendered {got['tool']:#08x}"
