@@ -2695,3 +2695,58 @@ def test_fov_url_param_clamped_to_range(viewer_client, page, raw):
         "() => window.threejsViewer && window.threejsViewer._perspCamera"
     )
     assert _read_persp_fov(page) == (1 if raw == "-5" else 179)
+
+
+@pytest.mark.browser
+def test_clip_tool_has_refined_rotate_and_slide_gizmos(viewer_client, viewer_page):
+    """Enabling the clip tool brings up both gizmos (rotate + normal-slide), and
+    disabling it puts them away."""
+    viewer_client.add_sphere("s", radius=1.5)
+    time.sleep(0.2)
+    viewer_client.set_clipping_plane(
+        normal=[0.6, 0.2, 0.78], distance=0.0, show_helper=True
+    )
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " return {"
+            "  rotEnabled: v._clipGizmo.enabled,"
+            "  rotMode: v._clipGizmo.getMode(),"
+            "  rotVisible: v._clipGizmoHelper.visible,"
+            "  moveEnabled: v._clipMoveGizmo.enabled,"
+            "  moveMode: v._clipMoveGizmo.getMode(),"
+            "  moveVisible: v._clipMoveGizmoHelper.visible,"
+            "  moveSpace: v._clipMoveGizmo.space,"
+            "  moveShowX: v._clipMoveGizmo.showX,"
+            "  moveShowZ: v._clipMoveGizmo.showZ,"
+            " };"
+            "}"
+        )
+        if state and state["moveEnabled"]:
+            break
+    assert state is not None
+    assert state["rotEnabled"] and state["rotMode"] == "rotate" and state["rotVisible"]
+    # The plane-slide gizmo is a local-space, Z-only (normal) translate handle.
+    assert (
+        state["moveEnabled"]
+        and state["moveMode"] == "translate"
+        and state["moveVisible"]
+    )
+    assert state["moveSpace"] == "local"
+    assert state["moveShowX"] is False and state["moveShowZ"] is True
+
+    # Disabling the clip tool puts both gizmos away.
+    viewer_client.disable_clipping_plane()
+    off = None
+    for _ in range(40):
+        time.sleep(0.05)
+        off = viewer_page.evaluate(
+            "() => ({rot: window.threejsViewer._clipGizmo.enabled,"
+            " move: window.threejsViewer._clipMoveGizmo.enabled})"
+        )
+        if off and not off["move"]:
+            break
+    assert off is not None and not off["rot"] and not off["move"]
