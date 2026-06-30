@@ -332,8 +332,10 @@ function makeChannelApply(viewer) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
                 } else if (obj.userData.isParametricTube) {
                     applyParametricTubeDrawRange(obj, value);
-                } else if (obj.userData.isMesh) {
+                } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+                } else if (obj.userData.isPoints) {
+                    obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 }
             }
         },
@@ -3824,6 +3826,184 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
     }
 }
 
+// ========== Swept oriented tool body (5-axis shank/holder) ==========
+//
+// add_swept_tool decouples the extrusion axis from the path tangent: at each
+// station k a surface-of-revolution `profile` (height_along_axis, radius) is
+// revolved about the *tool axis* axes[k] — generally NOT the path tangent —
+// centred at positions[k], and consecutive stations are lofted into a swept
+// surface (the swept shank/holder of a tilting tool).
+//
+// Strategy (matches the issue recipe "loft rings ... connecting consecutive
+// stations into a quad strip + end caps"): for each densified profile level we
+// loft a ring of `sections` verts along the path (a per-level swept tube), and
+// cap the first/last station with the revolution silhouette. Straight profile
+// runs are densified in height so a sparse profile (e.g. a 2-row shank) still
+// sweeps a continuous wall instead of two rim circles. The linear loft can
+// pinch on the inside of a sharp axis swing — accepted (faithful surface, not
+// a boolean solid). Index order is station-major so set_draw_range reveals the
+// body progressively along the path.
+//
+// @param {Float32Array} stationPos  (N*3) tool reference point per station
+// @param {Float32Array} axisArr     (N*3) unit tool axis per station
+// @param {Float32Array} profileArr  (M*2) (height_along_axis, radius) rows
+// @param {number} sections          cross-section facets per ring (>= 3)
+// @param {Float32Array|null} ringColors  (N*3) per-station RGB in 0..1, or null
+// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number}}
+function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringColors) {
+    const N = stationPos.length / 3;
+    const M = profileArr.length / 2;
+
+    // --- Densify the profile in height so straight runs sweep a solid wall. ---
+    // The per-level loft connects same-level rings across stations only, so two
+    // far-apart levels at the same radius leave an unfilled band. Subdivide each
+    // segment so consecutive levels are no farther apart than `step`.
+    let maxR = 0;
+    for (let m = 0; m < M; m++) maxR = Math.max(maxR, profileArr[m * 2 + 1]);
+    const totalH = Math.abs(profileArr[(M - 1) * 2] - profileArr[0]) || maxR || 1;
+    // ~ up to a few dozen levels; keep the wall smooth without exploding verts.
+    const step = Math.max((maxR || totalH) * 0.5, totalH / 48, 1e-6);
+    /** @type {number[]} */ const ph = []; // densified heights
+    /** @type {number[]} */ const pr = []; // densified radii
+    for (let m = 0; m < M - 1; m++) {
+        const h0 = profileArr[m * 2], r0 = profileArr[m * 2 + 1];
+        const h1 = profileArr[(m + 1) * 2], r1 = profileArr[(m + 1) * 2 + 1];
+        const segLen = Math.hypot(h1 - h0, r1 - r0);
+        const sub = Math.max(1, Math.min(64, Math.ceil(segLen / step)));
+        for (let s = 0; s < sub; s++) {
+            const t = s / sub;
+            ph.push(h0 + (h1 - h0) * t);
+            pr.push(r0 + (r1 - r0) * t);
+        }
+    }
+    ph.push(profileArr[(M - 1) * 2]);
+    pr.push(profileArr[(M - 1) * 2 + 1]);
+    const L = ph.length; // densified level count
+
+    // --- Per-station orthonormal frame (u, v) perpendicular to the tool axis. ---
+    // Constant-up derivation (V anchored to global +Z, X fallback near-vertical),
+    // mirroring the tube's frame logic so rings don't twist between stations.
+    const ux = new Float32Array(N), uy = new Float32Array(N), uz = new Float32Array(N);
+    const vx = new Float32Array(N), vy = new Float32Array(N), vz = new Float32Array(N);
+    for (let k = 0; k < N; k++) {
+        const ax = axisArr[k * 3], ay = axisArr[k * 3 + 1], az = axisArr[k * 3 + 2];
+        // up = +Z unless the axis is near-parallel to it, then fall back to +X.
+        let upx = 0, upy = 0, upz = 1;
+        if (Math.abs(az) > 0.99) { upx = 1; upy = 0; upz = 0; }
+        // u = normalize(up × axis)
+        let cx = upy * az - upz * ay;
+        let cy = upz * ax - upx * az;
+        let cz = upx * ay - upy * ax;
+        let cl = Math.hypot(cx, cy, cz) || 1;
+        cx /= cl; cy /= cl; cz /= cl;
+        ux[k] = cx; uy[k] = cy; uz[k] = cz;
+        // v = axis × u  (already unit, axis ⟂ u)
+        vx[k] = ay * cz - az * cy;
+        vy[k] = az * cx - ax * cz;
+        vz[k] = ax * cy - ay * cx;
+    }
+
+    // --- Vertices: N stations × L levels × sections, ring-major. ---
+    const ringCount = N * L;
+    const positions = new Float32Array(ringCount * sections * 3);
+    /** @type {Float32Array|null} */
+    const colors = ringColors ? new Float32Array(ringCount * sections * 3) : null;
+    const cosT = new Float32Array(sections), sinT = new Float32Array(sections);
+    for (let s = 0; s < sections; s++) {
+        const a = (s / sections) * Math.PI * 2;
+        cosT[s] = Math.cos(a); sinT[s] = Math.sin(a);
+    }
+    for (let k = 0; k < N; k++) {
+        const px = stationPos[k * 3], py = stationPos[k * 3 + 1], pz = stationPos[k * 3 + 2];
+        const ax = axisArr[k * 3], ay = axisArr[k * 3 + 1], az = axisArr[k * 3 + 2];
+        const uxk = ux[k], uyk = uy[k], uzk = uz[k];
+        const vxk = vx[k], vyk = vy[k], vzk = vz[k];
+        const cr = colors ? ringColors[k * 3] : 0;
+        const cg = colors ? ringColors[k * 3 + 1] : 0;
+        const cb = colors ? ringColors[k * 3 + 2] : 0;
+        for (let l = 0; l < L; l++) {
+            const h = ph[l], r = pr[l];
+            // ring centre = station + h·axis
+            const ccx = px + h * ax, ccy = py + h * ay, ccz = pz + h * az;
+            const ringBase = ((k * L + l) * sections) * 3;
+            for (let s = 0; s < sections; s++) {
+                const rc = r * cosT[s], rs = r * sinT[s];
+                const o = ringBase + s * 3;
+                positions[o] = ccx + rc * uxk + rs * vxk;
+                positions[o + 1] = ccy + rc * uyk + rs * vyk;
+                positions[o + 2] = ccz + rc * uzk + rs * vzk;
+                if (colors) { colors[o] = cr; colors[o + 1] = cg; colors[o + 2] = cb; }
+            }
+        }
+    }
+
+    // --- Indices. Station-major so draw_range advances along the path. ---
+    // Side faces: per level l, connect station k ring to station k+1 ring.
+    const indicesPerRingPair = L * sections * 6;
+    const ringPairCount = N - 1;
+    // End caps: revolution wall (L-1 bands) + a fan for any open end ring.
+    const r0End = pr[0], r1End = pr[L - 1];
+    const capBandsPerEnd = (L - 1) * sections * 6;
+    const cap0Fan = r0End > 1e-9 ? sections * 3 : 0;
+    const cap1Fan = r1End > 1e-9 ? sections * 3 : 0;
+    const capIndexCount = 2 * capBandsPerEnd + cap0Fan + cap1Fan;
+    const indices = new Uint32Array(ringPairCount * indicesPerRingPair + capIndexCount);
+    let w = 0;
+    const ringStart = (k, l) => (k * L + l) * sections;
+    // Side loft (station-major).
+    for (let k = 0; k < N - 1; k++) {
+        for (let l = 0; l < L; l++) {
+            const a0 = ringStart(k, l), b0 = ringStart(k + 1, l);
+            for (let s = 0; s < sections; s++) {
+                const s1 = (s + 1) % sections;
+                const a = a0 + s, an = a0 + s1, b = b0 + s, bn = b0 + s1;
+                indices[w++] = a; indices[w++] = b; indices[w++] = bn;
+                indices[w++] = a; indices[w++] = bn; indices[w++] = an;
+            }
+        }
+    }
+    // End-cap revolution walls + fans. Appended after the side faces so a
+    // partial draw_range grows the body before the far cap appears.
+    const addCap = (k, flip) => {
+        for (let l = 0; l < L - 1; l++) {
+            const a0 = ringStart(k, l), b0 = ringStart(k, l + 1);
+            for (let s = 0; s < sections; s++) {
+                const s1 = (s + 1) % sections;
+                const a = a0 + s, an = a0 + s1, b = b0 + s, bn = b0 + s1;
+                if (!flip) {
+                    indices[w++] = a; indices[w++] = b; indices[w++] = bn;
+                    indices[w++] = a; indices[w++] = bn; indices[w++] = an;
+                } else {
+                    indices[w++] = a; indices[w++] = bn; indices[w++] = b;
+                    indices[w++] = a; indices[w++] = an; indices[w++] = bn;
+                }
+            }
+        }
+    };
+    const addFan = (k, l, flip) => {
+        // Fan the open ring at level l to its centre (a fresh vertex appended
+        // to positions/colors is avoided by triangulating around vertex 0).
+        const base = ringStart(k, l);
+        for (let s = 1; s < sections - 1; s++) {
+            const a = base, b = base + s, c = base + s + 1;
+            if (!flip) { indices[w++] = a; indices[w++] = b; indices[w++] = c; }
+            else { indices[w++] = a; indices[w++] = c; indices[w++] = b; }
+        }
+    };
+    addCap(0, true);             // start cap faces inward (toward -path)
+    addCap(N - 1, false);        // end cap faces outward
+    if (cap0Fan) addFan(0, 0, true);
+    if (cap1Fan) addFan(N - 1, L - 1, false);
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeVertexNormals();
+    geometry.setDrawRange(0, indices.length);
+    return { geometry, ringPairCount, indicesPerRingPair, capIndexCount };
+}
+
 // ========== Depth cues (depth perception for flat white line drawings) ==========
 //
 // For very dense / complex toolpaths the caller falls back to flat line
@@ -6340,15 +6520,16 @@ export class ThreeJSViewer {
 
     _updateClipSliderRange() {
         this._bbox.makeEmpty();
-        this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.geometry) return;
-            if (this._isClipHelper(child)) return;
-            if (child === this._gridHelper) return;
-            child.updateWorldMatrix(true, false);
-            const geo = child.geometry;
-            if (!geo.boundingBox) geo.computeBoundingBox();
-            this._bbox.expandByObject(child);
-        });
+        // Bound the clip range to the user's CONTENT (this._objects) only. Traversing
+        // the whole scene graph pulled in gizmo geometry — TransformControls pickers
+        // have axis lines out to ±1e6 and a ±50000 plane — which blew the slider range
+        // up to the millions. Real content (meshes, point clouds, tubes) lives in
+        // this._objects; gizmos, grid, pivot and nav helpers do not.
+        for (const obj of this._objects.values()) {
+            if (!obj || this._isClipHelper(obj)) continue;
+            obj.updateWorldMatrix(true, true);
+            this._bbox.expandByObject(obj);
+        }
         if (this._bbox.isEmpty()) return;
         const n = this._clipPlane.normal;
         const corners = [
@@ -6857,7 +7038,7 @@ export class ThreeJSViewer {
             obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
         } else if (obj.userData.isParametricTube) {
             applyParametricTubeDrawRange(obj, value);
-        } else if (obj.userData.isMesh) {
+        } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         } else if (obj.userData.isPoints) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
@@ -8009,7 +8190,7 @@ export class ThreeJSViewer {
                                 } else if (obj.userData.isPolyline) {
                                     const max = obj.userData.maxInstanceCount;
                                     drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
-                                } else if (obj.userData.isMesh || obj.userData.isParametricTube) {
+                                } else if (obj.userData.isMesh || obj.userData.isParametricTube || obj.userData.isSweptTool) {
                                     const total = obj.userData.totalIndexCount;
                                     if (total > 0) {
                                         const cnt = geom.drawRange.count;
@@ -8390,6 +8571,10 @@ export class ThreeJSViewer {
                                 points.name = data.id;
                                 points.userData.id = data.id;
                                 points.userData.isPoints = true;
+                                // Join the EDL depth pre-pass so eye-dome lighting
+                                // sculpts the point cloud (Potree / jeroen's-huis
+                                // "depth trick"), not just polylines.
+                                points.layers.enable(EDL_LINE_LAYER);
                                 points.userData.totalPointCount = numPoints;
                                 // setDrawRange counts vertices for THREE.Points, so a
                                 // draw_range fraction reveals the leading frac*N points.
@@ -8890,6 +9075,90 @@ export class ThreeJSViewer {
                                 console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                             } catch (e) {
                                 console.error(`Error creating parametric_tube:`, e);
+                                deferred.reject(e);
+                            } finally {
+                                if (this._inflightLoads.get(data.id) === deferred) {
+                                    this._inflightLoads.delete(data.id);
+                                }
+                                this._onFetchEnd();
+                            }
+                        })();
+                        break;
+                    }
+                    case 'add_swept_tool_binary': {
+                        this._onFetchStart();
+                        const capturedScene = this._sceneGeneration;
+                        const loadToken = this._claimLoadToken(data.id);
+                        const deferred = this._makeDeferred();
+                        deferred.promise.catch(() => {});
+                        this._inflightLoads.set(data.id, deferred);
+                        (async () => {
+                            try {
+                                const resp = await fetch(data.blob_url);
+                                const buffer = await resp.arrayBuffer();
+                                if (this._sceneGeneration !== capturedScene) {
+                                    console.log('Discarding stale swept-tool fetch');
+                                    deferred.reject(new Error('stale'));
+                                    return;
+                                }
+                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                                    console.log(`Discarding stale swept-tool fetch for '${data.id}'`);
+                                    deferred.reject(new Error('stale'));
+                                    return;
+                                }
+                                const nStations = data.numStations;
+                                const nProfile = data.numProfile;
+                                const sections = data.sections || 16;
+                                let offset = 0;
+                                const stationPos = new Float32Array(buffer, offset, nStations * 3);
+                                offset += nStations * 3 * 4;
+                                const axisArr = new Float32Array(buffer, offset, nStations * 3);
+                                offset += nStations * 3 * 4;
+                                const profileArr = new Float32Array(buffer, offset, nProfile * 2);
+                                offset += nProfile * 2 * 4;
+                                /** @type {Float32Array|null} */
+                                let ringColors = null;
+                                if (data.hasColors) {
+                                    const packed = new Uint32Array(buffer, offset, nStations);
+                                    offset += nStations * 4;
+                                    ringColors = new Float32Array(nStations * 3);
+                                    for (let i = 0; i < nStations; i++) {
+                                        const c = packed[i];
+                                        ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
+                                        ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                        ringColors[i * 3 + 2] = (c & 0xff) / 255;
+                                    }
+                                }
+                                const hasColors = !!ringColors;
+                                const { geometry } = buildSweptToolGeometry(
+                                    stationPos, axisArr, profileArr, sections, ringColors,
+                                );
+                                const opacity = data.opacity !== undefined ? data.opacity : 1;
+                                const material = new THREE.MeshStandardMaterial({
+                                    color: hasColors ? 0xffffff : (data.color || 0x9aa0a6),
+                                    metalness: data.metalness !== undefined ? data.metalness : 0.3,
+                                    roughness: data.roughness !== undefined ? data.roughness : 0.6,
+                                    opacity,
+                                    transparent: opacity < 1,
+                                    depthWrite: opacity >= 1,
+                                    side: THREE.DoubleSide,
+                                    vertexColors: hasColors,
+                                    clippingPlanes: this._activeClippingPlanes(),
+                                });
+                                const mesh = new THREE.Mesh(geometry, material);
+                                mesh.name = data.id;
+                                mesh.userData.id = data.id;
+                                mesh.userData.isSweptTool = true;
+                                mesh.userData.totalIndexCount = geometry.getIndex().count;
+                                this._deleteObject(data.id, { preserveInflight: true });
+                                this._addToParentOrScene(mesh, data.parent);
+                                this._objects.set(data.id, mesh);
+                                this._objGeneration++;
+                                if (data.transform) this._applyTransform(mesh, data.transform);
+                                deferred.resolve();
+                                console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
+                            } catch (e) {
+                                console.error(`Error creating swept_tool:`, e);
                                 deferred.reject(e);
                             } finally {
                                 if (this._inflightLoads.get(data.id) === deferred) {

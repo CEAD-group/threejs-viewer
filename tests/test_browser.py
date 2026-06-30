@@ -304,6 +304,50 @@ def test_set_draw_range_on_points(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_add_swept_tool_appears_in_scene(viewer_client, viewer_page):
+    """add_swept_tool lofts an oriented tool-body mesh into the scene."""
+    n = 30
+    t = np.linspace(0, 1, n)
+    positions = np.column_stack([t * 6 - 3, np.sin(t * 6), 0 * t]).astype(np.float32)
+    lean = 0.6 * np.sin(t * 6)
+    axes = np.column_stack([np.sin(lean), 0 * t, np.cos(lean)]).astype(np.float32)
+    profile = np.array([[0, 0.0], [0.5, 0.5], [0.5, 0.4], [4.0, 0.4]], dtype=np.float32)
+    viewer_client.add_swept_tool("shank", positions, axes, profile, sections=16)
+    obj = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "shank" in objects:
+            obj = objects["shank"]
+            break
+    assert obj is not None, "swept tool never landed in the scene"
+    assert obj["type"] == "Mesh"
+
+
+@pytest.mark.browser
+def test_set_draw_range_on_swept_tool(viewer_client, viewer_page):
+    """set_draw_range reveals the swept tool body progressively along the path."""
+    n = 30
+    t = np.linspace(0, 1, n)
+    positions = np.column_stack([t * 6 - 3, 0 * t, 0 * t]).astype(np.float32)
+    axes = np.tile([0, 0, 1.0], (n, 1)).astype(np.float32)
+    profile = np.array([[0, 0.4], [4.0, 0.4]], dtype=np.float32)
+    viewer_client.add_swept_tool("shank", positions, axes, profile)
+    viewer_client.set_draw_range("shank", 0.5)
+    dr = None
+    for _ in range(40):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "shank" in objects:
+            dr = objects["shank"]["drawRange"]
+            if abs(dr - 0.5) < 0.05:
+                break
+    assert dr is not None and abs(dr - 0.5) < 0.05, (
+        f"expected drawRange ~0.5, got {dr!r}"
+    )
+
+
+@pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
     viewer_client.add_box("a")

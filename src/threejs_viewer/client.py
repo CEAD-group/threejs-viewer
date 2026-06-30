@@ -1299,6 +1299,140 @@ class ViewerClient:
         }
         self._send_binary(header, color_arr.tobytes())
 
+    def add_swept_tool(
+        self,
+        id: str,
+        positions: np.ndarray,
+        axes: np.ndarray,
+        profile: np.ndarray,
+        colors: Optional[np.ndarray] = None,
+        sections: int = 16,
+        color: int = 0x9AA0A6,
+        opacity: float = 1.0,
+        metalness: float = 0.3,
+        roughness: float = 0.6,
+        parent: Optional[str] = None,
+        position: Optional[list] = None,
+        rotation: Optional[list] = None,
+        scale: Optional[list] = None,
+        matrix: Optional[list] = None,
+    ) -> None:
+        """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
+
+        Unlike :meth:`add_parametric_tube` — whose cross-section is always
+        perpendicular to the spine tangent — this primitive **decouples the
+        extrusion axis from the path tangent**: at every station ``k`` a
+        surface-of-revolution profile is lofted about the *tool axis*
+        ``axes[k]`` (generally NOT the path tangent), centred at
+        ``positions[k]``, and consecutive stations are connected into a
+        swept surface. This visualizes the swept **shank/holder** of a
+        tilting 5-axis tool — revealing tool-axis reorientation rate
+        ("wrist speed") and tool-body collisions that the cutting-tip
+        envelope can't show.
+
+        The profile (a ``(height_along_axis, radius)`` silhouette) is
+        revolved about ``axes[k]`` and lofted along the path; a stepped
+        ``[[0, R_ball], [R_ball, rs], [R_ball + L, rs]]`` profile gives a
+        ball + shank + holder in one call. Straight runs of the silhouette
+        are densified on the client so a sparse profile still sweeps a
+        continuous wall.
+
+        Args:
+            id: Unique identifier.
+            positions: (N, 3) float32 tool reference point per station
+                (TCP / tip / ball centre), N >= 2.
+            axes: (N, 3) float32 unit tool axis per station (tip -> holder).
+                Normalized on the client; a zero axis is an error.
+            profile: (M, 2) float32 ``(height_along_axis, radius)`` pairs,
+                M >= 2, ascending in height. Radii must be >= 0.
+            colors: Optional (N,) uint32 packed ``0x00RRGGBB``, one color per
+                station (e.g. reorientation rate or shank clearance mapped to
+                a heatmap). Linearly interpolated along the path.
+            sections: Cross-section facets per ring (>= 3). Default 16.
+            color: Fallback color when ``colors`` is not provided.
+            opacity: Material opacity; ``< 1`` makes the tool translucent so
+                the part shows through for collision reads.
+            metalness, roughness: Standard PBR material properties.
+            parent: Optional parent group id.
+            position/rotation/scale/matrix: Optional local transform.
+
+        Reveal the swept body progressively along the path with
+        :meth:`set_draw_range` or the ``draw_ranges`` animation channel.
+
+        Note:
+            The linear loft between consecutive oriented rings can pinch /
+            self-intersect on the inside of a sharp tool-axis swing — a
+            faithful-enough swept surface, not a boolean solid. Tool-body
+            picking and LOD are not wired for this primitive.
+        """
+        pos_arr = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3)
+        n = pos_arr.shape[0]
+        if n < 2:
+            raise ValueError(f"add_swept_tool needs >= 2 stations, got {n}")
+
+        axes_arr = np.ascontiguousarray(axes, dtype=np.float32).reshape(-1, 3)
+        if axes_arr.shape[0] != n:
+            raise ValueError(f"axes must have length {n}, got {axes_arr.shape[0]}")
+        norms = np.linalg.norm(axes_arr, axis=1)
+        if not np.all(np.isfinite(axes_arr)) or np.any(norms == 0):
+            raise ValueError("axes must be finite, non-zero vectors at every station")
+        axes_arr = (axes_arr / norms[:, np.newaxis]).astype(np.float32)
+
+        profile_arr = np.ascontiguousarray(profile, dtype=np.float32).reshape(-1, 2)
+        m = profile_arr.shape[0]
+        if m < 2:
+            raise ValueError(f"profile needs >= 2 (height, radius) rows, got {m}")
+        if not np.all(np.isfinite(profile_arr)) or np.any(profile_arr[:, 1] < 0):
+            raise ValueError("profile heights/radii must be finite and radii >= 0")
+
+        sections = int(sections)
+        if sections < 3:
+            raise ValueError(f"sections must be >= 3, got {sections}")
+
+        color_arr_in: Optional[np.ndarray] = None
+        if colors is not None:
+            color_arr_in = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
+            if color_arr_in.shape[0] != n:
+                raise ValueError(
+                    f"colors must have length {n}, got {color_arr_in.shape[0]}"
+                )
+
+        parts = [
+            pos_arr.tobytes(),
+            axes_arr.tobytes(),
+            profile_arr.tobytes(),
+        ]
+        has_colors = color_arr_in is not None
+        if has_colors:
+            parts.append(color_arr_in.tobytes())
+
+        header = {
+            "type": "add_swept_tool_binary",
+            "id": id,
+            "numStations": n,
+            "numProfile": m,
+            "sections": sections,
+            "hasColors": has_colors,
+            "color": color,
+            "opacity": opacity,
+            "metalness": metalness,
+            "roughness": roughness,
+        }
+        if parent:
+            header["parent"] = parent
+        if matrix:
+            header["transform"] = {"matrix": matrix}
+        elif position or rotation or scale:
+            transform = {}
+            if position:
+                transform["position"] = position
+            if rotation:
+                transform["rotation"] = rotation
+            if scale:
+                transform["scale"] = scale
+            header["transform"] = transform
+        self._send_binary(header, b"".join(parts))
+
     def update_polyline_colors(
         self,
         id: str,
