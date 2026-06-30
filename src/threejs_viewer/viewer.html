@@ -4559,6 +4559,7 @@ class CameraController {
         v._controls.target.copy(tgt);
         v._controls.update();
         v._clipGizmo.camera = v._camera;
+        v._clipMoveGizmo.camera = v._camera;
         v._setGizmoHoverSprite(null);
         v._viewHelper = new ViewHelper(v._camera, v._renderer.domElement);
         v._viewHelper.center = v._controls.target;
@@ -6236,6 +6237,142 @@ function ghostGizmoMaterial(src) {
     return m;
 }
 
+// One-time structural refinement of a TransformControls' stock handles (the
+// per-frame `restyleGizmoHelper` only re-themes/resizes what survives this).
+// Shared by the move/rotate gizmo (TransformGizmoController) and the clipping
+// tool's rotate + plane-slide gizmos so all of them get the same refined look.
+// Two parts:
+//   1. Slim the rotate gizmo down to just the three coloured axis rings —
+//      remove the bulky outer screen-space ring (`E`), the gray full-circle
+//      backdrop (`XYZE`, the "double circle"), and the gray `AXIS` helper line.
+//   2. Give the translate arrowheads real shading: the stock arrows use a flat
+//      unlit `MeshBasicMaterial`, so the cones read as 2D triangles. Swap to a
+//      lit `MeshStandardMaterial` tinted to the axis colour so scene lighting /
+//      environment sculpt the cone. The lib's per-frame re-theme + highlight
+//      only touch `.color`/`.opacity` (which Standard supports), so they keep
+//      working; `restyleGizmoHelper` re-applies our `_color` each frame regardless.
+/** @param {any} control  a THREE TransformControls */
+function refineGizmoHandles(control) {
+    const gm = control._gizmo;
+    if (!gm) return;
+    for (const grp of [gm.gizmo && gm.gizmo.rotate, gm.picker && gm.picker.rotate]) {
+        if (!grp) continue;
+        for (const child of grp.children.slice()) {
+            if (child.name === 'E' || child.name === 'XYZE') grp.remove(child);
+        }
+    }
+    const helperRot = gm.helper && gm.helper.rotate;
+    if (helperRot) {
+        for (const child of helperRot.children.slice()) {
+            if (child.name === 'AXIS') helperRot.remove(child);
+        }
+    }
+    const arrows = gm.gizmo && gm.gizmo.translate;
+    if (arrows) {
+        for (const o of arrows.children) {
+            const hex = gizmoAxisColor(o.name);
+            // Single-axis handles only (X/Y/Z arrows + shaft); skip plane chips
+            // and the centre, which stay flat/transparent.
+            if (hex == null || o.name.length !== 1 || o.userData.__litArrow) continue;
+            o.userData.__litArrow = true;
+            const col = gizmoColor(hex);
+            const lit = /** @type {any} */ (new THREE.MeshStandardMaterial({
+                color: col.clone(),
+                emissive: col.clone().multiplyScalar(0.1),  // small floor so the dark side keeps its hue
+                roughness: 0.28,                             // a touch glossy → a highlight that sells the curve
+                metalness: 0.0,
+                transparent: true,
+                opacity: 0.95,
+                depthTest: false,
+                depthWrite: false,
+                toneMapped: false,
+            }));
+            lit._color = col.clone();
+            lit._opacity = 0.95;
+            o.material = lit;
+        }
+    }
+}
+
+// Refined look for one gizmo helper's handles. Runs every frame (cheap traverse)
+// so our resting palette survives TransformControls' per-frame re-theme; the
+// plane resize + margin + outline are guarded (via `sizedPlanes`) so they only
+// happen once per handle. Shared by the move gizmo and the clipping gizmos.
+/** @param {any} helper  a TransformControls helper Object3D
+ *  @param {WeakSet<object>} sizedPlanes  per-gizmo guard set for the one-time plane resize */
+function restyleGizmoHelper(helper, sizedPlanes) {
+    helper.traverse((/** @type {any} */ o) => {
+        const m = o.material;
+        if (!m || o.userData.__gizmoOutline) return;
+        const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
+        // Enlarge both the visible plane chip and its invisible picker so the
+        // clickable area matches the larger visual, then push the chip outward
+        // along its own offset direction so the three planes leave a margin
+        // around the gizmo centre instead of all meeting at the origin. Scale
+        // about the geometry's own centroid because the stock handle bakes its
+        // corner offset into the geometry.
+        if (planar && !sizedPlanes.has(o)) {
+            sizedPlanes.add(o);
+            const geo = o.geometry;
+            geo.computeBoundingBox();
+            const c = new THREE.Vector3();
+            geo.boundingBox.getCenter(c);
+            const size = new THREE.Vector3();
+            geo.boundingBox.getSize(size);
+            geo.translate(-c.x, -c.y, -c.z);
+            // The stock chip is a thin BOX (depth 0.01), which reads as a 3D
+            // slab — its sides catch light and its edge outline draws a back
+            // rectangle too. Scale the two broad axes up, but collapse the thin
+            // (normal) axis to zero so the chip is a flat quad. The thin axis is
+            // whichever bbox dimension is smallest (it varies per chip — the box
+            // is pre-rotated, baked into geometry — so detect it, don't hardcode).
+            const minDim = Math.min(size.x, size.y, size.z);
+            geo.scale(
+                size.x === minDim ? 0 : GIZMO_PLANE_SCALE,
+                size.y === minDim ? 0 : GIZMO_PLANE_SCALE,
+                size.z === minDim ? 0 : GIZMO_PLANE_SCALE,
+            );
+            const len = c.length();
+            if (len > 1e-6) {
+                const f = (len + GIZMO_PLANE_MARGIN) / len;   // push centroid out by the margin
+                geo.translate(c.x * f, c.y * f, c.z * f);
+            } else {
+                geo.translate(c.x, c.y, c.z);
+            }
+        }
+        // Pickers live in a permanently-hidden group (and the non-current
+        // mode's gizmo handles in a hidden one): resized above so the hit area
+        // matches, but not recoloured / outlined. `matInvisible` is opacity-
+        // based, not `visible:false`, so test the parent group — an outline on
+        // a picker would be raycast-hit before the chip and report an empty
+        // axis, breaking plane-chip dragging.
+        if (!o.parent || o.parent.visible === false) return;
+        const hex = gizmoAxisColor(o.name);
+        if (hex == null) return;
+        const col = gizmoColor(hex);              // cached; do not mutate
+        m._color = (m._color || new THREE.Color()).copy(col);
+        m.color.copy(col);
+        if (planar) {
+            m._opacity = 0.22; m.opacity = 0.22; m.transparent = true;
+            if (!o.userData.__hasOutline) {
+                o.userData.__hasOutline = true;
+                const edge = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(o.geometry),
+                    new THREE.LineBasicMaterial({
+                        color: col.clone().offsetHSL(0, 0, 0.18),
+                        transparent: true, opacity: 0.95, depthTest: false, depthWrite: false,
+                    })
+                );
+                edge.renderOrder = 1000;
+                edge.userData.__gizmoOutline = true;
+                o.add(edge);
+            }
+        } else {
+            m._opacity = 0.92; m.opacity = 0.92; m.transparent = true;
+        }
+    });
+}
+
 // One TransformControls instance bound to (at most) one object — the unit the
 // controller manages. The controller owns a `_primary` interactive gizmo (the
 // click-select / `enable({id})` target, always present so the legacy
@@ -6478,125 +6615,15 @@ class TransformGizmoController {
     //      environment sculpt the cone. The lib's per-frame re-theme + highlight
     //      only touch `.color`/`.opacity` (which Standard supports), so they keep
     //      working; `_restyleGizmo` re-applies our `_color` each frame regardless.
+    // Thin wrappers over the shared free helpers (also used by the clip gizmos).
     /** @param {Gizmo} g */
-    _refineHandles(g) {
-        const gm = /** @type {any} */ (g.control)._gizmo;
-        if (!gm) return;
-        for (const grp of [gm.gizmo && gm.gizmo.rotate, gm.picker && gm.picker.rotate]) {
-            if (!grp) continue;
-            for (const child of grp.children.slice()) {
-                if (child.name === 'E' || child.name === 'XYZE') grp.remove(child);
-            }
-        }
-        const helperRot = gm.helper && gm.helper.rotate;
-        if (helperRot) {
-            for (const child of helperRot.children.slice()) {
-                if (child.name === 'AXIS') helperRot.remove(child);
-            }
-        }
-        const arrows = gm.gizmo && gm.gizmo.translate;
-        if (arrows) {
-            for (const o of arrows.children) {
-                const hex = gizmoAxisColor(o.name);
-                // Single-axis handles only (X/Y/Z arrows + shaft); skip plane chips
-                // and the centre, which stay flat/transparent.
-                if (hex == null || o.name.length !== 1 || o.userData.__litArrow) continue;
-                o.userData.__litArrow = true;
-                const col = gizmoColor(hex);
-                const lit = /** @type {any} */ (new THREE.MeshStandardMaterial({
-                    color: col.clone(),
-                    emissive: col.clone().multiplyScalar(0.1),  // small floor so the dark side keeps its hue
-                    roughness: 0.28,                             // a touch glossy → a highlight that sells the curve
-                    metalness: 0.0,
-                    transparent: true,
-                    opacity: 0.95,
-                    depthTest: false,
-                    depthWrite: false,
-                    toneMapped: false,
-                }));
-                lit._color = col.clone();
-                lit._opacity = 0.95;
-                o.material = lit;
-            }
-        }
-    }
+    _refineHandles(g) { refineGizmoHandles(g.control); }
 
     // Refined look for one gizmo's handles. Runs every frame (cheap traverse) so
     // our resting palette survives TransformControls' per-frame re-theme; the
     // plane resize + margin + outline are guarded so they only happen once per handle.
     /** @param {Gizmo} g */
-    _restyleGizmo(g) {
-        g.helper.traverse((/** @type {any} */ o) => {
-            const m = o.material;
-            if (!m || o.userData.__gizmoOutline) return;
-            const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
-            // Enlarge both the visible plane chip and its invisible picker so the
-            // clickable area matches the larger visual, then push the chip outward
-            // along its own offset direction so the three planes leave a margin
-            // around the gizmo centre instead of all meeting at the origin. Scale
-            // about the geometry's own centroid because the stock handle bakes its
-            // corner offset into the geometry.
-            if (planar && !g._sizedPlanes.has(o)) {
-                g._sizedPlanes.add(o);
-                const geo = o.geometry;
-                geo.computeBoundingBox();
-                const c = new THREE.Vector3();
-                geo.boundingBox.getCenter(c);
-                const size = new THREE.Vector3();
-                geo.boundingBox.getSize(size);
-                geo.translate(-c.x, -c.y, -c.z);
-                // The stock chip is a thin BOX (depth 0.01), which reads as a 3D
-                // slab — its sides catch light and its edge outline draws a back
-                // rectangle too. Scale the two broad axes up, but collapse the thin
-                // (normal) axis to zero so the chip is a flat quad. The thin axis is
-                // whichever bbox dimension is smallest (it varies per chip — the box
-                // is pre-rotated, baked into geometry — so detect it, don't hardcode).
-                const minDim = Math.min(size.x, size.y, size.z);
-                geo.scale(
-                    size.x === minDim ? 0 : GIZMO_PLANE_SCALE,
-                    size.y === minDim ? 0 : GIZMO_PLANE_SCALE,
-                    size.z === minDim ? 0 : GIZMO_PLANE_SCALE,
-                );
-                const len = c.length();
-                if (len > 1e-6) {
-                    const f = (len + GIZMO_PLANE_MARGIN) / len;   // push centroid out by the margin
-                    geo.translate(c.x * f, c.y * f, c.z * f);
-                } else {
-                    geo.translate(c.x, c.y, c.z);
-                }
-            }
-            // Pickers live in a permanently-hidden group (and the non-current
-            // mode's gizmo handles in a hidden one): resized above so the hit area
-            // matches, but not recoloured / outlined. `matInvisible` is opacity-
-            // based, not `visible:false`, so test the parent group — an outline on
-            // a picker would be raycast-hit before the chip and report an empty
-            // axis, breaking plane-chip dragging.
-            if (!o.parent || o.parent.visible === false) return;
-            const hex = gizmoAxisColor(o.name);
-            if (hex == null) return;
-            const col = gizmoColor(hex);              // cached; do not mutate
-            m._color = (m._color || new THREE.Color()).copy(col);
-            m.color.copy(col);
-            if (planar) {
-                m._opacity = 0.22; m.opacity = 0.22; m.transparent = true;
-                if (!o.userData.__hasOutline) {
-                    o.userData.__hasOutline = true;
-                    const edge = new THREE.LineSegments(
-                        new THREE.EdgesGeometry(o.geometry),
-                        new THREE.LineBasicMaterial({
-                            color: col.clone().offsetHSL(0, 0, 0.18),
-                            transparent: true, opacity: 0.95, depthTest: false, depthWrite: false,
-                        })
-                    );
-                    edge.renderOrder = 1000;
-                    edge.userData.__gizmoOutline = true;
-                    o.add(edge);
-                }
-            } else {
-                m._opacity = 0.92; m.opacity = 0.92; m.transparent = true;
-            }
-        });
-    }
+    _restyleGizmo(g) { restyleGizmoHelper(g.helper, g._sizedPlanes); }
 
     // Drop a translucent clone of the dragged object at its grab-time world pose,
     // parented to the scene root so it stays put while the object moves. The clone
@@ -7463,6 +7490,21 @@ class ThreeJSViewer {
         this._clipAnchor.add(this._clipRing2);
 
         // TransformControls for rotating the plane
+        // Temp vectors for gizmo sync
+        this._zAxis = new THREE.Vector3();
+        this._localZ = new THREE.Vector3(0, 0, 1);
+
+        // The clip tool carries two gizmos on the same anchor, both wearing the
+        // refined look shared with the move/rotate gizmo (slim rotate rings,
+        // shaded translate cone): a ROTATE gizmo to tilt the plane normal, and a
+        // Z-only TRANSLATE gizmo (local space, so its arrow follows the current
+        // normal) to slide the plane along that normal. Both report through the
+        // same _syncClipFromGizmo handler. Per-gizmo Sets guard the one-time
+        // plane-chip resize inside restyleGizmoHelper (no chips show here, but
+        // the helper expects a Set).
+        this._clipRotSizedPlanes = new WeakSet();
+        this._clipMoveSizedPlanes = new WeakSet();
+
         this._clipGizmo = new TransformControls(this._camera, this._renderer.domElement);
         this._clipGizmo.attach(this._clipAnchor);
         this._clipGizmo.setMode('rotate');
@@ -7470,38 +7512,54 @@ class ThreeJSViewer {
         this._clipGizmoHelper = this._clipGizmo.getHelper();
         this._clipGizmoHelper.visible = false;
         this._scene.add(this._clipGizmoHelper);
+        refineGizmoHandles(this._clipGizmo);  // slim to the three coloured rings
 
-        // Disable orbit while dragging gizmo
-        this._clipGizmo.addEventListener('dragging-changed', (e) => {
-            this._controls.enabled = !e.value;
-        });
+        this._clipMoveGizmo = new TransformControls(this._camera, this._renderer.domElement);
+        this._clipMoveGizmo.attach(this._clipAnchor);
+        this._clipMoveGizmo.setMode('translate');
+        this._clipMoveGizmo.setSpace('local');   // Z arrow follows the plane normal
+        this._clipMoveGizmo.showX = false;        // 1-DOF rail along the normal
+        this._clipMoveGizmo.showY = false;
+        this._clipMoveGizmo.enabled = false;
+        this._clipMoveGizmoHelper = this._clipMoveGizmo.getHelper();
+        this._clipMoveGizmoHelper.visible = false;
+        this._scene.add(this._clipMoveGizmoHelper);
+        refineGizmoHandles(this._clipMoveGizmo);  // shade the single Z cone
 
-        // Temp vectors for gizmo sync
-        this._zAxis = new THREE.Vector3();
-        this._localZ = new THREE.Vector3(0, 0, 1);
-
-        this._clipGizmo.addEventListener('change', () => {
-            if (!this._clipEnabled) return;
-            this._clipSyncFromGizmo = true;
-            this._clipAnchor.getWorldDirection(this._zAxis);
-            this._clipPosition = this._clipAnchor.position.dot(this._zAxis);
-
-            this._clipPlane.normal.copy(this._zAxis);
-            this._updatePlaneConstants();
-            this._updateDiscPositions();
-            this._clipDistanceSlider.value = this._clipPosition;
-            this._clipDistanceValue.textContent = this._clipPosition.toFixed(2);
-            this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {Element} btn */ (btn) => {
-                btn.classList.remove('active');
+        // Disable orbit while dragging either gizmo.
+        for (const gz of [this._clipGizmo, this._clipMoveGizmo]) {
+            gz.addEventListener('dragging-changed', (e) => {
+                this._controls.enabled = !e.value;
             });
-            this._clipAxis = null;
-            this._syncNormalInputs();
-            this._clipSyncFromGizmo = false;
-        });
+            gz.addEventListener('change', () => this._syncClipFromGizmo());
+        }
 
         // Shared bbox objects for slider range calculation
         this._bbox = new THREE.Box3();
         this._bboxCenter = new THREE.Vector3();
+    }
+
+    // Re-derive the clip plane (normal from the anchor orientation, distance from
+    // its position along that normal) after either clip gizmo moves the anchor,
+    // and reflect it into the panel sliders/inputs. Shared by the rotate gizmo
+    // (changes the normal) and the Z-translate gizmo (slides along the normal).
+    _syncClipFromGizmo() {
+        if (!this._clipEnabled) return;
+        this._clipSyncFromGizmo = true;
+        this._clipAnchor.getWorldDirection(this._zAxis);
+        this._clipPosition = this._clipAnchor.position.dot(this._zAxis);
+
+        this._clipPlane.normal.copy(this._zAxis);
+        this._updatePlaneConstants();
+        this._updateDiscPositions();
+        this._clipDistanceSlider.value = this._clipPosition;
+        this._clipDistanceValue.textContent = this._clipPosition.toFixed(2);
+        this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {Element} btn */ (btn) => {
+            btn.classList.remove('active');
+        });
+        this._clipAxis = null;
+        this._syncNormalInputs();
+        this._clipSyncFromGizmo = false;
     }
 
     _syncNormalInputs() {
@@ -7608,7 +7666,7 @@ class ThreeJSViewer {
     _isClipHelper(child) {
         let node = child;
         while (node) {
-            if (node === this._clipAnchor || node === this._clipGizmoHelper) return true;
+            if (node === this._clipAnchor || node === this._clipGizmoHelper || node === this._clipMoveGizmoHelper) return true;
             node = node.parent;
         }
         return false;
@@ -7687,6 +7745,8 @@ class ThreeJSViewer {
         const showGizmo = this._clipEnabled && this._clipHelperVisible;
         this._clipGizmo.enabled = showGizmo;
         this._clipGizmoHelper.visible = showGizmo;
+        this._clipMoveGizmo.enabled = showGizmo;
+        this._clipMoveGizmoHelper.visible = showGizmo;
     }
 
     _toggleClipPanel() {
@@ -10674,6 +10734,13 @@ class ThreeJSViewer {
         // Move/rotate gizmo: keep the refined palette alive, prune stale selection.
         if (this._transformGizmo) this._transformGizmo.update();
 
+        // Clipping gizmos wear the same refined look — TransformControls re-themes
+        // its handles every frame, so re-apply our palette while the clip tool is open.
+        if (this._clipGizmo.enabled) {
+            restyleGizmoHelper(this._clipGizmoHelper, this._clipRotSizedPlanes);
+            restyleGizmoHelper(this._clipMoveGizmoHelper, this._clipMoveSizedPlanes);
+        }
+
         if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
         if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
@@ -11104,6 +11171,7 @@ class ThreeJSViewer {
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();
+        this._clipMoveGizmo.dispose();
         this.el.remove();
     }
 }
