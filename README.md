@@ -16,6 +16,7 @@ A Python client runs a WebSocket server that a browser-based Three.js viewer con
 - **Animation support**: Pre-compute animations, scrub timeline, adjust playback speed
 - **Binary channels**: Efficient transfer of large animations (100k+ objects × frames)
 - **Toolpath visualization**: Extruded bead tubes with per-point colors, draw_range animation, and automatic LOD — handles 1M+ point toolpaths at 60 fps with smooth camera-distance-adaptive simplification via Web Worker
+- **GPU point clouds**: `add_points` renders millions of unconnected points (voxel fields, metrology/deviation clouds, LiDAR scans) in a single `THREE.Points` draw call, with per-point colormap colours, distance size-attenuation, and draw_range reveal
 - **Auto-reconnect**: Browser reconnects automatically, animations persist
 - **Z-up coordinates**: Robotics convention (matches ROS, URDF)
 - **No build step**: Self-contained HTML viewer, just open in browser

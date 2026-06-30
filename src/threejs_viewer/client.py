@@ -960,6 +960,87 @@ class ViewerClient:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
+    def add_points(
+        self,
+        id: str,
+        positions: np.ndarray,
+        colors: np.ndarray = None,
+        colormap: str = "viridis",
+        cmin: float = None,
+        cmax: float = None,
+        color: int = 0xFFFFFF,
+        size: float = 2.0,
+        size_attenuation: bool = True,
+        parent: Optional[str] = None,
+    ) -> None:
+        """
+        Add a GPU point cloud (``THREE.Points``) using binary transfer.
+
+        The whole cloud renders in a single draw call, so this comfortably
+        handles multi-million-point clouds (voxel fields, metrology/deviation
+        clouds, LiDAR scans) where one box/sphere per point would be far too
+        heavy and ``add_polyline`` would connect points that should stay
+        unconnected.
+
+        Args:
+            id: Unique identifier for the point cloud.
+            positions: numpy array of shape (N, 3).
+            colors: Per-point colors. Either a scalar array of shape (N,)
+                (mapped through ``colormap``/``cmin``/``cmax`` — e.g. a signed
+                deviation field as a heatmap) or an (N, 3) RGB float array in
+                0..1. When ``None``, every point uses ``color``.
+            colormap: Colormap name for scalar ``colors`` (viridis/plasma/turbo).
+            cmin: Min value for colormap scaling (auto from ``colors`` if None).
+            cmax: Max value for colormap scaling (auto from ``colors`` if None).
+            color: Flat point color (hex) — used when ``colors`` is None.
+            size: Base point size in pixels.
+            size_attenuation: When ``True`` (default), points shrink with
+                distance (perspective). When ``False``, every point is drawn at
+                a constant pixel size regardless of depth.
+            parent: Optional parent group id.
+
+        Reveal a cloud progressively (e.g. a cheap material-removal animation)
+        with :meth:`set_draw_range` or the ``draw_ranges`` animation channel —
+        the fraction maps onto the leading ``frac * N`` points of the buffer.
+        """
+        positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1)
+        n_points = len(positions) // 3
+
+        color_bytes = b""
+        has_vertex_colors = False
+        if colors is not None:
+            colors = np.asarray(colors)
+            if colors.ndim == 1:
+                if cmin is None:
+                    cmin = float(colors.min())
+                if cmax is None:
+                    cmax = float(colors.max())
+                colors_rgb = self._apply_colormap(colors, colormap, cmin, cmax)
+            elif colors.ndim == 2 and colors.shape[1] == 3:
+                colors_rgb = colors
+            else:
+                raise ValueError(
+                    f"colors must be (N,) scalar or (N, 3) RGB float, got shape {colors.shape}"
+                )
+            colors_rgb = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
+            color_bytes = colors_rgb.tobytes()
+            has_vertex_colors = True
+
+        raw_bytes = positions.tobytes() + color_bytes
+
+        header = {
+            "type": "add_points_binary",
+            "id": id,
+            "color": color,
+            "size": float(size),
+            "sizeAttenuation": bool(size_attenuation),
+            "hasVertexColors": has_vertex_colors,
+            "numPoints": n_points,
+        }
+        if parent:
+            header["parent"] = parent
+        self._send_binary(header, raw_bytes)
+
     def add_parametric_tube(
         self,
         id: str,
