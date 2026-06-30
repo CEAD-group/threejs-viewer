@@ -332,8 +332,10 @@ function makeChannelApply(viewer) {
                     obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
                 } else if (obj.userData.isParametricTube) {
                     applyParametricTubeDrawRange(obj, value);
-                } else if (obj.userData.isMesh) {
+                } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+                } else if (obj.userData.isPoints) {
+                    obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 }
             }
         },
@@ -6518,15 +6520,16 @@ export class ThreeJSViewer {
 
     _updateClipSliderRange() {
         this._bbox.makeEmpty();
-        this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.geometry) return;
-            if (this._isClipHelper(child)) return;
-            if (child === this._gridHelper) return;
-            child.updateWorldMatrix(true, false);
-            const geo = child.geometry;
-            if (!geo.boundingBox) geo.computeBoundingBox();
-            this._bbox.expandByObject(child);
-        });
+        // Bound the clip range to the user's CONTENT (this._objects) only. Traversing
+        // the whole scene graph pulled in gizmo geometry — TransformControls pickers
+        // have axis lines out to ±1e6 and a ±50000 plane — which blew the slider range
+        // up to the millions. Real content (meshes, point clouds, tubes) lives in
+        // this._objects; gizmos, grid, pivot and nav helpers do not.
+        for (const obj of this._objects.values()) {
+            if (!obj || this._isClipHelper(obj)) continue;
+            obj.updateWorldMatrix(true, true);
+            this._bbox.expandByObject(obj);
+        }
         if (this._bbox.isEmpty()) return;
         const n = this._clipPlane.normal;
         const corners = [
@@ -8568,6 +8571,10 @@ export class ThreeJSViewer {
                                 points.name = data.id;
                                 points.userData.id = data.id;
                                 points.userData.isPoints = true;
+                                // Join the EDL depth pre-pass so eye-dome lighting
+                                // sculpts the point cloud (Potree / jeroen's-huis
+                                // "depth trick"), not just polylines.
+                                points.layers.enable(EDL_LINE_LAYER);
                                 points.userData.totalPointCount = numPoints;
                                 // setDrawRange counts vertices for THREE.Points, so a
                                 // draw_range fraction reveals the leading frac*N points.
