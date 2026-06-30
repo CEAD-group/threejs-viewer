@@ -3950,7 +3950,10 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
     const cap0Fan = r0End > 1e-9 ? (sections - 2) * 3 : 0;
     const cap1Fan = r1End > 1e-9 ? (sections - 2) * 3 : 0;
     const capIndexCount = 2 * capBandsPerEnd + cap0Fan + cap1Fan;
-    const indices = new Uint32Array(ringPairCount * indicesPerRingPair + capIndexCount);
+    // 16-bit indices below 64k verts (WebGL1-friendly, half the memory), 32-bit
+    // above — matching the parametric-tube builder.
+    const IndexCtor = N * L * sections > 65535 ? Uint32Array : Uint16Array;
+    const indices = new IndexCtor(ringPairCount * indicesPerRingPair + capIndexCount);
     let w = 0;
     const ringStart = (k, l) => (k * L + l) * sections;
     // Revolution wall closing the tool-body shell at one station (connects
@@ -3972,8 +3975,8 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
         }
     };
     const addFan = (k, l, flip) => {
-        // Fan the open ring at level l to its centre, triangulating around
-        // vertex 0 (sections-2 triangles) so no extra centre vertex is needed.
+        // Triangulate the open ring at level l as a fan rooted at its first
+        // vertex (sections-2 triangles) — no extra centre vertex needed.
         const base = ringStart(k, l);
         for (let s = 1; s < sections - 1; s++) {
             const a = base, b = base + s, c = base + s + 1;
@@ -10069,6 +10072,9 @@ export class ThreeJSViewer {
         this._controls.dispose();
         this._clipGizmo.dispose();
         this._clipMoveGizmo.dispose();
+        // TransformControls.dispose() doesn't detach the helper it added to the
+        // scene — remove both clip gizmo helpers so teardown frees them.
+        this._scene.remove(this._clipGizmoHelper, this._clipMoveGizmoHelper);
         this.el.remove();
     }
 }

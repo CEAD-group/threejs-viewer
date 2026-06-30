@@ -363,6 +363,15 @@ def test_add_points_rejects_color_length_mismatch(client):
     # (N, 3) RGB with the wrong row count too.
     with pytest.raises(ValueError, match="length 3"):
         client.add_points("pc", pts, colors=np.zeros((2, 3), dtype=np.float32))
+    # A 0-D scalar must raise a clean ValueError, not an IndexError on shape[0].
+    with pytest.raises(ValueError, match="length 3"):
+        client.add_points("pc", pts, colors=np.float32(0.5))
+
+
+def test_add_points_rejects_bad_positions_shape(client):
+    # 1D length not a multiple of 3 — must raise, not silently truncate via // 3.
+    with pytest.raises(ValueError):
+        client.add_points("pc", np.zeros(7, dtype=np.float32))
 
 
 def test_add_points_with_parent(client):
@@ -455,6 +464,15 @@ def test_add_swept_tool_validates(client):
         client.add_swept_tool("t", pos, axes, profile, sections=2)
     with pytest.raises(ValueError, match="length"):
         client.add_swept_tool("t", pos, axes[:2], profile)
+    # Heights must be non-decreasing (the docstring's contract).
+    with pytest.raises(ValueError, match="non-decreasing"):
+        client.add_swept_tool(
+            "t", pos, axes, np.array([[0, 0.5], [2, 0.4], [1, 0.3]], dtype=np.float32)
+        )
+    # Equal consecutive heights (a vertical step) must be allowed.
+    client.add_swept_tool(
+        "t", pos, axes, np.array([[0, 0.5], [1, 0.5], [1, 0.3]], dtype=np.float32)
+    )
 
 
 # === Toolpath.add_toolpath ===

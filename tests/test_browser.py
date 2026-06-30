@@ -2780,10 +2780,13 @@ def test_binary_draw_ranges_channel_on_swept_tool_and_points(
     )
     anim.set_draw_range_data(["shank", "cloud"], ramp)
     viewer_client.load_animation(anim, autoplay=False)
+    loaded = False
     for _ in range(40):
         time.sleep(0.05)
         if viewer_page.evaluate("() => window.threejsViewer._animation != null"):
+            loaded = True
             break
+    assert loaded, "animation never loaded"
     # Seek to mid-animation; the binary channel applier must set both draw ranges.
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
     got = None
