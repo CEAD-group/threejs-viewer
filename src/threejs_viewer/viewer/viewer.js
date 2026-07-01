@@ -8179,7 +8179,9 @@ export class ThreeJSViewer {
                         `Consider using binary channels (animation.add_channel()) for large animation data.`
                     );
                 }
-                this.handleMessage(data);
+                this.handleMessage(data).catch((err) => {
+                    console.error(`Error handling '${data.type}' message:`, err);
+                });
             };
         };
 
