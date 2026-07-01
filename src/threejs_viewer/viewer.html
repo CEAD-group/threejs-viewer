@@ -9276,7 +9276,7 @@ class ThreeJSViewer {
 
             this._ws.onerror = () => {};
 
-            this._ws.onmessage = /** @param {MessageEvent<string>} event */ async (event) => {
+            this._ws.onmessage = /** @param {MessageEvent<string>} event */ (event) => {
                 const tParse = performance.now();
                 const data = JSON.parse(event.data);
                 const parseMs = performance.now() - tParse;
@@ -9286,1391 +9286,1422 @@ class ThreeJSViewer {
                         `Consider using binary channels (animation.add_channel()) for large animation data.`
                     );
                 }
-
-                switch (data.type) {
-                    case 'hello':
-                        console.log(`Python client v${data.client_version}`);
-                        if (data.client_version !== VIEWER_VERSION) {
-                            console.warn(
-                                `Version mismatch: viewer v${VIEWER_VERSION}, client v${data.client_version}. ` +
-                                `Close this tab and re-open viewer.html to pick up the latest version.`
-                            );
-                        }
-                        break;
-                    case 'add_group': {
-                        const group = new THREE.Group();
-                        group.name = data.id;
-                        group.userData.id = data.id;
-                        if (data.transform) this._applyTransform(group, data.transform);
-                        if (data.visible === false) group.visible = false;
-                        this._addToParentOrScene(group, data.parent);
-                        this._objects.set(data.id, group);
-                        this._objGeneration++;
-                        break;
-                    }
-                    case 'add_object':
-                        await this._addObject(data.id, data.object, data.parent);
-                        break;
-                    case 'update_transform':
-                        this._withObject(data.id, 'update_transform', (obj) => this._applyTransform(obj, data.transform));
-                        break;
-                    case 'delete_object':
-                        this._deleteObject(data.id);
-                        break;
-                    case 'set_visibility':
-                        this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
-                        break;
-                    case 'set_scene_visibility':
-                        this._setSceneVisibility(data.visibility);
-                        break;
-                    case 'clear_scene':
-                        this._clearScene();
-                        break;
-                    case 'batch_update':
-                        this._batchUpdate(data.transforms);
-                        break;
-                    case 'set_color': {
-                        this._withObject(data.id, 'set_color', (colorObj) => {
-                            colorObj.traverse(/** @param {any} child */ (child) => {
-                                if (!child.material) return;
-                                const mats = Array.isArray(child.material) ? child.material : [child.material];
-                                for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
-                            });
-                            if (data.opacity != null) applyOpacity(colorObj, data.opacity);
-                        });
-                        break;
-                    }
-                    case 'set_opacity':
-                        this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
-                        break;
-                    case 'list_objects':
-                        this._ws.send(JSON.stringify({
-                            type: 'list_objects_response',
-                            requestId: data.requestId,
-                            objects: Array.from(this._objects.keys())
-                        }));
-                        break;
-                    case 'query_scene': {
-                        /** @type {Record<string, any>} */
-                        const tree = {};
-                        for (const [id, obj] of this._objects) {
-                            let drawRange = 1.0;
-                            const geom = obj.geometry;
-                            if (geom) {
-                                if (obj.userData.isNativeLine || obj.userData.isPoints) {
-                                    const total = obj.userData.totalPointCount;
-                                    const cnt = geom.drawRange.count;
-                                    drawRange = total > 0 && Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
-                                } else if (obj.userData.isPolyline) {
-                                    const max = obj.userData.maxInstanceCount;
-                                    drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
-                                } else if (obj.userData.isMesh || obj.userData.isParametricTube || obj.userData.isSweptTool) {
-                                    const total = obj.userData.totalIndexCount;
-                                    if (total > 0) {
-                                        const cnt = geom.drawRange.count;
-                                        drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
-                                    }
-                                }
-                            }
-                            tree[id] = {
-                                type: obj.type,
-                                parent: obj.parent?.userData?.id || null,
-                                children: obj.children
-                                    .filter(/** @param {any} c */ (c) => c.userData?.id)
-                                    .map(/** @param {any} c */ (c) => c.userData.id),
-                                visible: obj.visible,
-                                drawRange: drawRange,
-                            };
-                        }
-                        this._ws.send(JSON.stringify({
-                            type: 'query_scene_response',
-                            requestId: data.requestId,
-                            tree: tree,
-                            meta: {
-                                animation: { playing: this._animationPlaying },
-                                grid: { visible: this._gridHelper.visible },
-                                pending_fetches: this._pendingFetches,
-                            },
-                        }));
-                        break;
-                    }
-                    case 'load_animation':
-                        this._loadAnimation(data.animation, {
-                            restart: !!data.restart,
-                            autoplay: data.autoplay !== false,
-                            initial_time: data.initial_time,
-                        });
-                        break;
-                    case 'load_animation_http': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const capturedAnim = ++this._animGeneration;
-                        (async () => {
-                            try {
-                                const t0 = performance.now();
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
-                                    console.log('Discarding stale animation fetch');
-                                    return;
-                                }
-                                const t1 = performance.now();
-                                console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
-
-                                const nFrames = data.frame_count;
-                                /** @type {Record<string, {ArrayType: any, bytes: number}>} */
-                                const DTYPE_INFO = {
-                                    float32: { ArrayType: Float32Array, bytes: 4 },
-                                    uint32:  { ArrayType: Uint32Array,  bytes: 4 },
-                                    uint8:   { ArrayType: Uint8Array,   bytes: 1 },
-                                };
-
-                                // Each channel carries its own interpolation mode,
-                                // set explicitly Python-side (defaults to 'linear').
-                                // Visibility is special-cased by its applier to always
-                                // hold regardless — see makeChannelApply.visibility.
-                                let byteOffset = 0;
-                                /** @type {Record<string, any>} */
-                                const channels = {};
-                                if (data.channels) {
-                                    for (const ch of data.channels) {
-                                        const info = DTYPE_INFO[ch.dtype];
-                                        if (!info) { console.error(`Unknown channel dtype '${ch.dtype}' for '${ch.name}', skipping`); continue; }
-                                        const count = nFrames * ch.ids.length * ch.stride;
-                                        channels[ch.name] = {
-                                            data: new info.ArrayType(buffer, byteOffset, count),
-                                            ids: ch.ids,
-                                            stride: ch.stride,
-                                            refs: null,
-                                            colormap: ch.colormap || null,
-                                            interpolation: sanitizeInterpolation(ch.interpolation, 'linear'),
-                                        };
-                                        byteOffset += count * info.bytes;
-                                    }
-                                }
-
-                                const tMeta = performance.now();
-                                /** @type {Record<number, any>} */
-                                const metaByFrame = {};
-                                if (data.frames_meta) {
-                                    for (const meta of data.frames_meta) {
-                                        metaByFrame[meta.index] = meta;
-                                    }
-                                }
-
-                                /** @type {Array<Record<string, any>>} */
-                                const frames = [];
-                                for (let fi = 0; fi < nFrames; fi++) {
-                                    /** @type {Record<string, any>} */
-                                    const frame = { time: data.frame_times[fi] };
-                                    const meta = metaByFrame[fi];
-                                    if (meta) {
-                                        if (meta.colors) frame.colors = meta.colors;
-                                        if (meta.visibility) frame.visibility = meta.visibility;
-                                        if (meta.opacity) frame.opacity = meta.opacity;
-                                        if (meta.clip_times) frame.clip_times = meta.clip_times;
-                                        if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
-                                    }
-                                    frames.push(frame);
-                                }
-
-                                const metaMs = performance.now() - tMeta;
-                                if (metaMs > 500) {
-                                    console.warn(
-                                        `frames_meta processing took ${metaMs.toFixed(0)}ms. ` +
-                                        `Consider using animation.add_channel() on the Python side ` +
-                                        `for colors/visibility/opacity/draw_ranges for much faster transfer.`
-                                    );
-                                }
-
-                                this._loadAnimation({
-                                    duration: data.duration,
-                                    fps: data.fps,
-                                    loop: data.loop,
-                                    frames: frames,
-                                    markers: data.markers || [],
-                                    channels: channels,
-                                    camera_follow: data.camera_follow || null,
-                                    camera_lookat: data.camera_lookat || null,
-                                }, {
-                                    restart: !!data.restart,
-                                    autoplay: data.autoplay !== false,
-                                    initial_time: data.initial_time,
-                                });
-                                console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
-                            } catch (e) {
-                                console.error('Error loading animation via HTTP:', e);
-                            } finally {
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'add_model_binary': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const deferred = this._makeDeferred();
-                        // Suppress unhandled-rejection noise — _withObject is
-                        // the only consumer and queued ops attach their own
-                        // .then. Loads with no queued ops would otherwise
-                        // surface their stale/deleted rejection.
-                        deferred.promise.catch(() => {});
-                        this._inflightLoads.set(data.id, deferred);
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const meshBytes = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale model fetch');
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                const blob = new Blob([meshBytes]);
-                                const blobUrl = URL.createObjectURL(blob);
-                                console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
-                                // Read the registered object from _addObject's
-                                // return rather than _objects.get(id) — under a
-                                // delete-and-re-add race the latter could return
-                                // a *newer* same-id object that some other load
-                                // registered while we awaited _loadModel, and we
-                                // would then stamp our stale blobUrl onto it.
-                                const obj = await this._addObject(data.id, {
-                                    model: blobUrl,
-                                    format: data.format || 'stl',
-                                    yUp: data.yUp === true,
-                                }, data.parent, { preserveInflight: true });
-                                if (obj) {
-                                    obj.userData.blobUrl = blobUrl;
-                                    if (data.transform) this._updateTransform(data.id, data.transform);
-                                    deferred.resolve();
-                                } else {
-                                    deferred.reject(new Error('stale'));
-                                }
-                            } catch (e) {
-                                console.error(`Error loading model via HTTP:`, e);
-                                deferred.reject(e);
-                            } finally {
-                                if (this._inflightLoads.get(data.id) === deferred) {
-                                    this._inflightLoads.delete(data.id);
-                                }
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'add_polyline_binary': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const loadToken = this._claimLoadToken(data.id);
-                        const deferred = this._makeDeferred();
-                        deferred.promise.catch(() => {});
-                        this._inflightLoads.set(data.id, deferred);
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale polyline fetch');
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
-                                    console.log(`Discarding stale polyline fetch for '${data.id}'`);
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                const rawData = new Uint8Array(buffer);
-                                const numPoints = data.numPoints || (rawData.length / 12);
-                                const positionBytes = numPoints * 12;
-
-                                const posBuffer = new ArrayBuffer(positionBytes);
-                                new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
-                                const pointData = new Float32Array(posBuffer);
-
-                                console.log(`Creating polyline ${data.id} with ${numPoints} points via HTTP`);
-
-                                const w = this.container.clientWidth;
-                                const h = this.container.clientHeight;
-                                // fat=true (default) → Line2 instanced quads (any
-                                // width). fat=false → native THREE.Line: one vertex
-                                // per point, ~1px, one draw call — ~6x lighter for
-                                // million-point toolpaths, but WebGL ignores linewidth.
-                                const fat = data.fat !== false;
-
-                                /** @type {Float32Array | null} */
-                                let colorData = null;
-                                if (data.hasVertexColors) {
-                                    const colorBytes = rawData.slice(positionBytes);
-                                    colorData = new Float32Array(numPoints * 3);
-                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                        colorData[i] = colorBytes[i] / 255;
-                                    }
-                                }
-
-                                let line;
-                                if (fat) {
-                                    const geometry = new LineGeometry();
-                                    geometry.setPositions(pointData);
-                                    let material;
-                                    if (colorData) {
-                                        geometry.setColors(colorData);
-                                        material = new LineMaterial({
-                                            color: 0xffffff,
-                                            vertexColors: true,
-                                            linewidth: data.lineWidth || 2,
-                                            resolution: new THREE.Vector2(w, h),
-                                        });
-                                    } else {
-                                        material = new LineMaterial({
-                                            color: data.color || 0xffffff,
-                                            linewidth: data.lineWidth || 2,
-                                            resolution: new THREE.Vector2(w, h),
-                                        });
-                                    }
-                                    // LineMaterial defaults fog=false; match the
-                                    // current fog state so polylines added while fog
-                                    // is already on don't render unfogged.
-                                    material.fog = this._depthCue.fogActive;
-                                    line = new Line2(geometry, material);
-                                    line.computeLineDistances();
-                                    line.userData.maxInstanceCount = numPoints - 1;
-                                } else {
-                                    const geometry = new THREE.BufferGeometry();
-                                    geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
-                                    let material;
-                                    if (colorData) {
-                                        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
-                                        material = new THREE.LineBasicMaterial({ vertexColors: true });
-                                    } else {
-                                        material = new THREE.LineBasicMaterial({ color: data.color || 0xffffff });
-                                    }
-                                    line = new THREE.Line(geometry, material);
-                                    line.userData.isNativeLine = true;
-                                    line.userData.totalPointCount = numPoints;
-                                    geometry.setDrawRange(0, numPoints);
-                                }
-                                line.name = data.id;
-                                line.userData.id = data.id;
-                                line.userData.isPolyline = true;
-                                // Also place the line on the EDL line-only layer
-                                // (it stays on layer 0 for the normal render) so
-                                // the EDL depth pre-pass can capture line-only
-                                // depth and scope the effect to polylines.
-                                line.layers.enable(EDL_LINE_LAYER);
-                                // Retain a CPU copy of the local spine points so
-                                // PolylinePickController can resolve an exact
-                                // arc-length fraction for a picked point. (Same
-                                // data already uploaded to the GPU; the fat path
-                                // duplicates points internally, so this N-point
-                                // copy is the lighter source of truth.) Skipped
-                                // when pickable=False — the object is then absent
-                                // from the pick loop entirely (no cost, never hit).
-                                if (data.pickable !== false) {
-                                    line.userData.pickPoints = pointData;
-                                }
-                                this._deleteObject(data.id, { preserveInflight: true });
-                                this._addToParentOrScene(line, data.parent);
-                                this._objects.set(data.id, line);
-                                this._objGeneration++;
-                                deferred.resolve();
-                            } catch (e) {
-                                console.error(`Error creating polyline via HTTP:`, e);
-                                deferred.reject(e);
-                            } finally {
-                                if (this._inflightLoads.get(data.id) === deferred) {
-                                    this._inflightLoads.delete(data.id);
-                                }
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'add_points_binary': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const loadToken = this._claimLoadToken(data.id);
-                        const deferred = this._makeDeferred();
-                        deferred.promise.catch(() => {});
-                        this._inflightLoads.set(data.id, deferred);
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale points fetch');
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
-                                    console.log(`Discarding stale points fetch for '${data.id}'`);
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                const rawData = new Uint8Array(buffer);
-                                const numPoints = data.numPoints || (rawData.length / 12);
-                                const positionBytes = numPoints * 12;
-
-                                const posBuffer = new ArrayBuffer(positionBytes);
-                                new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
-                                const pointData = new Float32Array(posBuffer);
-
-                                console.log(`Creating point cloud ${data.id} with ${numPoints} points via HTTP`);
-
-                                const geometry = new THREE.BufferGeometry();
-                                geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
-
-                                // Native THREE.PointsMaterial: one draw call for the
-                                // whole cloud. sizeAttenuation gives the perspective
-                                // shrink-with-distance (viewport-aware, unlike a
-                                // hardcoded falloff constant); per-point colors flip
-                                // the material into vertexColors mode.
-                                /** @type {any} */
-                                const matOpts = {
-                                    size: data.size ?? 2.0,
-                                    sizeAttenuation: data.sizeAttenuation !== false,
-                                };
-                                if (data.hasVertexColors) {
-                                    const colorBytes = rawData.slice(positionBytes);
-                                    const colorData = new Float32Array(numPoints * 3);
-                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                        colorData[i] = colorBytes[i] / 255;
-                                    }
-                                    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
-                                    matOpts.vertexColors = true;
-                                } else {
-                                    matOpts.color = data.color ?? 0xffffff;
-                                }
-                                const material = new THREE.PointsMaterial(matOpts);
-                                const points = new THREE.Points(geometry, material);
-                                points.name = data.id;
-                                points.userData.id = data.id;
-                                points.userData.isPoints = true;
-                                // Join the EDL depth pre-pass so eye-dome lighting
-                                // sculpts the point cloud (Potree / jeroen's-huis
-                                // "depth trick"), not just polylines.
-                                points.layers.enable(EDL_LINE_LAYER);
-                                points.userData.totalPointCount = numPoints;
-                                // setDrawRange counts vertices for THREE.Points, so a
-                                // draw_range fraction reveals the leading frac*N points.
-                                geometry.setDrawRange(0, numPoints);
-
-                                this._deleteObject(data.id, { preserveInflight: true });
-                                this._addToParentOrScene(points, data.parent);
-                                this._objects.set(data.id, points);
-                                this._objGeneration++;
-                                deferred.resolve();
-                            } catch (e) {
-                                console.error(`Error creating point cloud via HTTP:`, e);
-                                deferred.reject(e);
-                            } finally {
-                                if (this._inflightLoads.get(data.id) === deferred) {
-                                    this._inflightLoads.delete(data.id);
-                                }
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'update_polyline_colors': {
-                        this._withObject(data.id, 'update_polyline_colors', (target) => {
-                            if (!target.userData.isPolyline) {
-                                console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
-                                return;
-                            }
-                            this._onFetchStart();
-                            const capturedScene = this._sceneGeneration;
-                            (async () => {
-                                try {
-                                    const resp = await fetch(data.blob_url);
-                                    const buffer = await resp.arrayBuffer();
-                                    if (this._sceneGeneration !== capturedScene) {
-                                        console.log('Discarding stale polyline color fetch');
-                                        return;
-                                    }
-                                    const obj = this._objects.get(data.id);
-                                    if (!obj || !obj.userData.isPolyline) {
-                                        console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
-                                        return;
-                                    }
-                                    const numPoints = data.numPoints;
-                                    // userData.maxInstanceCount = numPoints - 1 (one
-                                    // segment per pair of points), so vertex count
-                                    // is maxInstanceCount + 1. A length mismatch
-                                    // would desync the new color attributes from
-                                    // the existing positions.
-                                    const expected = obj.userData.isNativeLine
-                                        ? obj.userData.totalPointCount
-                                        : obj.userData.maxInstanceCount + 1;
-                                    if (numPoints !== expected) {
-                                        console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
-                                        return;
-                                    }
-                                    if (buffer.byteLength < numPoints * 3) {
-                                        console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
-                                        return;
-                                    }
-                                    const bytes = new Uint8Array(buffer, 0, numPoints * 3);
-                                    const colorData = new Float32Array(numPoints * 3);
-                                    for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                        colorData[i] = bytes[i] / 255;
-                                    }
-                                    if (obj.userData.isNativeLine) {
-                                        // Native line: plain per-vertex color attribute.
-                                        obj.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
-                                    } else {
-                                        // setColors rebuilds the instanceColorStart/End
-                                        // instanced attributes on the LineGeometry.
-                                        obj.geometry.setColors(colorData);
-                                    }
-                                    // If the polyline was created without vertex colors,
-                                    // the material is in flat-color mode — flip it.
-                                    // Also reset the base color to white so vertex
-                                    // colors aren't tinted/multiplied by the prior
-                                    // flat color (e.g. red base × green vertex = 0).
-                                    if (!obj.material.vertexColors) {
-                                        obj.material.vertexColors = true;
-                                        if (obj.material.color) obj.material.color.setHex(0xffffff);
-                                        obj.material.needsUpdate = true;
-                                    }
-                                } catch (e) {
-                                    console.error(`Error updating polyline colors:`, e);
-                                } finally {
-                                    this._onFetchEnd();
-                                }
-                            })();
-                        });
-                        break;
-                    }
-                    case 'add_mesh_binary': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const loadToken = this._claimLoadToken(data.id);
-                        const deferred = this._makeDeferred();
-                        deferred.promise.catch(() => {});
-                        this._inflightLoads.set(data.id, deferred);
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale mesh fetch');
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
-                                    console.log(`Discarding stale mesh fetch for '${data.id}'`);
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                const nv = data.numVertices;
-                                const ni = data.numIndices;
-
-                                let offset = 0;
-                                const positions = new Float32Array(buffer, offset, nv * 3);
-                                offset += nv * 3 * 4;
-
-                                let normals = null;
-                                if (data.hasNormals) {
-                                    normals = new Float32Array(buffer, offset, nv * 3);
-                                    offset += nv * 3 * 4;
-                                }
-
-                                let colors = null;
-                                if (data.hasVertexColors) {
-                                    colors = new Float32Array(buffer, offset, nv * 3);
-                                    offset += nv * 3 * 4;
-                                }
-
-                                const indices = new Uint32Array(buffer, offset, ni);
-
-                                const geometry = new THREE.BufferGeometry();
-                                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                                geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-                                if (normals) {
-                                    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-                                } else {
-                                    geometry.computeVertexNormals();
-                                }
-                                if (colors) {
-                                    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-                                }
-
-                                const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
-                                const meshMaterial = new THREE.MeshStandardMaterial({
-                                    color: colors ? 0xffffff : (data.color || 0x7ab8cc),
-                                    metalness: data.metalness !== undefined ? data.metalness : 0.1,
-                                    roughness: data.roughness !== undefined ? data.roughness : 0.8,
-                                    opacity: meshOpacity,
-                                    transparent: meshOpacity < 1,
-                                    depthWrite: meshOpacity >= 1,
-                                    side: THREE.DoubleSide,
-                                    vertexColors: !!colors,
-                                    clippingPlanes: this._activeClippingPlanes(),
-                                });
-
-                                const mesh = new THREE.Mesh(geometry, meshMaterial);
-                                mesh.name = data.id;
-                                mesh.userData.id = data.id;
-                                mesh.userData.isMesh = true;
-                                mesh.userData.totalIndexCount = ni;
-                                this._deleteObject(data.id, { preserveInflight: true });
-                                this._addToParentOrScene(mesh, data.parent);
-                                this._objects.set(data.id, mesh);
-                                this._objGeneration++;
-                                if (data.transform) this._applyTransform(mesh, data.transform);
-                                console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
-                                deferred.resolve();
-                            } catch (e) {
-                                console.error(`Error creating mesh:`, e);
-                                deferred.reject(e);
-                            } finally {
-                                if (this._inflightLoads.get(data.id) === deferred) {
-                                    this._inflightLoads.delete(data.id);
-                                }
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'add_parametric_tube_binary': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const loadToken = this._claimLoadToken(data.id);
-                        const deferred = this._makeDeferred();
-                        deferred.promise.catch(() => {});
-                        this._inflightLoads.set(data.id, deferred);
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale parametric tube fetch');
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
-                                    console.log(`Discarding stale parametric tube fetch for '${data.id}'`);
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                const n = data.numSpinePoints;
-                                let offset = 0;
-                                const spine = new Float32Array(buffer, offset, n * 3);
-                                offset += n * 3 * 4;
-                                const widths = new Float32Array(buffer, offset, n);
-                                offset += n * 4;
-                                const heights = new Float32Array(buffer, offset, n);
-                                offset += n * 4;
-                                let orientations = null;
-                                if (data.hasOrientations) {
-                                    orientations = new Float32Array(buffer, offset, n * 4);
-                                    offset += n * 4 * 4;
-                                }
-                                let ringColors = null;
-                                if (data.hasColors) {
-                                    const packed = new Uint32Array(buffer, offset, n);
-                                    offset += n * 4;
-                                    // Decode packed uint32 0x00RRGGBB → Float32Array(n*3).
-                                    ringColors = new Float32Array(n * 3);
-                                    for (let i = 0; i < n; i++) {
-                                        const c = packed[i];
-                                        ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
-                                        ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
-                                        ringColors[i * 3 + 2] = (c & 0xff) / 255;
-                                    }
-                                }
-                                const nCs = N_CROSS_SECTION;
-                                const hasColors = !!ringColors;
-                                const upVector = data.upVector || null;
-                                const heightOffset = data.heightOffset || 0;
-
-                                // Per-ring anchor offset along V, captured from the heights
-                                // BEFORE the deposition bias scales them. Recomputing it from
-                                // the biased heights would cancel the bias exactly on the
-                                // anchored face (anchor="top" would keep its top facet at
-                                // v = 0 for every ring, and an exact retrace would still
-                                // z-fight there) — capturing it unbiased makes the bias a
-                                // scale about each ring's anchored section centre instead of
-                                // about the spine point. null for anchor=center (vOff ≡ 0).
-                                let vOffs = null;
-                                if (heightOffset) {
-                                    vOffs = new Float32Array(n);
-                                    for (let i = 0; i < n; i++) vOffs[i] = heightOffset * heights[i];
-                                }
-
-                                // Deposition-order bias (see TUBE_DEPOSITION_BIAS): applied
-                                // in place to the decoded arrays, BEFORE the LOD reduction,
-                                // the main-thread build, and the worker 'init'/'collapseOnly'
-                                // posts — every downstream consumer (LOD rebuilds, collapse,
-                                // morph, caps, pick half-extents) sees the biased values, so
-                                // an exact retrace stays nested at every kept ring. The ramp
-                                // index runs over the WHOLE toolpath: add_toolpath splits at
-                                // travel moves into segment tubes and threads the global ramp
-                                // through biasIndexOffset/biasIndexTotal, so a retrace that
-                                // crosses a travel split still nests deterministically.
-                                const biasBase = data.biasIndexOffset || 0;
-                                const biasTotal = Math.max(data.biasIndexTotal || n, biasBase + n);
-                                if (biasTotal > 1) {
-                                    const biasStep = TUBE_DEPOSITION_BIAS / (biasTotal - 1);
-                                    for (let i = 0; i < n; i++) {
-                                        const k = 1 + (biasBase + i) * biasStep;
-                                        widths[i] *= k;
-                                        heights[i] *= k;
-                                    }
-                                }
-
-                                // LOD: for large tubes, reduce spine before building geometry.
-                                // Per-tube config via `data.lod` (see parseLodConfig).
-                                const lodCfg = parseLodConfig(data.lod);
-                                let tubeLOD = null;
-                                let buildSpine = spine, buildWidths = widths, buildHeights = heights;
-                                let buildOrientations = orientations, buildRingColors = ringColors;
-                                let buildVOffs = vOffs;
-                                let buildN = n;
-                                if (lodCfg.enabled && n >= lodCfg.threshold) {
-                                    // Bounding sphere from original spine (stable across LOD rebuilds).
-                                    // Includes cross-section extent so `boundingRadius` reflects the
-                                    // tube's actual on-screen size — color weight scales with it.
-                                    const _center = new THREE.Vector3();
-                                    for (let i = 0; i < n; i++) {
-                                        _center.x += spine[i * 3]; _center.y += spine[i * 3 + 1]; _center.z += spine[i * 3 + 2];
-                                    }
-                                    _center.divideScalar(n);
-                                    let _maxR2 = 0;
-                                    for (let i = 0; i < n; i++) {
-                                        const dx = spine[i * 3] - _center.x, dy = spine[i * 3 + 1] - _center.y, dz = spine[i * 3 + 2] - _center.z;
-                                        _maxR2 = Math.max(_maxR2, dx * dx + dy * dy + dz * dz);
-                                    }
-                                    let _maxHalfExtent = 0;
-                                    for (let i = 0; i < n; i++) {
-                                        const h = Math.max(widths[i], heights[i]) * 0.5;
-                                        if (h > _maxHalfExtent) _maxHalfExtent = h;
-                                    }
-                                    const boundingRadius = Math.sqrt(_maxR2) + _maxHalfExtent;
-                                    const cam = this._camera;
-                                    const { indices: keptIndices, minDist: _lodMinDist, maxDist: _lodMaxDist } = distanceWeightedRDP(
-                                        spine, widths, heights, ringColors, boundingRadius, n,
-                                        cam.position.x, cam.position.y, cam.position.z,
-                                        lodCfg.epsilonDivisor,
-                                    );
-                                    const nRed = keptIndices.length;
-                                    // Extract reduced arrays
-                                    buildSpine = new Float32Array(nRed * 3);
-                                    buildWidths = new Float32Array(nRed);
-                                    buildHeights = new Float32Array(nRed);
-                                    buildRingColors = ringColors ? new Float32Array(nRed * 3) : null;
-                                    buildVOffs = vOffs ? new Float32Array(nRed) : null;
-                                    buildOrientations = null; // orientations not preserved through LOD
-                                    buildN = nRed;
-                                    for (let i = 0; i < nRed; i++) {
-                                        const oi = keptIndices[i];
-                                        buildSpine[i * 3] = spine[oi * 3]; buildSpine[i * 3 + 1] = spine[oi * 3 + 1]; buildSpine[i * 3 + 2] = spine[oi * 3 + 2];
-                                        buildWidths[i] = widths[oi];
-                                        buildHeights[i] = heights[oi];
-                                        if (buildRingColors) {
-                                            buildRingColors[i * 3] = ringColors[oi * 3]; buildRingColors[i * 3 + 1] = ringColors[oi * 3 + 1]; buildRingColors[i * 3 + 2] = ringColors[oi * 3 + 2];
-                                        }
-                                        if (buildVOffs) buildVOffs[i] = vOffs[oi];
-                                    }
-                                    tubeLOD = {
-                                        originalSpine: new Float32Array(spine),
-                                        originalWidths: new Float32Array(widths),
-                                        originalHeights: new Float32Array(heights),
-                                        originalRingColors: ringColors ? new Float32Array(ringColors) : null,
-                                        originalVOffs: vOffs ? new Float32Array(vOffs) : null,
-                                        originalCount: n,
-                                        upVector,
-                                        keptIndices,
-                                        currentDrawRange: 1.0,
-                                        lastCameraPos: cam.position.clone(),
-                                        boundingCenter: _center,
-                                        boundingRadius,
-                                        colorVersion: 0,
-                                        epsilonDivisor: lodCfg.epsilonDivisor,
-                                    };
-                                    // LOD initial reduction logged at debug level only
-                                }
-
-                                // strand_collapse accepts true or {maxSnapFactor: N}. Normalize
-                                // here so the worker messages and the runtime toggle see a
-                                // single canonical shape — and so the LOD-rebuild path in
-                                // the worker can extract the snap factor without re-parsing.
-                                let strandCollapse = false;
-                                let strandCollapseCfg = null;
-                                if (data.strandCollapse === true) {
-                                    strandCollapse = true;
-                                    strandCollapseCfg = true;
-                                } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
-                                    strandCollapse = true;
-                                    const msf = data.strandCollapse.maxSnapFactor;
-                                    strandCollapseCfg = (typeof msf === 'number' && msf > 0)
-                                        ? { maxSnapFactor: msf }
-                                        : true;
-                                }
-                                const { geometry, ringPairs, indicesPerRingPair, localFrames, miters, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
-                                    buildSpine, buildWidths, buildHeights,
-                                    buildOrientations, upVector, buildRingColors, buildVOffs,
-                                );
-                                const opacity = data.opacity !== undefined ? data.opacity : 1;
-                                const material = new THREE.MeshStandardMaterial({
-                                    color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
-                                    metalness: data.metalness !== undefined ? data.metalness : 0.1,
-                                    roughness: data.roughness !== undefined ? data.roughness : 0.8,
-                                    opacity,
-                                    transparent: opacity < 1,
-                                    depthWrite: opacity >= 1,
-                                    side: THREE.DoubleSide,
-                                    vertexColors: hasColors,
-                                    clippingPlanes: this._activeClippingPlanes(),
-                                });
-                                const mesh = new THREE.Mesh(geometry, material);
-                                mesh.name = data.id;
-                                mesh.userData.id = data.id;
-                                mesh.userData.isParametricTube = true;
-                                mesh.userData.parametricTube = new ParametricTube(mesh);
-                                mesh.userData.tubeNumSpinePoints = buildN;
-                                mesh.userData.tubeNCs = nCs;
-                                mesh.userData.tubeRingPairs = ringPairs;
-                                mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
-                                mesh.userData.totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
-                                mesh.userData.tubeHasColors = hasColors;
-                                mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
-                                mesh.userData.tubeEndCapBase = endCapBase;
-                                // Picking: expose the FULL-resolution spine (1:1 with the
-                                // caller's per-spine-point data arrays, independent of LOD)
-                                // plus references to the width/height arrays. Everything
-                                // here is a reference to data we already hold (no copy, no
-                                // loop) — the per-point bead half-extents used by the pick
-                                // gate are built lazily on the first pick (see
-                                // PolylinePickController._ensureTubeHalfExtents), so a tube
-                                // costs nothing extra when picking is never used. Opt out
-                                // per object with pickable=False.
-                                if (data.pickable !== false) {
-                                    mesh.userData.isPickableTube = true;
-                                    mesh.userData.pickPoints = tubeLOD ? tubeLOD.originalSpine : spine;
-                                    mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
-                                    mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
-                                    mesh.userData.pickHeightOffset = heightOffset;
-                                }
-                                mesh.userData.tubeMorphData = {
-                                    spine: new Float32Array(buildSpine),
-                                    widths: new Float32Array(buildWidths),
-                                    heights: new Float32Array(buildHeights),
-                                    localFrames, miters, tangents: builtTangents, capAngles,
-                                    ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
-                                    section: new Float32Array(nCs * 2),
-                                    savedRing: new Float32Array(nCs * 3),
-                                    savedRingNormals: null,
-                                    savedRingColors: null,
-                                    savedRingIndex: null,
-                                    morphedState: null,
-                                    endCapPattern,
-                                    savedCapIndices: new (/** @type {any} */ (endCapPattern.constructor))(endCapPattern.length),
-                                    savedCapOffset: -1,
-                                    vOffs: buildVOffs ? new Float32Array(buildVOffs) : null,
-                                };
-                                // Dispose any existing object at this id BEFORE posting
-                                // worker messages so the worker's queue order is
-                                // dispose(old) → init(new) → collapseOnly(new). Sending
-                                // 'init' first would let the trailing 'dispose' that
-                                // _deleteObject queues for the old tubeLOD clobber the
-                                // new tube's worker state (same tubeId).
-                                this._deleteObject(data.id, { preserveInflight: true });
-                                this._addToParentOrScene(mesh, data.parent);
-                                this._objects.set(data.id, mesh);
-                                this._objGeneration++;
-                                if (data.transform) this._applyTransform(mesh, data.transform);
-                                deferred.resolve();
-                                if (tubeLOD) {
-                                    mesh.userData.tubeLOD = tubeLOD;
-                                    // Register original arrays with LOD worker
-                                    this._lodWorker.postMessage({
-                                        type: 'init',
-                                        tubeId: data.id,
-                                        spine: tubeLOD.originalSpine,
-                                        widths: tubeLOD.originalWidths,
-                                        heights: tubeLOD.originalHeights,
-                                        ringColors: tubeLOD.originalRingColors,
-                                        upVec: upVector,
-                                        nPoints: tubeLOD.originalCount,
-                                        vOffs: tubeLOD.originalVOffs,
-                                        boundingRadius: tubeLOD.boundingRadius,
-                                        epsilonDivisor: tubeLOD.epsilonDivisor,
-                                        strandCollapse: strandCollapseCfg,
-                                    });
-                                }
-                                // Async strand-collapse offload: post the un-collapsed
-                                // positions to the LOD worker. The mesh is visible
-                                // immediately (un-collapsed); when the worker returns
-                                // we copy the snapped positions back in. Sends a
-                                // CLONE — main thread keeps the renderable buffer
-                                // attached to THREE so the render loop never sees a
-                                // detached ArrayBuffer mid-frame.
-                                //
-                                // Includes the current load token so a late response
-                                // for a tube that's been deleted (and possibly re-
-                                // created with the same id) is dropped instead of
-                                // stomping the new mesh's positions.
-                                if (strandCollapse) {
-                                    const posAttr = /** @type {THREE.BufferAttribute} */ (geometry.getAttribute('position'));
-                                    const posClone = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
-                                    // Stash an independent copy of the pre-collapse positions
-                                    // so the runtime toggle (press S) can flip back to it
-                                    // without re-running the worker. posClone is transferred
-                                    // into the worker on the next postMessage, so this must
-                                    // be a separate Float32Array allocation.
-                                    mesh.userData.uncollapsedPositions = new Float32Array(posClone);
-                                    mesh.userData.strandCollapseEnabled = true;
-                                    mesh.userData.strandCollapseConfig = strandCollapseCfg;
-                                    const spineForWorker = new Float32Array(buildSpine);
-                                    const widthsForWorker = new Float32Array(buildWidths);
-                                    const heightsForWorker = new Float32Array(buildHeights);
-                                    const localFramesForWorker = new Float32Array(localFrames);
-                                    const collapseToken = this._loadTokens.get(data.id);
-                                    this._lodWorker.postMessage({
-                                        type: 'collapseOnly',
-                                        tubeId: data.id,
-                                        loadToken: collapseToken,
-                                        positions: posClone,
-                                        spine: spineForWorker,
-                                        widths: widthsForWorker,
-                                        heights: heightsForWorker,
-                                        localFrames: localFramesForWorker,
-                                        nSpine: buildN,
-                                        strandCollapse: strandCollapseCfg,
-                                    }, [
-                                        posClone.buffer,
-                                        spineForWorker.buffer,
-                                        widthsForWorker.buffer,
-                                        heightsForWorker.buffer,
-                                        localFramesForWorker.buffer,
-                                    ]);
-                                }
-                                console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
-                            } catch (e) {
-                                console.error(`Error creating parametric_tube:`, e);
-                                deferred.reject(e);
-                            } finally {
-                                if (this._inflightLoads.get(data.id) === deferred) {
-                                    this._inflightLoads.delete(data.id);
-                                }
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'add_swept_tool_binary': {
-                        this._onFetchStart();
-                        const capturedScene = this._sceneGeneration;
-                        const loadToken = this._claimLoadToken(data.id);
-                        const deferred = this._makeDeferred();
-                        deferred.promise.catch(() => {});
-                        this._inflightLoads.set(data.id, deferred);
-                        (async () => {
-                            try {
-                                const resp = await fetch(data.blob_url);
-                                const buffer = await resp.arrayBuffer();
-                                if (this._sceneGeneration !== capturedScene) {
-                                    console.log('Discarding stale swept-tool fetch');
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                if (!this._isLoadTokenCurrent(data.id, loadToken)) {
-                                    console.log(`Discarding stale swept-tool fetch for '${data.id}'`);
-                                    deferred.reject(new Error('stale'));
-                                    return;
-                                }
-                                const nStations = data.numStations;
-                                const nProfile = data.numProfile;
-                                const sections = data.sections || 16;
-                                let offset = 0;
-                                const stationPos = new Float32Array(buffer, offset, nStations * 3);
-                                offset += nStations * 3 * 4;
-                                const axisArr = new Float32Array(buffer, offset, nStations * 3);
-                                offset += nStations * 3 * 4;
-                                const profileArr = new Float32Array(buffer, offset, nProfile * 2);
-                                offset += nProfile * 2 * 4;
-                                /** @type {Float32Array|null} */
-                                let ringColors = null;
-                                if (data.hasColors) {
-                                    const packed = new Uint32Array(buffer, offset, nStations);
-                                    offset += nStations * 4;
-                                    ringColors = new Float32Array(nStations * 3);
-                                    for (let i = 0; i < nStations; i++) {
-                                        const c = packed[i];
-                                        ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
-                                        ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
-                                        ringColors[i * 3 + 2] = (c & 0xff) / 255;
-                                    }
-                                }
-                                const hasColors = !!ringColors;
-                                const { geometry } = buildSweptToolGeometry(
-                                    stationPos, axisArr, profileArr, sections, ringColors,
-                                );
-                                const opacity = data.opacity !== undefined ? data.opacity : 1;
-                                const material = new THREE.MeshStandardMaterial({
-                                    color: hasColors ? 0xffffff : (data.color ?? 0x9aa0a6),
-                                    metalness: data.metalness !== undefined ? data.metalness : 0.3,
-                                    roughness: data.roughness !== undefined ? data.roughness : 0.6,
-                                    opacity,
-                                    transparent: opacity < 1,
-                                    depthWrite: opacity >= 1,
-                                    side: THREE.DoubleSide,
-                                    vertexColors: hasColors,
-                                    clippingPlanes: this._activeClippingPlanes(),
-                                });
-                                const mesh = new THREE.Mesh(geometry, material);
-                                mesh.name = data.id;
-                                mesh.userData.id = data.id;
-                                mesh.userData.isSweptTool = true;
-                                mesh.userData.totalIndexCount = geometry.getIndex().count;
-                                this._deleteObject(data.id, { preserveInflight: true });
-                                this._addToParentOrScene(mesh, data.parent);
-                                this._objects.set(data.id, mesh);
-                                this._objGeneration++;
-                                if (data.transform) this._applyTransform(mesh, data.transform);
-                                deferred.resolve();
-                                console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
-                            } catch (e) {
-                                console.error(`Error creating swept_tool:`, e);
-                                deferred.reject(e);
-                            } finally {
-                                if (this._inflightLoads.get(data.id) === deferred) {
-                                    this._inflightLoads.delete(data.id);
-                                }
-                                this._onFetchEnd();
-                            }
-                        })();
-                        break;
-                    }
-                    case 'update_parametric_tube_colors': {
-                        this._withObject(data.id, 'update_parametric_tube_colors', (target) => {
-                            if (!target.userData.isParametricTube) {
-                                console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
-                                return;
-                            }
-                            this._onFetchStart();
-                            const capturedScene = this._sceneGeneration;
-                            (async () => {
-                                try {
-                                    const resp = await fetch(data.blob_url);
-                                    const buffer = await resp.arrayBuffer();
-                                    if (this._sceneGeneration !== capturedScene) {
-                                        console.log('Discarding stale parametric tube color fetch');
-                                        return;
-                                    }
-                                    const obj = this._objects.get(data.id);
-                                    if (!obj || !obj.userData.isParametricTube) {
-                                        console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
-                                        return;
-                                    }
-                                    const lod = obj.userData.tubeLOD;
-                                    // Color data from Python is always for the original spine count
-                                    const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
-                                    const nCs = obj.userData.tubeNCs;
-                                    if (buffer.byteLength < nOrig * 4) {
-                                        console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
-                                        return;
-                                    }
-                                    const packed = new Uint32Array(buffer, 0, nOrig);
-                                    // Decode per-ring colors (full original count)
-                                    const rc = new Float32Array(nOrig * 3);
-                                    for (let i = 0; i < nOrig; i++) {
-                                        const c = packed[i];
-                                        rc[i * 3]     = ((c >> 16) & 0xff) / 255;
-                                        rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
-                                        rc[i * 3 + 2] = (c & 0xff) / 255;
-                                    }
-    
-                                    // When LOD is active, store full colors and rebuild with reduced subset
-                                    if (lod && lod.keptIndices) {
-                                        lod.originalRingColors = new Float32Array(rc);
-                                        lod.colorVersion = (lod.colorVersion || 0) + 1;
-                                        this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                        // Extract reduced colors for current LOD level
-                                        const nRed = lod.keptIndices.length;
-                                        const redRc = new Float32Array(nRed * 3);
-                                        const redPacked = new Uint32Array(nRed);
-                                        for (let i = 0; i < nRed; i++) {
-                                            const oi = lod.keptIndices[i];
-                                            redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
-                                            redPacked[i] = packed[oi];
-                                        }
-                                        // Update geometry colors for reduced mesh
-                                        const n = nRed;
-                                        // Restore frontier ring BEFORE writing new colors
-                                        const md = obj.userData.tubeMorphData;
-                                        if (md) restoreFrontierRing(obj);
-                                        // Fill cap dome vertices with a single color
-                                        /**
-                                         * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                         * @param {number} baseVert
-                                         * @param {number} capVerts
-                                         * @param {number} r
-                                         * @param {number} g
-                                         * @param {number} b
-                                         */
-                                        function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                            for (let j = 0; j < capVerts; j++) {
-                                                arr[(baseVert + j) * 3]     = r;
-                                                arr[(baseVert + j) * 3 + 1] = g;
-                                                arr[(baseVert + j) * 3 + 2] = b;
-                                            }
-                                        }
-                                        const posCount = obj.geometry.getAttribute('position').count;
-                                        const capVertsPerCap = (posCount - n * nCs) / 2;
-                                        const startCapBaseVert = n * nCs;
-                                        const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                        const lr = (n - 1) * 3;
-                                        const existing = obj.geometry.getAttribute('color');
-                                        if (existing) {
-                                            expandRingColors(redPacked, n, nCs, existing.array);
-                                            fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                            fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                            existing.clearUpdateRanges();
-                                            existing.needsUpdate = true;
-                                        } else {
-                                            const allColors = new Float32Array(posCount * 3);
-                                            expandRingColors(redPacked, n, nCs, allColors);
-                                            fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                            fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                            obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
-                                        }
-                                        obj.material.vertexColors = true;
-                                        obj.material.color.setHex(0xffffff);
-                                        obj.material.needsUpdate = true;
-                                        obj.userData.tubeHasColors = true;
-                                        obj.userData._colorFullUploadNeeded = true;
-                                        if (md) md.ringColors = redRc;
-                                    } else {
-                                        // No LOD active — original path
-                                        if (lod) {
-                                            lod.originalRingColors = new Float32Array(rc);
-                                            lod.colorVersion = (lod.colorVersion || 0) + 1;
-                                            this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                        }
-                                        const n = nOrig;
-                                        // Fill cap dome vertices with a single color
-                                        /**
-                                         * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                         * @param {number} baseVert
-                                         * @param {number} capVerts
-                                         * @param {number} r
-                                         * @param {number} g
-                                         * @param {number} b
-                                         */
-                                        function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                            for (let j = 0; j < capVerts; j++) {
-                                                arr[(baseVert + j) * 3]     = r;
-                                                arr[(baseVert + j) * 3 + 1] = g;
-                                                arr[(baseVert + j) * 3 + 2] = b;
-                                            }
-                                        }
-                                        const posCount = obj.geometry.getAttribute('position').count;
-                                        const capVertsPerCap = (posCount - n * nCs) / 2;
-                                        const startCapBaseVert = n * nCs;
-                                        const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                        const lr = (n - 1) * 3;
-                                        // Restore frontier ring BEFORE writing new colors so
-                                        // the stale savedRingColors don't overwrite the update.
-                                        const md = obj.userData.tubeMorphData;
-                                        if (md) restoreFrontierRing(obj);
-                                        const existing = obj.geometry.getAttribute('color');
-                                        if (existing) {
-                                            expandRingColors(packed, n, nCs, existing.array);
-                                            fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                            fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                            existing.clearUpdateRanges();
-                                            existing.needsUpdate = true;
-                                        } else {
-                                            const allColors = new Float32Array(posCount * 3);
-                                            expandRingColors(packed, n, nCs, allColors);
-                                            fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                            fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                            obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
-                                        }
-                                        obj.material.vertexColors = true;
-                                        obj.material.color.setHex(0xffffff);
-                                        obj.material.needsUpdate = true;
-                                        obj.userData.tubeHasColors = true;
-                                        obj.userData._colorFullUploadNeeded = true;
-                                        if (md) md.ringColors = rc;
-                                    }
-                                } catch (e) {
-                                    console.error(`Error updating parametric_tube colors:`, e);
-                                } finally {
-                                    this._onFetchEnd();
-                                }
-                            })();
-                        });
-                        break;
-                    }
-                    case 'register_toolpath_group': {
-                        const grp = this._objects.get(data.id);
-                        if (grp) {
-                            grp.userData.isToolpathGroup = true;
-                            grp.userData.toolpathSegmentIds = data.segmentIds;
-                            grp.userData.toolpathSegmentRanges = data.segmentRanges;
-                        }
-                        break;
-                    }
-                    case 'unload_animation':
-                        this._unloadAnimation(data.restore_visibility !== false);
-                        break;
-                    case 'pause_animation':
-                        if (this._animation) {
-                            this._animationPlaying = false;
-                            this._updateAnimationUI();
-                        }
-                        break;
-                    case 'resume_animation':
-                        if (this._animation) {
-                            this._animationPlaying = true;
-                            this._lastAnimationUpdate = performance.now();
-                            this._updateAnimationUI();
-                        }
-                        break;
-                    case 'set_clip_time':
-                        this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
-                        break;
-                    case 'set_draw_range':
-                        this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
-                        break;
-                    case 'set_strand_collapse_enabled':
-                        this._withObject(data.id, 'set_strand_collapse_enabled', () =>
-                            this.setStrandCollapseEnabled(data.id, !!data.enabled));
-                        break;
-                    case 'set_clipping_plane': {
-                        this._clipEnabled = true;
-                        this._clipSlabMode = false;
-                        this._clipPlanes = [this._clipPlane];
-                        this._clipModeSingle.classList.add('active');
-                        this._clipModeSlab.classList.remove('active');
-                        this._clipThicknessSection.style.display = 'none';
-                        if (data.normal) {
-                            this._clipPlane.normal.fromArray(data.normal).normalize();
-                            this._syncNormalInputs();
-                        }
-                        if (data.distance != null) this._setClipDistance(data.distance);
-                        if (data.show_helper != null) this._clipHelperVisible = data.show_helper;
-                        let matchedAxis = null;
-                        for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
-                            if (n.equals(this._clipPlane.normal)) { matchedAxis = axis; break; }
-                        }
-                        if (matchedAxis) this._setClipAxis(matchedAxis);
-                        this._updateClipSliderRange();
-                        this._syncAnchorFromPlane();
-                        this._clipPanelEl.classList.add('visible');
-                        this._btnClip.classList.add('active');
-                        this._updateClipMaterials();
-                        break;
-                    }
-                    case 'set_clipping_slab': {
-                        this._clipEnabled = true;
-                        this._clipSlabMode = true;
-                        this._clipPlanes = [this._clipPlane, this._clipPlane2];
-                        this._clipModeSlab.classList.add('active');
-                        this._clipModeSingle.classList.remove('active');
-                        this._clipThicknessSection.style.display = '';
-                        if (data.normal) {
-                            this._clipPlane.normal.fromArray(data.normal).normalize();
-                            this._syncNormalInputs();
-                        }
-                        if (data.thickness != null) this._setClipThickness(data.thickness);
-                        if (data.center != null) this._setClipDistance(data.center);
-                        if (data.show_helper != null) this._clipHelperVisible = data.show_helper;
-                        let matchedAxis2 = null;
-                        for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
-                            if (n.equals(this._clipPlane.normal)) { matchedAxis2 = axis; break; }
-                        }
-                        if (matchedAxis2) this._setClipAxis(matchedAxis2);
-                        this._updateClipSliderRange();
-                        this._syncAnchorFromPlane();
-                        this._clipPanelEl.classList.add('visible');
-                        this._btnClip.classList.add('active');
-                        this._updateClipMaterials();
-                        break;
-                    }
-                    case 'disable_clipping_plane':
-                        this._clipEnabled = false;
-                        this._clipPanelEl.classList.remove('visible');
-                        this._btnClip.classList.remove('active');
-                        this._updateClipMaterials();
-                        break;
-                    case 'set_clipping_defaults':
-                        this._clipDefaults = { normal: data.normal, distance: data.distance };
-                        break;
-                    case 'set_depth_cue':
-                        // Programmatic equivalent of the D / Shift+D keys.
-                        if (data.fog != null) this._depthCue.setFog(data.fog);
-                        if (data.edl != null) this._depthCue.setEdl(data.edl);
-                        break;
-                    case 'set_polyline_picking':
-                        if (data.enabled) {
-                            this._polylinePick.enable({
-                                markerColor: data.markerColor,
-                                thresholdPx: data.thresholdPx,
-                            });
-                        } else {
-                            this._polylinePick.disable();
-                        }
-                        break;
-                    case 'set_move_gizmo':
-                        if (data.enabled) {
-                            this._transformGizmo.enable({
-                                id: data.id,
-                                mode: data.mode,
-                                translateSnap: data.translateSnap,
-                                translateSnapRelative: data.translateSnapRelative,
-                                rotateSnap: data.rotateSnap,   // radians
-                                clickSelect: data.clickSelect,
-                                snapDefault: data.snapDefault,
-                            });
-                        } else {
-                            this._transformGizmo.disable();
-                        }
-                        break;
-                    case 'set_gizmo_axes':
-                        this._transformGizmo.setAxes({ x: data.x, y: data.y, z: data.z });
-                        break;
-                    case 'add_gizmo': {
-                        const target = this._objects.get(data.id);
-                        if (target) this._transformGizmo.addGizmo(target, {
-                            id: data.id,
-                            mode: data.mode,
-                            axes: { x: data.x, y: data.y, z: data.z },
-                            space: data.space,
-                            snapDefault: data.snapDefault,
-                        });
-                        break;
-                    }
-                    case 'clear_gizmos':
-                        this._transformGizmo.clearGizmos();
-                        break;
-                    case 'show_grid':
-                        this._gridHelper.visible = !!data.visible;
-                        if (data.size != null && data.divisions != null) {
-                            const parent = this._gridHelper.parent;
-                            parent.remove(this._gridHelper);
-                            this._gridHelper.geometry.dispose();
-                            this._gridHelper.material.dispose();
-                            this._gridHelper = new THREE.GridHelper(data.size, data.divisions);
-                            this._gridHelper.rotation.x = Math.PI / 2;
-                            this._gridHelper.visible = !!data.visible;
-                            parent.add(this._gridHelper);
-                        }
-                        break;
-                    case 'mark_assets_complete':
-                        this._assetsComplete = true;
-                        this._maybeNotifyAssetsLoaded();
-                        break;
-                    default:
-                        console.warn(`Unknown message type: '${data.type}'`);
-                }
+                this.handleMessage(data).catch((err) => {
+                    console.error(`Error handling '${data.type}' message:`, err);
+                });
             };
         };
 
         doConnect();
+    }
+
+    /**
+     * Send a JSON reply to the backend, if a socket is connected. No-op in the
+     * no-WebSocket / static-data path (there is nobody to answer). Used by the
+     * query message handlers (`list_objects`, `query_scene`) so they degrade
+     * gracefully when driven via `handleMessage()` without a live socket.
+     * @param {any} payload
+     */
+    _reply(payload) {
+        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+            this._ws.send(JSON.stringify(payload));
+        }
+    }
+
+    /**
+     * Apply a single control message — the same JSON protocol the WebSocket
+     * `onmessage` handler dispatches. Exposed publicly so an embedder can drive
+     * the viewer from local/static data with *no* WebSocket backend: construct
+     * with `{ autoConnect: false }` and feed messages straight in, e.g.
+     * `viewer.handleMessage({ type: 'add_points_binary', id, blob_url, ... })`.
+     * Binary payloads still load over HTTP (static files or in-page `Blob`
+     * object URLs) exactly as under the socket transport — only the control
+     * dispatch is decoupled. Query messages that expect a response
+     * (`list_objects`, `query_scene`) route through `_reply()`, which no-ops
+     * when no socket is connected.
+     * @param {any} data Parsed control message (`{ type, ... }`).
+     */
+    async handleMessage(data) {
+        switch (data.type) {
+            case 'hello':
+                console.log(`Python client v${data.client_version}`);
+                if (data.client_version !== VIEWER_VERSION) {
+                    console.warn(
+                        `Version mismatch: viewer v${VIEWER_VERSION}, client v${data.client_version}. ` +
+                        `Close this tab and re-open viewer.html to pick up the latest version.`
+                    );
+                }
+                break;
+            case 'add_group': {
+                const group = new THREE.Group();
+                group.name = data.id;
+                group.userData.id = data.id;
+                if (data.transform) this._applyTransform(group, data.transform);
+                if (data.visible === false) group.visible = false;
+                this._addToParentOrScene(group, data.parent);
+                this._objects.set(data.id, group);
+                this._objGeneration++;
+                break;
+            }
+            case 'add_object':
+                await this._addObject(data.id, data.object, data.parent);
+                break;
+            case 'update_transform':
+                this._withObject(data.id, 'update_transform', (obj) => this._applyTransform(obj, data.transform));
+                break;
+            case 'delete_object':
+                this._deleteObject(data.id);
+                break;
+            case 'set_visibility':
+                this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
+                break;
+            case 'set_scene_visibility':
+                this._setSceneVisibility(data.visibility);
+                break;
+            case 'clear_scene':
+                this._clearScene();
+                break;
+            case 'batch_update':
+                this._batchUpdate(data.transforms);
+                break;
+            case 'set_color': {
+                this._withObject(data.id, 'set_color', (colorObj) => {
+                    colorObj.traverse(/** @param {any} child */ (child) => {
+                        if (!child.material) return;
+                        const mats = Array.isArray(child.material) ? child.material : [child.material];
+                        for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
+                    });
+                    if (data.opacity != null) applyOpacity(colorObj, data.opacity);
+                });
+                break;
+            }
+            case 'set_opacity':
+                this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
+                break;
+            case 'list_objects':
+                this._reply({
+                    type: 'list_objects_response',
+                    requestId: data.requestId,
+                    objects: Array.from(this._objects.keys())
+                });
+                break;
+            case 'query_scene': {
+                /** @type {Record<string, any>} */
+                const tree = {};
+                for (const [id, obj] of this._objects) {
+                    let drawRange = 1.0;
+                    const geom = obj.geometry;
+                    if (geom) {
+                        if (obj.userData.isNativeLine || obj.userData.isPoints) {
+                            const total = obj.userData.totalPointCount;
+                            const cnt = geom.drawRange.count;
+                            drawRange = total > 0 && Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
+                        } else if (obj.userData.isPolyline) {
+                            const max = obj.userData.maxInstanceCount;
+                            drawRange = max > 0 ? Math.min(geom.instanceCount / max, 1.0) : 1.0;
+                        } else if (obj.userData.isMesh || obj.userData.isParametricTube || obj.userData.isSweptTool) {
+                            const total = obj.userData.totalIndexCount;
+                            if (total > 0) {
+                                const cnt = geom.drawRange.count;
+                                drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
+                            }
+                        }
+                    }
+                    tree[id] = {
+                        type: obj.type,
+                        parent: obj.parent?.userData?.id || null,
+                        children: obj.children
+                            .filter(/** @param {any} c */ (c) => c.userData?.id)
+                            .map(/** @param {any} c */ (c) => c.userData.id),
+                        visible: obj.visible,
+                        drawRange: drawRange,
+                    };
+                }
+                this._reply({
+                    type: 'query_scene_response',
+                    requestId: data.requestId,
+                    tree: tree,
+                    meta: {
+                        animation: { playing: this._animationPlaying },
+                        grid: { visible: this._gridHelper.visible },
+                        pending_fetches: this._pendingFetches,
+                    },
+                });
+                break;
+            }
+            case 'load_animation':
+                this._loadAnimation(data.animation, {
+                    restart: !!data.restart,
+                    autoplay: data.autoplay !== false,
+                    initial_time: data.initial_time,
+                });
+                break;
+            case 'load_animation_http': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const capturedAnim = ++this._animGeneration;
+                (async () => {
+                    try {
+                        const t0 = performance.now();
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
+                            console.log('Discarding stale animation fetch');
+                            return;
+                        }
+                        const t1 = performance.now();
+                        console.log(`HTTP animation fetch: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB in ${(t1 - t0).toFixed(0)}ms`);
+
+                        const nFrames = data.frame_count;
+                        /** @type {Record<string, {ArrayType: any, bytes: number}>} */
+                        const DTYPE_INFO = {
+                            float32: { ArrayType: Float32Array, bytes: 4 },
+                            uint32:  { ArrayType: Uint32Array,  bytes: 4 },
+                            uint8:   { ArrayType: Uint8Array,   bytes: 1 },
+                        };
+
+                        // Each channel carries its own interpolation mode,
+                        // set explicitly Python-side (defaults to 'linear').
+                        // Visibility is special-cased by its applier to always
+                        // hold regardless — see makeChannelApply.visibility.
+                        let byteOffset = 0;
+                        /** @type {Record<string, any>} */
+                        const channels = {};
+                        if (data.channels) {
+                            for (const ch of data.channels) {
+                                const info = DTYPE_INFO[ch.dtype];
+                                if (!info) { console.error(`Unknown channel dtype '${ch.dtype}' for '${ch.name}', skipping`); continue; }
+                                const count = nFrames * ch.ids.length * ch.stride;
+                                channels[ch.name] = {
+                                    data: new info.ArrayType(buffer, byteOffset, count),
+                                    ids: ch.ids,
+                                    stride: ch.stride,
+                                    refs: null,
+                                    colormap: ch.colormap || null,
+                                    interpolation: sanitizeInterpolation(ch.interpolation, 'linear'),
+                                };
+                                byteOffset += count * info.bytes;
+                            }
+                        }
+
+                        const tMeta = performance.now();
+                        /** @type {Record<number, any>} */
+                        const metaByFrame = {};
+                        if (data.frames_meta) {
+                            for (const meta of data.frames_meta) {
+                                metaByFrame[meta.index] = meta;
+                            }
+                        }
+
+                        /** @type {Array<Record<string, any>>} */
+                        const frames = [];
+                        for (let fi = 0; fi < nFrames; fi++) {
+                            /** @type {Record<string, any>} */
+                            const frame = { time: data.frame_times[fi] };
+                            const meta = metaByFrame[fi];
+                            if (meta) {
+                                if (meta.colors) frame.colors = meta.colors;
+                                if (meta.visibility) frame.visibility = meta.visibility;
+                                if (meta.opacity) frame.opacity = meta.opacity;
+                                if (meta.clip_times) frame.clip_times = meta.clip_times;
+                                if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
+                            }
+                            frames.push(frame);
+                        }
+
+                        const metaMs = performance.now() - tMeta;
+                        if (metaMs > 500) {
+                            console.warn(
+                                `frames_meta processing took ${metaMs.toFixed(0)}ms. ` +
+                                `Consider using animation.add_channel() on the Python side ` +
+                                `for colors/visibility/opacity/draw_ranges for much faster transfer.`
+                            );
+                        }
+
+                        this._loadAnimation({
+                            duration: data.duration,
+                            fps: data.fps,
+                            loop: data.loop,
+                            frames: frames,
+                            markers: data.markers || [],
+                            channels: channels,
+                            camera_follow: data.camera_follow || null,
+                            camera_lookat: data.camera_lookat || null,
+                        }, {
+                            restart: !!data.restart,
+                            autoplay: data.autoplay !== false,
+                            initial_time: data.initial_time,
+                        });
+                        console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
+                    } catch (e) {
+                        console.error('Error loading animation via HTTP:', e);
+                    } finally {
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'add_model_binary': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const deferred = this._makeDeferred();
+                // Suppress unhandled-rejection noise — _withObject is
+                // the only consumer and queued ops attach their own
+                // .then. Loads with no queued ops would otherwise
+                // surface their stale/deleted rejection.
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const meshBytes = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene) {
+                            console.log('Discarding stale model fetch');
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const blob = new Blob([meshBytes]);
+                        const blobUrl = URL.createObjectURL(blob);
+                        console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
+                        // Read the registered object from _addObject's
+                        // return rather than _objects.get(id) — under a
+                        // delete-and-re-add race the latter could return
+                        // a *newer* same-id object that some other load
+                        // registered while we awaited _loadModel, and we
+                        // would then stamp our stale blobUrl onto it.
+                        const obj = await this._addObject(data.id, {
+                            model: blobUrl,
+                            format: data.format || 'stl',
+                            yUp: data.yUp === true,
+                        }, data.parent, { preserveInflight: true });
+                        if (obj) {
+                            obj.userData.blobUrl = blobUrl;
+                            if (data.transform) this._updateTransform(data.id, data.transform);
+                            deferred.resolve();
+                        } else {
+                            deferred.reject(new Error('stale'));
+                        }
+                    } catch (e) {
+                        console.error(`Error loading model via HTTP:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'add_polyline_binary': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._claimLoadToken(data.id);
+                const deferred = this._makeDeferred();
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene) {
+                            console.log('Discarding stale polyline fetch');
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                            console.log(`Discarding stale polyline fetch for '${data.id}'`);
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const rawData = new Uint8Array(buffer);
+                        const numPoints = data.numPoints || (rawData.length / 12);
+                        const positionBytes = numPoints * 12;
+
+                        const posBuffer = new ArrayBuffer(positionBytes);
+                        new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
+                        const pointData = new Float32Array(posBuffer);
+
+                        console.log(`Creating polyline ${data.id} with ${numPoints} points via HTTP`);
+
+                        const w = this.container.clientWidth;
+                        const h = this.container.clientHeight;
+                        // fat=true (default) → Line2 instanced quads (any
+                        // width). fat=false → native THREE.Line: one vertex
+                        // per point, ~1px, one draw call — ~6x lighter for
+                        // million-point toolpaths, but WebGL ignores linewidth.
+                        const fat = data.fat !== false;
+
+                        /** @type {Float32Array | null} */
+                        let colorData = null;
+                        if (data.hasVertexColors) {
+                            const colorBytes = rawData.slice(positionBytes);
+                            colorData = new Float32Array(numPoints * 3);
+                            for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                colorData[i] = colorBytes[i] / 255;
+                            }
+                        }
+
+                        let line;
+                        if (fat) {
+                            const geometry = new LineGeometry();
+                            geometry.setPositions(pointData);
+                            let material;
+                            if (colorData) {
+                                geometry.setColors(colorData);
+                                material = new LineMaterial({
+                                    color: 0xffffff,
+                                    vertexColors: true,
+                                    linewidth: data.lineWidth || 2,
+                                    resolution: new THREE.Vector2(w, h),
+                                });
+                            } else {
+                                material = new LineMaterial({
+                                    color: data.color || 0xffffff,
+                                    linewidth: data.lineWidth || 2,
+                                    resolution: new THREE.Vector2(w, h),
+                                });
+                            }
+                            // LineMaterial defaults fog=false; match the
+                            // current fog state so polylines added while fog
+                            // is already on don't render unfogged.
+                            material.fog = this._depthCue.fogActive;
+                            line = new Line2(geometry, material);
+                            line.computeLineDistances();
+                            line.userData.maxInstanceCount = numPoints - 1;
+                        } else {
+                            const geometry = new THREE.BufferGeometry();
+                            geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
+                            let material;
+                            if (colorData) {
+                                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                                material = new THREE.LineBasicMaterial({ vertexColors: true });
+                            } else {
+                                material = new THREE.LineBasicMaterial({ color: data.color || 0xffffff });
+                            }
+                            line = new THREE.Line(geometry, material);
+                            line.userData.isNativeLine = true;
+                            line.userData.totalPointCount = numPoints;
+                            geometry.setDrawRange(0, numPoints);
+                        }
+                        line.name = data.id;
+                        line.userData.id = data.id;
+                        line.userData.isPolyline = true;
+                        // Also place the line on the EDL line-only layer
+                        // (it stays on layer 0 for the normal render) so
+                        // the EDL depth pre-pass can capture line-only
+                        // depth and scope the effect to polylines.
+                        line.layers.enable(EDL_LINE_LAYER);
+                        // Retain a CPU copy of the local spine points so
+                        // PolylinePickController can resolve an exact
+                        // arc-length fraction for a picked point. (Same
+                        // data already uploaded to the GPU; the fat path
+                        // duplicates points internally, so this N-point
+                        // copy is the lighter source of truth.) Skipped
+                        // when pickable=False — the object is then absent
+                        // from the pick loop entirely (no cost, never hit).
+                        if (data.pickable !== false) {
+                            line.userData.pickPoints = pointData;
+                        }
+                        this._deleteObject(data.id, { preserveInflight: true });
+                        this._addToParentOrScene(line, data.parent);
+                        this._objects.set(data.id, line);
+                        this._objGeneration++;
+                        deferred.resolve();
+                    } catch (e) {
+                        console.error(`Error creating polyline via HTTP:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'add_points_binary': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._claimLoadToken(data.id);
+                const deferred = this._makeDeferred();
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene) {
+                            console.log('Discarding stale points fetch');
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                            console.log(`Discarding stale points fetch for '${data.id}'`);
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const rawData = new Uint8Array(buffer);
+                        const numPoints = data.numPoints || (rawData.length / 12);
+                        const positionBytes = numPoints * 12;
+
+                        const posBuffer = new ArrayBuffer(positionBytes);
+                        new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
+                        const pointData = new Float32Array(posBuffer);
+
+                        console.log(`Creating point cloud ${data.id} with ${numPoints} points via HTTP`);
+
+                        const geometry = new THREE.BufferGeometry();
+                        geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
+
+                        // Native THREE.PointsMaterial: one draw call for the
+                        // whole cloud. sizeAttenuation gives the perspective
+                        // shrink-with-distance (viewport-aware, unlike a
+                        // hardcoded falloff constant); per-point colors flip
+                        // the material into vertexColors mode.
+                        /** @type {any} */
+                        const matOpts = {
+                            size: data.size ?? 2.0,
+                            sizeAttenuation: data.sizeAttenuation !== false,
+                        };
+                        if (data.hasVertexColors) {
+                            const colorBytes = rawData.slice(positionBytes);
+                            const colorData = new Float32Array(numPoints * 3);
+                            for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                colorData[i] = colorBytes[i] / 255;
+                            }
+                            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                            matOpts.vertexColors = true;
+                        } else {
+                            matOpts.color = data.color ?? 0xffffff;
+                        }
+                        const material = new THREE.PointsMaterial(matOpts);
+                        const points = new THREE.Points(geometry, material);
+                        points.name = data.id;
+                        points.userData.id = data.id;
+                        points.userData.isPoints = true;
+                        // Join the EDL depth pre-pass so eye-dome lighting
+                        // sculpts the point cloud (Potree / jeroen's-huis
+                        // "depth trick"), not just polylines.
+                        points.layers.enable(EDL_LINE_LAYER);
+                        points.userData.totalPointCount = numPoints;
+                        // setDrawRange counts vertices for THREE.Points, so a
+                        // draw_range fraction reveals the leading frac*N points.
+                        geometry.setDrawRange(0, numPoints);
+
+                        this._deleteObject(data.id, { preserveInflight: true });
+                        this._addToParentOrScene(points, data.parent);
+                        this._objects.set(data.id, points);
+                        this._objGeneration++;
+                        deferred.resolve();
+                    } catch (e) {
+                        console.error(`Error creating point cloud via HTTP:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'update_polyline_colors': {
+                this._withObject(data.id, 'update_polyline_colors', (target) => {
+                    if (!target.userData.isPolyline) {
+                        console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                        return;
+                    }
+                    this._onFetchStart();
+                    const capturedScene = this._sceneGeneration;
+                    (async () => {
+                        try {
+                            const resp = await fetch(data.blob_url);
+                            const buffer = await resp.arrayBuffer();
+                            if (this._sceneGeneration !== capturedScene) {
+                                console.log('Discarding stale polyline color fetch');
+                                return;
+                            }
+                            const obj = this._objects.get(data.id);
+                            if (!obj || !obj.userData.isPolyline) {
+                                console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                return;
+                            }
+                            const numPoints = data.numPoints;
+                            // userData.maxInstanceCount = numPoints - 1 (one
+                            // segment per pair of points), so vertex count
+                            // is maxInstanceCount + 1. A length mismatch
+                            // would desync the new color attributes from
+                            // the existing positions.
+                            const expected = obj.userData.isNativeLine
+                                ? obj.userData.totalPointCount
+                                : obj.userData.maxInstanceCount + 1;
+                            if (numPoints !== expected) {
+                                console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
+                                return;
+                            }
+                            if (buffer.byteLength < numPoints * 3) {
+                                console.warn(`update_polyline_colors: blob too small (${buffer.byteLength} < ${numPoints * 3})`);
+                                return;
+                            }
+                            const bytes = new Uint8Array(buffer, 0, numPoints * 3);
+                            const colorData = new Float32Array(numPoints * 3);
+                            for (let i = 0, n = numPoints * 3; i < n; i++) {
+                                colorData[i] = bytes[i] / 255;
+                            }
+                            if (obj.userData.isNativeLine) {
+                                // Native line: plain per-vertex color attribute.
+                                obj.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                            } else {
+                                // setColors rebuilds the instanceColorStart/End
+                                // instanced attributes on the LineGeometry.
+                                obj.geometry.setColors(colorData);
+                            }
+                            // If the polyline was created without vertex colors,
+                            // the material is in flat-color mode — flip it.
+                            // Also reset the base color to white so vertex
+                            // colors aren't tinted/multiplied by the prior
+                            // flat color (e.g. red base × green vertex = 0).
+                            if (!obj.material.vertexColors) {
+                                obj.material.vertexColors = true;
+                                if (obj.material.color) obj.material.color.setHex(0xffffff);
+                                obj.material.needsUpdate = true;
+                            }
+                        } catch (e) {
+                            console.error(`Error updating polyline colors:`, e);
+                        } finally {
+                            this._onFetchEnd();
+                        }
+                    })();
+                });
+                break;
+            }
+            case 'add_mesh_binary': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._claimLoadToken(data.id);
+                const deferred = this._makeDeferred();
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene) {
+                            console.log('Discarding stale mesh fetch');
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                            console.log(`Discarding stale mesh fetch for '${data.id}'`);
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const nv = data.numVertices;
+                        const ni = data.numIndices;
+
+                        let offset = 0;
+                        const positions = new Float32Array(buffer, offset, nv * 3);
+                        offset += nv * 3 * 4;
+
+                        let normals = null;
+                        if (data.hasNormals) {
+                            normals = new Float32Array(buffer, offset, nv * 3);
+                            offset += nv * 3 * 4;
+                        }
+
+                        let colors = null;
+                        if (data.hasVertexColors) {
+                            colors = new Float32Array(buffer, offset, nv * 3);
+                            offset += nv * 3 * 4;
+                        }
+
+                        const indices = new Uint32Array(buffer, offset, ni);
+
+                        const geometry = new THREE.BufferGeometry();
+                        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+                        if (normals) {
+                            geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+                        } else {
+                            geometry.computeVertexNormals();
+                        }
+                        if (colors) {
+                            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                        }
+
+                        const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
+                        const meshMaterial = new THREE.MeshStandardMaterial({
+                            color: colors ? 0xffffff : (data.color || 0x7ab8cc),
+                            metalness: data.metalness !== undefined ? data.metalness : 0.1,
+                            roughness: data.roughness !== undefined ? data.roughness : 0.8,
+                            opacity: meshOpacity,
+                            transparent: meshOpacity < 1,
+                            depthWrite: meshOpacity >= 1,
+                            side: THREE.DoubleSide,
+                            vertexColors: !!colors,
+                            clippingPlanes: this._activeClippingPlanes(),
+                        });
+
+                        const mesh = new THREE.Mesh(geometry, meshMaterial);
+                        mesh.name = data.id;
+                        mesh.userData.id = data.id;
+                        mesh.userData.isMesh = true;
+                        mesh.userData.totalIndexCount = ni;
+                        this._deleteObject(data.id, { preserveInflight: true });
+                        this._addToParentOrScene(mesh, data.parent);
+                        this._objects.set(data.id, mesh);
+                        this._objGeneration++;
+                        if (data.transform) this._applyTransform(mesh, data.transform);
+                        console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
+                        deferred.resolve();
+                    } catch (e) {
+                        console.error(`Error creating mesh:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'add_parametric_tube_binary': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._claimLoadToken(data.id);
+                const deferred = this._makeDeferred();
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene) {
+                            console.log('Discarding stale parametric tube fetch');
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                            console.log(`Discarding stale parametric tube fetch for '${data.id}'`);
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const n = data.numSpinePoints;
+                        let offset = 0;
+                        const spine = new Float32Array(buffer, offset, n * 3);
+                        offset += n * 3 * 4;
+                        const widths = new Float32Array(buffer, offset, n);
+                        offset += n * 4;
+                        const heights = new Float32Array(buffer, offset, n);
+                        offset += n * 4;
+                        let orientations = null;
+                        if (data.hasOrientations) {
+                            orientations = new Float32Array(buffer, offset, n * 4);
+                            offset += n * 4 * 4;
+                        }
+                        let ringColors = null;
+                        if (data.hasColors) {
+                            const packed = new Uint32Array(buffer, offset, n);
+                            offset += n * 4;
+                            // Decode packed uint32 0x00RRGGBB → Float32Array(n*3).
+                            ringColors = new Float32Array(n * 3);
+                            for (let i = 0; i < n; i++) {
+                                const c = packed[i];
+                                ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
+                                ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                ringColors[i * 3 + 2] = (c & 0xff) / 255;
+                            }
+                        }
+                        const nCs = N_CROSS_SECTION;
+                        const hasColors = !!ringColors;
+                        const upVector = data.upVector || null;
+                        const heightOffset = data.heightOffset || 0;
+
+                        // Per-ring anchor offset along V, captured from the heights
+                        // BEFORE the deposition bias scales them. Recomputing it from
+                        // the biased heights would cancel the bias exactly on the
+                        // anchored face (anchor="top" would keep its top facet at
+                        // v = 0 for every ring, and an exact retrace would still
+                        // z-fight there) — capturing it unbiased makes the bias a
+                        // scale about each ring's anchored section centre instead of
+                        // about the spine point. null for anchor=center (vOff ≡ 0).
+                        let vOffs = null;
+                        if (heightOffset) {
+                            vOffs = new Float32Array(n);
+                            for (let i = 0; i < n; i++) vOffs[i] = heightOffset * heights[i];
+                        }
+
+                        // Deposition-order bias (see TUBE_DEPOSITION_BIAS): applied
+                        // in place to the decoded arrays, BEFORE the LOD reduction,
+                        // the main-thread build, and the worker 'init'/'collapseOnly'
+                        // posts — every downstream consumer (LOD rebuilds, collapse,
+                        // morph, caps, pick half-extents) sees the biased values, so
+                        // an exact retrace stays nested at every kept ring. The ramp
+                        // index runs over the WHOLE toolpath: add_toolpath splits at
+                        // travel moves into segment tubes and threads the global ramp
+                        // through biasIndexOffset/biasIndexTotal, so a retrace that
+                        // crosses a travel split still nests deterministically.
+                        const biasBase = data.biasIndexOffset || 0;
+                        const biasTotal = Math.max(data.biasIndexTotal || n, biasBase + n);
+                        if (biasTotal > 1) {
+                            const biasStep = TUBE_DEPOSITION_BIAS / (biasTotal - 1);
+                            for (let i = 0; i < n; i++) {
+                                const k = 1 + (biasBase + i) * biasStep;
+                                widths[i] *= k;
+                                heights[i] *= k;
+                            }
+                        }
+
+                        // LOD: for large tubes, reduce spine before building geometry.
+                        // Per-tube config via `data.lod` (see parseLodConfig).
+                        const lodCfg = parseLodConfig(data.lod);
+                        let tubeLOD = null;
+                        let buildSpine = spine, buildWidths = widths, buildHeights = heights;
+                        let buildOrientations = orientations, buildRingColors = ringColors;
+                        let buildVOffs = vOffs;
+                        let buildN = n;
+                        if (lodCfg.enabled && n >= lodCfg.threshold) {
+                            // Bounding sphere from original spine (stable across LOD rebuilds).
+                            // Includes cross-section extent so `boundingRadius` reflects the
+                            // tube's actual on-screen size — color weight scales with it.
+                            const _center = new THREE.Vector3();
+                            for (let i = 0; i < n; i++) {
+                                _center.x += spine[i * 3]; _center.y += spine[i * 3 + 1]; _center.z += spine[i * 3 + 2];
+                            }
+                            _center.divideScalar(n);
+                            let _maxR2 = 0;
+                            for (let i = 0; i < n; i++) {
+                                const dx = spine[i * 3] - _center.x, dy = spine[i * 3 + 1] - _center.y, dz = spine[i * 3 + 2] - _center.z;
+                                _maxR2 = Math.max(_maxR2, dx * dx + dy * dy + dz * dz);
+                            }
+                            let _maxHalfExtent = 0;
+                            for (let i = 0; i < n; i++) {
+                                const h = Math.max(widths[i], heights[i]) * 0.5;
+                                if (h > _maxHalfExtent) _maxHalfExtent = h;
+                            }
+                            const boundingRadius = Math.sqrt(_maxR2) + _maxHalfExtent;
+                            const cam = this._camera;
+                            const { indices: keptIndices, minDist: _lodMinDist, maxDist: _lodMaxDist } = distanceWeightedRDP(
+                                spine, widths, heights, ringColors, boundingRadius, n,
+                                cam.position.x, cam.position.y, cam.position.z,
+                                lodCfg.epsilonDivisor,
+                            );
+                            const nRed = keptIndices.length;
+                            // Extract reduced arrays
+                            buildSpine = new Float32Array(nRed * 3);
+                            buildWidths = new Float32Array(nRed);
+                            buildHeights = new Float32Array(nRed);
+                            buildRingColors = ringColors ? new Float32Array(nRed * 3) : null;
+                            buildVOffs = vOffs ? new Float32Array(nRed) : null;
+                            buildOrientations = null; // orientations not preserved through LOD
+                            buildN = nRed;
+                            for (let i = 0; i < nRed; i++) {
+                                const oi = keptIndices[i];
+                                buildSpine[i * 3] = spine[oi * 3]; buildSpine[i * 3 + 1] = spine[oi * 3 + 1]; buildSpine[i * 3 + 2] = spine[oi * 3 + 2];
+                                buildWidths[i] = widths[oi];
+                                buildHeights[i] = heights[oi];
+                                if (buildRingColors) {
+                                    buildRingColors[i * 3] = ringColors[oi * 3]; buildRingColors[i * 3 + 1] = ringColors[oi * 3 + 1]; buildRingColors[i * 3 + 2] = ringColors[oi * 3 + 2];
+                                }
+                                if (buildVOffs) buildVOffs[i] = vOffs[oi];
+                            }
+                            tubeLOD = {
+                                originalSpine: new Float32Array(spine),
+                                originalWidths: new Float32Array(widths),
+                                originalHeights: new Float32Array(heights),
+                                originalRingColors: ringColors ? new Float32Array(ringColors) : null,
+                                originalVOffs: vOffs ? new Float32Array(vOffs) : null,
+                                originalCount: n,
+                                upVector,
+                                keptIndices,
+                                currentDrawRange: 1.0,
+                                lastCameraPos: cam.position.clone(),
+                                boundingCenter: _center,
+                                boundingRadius,
+                                colorVersion: 0,
+                                epsilonDivisor: lodCfg.epsilonDivisor,
+                            };
+                            // LOD initial reduction logged at debug level only
+                        }
+
+                        // strand_collapse accepts true or {maxSnapFactor: N}. Normalize
+                        // here so the worker messages and the runtime toggle see a
+                        // single canonical shape — and so the LOD-rebuild path in
+                        // the worker can extract the snap factor without re-parsing.
+                        let strandCollapse = false;
+                        let strandCollapseCfg = null;
+                        if (data.strandCollapse === true) {
+                            strandCollapse = true;
+                            strandCollapseCfg = true;
+                        } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
+                            strandCollapse = true;
+                            const msf = data.strandCollapse.maxSnapFactor;
+                            strandCollapseCfg = (typeof msf === 'number' && msf > 0)
+                                ? { maxSnapFactor: msf }
+                                : true;
+                        }
+                        const { geometry, ringPairs, indicesPerRingPair, localFrames, miters, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
+                            buildSpine, buildWidths, buildHeights,
+                            buildOrientations, upVector, buildRingColors, buildVOffs,
+                        );
+                        const opacity = data.opacity !== undefined ? data.opacity : 1;
+                        const material = new THREE.MeshStandardMaterial({
+                            color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
+                            metalness: data.metalness !== undefined ? data.metalness : 0.1,
+                            roughness: data.roughness !== undefined ? data.roughness : 0.8,
+                            opacity,
+                            transparent: opacity < 1,
+                            depthWrite: opacity >= 1,
+                            side: THREE.DoubleSide,
+                            vertexColors: hasColors,
+                            clippingPlanes: this._activeClippingPlanes(),
+                        });
+                        const mesh = new THREE.Mesh(geometry, material);
+                        mesh.name = data.id;
+                        mesh.userData.id = data.id;
+                        mesh.userData.isParametricTube = true;
+                        mesh.userData.parametricTube = new ParametricTube(mesh);
+                        mesh.userData.tubeNumSpinePoints = buildN;
+                        mesh.userData.tubeNCs = nCs;
+                        mesh.userData.tubeRingPairs = ringPairs;
+                        mesh.userData.tubeIndicesPerRingPair = indicesPerRingPair;
+                        mesh.userData.totalIndexCount = capIndicesPerCap + ringPairs * indicesPerRingPair + capIndicesPerCap;
+                        mesh.userData.tubeHasColors = hasColors;
+                        mesh.userData.tubeCapIndicesPerCap = capIndicesPerCap;
+                        mesh.userData.tubeEndCapBase = endCapBase;
+                        // Picking: expose the FULL-resolution spine (1:1 with the
+                        // caller's per-spine-point data arrays, independent of LOD)
+                        // plus references to the width/height arrays. Everything
+                        // here is a reference to data we already hold (no copy, no
+                        // loop) — the per-point bead half-extents used by the pick
+                        // gate are built lazily on the first pick (see
+                        // PolylinePickController._ensureTubeHalfExtents), so a tube
+                        // costs nothing extra when picking is never used. Opt out
+                        // per object with pickable=False.
+                        if (data.pickable !== false) {
+                            mesh.userData.isPickableTube = true;
+                            mesh.userData.pickPoints = tubeLOD ? tubeLOD.originalSpine : spine;
+                            mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
+                            mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
+                            mesh.userData.pickHeightOffset = heightOffset;
+                        }
+                        mesh.userData.tubeMorphData = {
+                            spine: new Float32Array(buildSpine),
+                            widths: new Float32Array(buildWidths),
+                            heights: new Float32Array(buildHeights),
+                            localFrames, miters, tangents: builtTangents, capAngles,
+                            ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
+                            section: new Float32Array(nCs * 2),
+                            savedRing: new Float32Array(nCs * 3),
+                            savedRingNormals: null,
+                            savedRingColors: null,
+                            savedRingIndex: null,
+                            morphedState: null,
+                            endCapPattern,
+                            savedCapIndices: new (/** @type {any} */ (endCapPattern.constructor))(endCapPattern.length),
+                            savedCapOffset: -1,
+                            vOffs: buildVOffs ? new Float32Array(buildVOffs) : null,
+                        };
+                        // Dispose any existing object at this id BEFORE posting
+                        // worker messages so the worker's queue order is
+                        // dispose(old) → init(new) → collapseOnly(new). Sending
+                        // 'init' first would let the trailing 'dispose' that
+                        // _deleteObject queues for the old tubeLOD clobber the
+                        // new tube's worker state (same tubeId).
+                        this._deleteObject(data.id, { preserveInflight: true });
+                        this._addToParentOrScene(mesh, data.parent);
+                        this._objects.set(data.id, mesh);
+                        this._objGeneration++;
+                        if (data.transform) this._applyTransform(mesh, data.transform);
+                        deferred.resolve();
+                        if (tubeLOD) {
+                            mesh.userData.tubeLOD = tubeLOD;
+                            // Register original arrays with LOD worker
+                            this._lodWorker.postMessage({
+                                type: 'init',
+                                tubeId: data.id,
+                                spine: tubeLOD.originalSpine,
+                                widths: tubeLOD.originalWidths,
+                                heights: tubeLOD.originalHeights,
+                                ringColors: tubeLOD.originalRingColors,
+                                upVec: upVector,
+                                nPoints: tubeLOD.originalCount,
+                                vOffs: tubeLOD.originalVOffs,
+                                boundingRadius: tubeLOD.boundingRadius,
+                                epsilonDivisor: tubeLOD.epsilonDivisor,
+                                strandCollapse: strandCollapseCfg,
+                            });
+                        }
+                        // Async strand-collapse offload: post the un-collapsed
+                        // positions to the LOD worker. The mesh is visible
+                        // immediately (un-collapsed); when the worker returns
+                        // we copy the snapped positions back in. Sends a
+                        // CLONE — main thread keeps the renderable buffer
+                        // attached to THREE so the render loop never sees a
+                        // detached ArrayBuffer mid-frame.
+                        //
+                        // Includes the current load token so a late response
+                        // for a tube that's been deleted (and possibly re-
+                        // created with the same id) is dropped instead of
+                        // stomping the new mesh's positions.
+                        if (strandCollapse) {
+                            const posAttr = /** @type {THREE.BufferAttribute} */ (geometry.getAttribute('position'));
+                            const posClone = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+                            // Stash an independent copy of the pre-collapse positions
+                            // so the runtime toggle (press S) can flip back to it
+                            // without re-running the worker. posClone is transferred
+                            // into the worker on the next postMessage, so this must
+                            // be a separate Float32Array allocation.
+                            mesh.userData.uncollapsedPositions = new Float32Array(posClone);
+                            mesh.userData.strandCollapseEnabled = true;
+                            mesh.userData.strandCollapseConfig = strandCollapseCfg;
+                            const spineForWorker = new Float32Array(buildSpine);
+                            const widthsForWorker = new Float32Array(buildWidths);
+                            const heightsForWorker = new Float32Array(buildHeights);
+                            const localFramesForWorker = new Float32Array(localFrames);
+                            const collapseToken = this._loadTokens.get(data.id);
+                            this._lodWorker.postMessage({
+                                type: 'collapseOnly',
+                                tubeId: data.id,
+                                loadToken: collapseToken,
+                                positions: posClone,
+                                spine: spineForWorker,
+                                widths: widthsForWorker,
+                                heights: heightsForWorker,
+                                localFrames: localFramesForWorker,
+                                nSpine: buildN,
+                                strandCollapse: strandCollapseCfg,
+                            }, [
+                                posClone.buffer,
+                                spineForWorker.buffer,
+                                widthsForWorker.buffer,
+                                heightsForWorker.buffer,
+                                localFramesForWorker.buffer,
+                            ]);
+                        }
+                        console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
+                    } catch (e) {
+                        console.error(`Error creating parametric_tube:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'add_swept_tool_binary': {
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._claimLoadToken(data.id);
+                const deferred = this._makeDeferred();
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene) {
+                            console.log('Discarding stale swept-tool fetch');
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        if (!this._isLoadTokenCurrent(data.id, loadToken)) {
+                            console.log(`Discarding stale swept-tool fetch for '${data.id}'`);
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const nStations = data.numStations;
+                        const nProfile = data.numProfile;
+                        const sections = data.sections || 16;
+                        let offset = 0;
+                        const stationPos = new Float32Array(buffer, offset, nStations * 3);
+                        offset += nStations * 3 * 4;
+                        const axisArr = new Float32Array(buffer, offset, nStations * 3);
+                        offset += nStations * 3 * 4;
+                        const profileArr = new Float32Array(buffer, offset, nProfile * 2);
+                        offset += nProfile * 2 * 4;
+                        /** @type {Float32Array|null} */
+                        let ringColors = null;
+                        if (data.hasColors) {
+                            const packed = new Uint32Array(buffer, offset, nStations);
+                            offset += nStations * 4;
+                            ringColors = new Float32Array(nStations * 3);
+                            for (let i = 0; i < nStations; i++) {
+                                const c = packed[i];
+                                ringColors[i * 3] = ((c >> 16) & 0xff) / 255;
+                                ringColors[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                ringColors[i * 3 + 2] = (c & 0xff) / 255;
+                            }
+                        }
+                        const hasColors = !!ringColors;
+                        const { geometry } = buildSweptToolGeometry(
+                            stationPos, axisArr, profileArr, sections, ringColors,
+                        );
+                        const opacity = data.opacity !== undefined ? data.opacity : 1;
+                        const material = new THREE.MeshStandardMaterial({
+                            color: hasColors ? 0xffffff : (data.color ?? 0x9aa0a6),
+                            metalness: data.metalness !== undefined ? data.metalness : 0.3,
+                            roughness: data.roughness !== undefined ? data.roughness : 0.6,
+                            opacity,
+                            transparent: opacity < 1,
+                            depthWrite: opacity >= 1,
+                            side: THREE.DoubleSide,
+                            vertexColors: hasColors,
+                            clippingPlanes: this._activeClippingPlanes(),
+                        });
+                        const mesh = new THREE.Mesh(geometry, material);
+                        mesh.name = data.id;
+                        mesh.userData.id = data.id;
+                        mesh.userData.isSweptTool = true;
+                        mesh.userData.totalIndexCount = geometry.getIndex().count;
+                        this._deleteObject(data.id, { preserveInflight: true });
+                        this._addToParentOrScene(mesh, data.parent);
+                        this._objects.set(data.id, mesh);
+                        this._objGeneration++;
+                        if (data.transform) this._applyTransform(mesh, data.transform);
+                        deferred.resolve();
+                        console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
+                    } catch (e) {
+                        console.error(`Error creating swept_tool:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'update_parametric_tube_colors': {
+                this._withObject(data.id, 'update_parametric_tube_colors', (target) => {
+                    if (!target.userData.isParametricTube) {
+                        console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                        return;
+                    }
+                    this._onFetchStart();
+                    const capturedScene = this._sceneGeneration;
+                    (async () => {
+                        try {
+                            const resp = await fetch(data.blob_url);
+                            const buffer = await resp.arrayBuffer();
+                            if (this._sceneGeneration !== capturedScene) {
+                                console.log('Discarding stale parametric tube color fetch');
+                                return;
+                            }
+                            const obj = this._objects.get(data.id);
+                            if (!obj || !obj.userData.isParametricTube) {
+                                console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                return;
+                            }
+                            const lod = obj.userData.tubeLOD;
+                            // Color data from Python is always for the original spine count
+                            const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
+                            const nCs = obj.userData.tubeNCs;
+                            if (buffer.byteLength < nOrig * 4) {
+                                console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
+                                return;
+                            }
+                            const packed = new Uint32Array(buffer, 0, nOrig);
+                            // Decode per-ring colors (full original count)
+                            const rc = new Float32Array(nOrig * 3);
+                            for (let i = 0; i < nOrig; i++) {
+                                const c = packed[i];
+                                rc[i * 3]     = ((c >> 16) & 0xff) / 255;
+                                rc[i * 3 + 1] = ((c >> 8) & 0xff) / 255;
+                                rc[i * 3 + 2] = (c & 0xff) / 255;
+                            }
+
+                            // When LOD is active, store full colors and rebuild with reduced subset
+                            if (lod && lod.keptIndices) {
+                                lod.originalRingColors = new Float32Array(rc);
+                                lod.colorVersion = (lod.colorVersion || 0) + 1;
+                                this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
+                                // Extract reduced colors for current LOD level
+                                const nRed = lod.keptIndices.length;
+                                const redRc = new Float32Array(nRed * 3);
+                                const redPacked = new Uint32Array(nRed);
+                                for (let i = 0; i < nRed; i++) {
+                                    const oi = lod.keptIndices[i];
+                                    redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                                    redPacked[i] = packed[oi];
+                                }
+                                // Update geometry colors for reduced mesh
+                                const n = nRed;
+                                // Restore frontier ring BEFORE writing new colors
+                                const md = obj.userData.tubeMorphData;
+                                if (md) restoreFrontierRing(obj);
+                                // Fill cap dome vertices with a single color
+                                /**
+                                 * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                 * @param {number} baseVert
+                                 * @param {number} capVerts
+                                 * @param {number} r
+                                 * @param {number} g
+                                 * @param {number} b
+                                 */
+                                function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                    for (let j = 0; j < capVerts; j++) {
+                                        arr[(baseVert + j) * 3]     = r;
+                                        arr[(baseVert + j) * 3 + 1] = g;
+                                        arr[(baseVert + j) * 3 + 2] = b;
+                                    }
+                                }
+                                const posCount = obj.geometry.getAttribute('position').count;
+                                const capVertsPerCap = (posCount - n * nCs) / 2;
+                                const startCapBaseVert = n * nCs;
+                                const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                const lr = (n - 1) * 3;
+                                const existing = obj.geometry.getAttribute('color');
+                                if (existing) {
+                                    expandRingColors(redPacked, n, nCs, existing.array);
+                                    fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                    fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                    existing.clearUpdateRanges();
+                                    existing.needsUpdate = true;
+                                } else {
+                                    const allColors = new Float32Array(posCount * 3);
+                                    expandRingColors(redPacked, n, nCs, allColors);
+                                    fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
+                                    fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
+                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                }
+                                obj.material.vertexColors = true;
+                                obj.material.color.setHex(0xffffff);
+                                obj.material.needsUpdate = true;
+                                obj.userData.tubeHasColors = true;
+                                obj.userData._colorFullUploadNeeded = true;
+                                if (md) md.ringColors = redRc;
+                            } else {
+                                // No LOD active — original path
+                                if (lod) {
+                                    lod.originalRingColors = new Float32Array(rc);
+                                    lod.colorVersion = (lod.colorVersion || 0) + 1;
+                                    this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
+                                }
+                                const n = nOrig;
+                                // Fill cap dome vertices with a single color
+                                /**
+                                 * @param {ArrayLike<number> & {[i: number]: number}} arr
+                                 * @param {number} baseVert
+                                 * @param {number} capVerts
+                                 * @param {number} r
+                                 * @param {number} g
+                                 * @param {number} b
+                                 */
+                                function fillCapColors(arr, baseVert, capVerts, r, g, b) {
+                                    for (let j = 0; j < capVerts; j++) {
+                                        arr[(baseVert + j) * 3]     = r;
+                                        arr[(baseVert + j) * 3 + 1] = g;
+                                        arr[(baseVert + j) * 3 + 2] = b;
+                                    }
+                                }
+                                const posCount = obj.geometry.getAttribute('position').count;
+                                const capVertsPerCap = (posCount - n * nCs) / 2;
+                                const startCapBaseVert = n * nCs;
+                                const endCapBaseVert = startCapBaseVert + capVertsPerCap;
+                                const lr = (n - 1) * 3;
+                                // Restore frontier ring BEFORE writing new colors so
+                                // the stale savedRingColors don't overwrite the update.
+                                const md = obj.userData.tubeMorphData;
+                                if (md) restoreFrontierRing(obj);
+                                const existing = obj.geometry.getAttribute('color');
+                                if (existing) {
+                                    expandRingColors(packed, n, nCs, existing.array);
+                                    fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                    fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                    existing.clearUpdateRanges();
+                                    existing.needsUpdate = true;
+                                } else {
+                                    const allColors = new Float32Array(posCount * 3);
+                                    expandRingColors(packed, n, nCs, allColors);
+                                    fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
+                                    fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
+                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
+                                }
+                                obj.material.vertexColors = true;
+                                obj.material.color.setHex(0xffffff);
+                                obj.material.needsUpdate = true;
+                                obj.userData.tubeHasColors = true;
+                                obj.userData._colorFullUploadNeeded = true;
+                                if (md) md.ringColors = rc;
+                            }
+                        } catch (e) {
+                            console.error(`Error updating parametric_tube colors:`, e);
+                        } finally {
+                            this._onFetchEnd();
+                        }
+                    })();
+                });
+                break;
+            }
+            case 'register_toolpath_group': {
+                const grp = this._objects.get(data.id);
+                if (grp) {
+                    grp.userData.isToolpathGroup = true;
+                    grp.userData.toolpathSegmentIds = data.segmentIds;
+                    grp.userData.toolpathSegmentRanges = data.segmentRanges;
+                }
+                break;
+            }
+            case 'unload_animation':
+                this._unloadAnimation(data.restore_visibility !== false);
+                break;
+            case 'pause_animation':
+                if (this._animation) {
+                    this._animationPlaying = false;
+                    this._updateAnimationUI();
+                }
+                break;
+            case 'resume_animation':
+                if (this._animation) {
+                    this._animationPlaying = true;
+                    this._lastAnimationUpdate = performance.now();
+                    this._updateAnimationUI();
+                }
+                break;
+            case 'set_clip_time':
+                this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
+                break;
+            case 'set_draw_range':
+                this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
+                break;
+            case 'set_strand_collapse_enabled':
+                this._withObject(data.id, 'set_strand_collapse_enabled', () =>
+                    this.setStrandCollapseEnabled(data.id, !!data.enabled));
+                break;
+            case 'set_clipping_plane': {
+                this._clipEnabled = true;
+                this._clipSlabMode = false;
+                this._clipPlanes = [this._clipPlane];
+                this._clipModeSingle.classList.add('active');
+                this._clipModeSlab.classList.remove('active');
+                this._clipThicknessSection.style.display = 'none';
+                if (data.normal) {
+                    this._clipPlane.normal.fromArray(data.normal).normalize();
+                    this._syncNormalInputs();
+                }
+                if (data.distance != null) this._setClipDistance(data.distance);
+                if (data.show_helper != null) this._clipHelperVisible = data.show_helper;
+                let matchedAxis = null;
+                for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
+                    if (n.equals(this._clipPlane.normal)) { matchedAxis = axis; break; }
+                }
+                if (matchedAxis) this._setClipAxis(matchedAxis);
+                this._updateClipSliderRange();
+                this._syncAnchorFromPlane();
+                this._clipPanelEl.classList.add('visible');
+                this._btnClip.classList.add('active');
+                this._updateClipMaterials();
+                break;
+            }
+            case 'set_clipping_slab': {
+                this._clipEnabled = true;
+                this._clipSlabMode = true;
+                this._clipPlanes = [this._clipPlane, this._clipPlane2];
+                this._clipModeSlab.classList.add('active');
+                this._clipModeSingle.classList.remove('active');
+                this._clipThicknessSection.style.display = '';
+                if (data.normal) {
+                    this._clipPlane.normal.fromArray(data.normal).normalize();
+                    this._syncNormalInputs();
+                }
+                if (data.thickness != null) this._setClipThickness(data.thickness);
+                if (data.center != null) this._setClipDistance(data.center);
+                if (data.show_helper != null) this._clipHelperVisible = data.show_helper;
+                let matchedAxis2 = null;
+                for (const [axis, n] of Object.entries(CLIP_AXIS_NORMALS)) {
+                    if (n.equals(this._clipPlane.normal)) { matchedAxis2 = axis; break; }
+                }
+                if (matchedAxis2) this._setClipAxis(matchedAxis2);
+                this._updateClipSliderRange();
+                this._syncAnchorFromPlane();
+                this._clipPanelEl.classList.add('visible');
+                this._btnClip.classList.add('active');
+                this._updateClipMaterials();
+                break;
+            }
+            case 'disable_clipping_plane':
+                this._clipEnabled = false;
+                this._clipPanelEl.classList.remove('visible');
+                this._btnClip.classList.remove('active');
+                this._updateClipMaterials();
+                break;
+            case 'set_clipping_defaults':
+                this._clipDefaults = { normal: data.normal, distance: data.distance };
+                break;
+            case 'set_depth_cue':
+                // Programmatic equivalent of the D / Shift+D keys.
+                if (data.fog != null) this._depthCue.setFog(data.fog);
+                if (data.edl != null) this._depthCue.setEdl(data.edl);
+                break;
+            case 'set_polyline_picking':
+                if (data.enabled) {
+                    this._polylinePick.enable({
+                        markerColor: data.markerColor,
+                        thresholdPx: data.thresholdPx,
+                    });
+                } else {
+                    this._polylinePick.disable();
+                }
+                break;
+            case 'set_move_gizmo':
+                if (data.enabled) {
+                    this._transformGizmo.enable({
+                        id: data.id,
+                        mode: data.mode,
+                        translateSnap: data.translateSnap,
+                        translateSnapRelative: data.translateSnapRelative,
+                        rotateSnap: data.rotateSnap,   // radians
+                        clickSelect: data.clickSelect,
+                        snapDefault: data.snapDefault,
+                    });
+                } else {
+                    this._transformGizmo.disable();
+                }
+                break;
+            case 'set_gizmo_axes':
+                this._transformGizmo.setAxes({ x: data.x, y: data.y, z: data.z });
+                break;
+            case 'add_gizmo': {
+                const target = this._objects.get(data.id);
+                if (target) this._transformGizmo.addGizmo(target, {
+                    id: data.id,
+                    mode: data.mode,
+                    axes: { x: data.x, y: data.y, z: data.z },
+                    space: data.space,
+                    snapDefault: data.snapDefault,
+                });
+                break;
+            }
+            case 'clear_gizmos':
+                this._transformGizmo.clearGizmos();
+                break;
+            case 'show_grid':
+                this._gridHelper.visible = !!data.visible;
+                if (data.size != null && data.divisions != null) {
+                    const parent = this._gridHelper.parent;
+                    parent.remove(this._gridHelper);
+                    this._gridHelper.geometry.dispose();
+                    this._gridHelper.material.dispose();
+                    this._gridHelper = new THREE.GridHelper(data.size, data.divisions);
+                    this._gridHelper.rotation.x = Math.PI / 2;
+                    this._gridHelper.visible = !!data.visible;
+                    parent.add(this._gridHelper);
+                }
+                break;
+            case 'mark_assets_complete':
+                this._assetsComplete = true;
+                this._maybeNotifyAssetsLoaded();
+                break;
+            default:
+                console.warn(`Unknown message type: '${data.type}'`);
+        }
     }
 
     // ========== Dynamic Near/Far ==========

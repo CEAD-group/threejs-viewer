@@ -627,6 +627,36 @@ def test_clear_resets_animation_state(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_handle_message_dispatches_without_websocket(viewer_client, viewer_page):
+    """`viewer.handleMessage(data)` is the public, WS-decoupled control-message
+    entry point (issue #71). Feeding a message straight in — no WebSocket frame —
+    must mutate the scene exactly as an `onmessage` would, so an embedder can drive
+    the viewer from local/static data with `{ autoConnect: false }`. We call it in
+    the browser directly, bypassing the socket, and assert the object appears; a
+    delete_object then removes it. Query messages (`list_objects`) must not throw
+    when dispatched this way — `_reply()` guards the send."""
+    present = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.handleMessage({ type: 'add_group', id: 'hm_group' });
+            // A query message must be safe to dispatch directly (routes via _reply).
+            v.handleMessage({ type: 'list_objects', requestId: 1 });
+            return v._objects.has('hm_group');
+        }"""
+    )
+    assert present is True
+
+    removed = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.handleMessage({ type: 'delete_object', id: 'hm_group' });
+            return v._objects.has('hm_group');
+        }"""
+    )
+    assert removed is False
+
+
+@pytest.mark.browser
 def test_show_grid(viewer_client, viewer_page):
     """show_grid() toggles grid visibility."""
     time.sleep(0.1)
