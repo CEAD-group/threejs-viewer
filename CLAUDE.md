@@ -67,6 +67,7 @@ A lightweight Three.js viewer designed to be controlled from Python/Jupyter note
 - **Binary transfer**: Large data (models, polylines, animations) served via HTTP sidecar on port 5667, browser fetches with native `fetch()`
 - **Batch updates**: `batch_update()` updates multiple objects in one message
 - **60fps capable**: Minimal JSON payloads with 4x4 matrices
+- **WS-decoupled dispatch**: The control-message switch lives in a public `viewer.handleMessage(data)` method; `connect()`'s `onmessage` only parses the WS frame and delegates to it. This makes no-WebSocket / static-page embedding first-class — construct `new ThreeJSViewer(container, { autoConnect: false })` (already supported) and feed messages straight in (`viewer.handleMessage({ type: 'add_points_binary', id, blob_url, ... })`) with no `websockets` server. Binary payloads still load over HTTP (static files or in-page `Blob` object URLs) exactly as under the socket transport. Query messages that expect a reply (`list_objects`, `query_scene`) route their response through `_reply(payload)`, which no-ops when no socket is connected, so they're safe to dispatch in static mode.
 
 ### Animation Modes
 - **Streaming mode**: Real-time updates from Python (`batch_update()`, `set_matrix()`)
