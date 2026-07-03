@@ -10380,6 +10380,12 @@ export class ThreeJSViewer {
         const bbox = new THREE.Box3();
         object.updateWorldMatrix(true, true);
         bbox.expandByObject(object);
+        // LOD point clouds know their full extent from the hierarchy even
+        // when few (or no) node payloads are streamed in yet.
+        if (object.userData.lodRootBox) {
+            bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
+                .applyMatrix4(object.matrixWorld));
+        }
         this._fitCameraToBox(bbox, 1.5);
     }
 
