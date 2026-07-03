@@ -1,11 +1,18 @@
 # add_points: octree LOD + per-point time-window visibility (issue #79)
 
-> **Status: proposed / not started.** Decision-making artifact for issue #79
-> (mill-sim animated voxel fields: up to ~1B source points, ~1M drawn).
-> Synthesized 2026-07-03 from three prior-art surveys (Potree ecosystem,
-> formats & Python tooling, LOD techniques literature) plus discussion with
-> Thijs. The architecture decisions below are settled enough to implement;
-> the "Open questions" section lists what is not.
+> **Status: Phases 1–2 implemented (branch `points-octree-lod-time`);
+> Phase 3 open.** Decision-making artifact for issue #79 (mill-sim animated
+> voxel fields: up to ~1B source points, ~1M drawn). Synthesized 2026-07-03
+> from five prior-art surveys (Potree ecosystem, formats & Python tooling,
+> LOD techniques, encoding/compression, GPU efficiency) plus discussion
+> with Thijs. Implementation notes: the builder lives in `points_lod.py`;
+> node serving = lazy callable values in the existing blob store (the
+> Phase 3 `node_provider` hook falls out of the same mechanism);
+> **deviation from D8**: timestamps ship as f32, not u16 — u16 needs an
+> "unbounded" sentinel the shader can read (an immortal flag); deferred.
+> Current per-point payload is 6 (i16 xyz) + 3 (u8 rgb) + 8 (f32 times)
+> = 17 B. CLAUDE.md carries the as-built behavior; this doc remains the
+> rationale + Phase 3 blueprint.
 
 ## The problem
 
@@ -273,18 +280,23 @@ bytes (~1.7 GB/s fetched vs 200–1000 GB/s available).
    WebGL2 + quantized attributes (Phase 2, D8) is the 2026 target and the
    buffer layout stays compute-friendly for the eventual drop-in.
 
-## Open questions
+## Open questions (resolved ones marked)
 
-- Exact node-endpoint shape on the sidecar (path routing vs pre-registered
-  per-node blob ids) — decide when touching the sidecar code.
-- Whether Phase 2's builder lives in `client.py` or a new `points_lod.py`
-  (leaning in-file per repo convention, but the builder + tests are
-  self-contained enough that a module may be cleaner).
-- `point_times` neutral value on `unload_animation` (draw_ranges reset to
-  1.0; there is no universally "all visible" time when both birth and
-  removal are in play — current lean: leave `uTime` untouched).
-- Whether Phase 1's shader patch should also apply to the EDL depth
-  pre-pass points layer (it should — same material — but verify).
+- ~~Node-endpoint shape~~ → resolved: per-node **callable** values in the
+  existing blob store (`/points_lod_<uuid>/<i>` → lazy quantize+pack of a
+  numpy slice); `_BlobHandler` calls callables on GET. Phase 3's
+  `node_provider` hook is the same mechanism with user-supplied callables.
+- ~~Builder location~~ → resolved: `src/threejs_viewer/points_lod.py`
+  (matches `animation.py`/`toolpath.py` precedent).
+- ~~`point_times` on `unload_animation`~~ → resolved: scrub time left
+  untouched (documented).
+- ~~EDL pre-pass~~ → resolved: same material instance (shared uniform by
+  reference), filter applies in the pre-pass too.
+- u16 timestamp quantization: needs an immortal-flag encoding (see status
+  note). Phase 3.
+- Builder throughput: ~1s per 1M points (BFS numpy masking + per-node
+  lexsort). Fine to ~20M; a Morton-radix build is the known upgrade path
+  for the 100M in-RAM ceiling.
 
 ## Prior-art pointers (from the 2026-07-03 surveys)
 
