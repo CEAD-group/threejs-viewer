@@ -7314,6 +7314,15 @@ export class ThreeJSViewer {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         } else if (obj.userData.isPoints) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
+        } else if (obj.userData.isPointsLOD && !obj.userData._warnedDrawRange) {
+            // Octree-LOD clouds: buffer order is per-node Morton, a prefix
+            // is spatially meaningless. Warn once instead of silently
+            // no-oping so the mistake is discoverable.
+            obj.userData._warnedDrawRange = true;
+            console.warn(
+                `set_draw_range: '${id}' is an octree-LOD point cloud — draw_range is ` +
+                `ignored (per-node Morton buffer order); use the birth/removal time ` +
+                `window (set_points_time / point_times channel) instead.`);
         }
     }
 
