@@ -23,6 +23,12 @@ What happens:
   buffer order, at every LOD, because the filter runs per point in the
   vertex shader and each octree node's sample is stratified over time.
 
+Note the script stays running: LOD nodes stream from this Python process
+on demand, so exiting it freezes refinement at whatever is already loaded
+(the standard trade-off of the streamed tier). Ctrl+C to quit. At t=0
+nothing has been built yet — the cloud appears as the animation plays
+(it autoplays) or when you drag the slider forward.
+
 Run: uv run python examples/27_points_octree_lod.py [n_points]
 """
 
@@ -40,10 +46,11 @@ v.clear()
 v.unload_animation()
 
 # --- Abstract point field: a thick wavy sheet with density structure ---
+# Centered on the origin so the default camera view frames it naturally.
 rng = np.random.default_rng(0)
-x = rng.uniform(0.0, 40.0, N).astype(np.float32)
-y = rng.uniform(0.0, 20.0, N).astype(np.float32)
-sheet = 4.0 + 1.8 * np.sin(x / 3.0) * np.cos(y / 2.5)  # wavy mid-surface
+x = rng.uniform(-20.0, 20.0, N).astype(np.float32)
+y = rng.uniform(-10.0, 10.0, N).astype(np.float32)
+sheet = 1.8 * np.sin(x / 3.0) * np.cos(y / 2.5)  # wavy mid-surface
 thickness = 0.8 + 0.5 * np.sin(x / 5.0 + y / 7.0)
 z = (sheet + thickness * rng.normal(0.0, 0.6, N)).astype(np.float32)
 positions = np.column_stack([x, y, z])
@@ -53,8 +60,8 @@ positions = np.column_stack([x, y, z])
 deviation = z - sheet
 
 # --- Per-point lifetimes ---
-# Build front: sweeps diagonally, points appear over ~14s of field time.
-birth = (x + 0.4 * y) / 3.0 + rng.normal(0.0, 0.25, N)
+# Build front: sweeps diagonally, points appear over ~16s of field time.
+birth = ((x + 20.0) + 0.4 * (y + 10.0)) / 3.0 + rng.normal(0.0, 0.25, N)
 # Erosion front: follows ~5s behind with some scatter...
 removal = birth + 5.0 + rng.exponential(1.5, N)
 # ...but the lowest points are bedrock and never erode (NaN = never removed).
@@ -89,5 +96,13 @@ print(f"{N:,} points -> octree built + registered in {build_s:.1f}s.")
 print("Zoom in/out: node detail streams on demand under a ~1.5M-point budget.")
 print("Drag the time slider: the build front adds points, the erosion front")
 print("removes them (out of buffer order), bedrock near the base persists.")
+print("Press F in the viewer to frame the cloud.")
 print("Tune the count: uv run python examples/27_points_octree_lod.py 10000000")
-v.wait_for_assets()
+print()
+print("Serving LOD nodes from this process — leave it running (Ctrl+C to quit).")
+v.wait_for_assets(disconnect=False)
+try:
+    while True:
+        time.sleep(1.0)
+except KeyboardInterrupt:
+    pass

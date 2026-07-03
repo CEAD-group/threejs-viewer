@@ -127,6 +127,7 @@ function refreshRefs(refs, ids, map) {
 const _lodInvMat = new THREE.Matrix4();
 const _lodCamLocal = new THREE.Vector3();
 const _lodScaleVec = new THREE.Vector3();
+const _lodBoundsBox = new THREE.Box3();
 
 // Scratch objects for matrix decompose/lerp. Module-scope to avoid per-frame alloc.
 const _lerpPosA = new THREE.Vector3();
@@ -3655,6 +3656,14 @@ class CameraController {
         for (const obj of v._objects.values()) {
             obj.updateWorldMatrix(true, true);
             box.expandByObject(obj);
+            // A LOD point cloud knows its full extent from the hierarchy
+            // even while the group has no (or few) streamed node children —
+            // without this, near/far and framing see an empty box until
+            // the first node payload lands.
+            if (obj.userData.lodRootBox) {
+                box.union(_lodBoundsBox.copy(obj.userData.lodRootBox)
+                    .applyMatrix4(obj.matrixWorld));
+            }
         }
         if (box.isEmpty()) {
             v._sceneSphere.set(new THREE.Vector3(), 0);
@@ -8710,6 +8719,9 @@ export class ThreeJSViewer {
             case 'set_visibility':
                 this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
                 break;
+            case 'frame_object':
+                this._withObject(data.id, 'frame_object', (obj) => { this.frameObject(obj); });
+                break;
             case 'set_scene_visibility':
                 this._setSceneVisibility(data.visibility);
                 break;
@@ -9226,6 +9238,18 @@ export class ThreeJSViewer {
                         // the group exactly like a flat cloud.
                         const timeUniform = { value: 0 };
                         if (hasBirth || hasRemoval) group.userData.timeUniform = timeUniform;
+                        // Full cloud extent (root octree cube) for framing /
+                        // near-far before any node payload has streamed in.
+                        const rootHalf = nodes.halfs[0];
+                        group.userData.lodRootBox = new THREE.Box3(
+                            new THREE.Vector3(
+                                nodes.centers[0] - rootHalf,
+                                nodes.centers[1] - rootHalf,
+                                nodes.centers[2] - rootHalf),
+                            new THREE.Vector3(
+                                nodes.centers[0] + rootHalf,
+                                nodes.centers[1] + rootHalf,
+                                nodes.centers[2] + rootHalf));
                         group.userData.pointsLOD = {
                             nodes,
                             /** @type {Array<any>} */
@@ -10477,6 +10501,14 @@ export class ThreeJSViewer {
                 !this._isPivotMarkerDescendant(child)) {
                 child.updateWorldMatrix(true, false);
                 bbox.expandByObject(child);
+            }
+            // LOD point clouds: frame the full advertised extent (root
+            // octree cube), not just whatever nodes happen to be streamed
+            // in right now.
+            if (child.userData && child.userData.lodRootBox) {
+                child.updateWorldMatrix(true, false);
+                bbox.union(_lodBoundsBox.copy(child.userData.lodRootBox)
+                    .applyMatrix4(child.matrixWorld));
             }
             const kids = child.children;
             for (let i = 0; i < kids.length; i++) visit(kids[i]);

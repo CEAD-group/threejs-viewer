@@ -1978,6 +1978,11 @@ class ViewerClient:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
+    def frame_object(self, id: str) -> None:
+        """Fit the camera to an object's bounding box (the programmatic
+        equivalent of double-clicking it in the viewer)."""
+        self._send({"type": "frame_object", "id": id})
+
     def set_points_time(self, id: str, time: float) -> None:
         """Set the time-window scrub time for a point cloud.
 
