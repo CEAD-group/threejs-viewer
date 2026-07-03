@@ -374,6 +374,87 @@ def test_add_points_rejects_bad_positions_shape(client):
         client.add_points("pc", np.zeros(7, dtype=np.float32))
 
 
+def test_add_points_time_windows_payload_layout(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    birth = np.array([0.5, 1.5], dtype=np.float32)
+    removal = np.array([2.0, 3.0], dtype=np.float32)
+    client.add_points("pc", pts, birth_times=birth, removal_times=removal)
+    header, payload = client._binary_messages[0]
+    assert header["hasBirthTimes"] is True
+    assert header["hasRemovalTimes"] is True
+    # positions (24 B) + birth (8 B) + removal (8 B), no colors.
+    assert len(payload) == 24 + 8 + 8
+    np.testing.assert_array_equal(
+        np.frombuffer(payload[24:32], dtype=np.float32), birth
+    )
+    np.testing.assert_array_equal(
+        np.frombuffer(payload[32:40], dtype=np.float32), removal
+    )
+
+
+def test_add_points_time_windows_after_colors(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    rgb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    removal = np.array([2.0, 3.0], dtype=np.float32)
+    client.add_points("pc", pts, colors=rgb, removal_times=removal)
+    header, payload = client._binary_messages[0]
+    assert "hasBirthTimes" not in header
+    assert header["hasRemovalTimes"] is True
+    # positions (24 B) + colors (6 B) + removal (8 B).
+    assert len(payload) == 24 + 6 + 8
+    np.testing.assert_array_equal(
+        np.frombuffer(payload[30:38], dtype=np.float32), removal
+    )
+
+
+def test_add_points_time_windows_flags_omitted_by_default(client):
+    pts = np.array([[0, 0, 0]], dtype=np.float32)
+    client.add_points("pc", pts)
+    header, _ = client._binary_messages[0]
+    assert "hasBirthTimes" not in header
+    assert "hasRemovalTimes" not in header
+
+
+def test_add_points_time_nan_inf_map_to_unbounded_sentinels(client):
+    # NaN/±inf never reach the float32 attribute — GLSL NaN compares are
+    # undefined. NaN birth = "always existed" (−FLT_MAX); NaN removal =
+    # "never removed" (+FLT_MAX); ±inf clamp likewise.
+    flt_max = float(np.finfo(np.float32).max)
+    pts = np.zeros((3, 3), dtype=np.float32)
+    birth = np.array([np.nan, -np.inf, 1.0])
+    removal = np.array([np.nan, np.inf, 2.0])
+    client.add_points("pc", pts, birth_times=birth, removal_times=removal)
+    _, payload = client._binary_messages[0]
+    packed_birth = np.frombuffer(payload[36:48], dtype=np.float32)
+    packed_removal = np.frombuffer(payload[48:60], dtype=np.float32)
+    assert packed_birth[0] == -flt_max
+    assert packed_birth[1] == -flt_max
+    assert packed_birth[2] == 1.0
+    assert packed_removal[0] == flt_max
+    assert packed_removal[1] == flt_max
+    assert packed_removal[2] == 2.0
+
+
+def test_add_points_rejects_time_length_mismatch(client):
+    pts = np.zeros((3, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="birth_times must have length 3"):
+        client.add_points("pc", pts, birth_times=np.array([0.0, 1.0]))
+    with pytest.raises(ValueError, match="removal_times must have length 3"):
+        client.add_points("pc", pts, removal_times=np.zeros(4))
+
+
+def test_set_points_time(client):
+    client.set_points_time("pc", 2.5)
+    assert client._messages == [{"type": "set_points_time", "id": "pc", "time": 2.5}]
+
+
+def test_set_points_time_rejects_non_finite(client):
+    with pytest.raises(ValueError, match="finite"):
+        client.set_points_time("pc", float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        client.set_points_time("pc", float("inf"))
+
+
 def test_add_points_with_parent(client):
     pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
     client.add_points("pc", pts, parent="g")

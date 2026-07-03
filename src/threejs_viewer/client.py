@@ -53,6 +53,30 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
     return f
 
 
+# "Unbounded" sentinel for point-cloud time-window ends: NaN/±inf in
+# birth_times/removal_times are mapped to ±FLT_MAX before packing, because
+# NaN comparisons in GLSL are undefined and would make points flicker in or
+# out arbitrarily per driver.
+_TIME_UNBOUNDED = float(np.finfo(np.float32).max)
+
+
+def _sanitize_point_times(values, name: str, n_points: int, nan_to: float):
+    """Validate and pack a per-point time array for add_points.
+
+    NaN maps to ``nan_to`` (−FLT_MAX for birth_times = "always existed",
+    +FLT_MAX for removal_times = "never removed"); ±inf clamp to ±FLT_MAX.
+    """
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.shape[0] != n_points:
+        raise ValueError(
+            f"{name} must have length {n_points} (one per point), got {arr.shape[0]}"
+        )
+    arr = np.nan_to_num(
+        arr, nan=nan_to, posinf=_TIME_UNBOUNDED, neginf=-_TIME_UNBOUNDED
+    )
+    return np.clip(arr, -_TIME_UNBOUNDED, _TIME_UNBOUNDED).astype(np.float32)
+
+
 _LOD_DEFAULT = object()  # sentinel: header "lod" key omitted
 _LOD_ALLOWED_KEYS = {"epsilon_divisor", "threshold"}
 
@@ -971,6 +995,8 @@ class ViewerClient:
         color: int = 0xFFFFFF,
         size: float = 2.0,
         size_attenuation: bool = True,
+        birth_times: Optional[np.ndarray] = None,
+        removal_times: Optional[np.ndarray] = None,
         parent: Optional[str] = None,
     ) -> None:
         """
@@ -997,11 +1023,24 @@ class ViewerClient:
             size_attenuation: When ``True`` (default), points shrink with
                 distance (perspective). When ``False``, every point is drawn at
                 a constant pixel size regardless of depth.
+            birth_times: Optional (N,) per-point times: a point becomes
+                visible once the cloud's scrub time ``t`` reaches its birth
+                time (``birth_time <= t``). NaN/-inf = always existed.
+            removal_times: Optional (N,) per-point times: a point disappears
+                once ``t`` reaches its removal time (``t < removal_time``
+                keeps it visible). NaN/+inf = never removed.
             parent: Optional parent group id.
 
         Reveal a cloud progressively (e.g. a cheap material-removal animation)
         with :meth:`set_draw_range` or the ``draw_ranges`` animation channel —
         the fraction maps onto the leading ``frac * N`` points of the buffer.
+
+        For out-of-order appearance/removal (issue #79: material removal is
+        not a buffer prefix), pass ``birth_times``/``removal_times`` and
+        drive the scrub time with :meth:`set_points_time` or an animation's
+        ``point_times`` channel (``Animation.set_point_time_data``) — the
+        filter runs per point in the vertex shader, independent of buffer
+        order. The scrub time starts at ``0.0`` when the cloud is created.
         """
         # reshape(-1, 3) enforces (N, 3) or a 1D multiple of 3 — a stray length
         # would otherwise be silently truncated by // 3.
@@ -1034,7 +1073,17 @@ class ViewerClient:
             color_bytes = colors_rgb.tobytes()
             has_vertex_colors = True
 
-        raw_bytes = positions.tobytes() + color_bytes
+        time_bytes = b""
+        if birth_times is not None:
+            time_bytes += _sanitize_point_times(
+                birth_times, "birth_times", n_points, nan_to=-_TIME_UNBOUNDED
+            ).tobytes()
+        if removal_times is not None:
+            time_bytes += _sanitize_point_times(
+                removal_times, "removal_times", n_points, nan_to=_TIME_UNBOUNDED
+            ).tobytes()
+
+        raw_bytes = positions.tobytes() + color_bytes + time_bytes
 
         header = {
             "type": "add_points_binary",
@@ -1045,6 +1094,10 @@ class ViewerClient:
             "hasVertexColors": has_vertex_colors,
             "numPoints": n_points,
         }
+        if birth_times is not None:
+            header["hasBirthTimes"] = True
+        if removal_times is not None:
+            header["hasRemovalTimes"] = True
         if parent:
             header["parent"] = parent
         self._send_binary(header, raw_bytes)
@@ -1742,6 +1795,21 @@ class ViewerClient:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
+    def set_points_time(self, id: str, time: float) -> None:
+        """Set the time-window scrub time for a point cloud.
+
+        Only affects point clouds created with ``birth_times`` and/or
+        ``removal_times``: the vertex shader shows points whose window
+        contains the scrub time (``birth_time <= time < removal_time``).
+        Silently no-ops on objects without a time window. For pre-computed
+        playback, drive the same value from the animation slider via the
+        ``point_times`` channel (:meth:`Animation.set_point_time_data`).
+        """
+        t = float(time)
+        if not math.isfinite(t):
+            raise ValueError(f"time must be a finite number (got {time!r})")
+        self._send({"type": "set_points_time", "id": id, "time": t})
+
     def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
         """Toggle strand_collapse on a parametric_tube without re-uploading geometry.
 
@@ -2433,6 +2501,8 @@ class ViewerClient:
                 meta["clip_times"] = frame.clip_times
             if frame.draw_ranges and "draw_ranges" not in binary_channel_names:
                 meta["draw_ranges"] = frame.draw_ranges
+            if frame.point_times and "point_times" not in binary_channel_names:
+                meta["point_times"] = frame.point_times
             if meta:
                 meta["index"] = fi
                 frames_meta.append(meta)

@@ -95,6 +95,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {Record<string, number>}   [opacity]
  * @property {Record<string, number>}   [clip_times]
  * @property {Record<string, number>}   [draw_ranges]
+ * @property {Record<string, number>}   [point_times]
  */
 
 /**
@@ -390,10 +391,75 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
+        point_times(ch, refs, base, baseNext, t) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+            }
+            const nObj = ch.ids.length;
+            const interp = shouldInterpChannel(ch, baseNext, t);
+            for (let i = 0; i < nObj; i++) {
+                const obj = refs[i];
+                if (!obj) continue;
+                const uniform = obj.userData.timeUniform;
+                if (!uniform) continue;
+                let val = ch.data[base + i];
+                if (interp) {
+                    val = val * (1 - t) + ch.data[baseNext + i] * t;
+                }
+                uniform.value = val;
+            }
+        },
+
         // No-ops: data is read directly in _applyCameraTracking, not per-object
         camera_target: () => {},
         camera_position: () => {},
     };
+}
+
+// ---- Point-cloud time-window filter ----------------------------------------
+// Per-point [birthTime, removalTime) visibility against a shared scrub-time
+// uniform, patched into the stock PointsMaterial via onBeforeCompile. Culled
+// points get their gl_Position shoved outside the clip volume, so they are
+// clipped before rasterization and cost nothing past the vertex stage
+// (Potree's GPS-time-filter trick). The uniform object is shared by
+// reference: writing `timeUniform.value` reaches every program compiled from
+// this material — including the EDL depth pre-pass — with no per-frame
+// material work.
+/**
+ * @param {THREE.PointsMaterial} material
+ * @param {{ value: number }} timeUniform
+ * @param {boolean} hasBirth
+ * @param {boolean} hasRemoval
+ */
+function applyPointsTimeWindow(material, timeUniform, hasBirth, hasRemoval) {
+    if (!hasBirth && !hasRemoval) return;
+    material.onBeforeCompile = (shader) => {
+        shader.uniforms.uPointsTime = timeUniform;
+        let decl = 'uniform float uPointsTime;\n';
+        if (hasBirth) decl += 'attribute float birthTime;\n';
+        if (hasRemoval) decl += 'attribute float removalTime;\n';
+        const conds = [];
+        if (hasBirth) conds.push('uPointsTime < birthTime');
+        if (hasRemoval) conds.push('uPointsTime >= removalTime');
+        shader.vertexShader = decl + shader.vertexShader.replace(
+            '#include <project_vertex>',
+            '#include <project_vertex>\n'
+            + `    if (${conds.join(' || ')}) { gl_Position = vec4(2.0e10, 2.0e10, 2.0e10, 1.0); }`
+        );
+    };
+    // Distinct program per attribute combination — onBeforeCompile edits are
+    // invisible to three's default program cache key, so without this a
+    // plain cloud could reuse (or be handed) a time-filtered program.
+    material.customProgramCacheKey = () =>
+        `tjsvPointsTime|${hasBirth ? 'b' : ''}${hasRemoval ? 'r' : ''}`;
 }
 
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
@@ -7112,6 +7178,18 @@ export class ThreeJSViewer {
         }
     }
 
+    /**
+     * Set the time-window scrub time on a point cloud created with
+     * birth/removal times. No-op on objects without a time window.
+     * @param {string} id @param {number} time
+     */
+    _setPointsTime(id, time) {
+        const obj = this._objects.get(id);
+        if (!obj) return;
+        const uniform = obj.userData.timeUniform;
+        if (uniform) uniform.value = time;
+    }
+
     /** @param {string} id @param {any} transform */
     _updateTransform(id, transform) {
         const obj = this._objects.get(id);
@@ -7598,6 +7676,16 @@ export class ThreeJSViewer {
                     v = value * (1 - t) + nextD[id] * t;
                 }
                 this._setDrawRange(id, v);
+            }
+        }
+        if (frame.point_times) {
+            const nextPt = (hasNext && nextFrame.point_times) ? nextFrame.point_times : null;
+            for (const [id, time] of Object.entries(frame.point_times)) {
+                let v = time;
+                if (nextPt && nextPt[id] != null) {
+                    v = time * (1 - t) + nextPt[id] * t;
+                }
+                this._setPointsTime(id, v);
             }
         }
 
@@ -8398,6 +8486,7 @@ export class ThreeJSViewer {
                                 if (meta.opacity) frame.opacity = meta.opacity;
                                 if (meta.clip_times) frame.clip_times = meta.clip_times;
                                 if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
+                                if (meta.point_times) frame.point_times = meta.point_times;
                             }
                             frames.push(frame);
                         }
@@ -8668,8 +8757,37 @@ export class ThreeJSViewer {
                         } else {
                             matOpts.color = data.color ?? 0xffffff;
                         }
+
+                        // Optional per-point time-window attributes, packed
+                        // after positions (+colors). Copied into fresh
+                        // buffers because the color block is 3 bytes/point,
+                        // so the float32 blocks are not 4-byte aligned
+                        // within the fetched payload.
+                        const hasBirth = !!data.hasBirthTimes;
+                        const hasRemoval = !!data.hasRemovalTimes;
+                        /** @param {number} byteOff */
+                        const readTimeBlock = (byteOff) => {
+                            const buf = new ArrayBuffer(numPoints * 4);
+                            new Uint8Array(buf).set(rawData.subarray(byteOff, byteOff + numPoints * 4));
+                            return new Float32Array(buf);
+                        };
+                        let timeOffset = positionBytes + (data.hasVertexColors ? numPoints * 3 : 0);
+                        if (hasBirth) {
+                            geometry.setAttribute('birthTime', new THREE.BufferAttribute(readTimeBlock(timeOffset), 1));
+                            timeOffset += numPoints * 4;
+                        }
+                        if (hasRemoval) {
+                            geometry.setAttribute('removalTime', new THREE.BufferAttribute(readTimeBlock(timeOffset), 1));
+                            timeOffset += numPoints * 4;
+                        }
+
                         const material = new THREE.PointsMaterial(matOpts);
                         const points = new THREE.Points(geometry, material);
+                        if (hasBirth || hasRemoval) {
+                            const timeUniform = { value: 0 };
+                            applyPointsTimeWindow(material, timeUniform, hasBirth, hasRemoval);
+                            points.userData.timeUniform = timeUniform;
+                        }
                         points.name = data.id;
                         points.userData.id = data.id;
                         points.userData.isPoints = true;
@@ -9460,6 +9578,9 @@ export class ThreeJSViewer {
                 break;
             case 'set_clip_time':
                 this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
+                break;
+            case 'set_points_time':
+                this._withObject(data.id, 'set_points_time', () => this._setPointsTime(data.id, data.time));
                 break;
             case 'set_draw_range':
                 this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));

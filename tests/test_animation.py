@@ -132,6 +132,34 @@ def test_set_clip_time_data():
     assert animation._channels[0].stride == 1
 
 
+def test_set_point_time_data():
+    """set_point_time_data convenience wrapper creates a point_times channel."""
+    animation = Animation(loop=True)
+    animation.set_frame_times(np.linspace(0, 5, 50))
+
+    point_times = np.linspace(0, 2, 50).reshape(50, 1).astype(np.float32)
+    point_times = np.column_stack([point_times, point_times * 0.5])
+    animation.set_point_time_data(["cloud_a", "cloud_b"], point_times)
+
+    assert len(animation._channels) == 1
+    assert animation._channels[0].name == "point_times"
+    assert animation._channels[0].dtype == "float32"
+    assert animation._channels[0].stride == 1
+    assert animation._channels[0].interpolation == "linear"
+
+
+def test_frame_point_times_to_dict():
+    """Frame.point_times serializes through to_dict like clip_times."""
+    animation = Animation(loop=False)
+    animation.add_frame(time=0.0, transforms={}, point_times={"cloud": 1.5})
+    d = animation.to_dict()
+    assert d["frames"][0]["point_times"] == {"cloud": 1.5}
+    # Omitted when absent.
+    animation2 = Animation(loop=False)
+    animation2.add_frame(time=0.0, transforms={})
+    assert "point_times" not in animation2.to_dict()["frames"][0]
+
+
 def test_add_channel_generic():
     """Test add_channel with custom channel types."""
     animation = Animation(loop=True)

@@ -304,6 +304,83 @@ def test_set_draw_range_on_points(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_points_time_window_attributes_and_scrub(viewer_client, viewer_page):
+    """birth/removal times land as vertex attributes, the patched shader
+    compiles cleanly, and set_points_time drives the shared uniform."""
+    shader_errors = []
+    viewer_page.on(
+        "console",
+        lambda msg: (
+            shader_errors.append(msg.text)
+            if "Shader Error" in msg.text or "THREE.WebGLProgram" in msg.text
+            else None
+        ),
+    )
+    pts = np.array([[i, 0.0, 0.0] for i in range(4)], dtype=np.float32)
+    birth = np.array([0.0, 1.0, 2.0, np.nan])  # NaN = always existed
+    removal = np.array([10.0, 10.0, 10.0, 1.5])
+    viewer_client.add_points("pc", pts, birth_times=birth, removal_times=removal)
+    info = None
+    for _ in range(40):
+        time.sleep(0.05)
+        info = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('pc');"
+            " if (!o) return null;"
+            " return {"
+            "  hasBirth: !!o.geometry.getAttribute('birthTime'),"
+            "  hasRemoval: !!o.geometry.getAttribute('removalTime'),"
+            "  time: o.userData.timeUniform ? o.userData.timeUniform.value : null,"
+            " };"
+            "}"
+        )
+        if info:
+            break
+    assert info == {"hasBirth": True, "hasRemoval": True, "time": 0}
+
+    viewer_client.set_points_time("pc", 2.5)
+    t = None
+    for _ in range(40):
+        time.sleep(0.05)
+        t = viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('pc').userData.timeUniform.value"
+        )
+        if t == 2.5:
+            break
+    assert t == 2.5
+    # Let a couple of frames render with the patched program before checking
+    # for compile errors.
+    time.sleep(0.2)
+    assert not shader_errors, f"shader errors with time filter: {shader_errors}"
+
+
+@pytest.mark.browser
+def test_point_times_channel_drives_uniform(viewer_client, viewer_page):
+    """The point_times binary animation channel scrubs the cloud's time
+    uniform from the playhead (lerped between keyframes)."""
+    pts = np.zeros((3, 3), dtype=np.float32)
+    viewer_client.add_points("pc", pts, removal_times=np.array([1.0, 2.0, 3.0]))
+    time.sleep(0.2)
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    anim.set_point_time_data(["pc"], np.array([[0.0], [5.0]], dtype=np.float32))
+    viewer_client.load_animation(anim, autoplay=False, initial_time="end")
+    t = None
+    for _ in range(40):
+        time.sleep(0.05)
+        t = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('pc');"
+            " return o && o.userData.timeUniform ? o.userData.timeUniform.value : null;"
+            "}"
+        )
+        if t == 5.0:
+            break
+    assert t == 5.0, f"expected playhead at end to scrub uniform to 5.0, got {t!r}"
+
+
+@pytest.mark.browser
 def test_add_swept_tool_appears_in_scene(viewer_client, viewer_page):
     """add_swept_tool lofts an oriented tool-body mesh into the scene."""
     n = 30
