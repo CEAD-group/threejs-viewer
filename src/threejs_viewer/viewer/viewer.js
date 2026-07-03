@@ -10089,6 +10089,48 @@ export class ThreeJSViewer {
             case 'set_draw_range':
                 this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
                 break;
+            case 'get_camera': {
+                const p = this._camera.position, t = this._controls.target, u = this._camera.up;
+                const cam = /** @type {any} */ (this._camera);
+                this._reply({
+                    type: 'get_camera_response',
+                    requestId: data.requestId,
+                    position: [p.x, p.y, p.z],
+                    target: [t.x, t.y, t.z],
+                    up: [u.x, u.y, u.z],
+                    fov: cam.isPerspectiveCamera ? cam.fov : null,
+                    zoom: cam.zoom,
+                });
+                break;
+            }
+            case 'set_camera': {
+                const cam = /** @type {any} */ (this._camera);
+                if (Array.isArray(data.position) && data.position.length === 3) {
+                    cam.position.set(data.position[0], data.position[1], data.position[2]);
+                }
+                if (Array.isArray(data.target) && data.target.length === 3) {
+                    this._controls.target.set(data.target[0], data.target[1], data.target[2]);
+                }
+                if (Array.isArray(data.up) && data.up.length === 3) {
+                    cam.up.set(data.up[0], data.up[1], data.up[2]).normalize();
+                }
+                if (data.fov != null && cam.isPerspectiveCamera) {
+                    cam.fov = Math.min(FOV_MAX, Math.max(FOV_MIN, data.fov));
+                    cam.updateProjectionMatrix();
+                }
+                if (data.zoom != null && data.zoom > 0) {
+                    cam.zoom = data.zoom;
+                    cam.updateProjectionMatrix();
+                }
+                // ViewerControls never re-orients the camera from its target
+                // (update() deliberately does no lookAt — see controls.js),
+                // so orient explicitly or the camera would move while still
+                // facing its old direction.
+                cam.lookAt(this._controls.target);
+                cam.updateMatrixWorld(true);
+                this._controls.update();
+                break;
+            }
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
