@@ -718,3 +718,39 @@ def test_set_clipping_defaults(client):
             "distance": 3.0,
         }
     ]
+
+
+# === camera pose API ===
+
+
+def test_set_camera_full_message(client):
+    client.set_camera(
+        position=[1, 2, 3], target=[0, 0.5, 0], up=[0, 0, 1], fov=50, zoom=2.0
+    )
+    assert client._messages == [
+        {
+            "type": "set_camera",
+            "position": [1.0, 2.0, 3.0],
+            "target": [0.0, 0.5, 0.0],
+            "up": [0.0, 0.0, 1.0],
+            "fov": 50.0,
+            "zoom": 2.0,
+        }
+    ]
+
+
+def test_set_camera_partial_omits_unset_fields(client):
+    client.set_camera(target=[1, 1, 1])
+    assert client._messages == [{"type": "set_camera", "target": [1.0, 1.0, 1.0]}]
+
+
+def test_set_camera_validation(client):
+    with pytest.raises(ValueError, match="3-vector"):
+        client.set_camera(position=[1, 2])
+    with pytest.raises(ValueError, match="finite"):
+        client.set_camera(target=[float("nan"), 0, 0])
+    with pytest.raises(ValueError, match="fov"):
+        client.set_camera(fov=200)
+    with pytest.raises(ValueError, match="zoom"):
+        client.set_camera(zoom=0)
+    assert client._messages == []

@@ -2000,6 +2000,78 @@ class ViewerClient:
             raise ValueError(f"time must be a finite number (got {time!r})")
         self._send({"type": "set_points_time", "id": id, "time": t})
 
+    def get_camera(self, timeout: float = 5.0) -> dict:
+        """Read the viewer's current camera pose (round-trip over the socket).
+
+        Returns ``{"position": [x, y, z], "target": [x, y, z],
+        "up": [x, y, z], "fov": float | None, "zoom": float}``. ``fov`` is
+        ``None`` while the orthographic camera is active; ``zoom`` matters
+        for the ortho camera (perspective keeps it at 1.0).
+
+        Workflow: orbit to a view you like in the browser, call this, and
+        paste the result into :meth:`set_camera` to pin that view as a
+        script's configured default.
+        """
+        request_id = str(uuid.uuid4())
+        event = threading.Event()
+        self._pending_responses[request_id] = event
+        self._send({"type": "get_camera", "requestId": request_id})
+        if not event.wait(timeout=timeout):
+            self._pending_responses.pop(request_id, None)
+            raise TimeoutError("No response from viewer")
+        response = self._responses.pop(request_id, {})
+        self._pending_responses.pop(request_id, None)
+        return {k: response.get(k) for k in ("position", "target", "up", "fov", "zoom")}
+
+    def set_camera(
+        self,
+        position: Optional[List[float]] = None,
+        target: Optional[List[float]] = None,
+        up: Optional[List[float]] = None,
+        fov: Optional[float] = None,
+        zoom: Optional[float] = None,
+    ) -> None:
+        """Set the viewer camera pose. Omitted fields are left unchanged.
+
+        Args:
+            position: Camera position, 3-vector.
+            target: Orbit target (the point the camera looks at), 3-vector.
+                The viewer re-orients the camera toward the target whenever
+                position/target/up change.
+            up: Camera up vector, 3-vector.
+            fov: Perspective vertical field-of-view in degrees, within
+                (0, 180). Ignored while the orthographic camera is active.
+            zoom: Camera zoom factor (> 0) — the framing control for the
+                orthographic camera.
+
+        Pair with :meth:`get_camera` to capture a hand-tuned view and replay
+        it from a script.
+        """
+
+        def _vec3(name, v):
+            vals = [float(x) for x in v]
+            if len(vals) != 3:
+                raise ValueError(f"{name} must be a 3-vector (got {len(vals)} values)")
+            for x in vals:
+                _validate_finite(name, x)
+            return vals
+
+        msg: dict = {"type": "set_camera"}
+        if position is not None:
+            msg["position"] = _vec3("position", position)
+        if target is not None:
+            msg["target"] = _vec3("target", target)
+        if up is not None:
+            msg["up"] = _vec3("up", up)
+        if fov is not None:
+            msg["fov"] = _validate_fov(fov)
+        if zoom is not None:
+            z = _validate_finite("zoom", zoom)
+            if z is not None and z <= 0:
+                raise ValueError(f"zoom must be > 0 (got {zoom!r})")
+            msg["zoom"] = z
+        self._send(msg)
+
     def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
         """Toggle strand_collapse on a parametric_tube without re-uploading geometry.
 
