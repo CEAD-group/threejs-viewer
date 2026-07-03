@@ -294,9 +294,10 @@ bytes (~1.7 GB/s fetched vs 200–1000 GB/s available).
   reference), filter applies in the pre-pass too.
 - u16 timestamp quantization: needs an immortal-flag encoding (see status
   note). Phase 3.
-- Builder throughput: ~1s per 1M points (BFS numpy masking + per-node
-  lexsort). Fine to ~20M; a Morton-radix build is the known upgrade path
-  for the 100M in-RAM ceiling.
+- Builder throughput: ~1.2–1.7M pts/s after replacing per-node lexsorts
+  with one global time-sorted candidate order (mask partitioning preserves
+  it, so stratified sampling is a strided pick). 10M ≈ 8s build. A
+  Morton-radix build remains the upgrade path for the 100M in-RAM ceiling.
 
 ## Prior-art pointers (from the 2026-07-03 surveys)
 

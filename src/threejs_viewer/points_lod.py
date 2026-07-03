@@ -153,26 +153,6 @@ def _shuffled_morton_order(rel: np.ndarray, rng: np.random.Generator) -> np.ndar
     return out
 
 
-def _stratified_sample(
-    n: int,
-    capacity: int,
-    strat_values: Optional[np.ndarray],
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Pick ``capacity`` of ``n`` candidate slots.
-
-    With ``strat_values`` (per-candidate times): order by time with a random
-    tiebreak and pick at even strides — an unbiased-per-time-slice sample,
-    so a time filter later thins this node uniformly. Without: plain seeded
-    random sample.
-    """
-    if strat_values is None:
-        return rng.permutation(n)[:capacity]
-    order = np.lexsort((rng.random(n), strat_values))
-    picks = (np.arange(capacity, dtype=np.float64) * n / capacity).astype(np.int64)
-    return order[picks]
-
-
 def build_points_octree(
     positions: np.ndarray,
     strat_times: Optional[np.ndarray] = None,
@@ -224,8 +204,26 @@ def build_points_octree(
         samples.append(None)  # type: ignore[arg-type]
         return len(centers) - 1
 
+    # One global candidate order, computed once: time-sorted with a random
+    # tiebreak when stratifying (a strided pick then gives every node an
+    # unbiased-per-time-slice sample, keeping time-filtered density honest
+    # at every LOD), plain random permutation otherwise (strided pick over
+    # a random order = random sample). Boolean-mask partitioning below
+    # preserves relative order, so every node's candidate list inherits
+    # this order for free — no per-node sort. (A per-node lexsort here
+    # dominated build time: the root alone re-sorted all N points.)
+    if strat_times is not None:
+        strat_arr = np.asarray(strat_times).reshape(-1)
+        if strat_arr.shape[0] != n:
+            raise ValueError(
+                f"strat_times must have length {n} (got {strat_arr.shape[0]})"
+            )
+        base_order = np.lexsort((rng.random(n), strat_arr))
+    else:
+        base_order = rng.permutation(n)
+
     root = _alloc(center0, half0, 0)
-    queue: list[tuple[np.ndarray, int]] = [(np.arange(n, dtype=np.int64), root)]
+    queue: list[tuple[np.ndarray, int]] = [(base_order.astype(np.int64), root)]
     qi = 0
     while qi < len(queue):
         idx, slot = queue[qi]
@@ -239,10 +237,13 @@ def build_points_octree(
             samples[slot] = idx
             continue
 
-        strat = strat_times[idx] if strat_times is not None else None
-        sel = _stratified_sample(m, node_capacity, strat, rng)
+        # Candidates arrive pre-ordered (see base_order above): an even
+        # stride through them is the stratified/random sample.
+        picks = (np.arange(node_capacity, dtype=np.float64) * m / node_capacity).astype(
+            np.int64
+        )
         keep = np.zeros(m, dtype=bool)
-        keep[sel] = True
+        keep[picks] = True
         samples[slot] = idx[keep]
         rest = idx[~keep]
 
