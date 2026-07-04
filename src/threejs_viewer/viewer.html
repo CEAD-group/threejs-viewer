@@ -5493,6 +5493,17 @@ class DepthCueController {
         this.v = viewer;
         this.fogActive = false;
         this.edlActive = false;
+        // EDL is auto-enabled the first time a point cloud is added (dense
+        // unlit quads tile into a washed-out sheet without a depth cue). This
+        // flag records that the USER pinned the EDL state (keyboard `Shift+D`
+        // or set_depth_cue) so the auto-enable never overrides an explicit
+        // choice — including an explicit OFF. See maybeAutoEnableEdl().
+        this._edlUserSet = false;
+        // Desired EDL shader params, held here so they survive across composer
+        // (re)builds and can be set before the composer exists. Applied to the
+        // pass in _ensureComposer / _applyEdlParams. Defaults mirror EDL_SHADER.
+        this._edlStrength = EDL_SHADER.uniforms.edlStrength.value;
+        this._edlRadius = EDL_SHADER.uniforms.edlRadius.value;
         // EDL pipeline — created lazily on first use.
         this._composer = null;
         this._edlPass = null;
@@ -5540,10 +5551,23 @@ class DepthCueController {
     }
 
     /** `Shift+D` — toggle eye-dome lighting. A screen-space post-process, so it
-     *  composes with fog without disturbing it. */
+     *  composes with fog without disturbing it. Pins the EDL state as
+     *  user-chosen so the point-cloud auto-enable won't fight the keyboard. */
     toggleEdl() {
+        this._edlUserSet = true;
         this.setEdl(!this.edlActive);
         this._showToast(this.edlActive ? 'Eye-dome lighting on' : 'Eye-dome lighting off');
+    }
+
+    /** Turn EDL on the first time a point cloud enters the scene — UNLESS the
+     *  user has explicitly pinned the EDL state (keyboard or set_depth_cue),
+     *  including explicitly OFF. Point clouds are unlit flat quads that tile
+     *  into a washed-out sheet with no depth perception; EDL sculpts them in
+     *  screen space (Potree/CloudCompare). Idempotent and cheap — the caller
+     *  fires it on every points add. */
+    maybeAutoEnableEdl() {
+        if (this._edlUserSet || this.edlActive) return;
+        this.setEdl(true);
     }
 
     /** Programmatic fog on/off (idempotent). @param {boolean} on */
@@ -5563,12 +5587,35 @@ class DepthCueController {
         }
     }
 
-    /** Programmatic EDL on/off (idempotent). @param {boolean} on */
-    setEdl(on) {
+    /** Programmatic EDL on/off, with optional shader tuning. Idempotent on the
+     *  on/off state; `opts` (strength/radius) is applied even when the state is
+     *  unchanged so a live scene can be re-tuned without toggling.
+     *  @param {boolean} on
+     *  @param {{strength?: number, radius?: number}} [opts] */
+    setEdl(on, opts) {
         const want = !!on;
+        if (opts) this._applyEdlParams(opts);
         if (want === this.edlActive) return;
         this.edlActive = want;
         if (want) this._ensureComposer();
+    }
+
+    /** Record and apply EDL shader tuning. Values are stored on the controller
+     *  (so they survive a composer rebuild and can be set before the composer
+     *  exists) and pushed to the live pass when it is present. Non-finite or
+     *  omitted fields are left unchanged.
+     *  @param {{strength?: number, radius?: number}} opts */
+    _applyEdlParams(opts) {
+        if (opts.strength != null && isFinite(opts.strength)) {
+            this._edlStrength = Math.max(0, opts.strength);
+        }
+        if (opts.radius != null && isFinite(opts.radius)) {
+            this._edlRadius = Math.max(0, opts.radius);
+        }
+        if (this._edlPass) {
+            this._edlPass.uniforms.edlStrength.value = this._edlStrength;
+            this._edlPass.uniforms.edlRadius.value = this._edlRadius;
+        }
     }
 
     /** @param {boolean} on */
@@ -5725,6 +5772,9 @@ class DepthCueController {
         const edlPass = new ShaderPass(EDL_SHADER);
         edlPass.uniforms.tDepth.value = lineDepthTarget.depthTexture; // line-only
         edlPass.uniforms.tSceneDepth.value = depthTexture; // full scene
+        // Honour any strength/radius set before the composer was built.
+        edlPass.uniforms.edlStrength.value = this._edlStrength;
+        edlPass.uniforms.edlRadius.value = this._edlRadius;
         // OutputPass applies tone mapping + sRGB (the scene render into the
         // float target is linear) and tracks renderer.toneMapping at runtime.
         // NoBlending so its fullscreen quad REPLACES every canvas pixel (rather
@@ -8642,7 +8692,7 @@ class ThreeJSViewer {
                 // samples into giant occluding sprites. Only under
                 // sizeAttenuation, where `size` behaves like a world extent.
                 matOpts.size = lod.sizeAttenuation
-                    ? lod.baseSize * Math.min(POINTS_LOD_SIZE_BOOST_MAX,
+                    ? lod.baseSize * Math.min(lod.sizeBoostMax,
                         Math.pow(2, (lod.maxLevel - lod.nodes.levels[i]) / 2))
                     : lod.baseSize;
                 const material = new THREE.PointsMaterial(matOpts);
@@ -10327,6 +10377,10 @@ class ThreeJSViewer {
                         this._addToParentOrScene(points, data.parent);
                         this._objects.set(data.id, points);
                         this._objGeneration++;
+                        // Unlit point quads read flat without a depth cue —
+                        // switch EDL on the first time a cloud appears (unless
+                        // the user pinned it).
+                        this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
                         console.error(`Error creating point cloud via HTTP:`, e);
@@ -10398,6 +10452,7 @@ class ThreeJSViewer {
                             urlBase: data.node_url_base,
                             budget: data.pointBudget || 1500000,
                             refinePixels: data.refinePixels || 12,
+                            sizeBoostMax: data.sizeBoostMax ?? POINTS_LOD_SIZE_BOOST_MAX,
                             maxLevel: data.maxLevel || 0,
                             baseSize: data.size ?? 2.0,
                             sizeAttenuation: data.sizeAttenuation !== false,
@@ -10415,6 +10470,9 @@ class ThreeJSViewer {
                         this._addToParentOrScene(group, data.parent);
                         this._objects.set(data.id, group);
                         this._objGeneration++;
+                        // Sculpt the streaming octree nodes with EDL from the
+                        // first frame (unless the user pinned the EDL state).
+                        this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
                         console.error(`Error creating LOD point cloud:`, e);
@@ -11302,11 +11360,33 @@ class ThreeJSViewer {
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
                 break;
-            case 'set_depth_cue':
+            case 'set_depth_cue': {
                 // Programmatic equivalent of the D / Shift+D keys.
                 if (data.fog != null) this._depthCue.setFog(data.fog);
-                if (data.edl != null) this._depthCue.setEdl(data.edl);
+                const edlOpts = {};
+                if (data.edlStrength != null) edlOpts.strength = data.edlStrength;
+                if (data.edlRadius != null) edlOpts.radius = data.edlRadius;
+                if (data.edl != null) {
+                    // An explicit edl flag pins the state so the point-cloud
+                    // auto-enable won't override the caller's choice.
+                    this._depthCue._edlUserSet = true;
+                    this._depthCue.setEdl(data.edl, edlOpts);
+                } else if (edlOpts.strength != null || edlOpts.radius != null) {
+                    // Tuning-only update: re-tune without changing on/off.
+                    this._depthCue.setEdl(this._depthCue.edlActive, edlOpts);
+                }
                 break;
+            }
+            case 'set_edl': {
+                // Focused EDL control (client.set_edl). An explicit enabled flag
+                // pins the state so the point-cloud auto-enable won't override it.
+                const opts = {};
+                if (data.strength != null) opts.strength = data.strength;
+                if (data.radius != null) opts.radius = data.radius;
+                this._depthCue._edlUserSet = true;
+                this._depthCue.setEdl(data.enabled !== false, opts);
+                break;
+            }
             case 'set_polyline_picking':
                 if (data.enabled) {
                     this._polylinePick.enable({

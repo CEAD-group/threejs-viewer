@@ -3051,3 +3051,49 @@ def test_camera_set_get_roundtrip_and_orientation(viewer_client, viewer_page):
         "}"
     )
     assert dot > 0.999, f"camera not oriented at target (dot={dot})"
+
+
+@pytest.mark.browser
+def test_edl_auto_enables_on_points_and_pin_wins(viewer_client, viewer_page):
+    """EDL switches on automatically when the first point cloud is added,
+    but an explicit set_edl choice (including OFF) pins the state so the
+    auto-enable never overrides it; strength/radius reach the shader."""
+    pts = np.random.default_rng(0).random((500, 3)).astype(np.float32)
+    viewer_client.add_points("pc", pts)
+    active = None
+    for _ in range(40):
+        time.sleep(0.05)
+        active = viewer_page.evaluate("() => window.threejsViewer._depthCue.edlActive")
+        if active:
+            break
+    assert active is True, "EDL did not auto-enable on first point cloud"
+
+    # Explicit OFF pins the state: a second cloud must not re-enable it.
+    viewer_client.set_edl(False)
+    time.sleep(0.2)
+    viewer_client.add_points("pc2", pts + 2.0)
+    time.sleep(0.4)
+    state = viewer_page.evaluate(
+        "() => ({active: window.threejsViewer._depthCue.edlActive,"
+        "        pinned: window.threejsViewer._depthCue._edlUserSet})"
+    )
+    assert state == {"active": False, "pinned": True}, (
+        f"auto-enable overrode the pinned OFF: {state}"
+    )
+
+    # Tuning params reach the live shader pass.
+    viewer_client.set_edl(True, strength=77.0, radius=3.5)
+    vals = None
+    for _ in range(40):
+        time.sleep(0.05)
+        vals = viewer_page.evaluate(
+            "() => {"
+            " const dc = window.threejsViewer._depthCue;"
+            " if (!dc._edlPass) return null;"
+            " return [dc._edlPass.uniforms.edlStrength.value,"
+            "         dc._edlPass.uniforms.edlRadius.value];"
+            "}"
+        )
+        if vals == [77.0, 3.5]:
+            break
+    assert vals == [77.0, 3.5], f"EDL tuning did not reach the shader: {vals}"
