@@ -243,3 +243,13 @@ def test_add_points_lod_flat_color_no_times(client):
     )
     payload = client._blob_store[f"{key_base}/0"]()
     assert len(payload) == int(rec["count"][0]) * 6  # positions only
+
+
+def test_add_points_lod_empty_dict_enables_lod(client):
+    """lod={} means "LOD with all defaults" — it must not fall through to
+    the flat path via dict truthiness (Copilot review, PR #80)."""
+    pts, _, _ = _cloud(n=2_000)
+    client.add_points("cloud", pts, lod={})
+    (msg,) = client._messages
+    assert msg["type"] == "add_points_lod"
+    assert client._binary_messages == []

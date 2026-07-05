@@ -7418,7 +7418,12 @@ export class ThreeJSViewer {
                 (uTime < nodes.tmins[i] || uTime >= nodes.tmaxs[i]);
             if (!timeCulled) {
                 const cnt = nodes.counts[i];
-                if (used + cnt > lod.budget) break;
+                // Over budget: skip this node AND its subtree (children
+                // refine the parent's sample; rendering them without it
+                // leaves density holes) — but keep popping, a smaller
+                // branch elsewhere may still fit the remaining budget
+                // (a plain `break` here under-filled the budget).
+                if (used + cnt > lod.budget) continue;
                 used += cnt;
                 wanted[i] = 1;
                 wantedList.push(i);
@@ -9121,6 +9126,22 @@ export class ThreeJSViewer {
                         const rawData = new Uint8Array(buffer);
                         const numPoints = data.numPoints || (rawData.length / 12);
                         const positionBytes = numPoints * 12;
+
+                        // Validate the full expected layout up front — a
+                        // truncated payload (or flags disagreeing with it)
+                        // would otherwise silently zero-pad the trailing
+                        // time blocks into wrong birth/removal values.
+                        const expectedBytes = positionBytes
+                            + (data.hasVertexColors ? numPoints * 3 : 0)
+                            + (data.hasBirthTimes ? numPoints * 4 : 0)
+                            + (data.hasRemovalTimes ? numPoints * 4 : 0);
+                        if (rawData.length < expectedBytes) {
+                            throw new Error(
+                                `add_points payload too short: ${rawData.length} bytes, ` +
+                                `expected ${expectedBytes} for ${numPoints} points ` +
+                                `(colors=${!!data.hasVertexColors}, birth=${!!data.hasBirthTimes}, ` +
+                                `removal=${!!data.hasRemovalTimes})`);
+                        }
 
                         const posBuffer = new ArrayBuffer(positionBytes);
                         new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));

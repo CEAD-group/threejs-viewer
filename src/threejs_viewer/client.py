@@ -1135,7 +1135,9 @@ class ViewerClient:
                 removal_times, "removal_times", n_points, nan_to=_TIME_UNBOUNDED
             )
 
-        if lod:
+        # Explicit None/False check: `lod={}` is a legitimate "all defaults"
+        # opt-in and must not fall through to the flat path via truthiness.
+        if lod is not None and lod is not False:
             self._add_points_lod(
                 id,
                 positions3,
