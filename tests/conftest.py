@@ -73,11 +73,13 @@ if _has_playwright:
         load a file:// navigation occasionally exceeded the 30 s default and
         errored unrelated tests at setup (#95).
         """
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
         viewer_path = viewer_client.viewer_path.resolve()
-        url = f"file://{viewer_path}?ws_port={viewer_client.port}"
+        url = f"{viewer_path.as_uri()}?ws_port={viewer_client.port}"
         try:
             page.goto(url, timeout=90_000)
-        except Exception:
+        except PlaywrightTimeoutError:
             page.goto(url, timeout=90_000)
 
         # Wait for the browser to connect via WebSocket
