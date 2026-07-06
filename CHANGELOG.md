@@ -24,6 +24,9 @@
 ### Follow-path track
 
 - **`set_follow_path(id, times, positions, axes)` — object rides a timed 5-axis path with its pose computed per render tick from the real path.** Animation `transforms` frames may sample a long timeline coarsely (e.g. 10 Hz), which aliases a fast tool on a detailed toolpath; a follow-path track instead binary-searches the full-resolution path at the current animation clock every rendered frame — tip position lerped, tool axis nlerped, minimal rotation of the object's local `+z` onto the axis, the object's own scale preserved. Payload is binary float32 `[t,px,py,pz,ax,ay,az]` rows (K≥2, non-decreasing times, validated Python-side) over the blob sidecar. Tracks are per-id (re-send replaces), dropped on `delete`/`clear`, and a follow-path object is the **preferred `T`-key camera-tracking target** (picked before the transform-channel name hints).
+### Move/rotate gizmo
+
+- **Gizmo reports now carry the *effective* drag mode** (`mode: "translate" | "rotate" | "scale"`, Python: `move["mode"]`), read off the live `TransformControls` — so an **Alt** momentary rotate override is observable: the report says `"rotate"` even though the gizmo's base mode is still translate. Previously the payload had no mode field at all, so an embedder whose handler must interpret the drag per mode (position-only vs orientation) could only branch on the base mode, ran the translate branch on an Alt rotate-drag (position unchanged → no-op), and the rotation was silently wiped on drag-end (#84). Branch on the payload's `mode`, not the mode you configured.
 
 ## 0.0.39
 

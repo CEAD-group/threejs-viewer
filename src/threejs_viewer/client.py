@@ -2712,6 +2712,11 @@ class ViewerClient:
         - ``position_start`` — ``[x, y, z]`` local position captured at
           drag-start (the grab-time pose).
         - ``quaternion_start`` — ``[x, y, z, w]`` local rotation at drag-start.
+        - ``mode`` — the *effective* mode of this drag: ``"translate"``,
+          ``"rotate"`` or ``"scale"``. Read off the live control, so a
+          momentary **Alt** rotate override reports ``"rotate"`` even though
+          the gizmo's base mode is still translate — branch on this (not on
+          the mode you configured) when interpreting the drag.
         - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).
 
         It runs on the client's WebSocket receive thread, so keep it short; it
@@ -2736,6 +2741,7 @@ class ViewerClient:
             "matrix": data.get("matrix"),
             "position_start": data.get("positionStart"),
             "quaternion_start": data.get("quaternionStart"),
+            "mode": data.get("mode"),
             "phase": data.get("phase"),
         }
         for cb in list(self._move_callbacks):
