@@ -1697,6 +1697,22 @@ function lodHeapPop(heap) {
     return top;
 }
 
+/**
+ * Point size for one LOD node: coarse nodes draw slightly fatter points so a
+ * partially-refined region doesn't look holey (√2 per level, capped at
+ * sizeBoostMax; only under sizeAttenuation, where `size` behaves like a
+ * world extent). Shared by the node-fetch material setup and the runtime
+ * sizeBoostMax re-tune (set_points_lod_options).
+ * @param {any} lod @param {number} i
+ * @returns {number}
+ */
+function lodNodeSize(lod, i) {
+    return lod.sizeAttenuation
+        ? lod.baseSize * Math.min(lod.sizeBoostMax,
+            Math.pow(2, (lod.maxLevel - lod.nodes.levels[i]) / 2))
+        : lod.baseSize;
+}
+
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
 const DEFAULT_TONE_MAPPING_EXPOSURE = 1.0;
 const DEFAULT_ENVIRONMENT_INTENSITY = 2.0;
@@ -8513,6 +8529,34 @@ class ThreeJSViewer {
     }
 
     /**
+     * Runtime tuning of a streamed-LOD cloud's traversal knobs — no
+     * re-upload or octree rebuild (issue #87). budget/refinePixels are
+     * read fresh by every traversal frame (and the eviction limit derives
+     * from budget), so assigning them is immediately live; sizeBoostMax is
+     * baked into each node material's point size at fetch time, so a
+     * change also re-derives the size on every already-loaded node.
+     * @param {string} id
+     * @param {{pointBudget?: number, refinePixels?: number, sizeBoostMax?: number}} data
+     */
+    _setPointsLodOptions(id, data) {
+        const group = this._objects.get(id);
+        const lod = group && group.userData && group.userData.pointsLOD;
+        if (!lod) {
+            console.warn(`set_points_lod_options: '${id}' is not a streamed-LOD point cloud`);
+            return;
+        }
+        if (data.pointBudget != null) lod.budget = data.pointBudget;
+        if (data.refinePixels != null) lod.refinePixels = data.refinePixels;
+        if (data.sizeBoostMax != null) {
+            lod.sizeBoostMax = data.sizeBoostMax;
+            for (let i = 0; i < lod.nodes.count; i++) {
+                const obj = lod.objects[i];
+                if (obj) obj.material.size = lodNodeSize(lod, i);
+            }
+        }
+    }
+
+    /**
      * Per-frame driver for octree-streamed point clouds: refresh the cached
      * cloud list when the scene graph changed, then traverse each cloud.
      * Cheap (typically well under a millisecond for thousands of nodes), so
@@ -8701,17 +8745,11 @@ class ThreeJSViewer {
                 geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), SQRT3);
                 geometry.boundingBox = new THREE.Box3(
                     new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
-                // Adaptive point size: coarse nodes draw slightly fatter
-                // points so a partially-refined region doesn't look holey.
-                // Deliberately gentle (√2 per level, capped low): coarse
-                // ancestors also render close to the camera under additive
-                // refinement, and an aggressive boost turns their sparse
-                // samples into giant occluding sprites. Only under
-                // sizeAttenuation, where `size` behaves like a world extent.
-                matOpts.size = lod.sizeAttenuation
-                    ? lod.baseSize * Math.min(lod.sizeBoostMax,
-                        Math.pow(2, (lod.maxLevel - lod.nodes.levels[i]) / 2))
-                    : lod.baseSize;
+                // Adaptive point size: gentle boost for coarse nodes —
+                // coarse ancestors also render close to the camera under
+                // additive refinement, and an aggressive boost turns their
+                // sparse samples into giant occluding sprites.
+                matOpts.size = lodNodeSize(lod, i);
                 const material = new THREE.PointsMaterial(matOpts);
                 applyPointsTimeWindow(material, lod.timeUniform, lod.hasBirth, lod.hasRemoval);
                 const pts = new THREE.Points(geometry, material);
@@ -11344,6 +11382,10 @@ class ThreeJSViewer {
             }
             case 'set_points_time':
                 this._withObject(data.id, 'set_points_time', () => this._setPointsTime(data.id, data.time));
+                break;
+            case 'set_points_lod_options':
+                this._withObject(data.id, 'set_points_lod_options',
+                    () => this._setPointsLodOptions(data.id, data));
                 break;
             case 'set_draw_range':
                 this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));

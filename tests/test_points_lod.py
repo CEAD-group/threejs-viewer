@@ -552,3 +552,40 @@ def test_add_points_lod_empty_dict_enables_lod(client):
     (msg,) = client._messages
     assert msg["type"] == "add_points_lod"
     assert client._binary_messages == []
+
+
+# === runtime LOD option tuning (set_points_lod_options) ===
+
+
+def test_set_points_lod_options_message(client):
+    client.set_points_lod_options(
+        "c", point_budget=2_000_000, refine_pixels=6, size_boost_max=1.0
+    )
+    assert client._messages[-1] == {
+        "type": "set_points_lod_options",
+        "id": "c",
+        "pointBudget": 2_000_000,
+        "refinePixels": 6.0,
+        "sizeBoostMax": 1.0,
+    }
+    # partial update: only the provided field ships
+    client.set_points_lod_options("c", refine_pixels=8)
+    assert client._messages[-1] == {
+        "type": "set_points_lod_options",
+        "id": "c",
+        "refinePixels": 8.0,
+    }
+
+
+def test_set_points_lod_options_validation(client):
+    with pytest.raises(ValueError, match="point_budget"):
+        client.set_points_lod_options("c", point_budget=0)
+    with pytest.raises(ValueError, match="refine_pixels"):
+        client.set_points_lod_options("c", refine_pixels=0)
+    with pytest.raises(ValueError, match="refine_pixels"):
+        client.set_points_lod_options("c", refine_pixels=float("nan"))
+    with pytest.raises(ValueError, match="size_boost_max"):
+        client.set_points_lod_options("c", size_boost_max=0.5)
+    with pytest.raises(ValueError, match="at least one"):
+        client.set_points_lod_options("c")
+    assert client._messages == []
