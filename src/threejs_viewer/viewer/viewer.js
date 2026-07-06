@@ -3705,6 +3705,16 @@ class CameraController {
                     .applyMatrix4(obj.matrixWorld));
             }
         }
+        // Embedder overlays are outside _objects and excluded from bounds
+        // by default; include the ones that opted in (includeInBounds).
+        if (v._overlays) {
+            for (const obj of v._overlays.values()) {
+                const meta = obj.userData.__overlay;
+                if (!meta || !meta.includeInBounds) continue;
+                obj.updateWorldMatrix(true, true);
+                box.expandByObject(obj);
+            }
+        }
         if (box.isEmpty()) {
             v._sceneSphere.set(new THREE.Vector3(), 0);
         } else {
@@ -6228,6 +6238,24 @@ export class ThreeJSViewer {
         /** @type {Map<string, Float32Array>} */
         this._followPaths = new Map();
 
+        // Embedder-owned overlays (addOverlay): id -> Object3D. Not part of
+        // _objects — excluded from framing/scene bounds by default, never
+        // touched by clear/animation, and the embedder keeps ownership
+        // (removeOverlay does not dispose).
+        /** @type {Map<string, THREE.Object3D>} */
+        this._overlays = new Map();
+        this._overlayAutoId = 0;
+
+        // Embedder animation-clock hooks (onAnimationTime): fired on every
+        // applied frame (playback tick, seek, step) and on play/pause flips.
+        /** @type {Array<(state: any) => void>} */
+        this._animTimeHooks = [];
+
+        // Reply payload of the most recent query-type message, captured by
+        // _reply() so handleMessage() can return it to no-WebSocket callers.
+        /** @type {any} */
+        this._lastReplyPayload = null;
+
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
 
@@ -6246,6 +6274,11 @@ export class ThreeJSViewer {
         // Connect
         if (options.autoConnect !== false) {
             this.connect();
+        } else {
+            // No backend expected: a permanent "Waiting for Python..." chip
+            // is misleading for a static/no-WS embed. Default to a neutral
+            // state; the embedder can overwrite it via setStatus().
+            this.setStatus('Local data', 'neutral');
         }
 
         // Start render loop
@@ -8425,6 +8458,7 @@ export class ThreeJSViewer {
         this._animationTime = this._animation.frames[newFrame].time;
         this._applyFrame(newFrame);
         this._updateAnimationUI();
+        this._fireAnimationTime();
     }
 
     /**
@@ -8480,6 +8514,7 @@ export class ThreeJSViewer {
         const { index, t } = this._getFrameAtTime(this._animationTime);
         this._applyFrame(index, t);
         this._updateAnimationUI();
+        this._fireAnimationTime();
     }
 
     _togglePlay() {
@@ -8488,6 +8523,7 @@ export class ThreeJSViewer {
             this._lastAnimationUpdate = performance.now();
         }
         this._updateAnimationUI();
+        this._fireAnimationTime();
     }
 
     /** @param {number} speed */
@@ -8885,6 +8921,9 @@ export class ThreeJSViewer {
      * @param {any} payload
      */
     _reply(payload) {
+        // Captured so handleMessage() can hand the payload back to a
+        // no-WebSocket caller (the send below is a no-op without a socket).
+        this._lastReplyPayload = payload;
         if (this._ws && this._ws.readyState === WebSocket.OPEN) {
             this._ws.send(JSON.stringify(payload));
         }
@@ -8899,11 +8938,15 @@ export class ThreeJSViewer {
      * Binary payloads still load over HTTP (static files or in-page `Blob`
      * object URLs) exactly as under the socket transport — only the control
      * dispatch is decoupled. Query messages that expect a response
-     * (`list_objects`, `query_scene`) route through `_reply()`, which no-ops
-     * when no socket is connected.
+     * (`list_objects`, `query_scene`, `get_camera`) route through `_reply()`
+     * — sent over the socket when one is connected, and **returned** from
+     * this method either way, so a no-WebSocket embedder gets the reply as
+     * the resolved value (issue #75). Non-query messages resolve to null.
      * @param {any} data Parsed control message (`{ type, ... }`).
+     * @returns {Promise<any>} the reply payload for query messages, else null.
      */
     async handleMessage(data) {
+        this._lastReplyPayload = null;
         switch (data.type) {
             case 'hello':
                 console.log(`Python client v${data.client_version}`);
@@ -10492,6 +10535,7 @@ export class ThreeJSViewer {
             default:
                 console.warn(`Unknown message type: '${data.type}'`);
         }
+        return this._lastReplyPayload;
     }
 
     // ========== Dynamic Near/Far ==========
@@ -10526,6 +10570,7 @@ export class ThreeJSViewer {
 
             const { index, t } = this._getFrameAtTime(this._animationTime);
             this._applyFrame(index, t);
+            this._fireAnimationTime();
             if (now - this._lastUIUpdate > 100) {
                 this._updateAnimationUI();
                 this._lastUIUpdate = now;
@@ -10803,6 +10848,9 @@ export class ThreeJSViewer {
         const bbox = new THREE.Box3();
         const visit = /** @param {any} child */ (child) => {
             if (!child.visible) return;
+            // Embedder overlays are excluded from framing unless opted in.
+            if (child.userData && child.userData.__overlay &&
+                !child.userData.__overlay.includeInBounds) return;
             if (child.geometry &&
                 child !== this._gridHelper &&
                 !this._isClipHelper(child) &&
@@ -10996,6 +11044,171 @@ export class ThreeJSViewer {
      * @param {boolean} enabled
      */
     setControlsEnabled(enabled) { this._controls.enabled = !!enabled; }
+
+    // ========== Embedder animation transport / object / overlay / status API
+    // (issues #74, #75, #76, #78) ==========
+
+    /**
+     * Seek the animation clock to `seconds` (clamped to [0, duration]),
+     * apply the frame, and update the native transport UI. No-op when no
+     * animation is loaded.
+     * @param {number} seconds
+     */
+    seekAnimationTime(seconds) {
+        if (!this._animation || !Number.isFinite(seconds)) return;
+        this._seekToTime(Number(seconds));
+    }
+
+    /**
+     * Read the animation transport state, or null when no animation is
+     * loaded. One clock: this is the same time that drives draw_range
+     * reveals, follow-path tracks, and the native transport UI.
+     * @returns {{time:number, duration:number, playing:boolean, speed:number, loop:boolean}|null}
+     */
+    getAnimationState() {
+        if (!this._animation) return null;
+        return {
+            time: this._animationTime,
+            duration: this._animation.duration,
+            playing: this._animationPlaying,
+            speed: this._animationSpeed,
+            loop: !!this._animationLoop,
+        };
+    }
+
+    /**
+     * Play (`true`) or pause (`false`) at the current playhead. No-op when
+     * no animation is loaded or the state already matches.
+     * @param {boolean} playing
+     */
+    setAnimationPlaying(playing) {
+        if (!this._animation) return;
+        if (!!playing !== this._animationPlaying) this._togglePlay();
+    }
+
+    /**
+     * Set the playback speed multiplier (finite, > 0). The native ± speed
+     * buttons continue from the nearest predefined step.
+     * @param {number} mult
+     */
+    setAnimationSpeed(mult) {
+        const m = Number(mult);
+        if (!Number.isFinite(m) || m <= 0) {
+            console.warn(`setAnimationSpeed: invalid multiplier ${mult}`);
+            return;
+        }
+        // Keep the ± stepper sane after an arbitrary speed: park its index
+        // on the closest predefined step.
+        let best = 0;
+        for (let i = 1; i < SPEED_STEPS.length; i++) {
+            if (Math.abs(SPEED_STEPS[i] - m) < Math.abs(SPEED_STEPS[best] - m)) best = i;
+        }
+        this._speedIndex = best;
+        this._setSpeed(m);
+    }
+
+    /**
+     * Register a hook fired with `getAnimationState()` on every applied
+     * animation frame (playback tick, seek, frame step) and on play/pause
+     * flips — saves an embedder the per-rAF poll when docking its own
+     * scrubber/graph around the viewer's clock.
+     * @param {(state: {time:number, duration:number, playing:boolean, speed:number, loop:boolean}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onAnimationTime(cb) {
+        this._animTimeHooks.push(cb);
+        return () => {
+            const i = this._animTimeHooks.indexOf(cb);
+            if (i >= 0) this._animTimeHooks.splice(i, 1);
+        };
+    }
+
+    /** Fire the onAnimationTime hooks (no-op with none registered). */
+    _fireAnimationTime() {
+        if (!this._animTimeHooks.length) return;
+        const state = this.getAnimationState();
+        if (!state) return;
+        for (const cb of this._animTimeHooks.slice()) {
+            try { cb(state); } catch (err) { console.error('onAnimationTime hook error', err); }
+        }
+    }
+
+    /**
+     * Public handle to a loaded scene object — the styling / raycast escape
+     * hatch for embedders (renderOrder layering, polygonOffset fixes,
+     * onBeforeCompile chunks, bulk attribute writes, raycast targets). The
+     * viewer guarantees the id mapping only, not the object's internals;
+     * the returned object is live viewer state, and structural edits
+     * (reparenting, disposal) are the embedder's own risk.
+     * @param {string} id
+     * @returns {THREE.Object3D | undefined}
+     */
+    getObject(id) { return this._objects.get(id); }
+
+    /**
+     * Mount an embedder-owned Object3D in the scene — live, embedder-computed
+     * content the message protocol doesn't cover (an animated cutter, a
+     * draggable selection box, transient highlights). Semantics: excluded
+     * from framing and scene bounds unless `includeInBounds: true`; never
+     * touched by scene `clear` or the animation system; ownership (and
+     * disposal) stays with the embedder. Re-using an id replaces that
+     * overlay (the old object is removed, not disposed).
+     * @param {THREE.Object3D} object3D
+     * @param {{id?: string, includeInBounds?: boolean}} [opts]
+     * @returns {string|null} the overlay id (auto-generated if not given)
+     */
+    addOverlay(object3D, opts = {}) {
+        if (!object3D || !(/** @type {any} */ (object3D).isObject3D)) {
+            console.warn('addOverlay: not an Object3D');
+            return null;
+        }
+        const id = opts.id != null ? String(opts.id) : `__overlay_${++this._overlayAutoId}`;
+        const prior = this._overlays.get(id);
+        if (prior) this._scene.remove(prior);
+        object3D.userData.__overlay = { id, includeInBounds: !!opts.includeInBounds };
+        this._scene.add(object3D);
+        this._overlays.set(id, object3D);
+        this._sceneBoundsDirty = true;
+        return id;
+    }
+
+    /**
+     * Unmount an overlay by id or by the Object3D itself. Does NOT dispose
+     * geometry/materials — the embedder owns them.
+     * @param {string|THREE.Object3D} idOrObject
+     * @returns {boolean} true if an overlay was removed
+     */
+    removeOverlay(idOrObject) {
+        let id = null;
+        if (typeof idOrObject === 'string') {
+            id = idOrObject;
+        } else if (idOrObject && /** @type {any} */ (idOrObject).userData &&
+                   /** @type {any} */ (idOrObject).userData.__overlay) {
+            id = /** @type {any} */ (idOrObject).userData.__overlay.id;
+        }
+        const obj = id != null ? this._overlays.get(id) : undefined;
+        if (!obj) return false;
+        this._scene.remove(obj);
+        this._overlays.delete(/** @type {string} */(id));
+        delete obj.userData.__overlay;
+        this._sceneBoundsDirty = true;
+        return true;
+    }
+
+    /**
+     * Set the header connection-status chip — for `autoConnect: false`
+     * embeds that have no socket to drive it (the chip defaults to a
+     * neutral "Local data" in that mode). A live socket's own
+     * connect/disconnect updates will overwrite this.
+     * @param {string} text
+     * @param {'connected'|'disconnected'|'neutral'} [state]
+     */
+    setStatus(text, state = 'neutral') {
+        const cls = (state === 'connected' || state === 'disconnected') ? state : 'neutral';
+        this._statusDot.className = `tjsv-status-dot ${cls}`;
+        this._statusDot.title = String(text);
+        this._statusText.textContent = String(text);
+    }
 
     /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else

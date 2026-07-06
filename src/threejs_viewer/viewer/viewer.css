@@ -31,6 +31,8 @@
 }
 .threejs-viewer .tjsv-status-dot.connected { background: #33cc33; }
 .threejs-viewer .tjsv-status-dot.disconnected { background: #cc3333; }
+/* Embedder-set neutral state (setStatus / autoConnect:false — no backend expected) */
+.threejs-viewer .tjsv-status-dot.neutral { background: #8a8a8a; }
 .threejs-viewer .tjsv-status-text {
     color: #999;
     font-family: monospace;

@@ -3427,3 +3427,197 @@ def test_embedder_pick_and_controls_toggle(viewer_client, viewer_page):
         " v.setControlsEnabled(false); const off = v._controls.enabled;"
         " v.setControlsEnabled(true); return {off, on: v._controls.enabled}; }"
     ) == {"off": False, "on": True}
+
+
+@pytest.mark.browser
+def test_embedder_animation_transport(viewer_client, viewer_page):
+    """seekAnimationTime / getAnimationState / setAnimationPlaying /
+    setAnimationSpeed / onAnimationTime — the public animation transport for
+    embedders (issue #74), all against the one shared clock."""
+    viewer_client.add_box("tbox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=4, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(viewer_page)
+
+    state = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " window.__ticks = [];"
+        " window.__unsub = v.onAnimationTime(s => window.__ticks.push(s.time));"
+        " v.seekAnimationTime(1.5);"
+        " return v.getAnimationState();"
+        "}"
+    )
+    assert state["time"] == pytest.approx(1.5)
+    assert state["duration"] == pytest.approx(4.0)
+    assert state["playing"] is False
+    assert state["loop"] is False
+    # the hook saw the seek
+    assert viewer_page.evaluate("() => window.__ticks.slice(-1)[0]") == pytest.approx(
+        1.5
+    )
+
+    # seek clamps
+    assert viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.seekAnimationTime(99); return v.getAnimationState().time; }"
+    ) == pytest.approx(4.0)
+
+    # play/pause + speed; hook fires during playback ticks
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.seekAnimationTime(0); window.__ticks = [];"
+        " v.setAnimationSpeed(2.0); v.setAnimationPlaying(true); }"
+    )
+    time.sleep(0.4)
+    playing = viewer_page.evaluate("() => window.threejsViewer.getAnimationState()")
+    assert playing["playing"] is True
+    assert playing["speed"] == pytest.approx(2.0)
+    assert playing["time"] > 0.3, "clock did not advance under playback"
+    n_ticks = viewer_page.evaluate("() => window.__ticks.length")
+    assert n_ticks >= 5, f"hook fired only {n_ticks}× during playback"
+    viewer_page.evaluate("() => window.threejsViewer.setAnimationPlaying(false)")
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getAnimationState().playing")
+        is False
+    )
+    # unsubscribe stops the hook
+    viewer_page.evaluate(
+        "() => { window.__unsub(); window.__ticks = [];"
+        " window.threejsViewer.seekAnimationTime(1.0); }"
+    )
+    assert viewer_page.evaluate("() => window.__ticks.length") == 0
+    # invalid speed is rejected without change
+    assert viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v.setAnimationSpeed(0);"
+        " return v.getAnimationState().speed; }"
+    ) == pytest.approx(2.0)
+
+
+@pytest.mark.browser
+def test_embedder_get_object_and_message_replies(viewer_client, viewer_page):
+    """getObject(id) hands out the loaded Object3D (issue #75), and
+    handleMessage() returns the reply payload for query messages so no-WS
+    embedders don't need the socket round-trip."""
+    viewer_client.add_box("gbox")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('gbox')")
+
+    assert viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const o = v.getObject('gbox');"
+        " return !!o && o === v._objects.get('gbox') && o.isObject3D === true; }"
+    )
+    assert viewer_page.evaluate("() => window.threejsViewer.getObject('nope')") is None
+
+    reply = viewer_page.evaluate(
+        "async () => await window.threejsViewer.handleMessage("
+        "{type: 'list_objects', requestId: 7})"
+    )
+    assert reply["type"] == "list_objects_response"
+    assert reply["requestId"] == 7
+    assert "gbox" in reply["objects"]
+    # non-query messages resolve to null
+    assert (
+        viewer_page.evaluate(
+            "async () => await window.threejsViewer.handleMessage("
+            "{type: 'add_group', id: 'g2'})"
+        )
+        is None
+    )
+
+
+@pytest.mark.browser
+def test_embedder_overlays(viewer_client, viewer_page):
+    """addOverlay/removeOverlay (issue #76): overlays mount in the scene,
+    are excluded from framing bounds unless includeInBounds, survive a
+    scene clear, and removeOverlay unmounts without disposing."""
+    viewer_client.add_box("obox")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('obox')")
+
+    setup = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const ov = v.getObject('obox').clone();"
+        " ov.position.set(1000, 0, 0);"
+        " window.__ov = ov;"
+        " const id = v.addOverlay(ov, {id: 'cutter'});"
+        " const bounds = v._collectFrameableBounds();"
+        " return {id, mounted: ov.parent === v._scene,"
+        "         framedMaxX: bounds.max.x};"
+        "}"
+    )
+    assert setup["id"] == "cutter"
+    assert setup["mounted"] is True
+    # default: excluded from framing — bounds stop at the real box, not 1000
+    assert setup["framedMaxX"] < 100, setup
+
+    # opt-in inclusion
+    included = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v.addOverlay(window.__ov, {id: 'cutter', includeInBounds: true});"
+        " return v._collectFrameableBounds().max.x;"
+        "}"
+    )
+    assert included > 999
+
+    # survives a scene clear (embedder owns it; _objects is emptied)
+    viewer_client.clear()
+    time.sleep(0.2)
+    assert viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return v._objects.size === 0 && window.__ov.parent === v._scene; }"
+    )
+
+    # removeOverlay unmounts, does not dispose (geometry attrs intact)
+    assert viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const removed = v.removeOverlay('cutter');"
+        " return removed && window.__ov.parent === null"
+        "   && !!window.__ov.geometry.attributes.position"
+        "   && v.removeOverlay('cutter') === false;"
+        "}"
+    )
+
+
+@pytest.mark.browser
+def test_status_chip_neutral_default_and_set_status(viewer_client, viewer_page):
+    """autoConnect:false defaults the status chip to a neutral 'Local data'
+    instead of 'Waiting for Python...' (issue #78); setStatus lets the
+    embedder drive text + state."""
+    result = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const div = document.createElement('div');"
+        " div.style.cssText ="
+        "   'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        " document.body.appendChild(div);"
+        " const v2 = new V(div, {"
+        "   htmlTemplate: live._options.htmlTemplate,"
+        "   cubemapData: live._options.cubemapData,"
+        "   autoConnect: false });"
+        " const initial = {dot: v2._statusDot.className,"
+        "                  text: v2._statusText.textContent};"
+        " v2.setStatus('Static demo', 'connected');"
+        " const set = {dot: v2._statusDot.className,"
+        "              text: v2._statusText.textContent};"
+        " v2.setStatus('Odd', 'bogus-state');"
+        " const fallback = v2._statusDot.className;"
+        " return {initial, set, fallback};"
+        "}"
+    )
+    assert result["initial"] == {
+        "dot": "tjsv-status-dot neutral",
+        "text": "Local data",
+    }
+    assert result["set"] == {
+        "dot": "tjsv-status-dot connected",
+        "text": "Static demo",
+    }
+    assert result["fallback"] == "tjsv-status-dot neutral"
