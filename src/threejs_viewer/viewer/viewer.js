@@ -200,6 +200,8 @@ function lerpHexColor(a, b, t) {
  * @param {unknown} value
  * @param {string} fallback
  */
+// Scratch NDC vector for the embedder pick() API.
+const _pickNdc = new THREE.Vector2();
 const _fpPos = new THREE.Vector3();
 const _fpAxis = new THREE.Vector3();
 const _fpQuat = new THREE.Quaternion();
@@ -604,6 +606,23 @@ function lodNodeSize(lod, i) {
         ? lod.baseSize * Math.min(lod.sizeBoostMax,
             Math.pow(2, (lod.maxLevel - lod.nodes.levels[i]) / 2))
         : lod.baseSize;
+}
+
+/**
+ * Coerce a caller-supplied 3-vector — `[x, y, z]` or `{x, y, z}` — into a
+ * finite tuple, or null if it isn't one. Shared by the embedder camera API
+ * (which accepts both forms) and the `set_camera` WS case (arrays).
+ * @param {any} v
+ * @returns {[number, number, number] | null}
+ */
+function vec3Tuple(v) {
+    if (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite)) {
+        return [v[0], v[1], v[2]];
+    }
+    if (v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)) {
+        return [v.x, v.y, v.z];
+    }
+    return null;
 }
 
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
@@ -7438,9 +7457,29 @@ export class ThreeJSViewer {
             console.warn(`set_points_lod_options: '${id}' is not a streamed-LOD point cloud`);
             return;
         }
-        if (data.pointBudget != null) lod.budget = data.pointBudget;
-        if (data.refinePixels != null) lod.refinePixels = data.refinePixels;
+        // Validate viewer-side too: the Python client checks eagerly, but a
+        // JS embedder can call handleMessage directly, and a NaN here would
+        // poison the traversal (NaN comparisons never trigger) and the
+        // eviction limit.
+        if (data.pointBudget != null) {
+            if (Number.isFinite(data.pointBudget) && data.pointBudget >= 1) {
+                lod.budget = data.pointBudget;
+            } else {
+                console.warn(`set_points_lod_options: invalid point budget ${data.pointBudget}`);
+            }
+        }
+        if (data.refinePixels != null) {
+            if (Number.isFinite(data.refinePixels) && data.refinePixels > 0) {
+                lod.refinePixels = data.refinePixels;
+            } else {
+                console.warn(`set_points_lod_options: invalid refine_pixels ${data.refinePixels}`);
+            }
+        }
         if (data.sizeBoostMax != null) {
+            if (!Number.isFinite(data.sizeBoostMax) || data.sizeBoostMax < 1) {
+                console.warn(`set_points_lod_options: invalid size_boost_max ${data.sizeBoostMax}`);
+                return;
+            }
             lod.sizeBoostMax = data.sizeBoostMax;
             for (let i = 0; i < lod.nodes.count; i++) {
                 const obj = lod.objects[i];
@@ -10297,34 +10336,9 @@ export class ThreeJSViewer {
                 });
                 break;
             }
-            case 'set_camera': {
-                const cam = /** @type {any} */ (this._camera);
-                if (Array.isArray(data.position) && data.position.length === 3) {
-                    cam.position.set(data.position[0], data.position[1], data.position[2]);
-                }
-                if (Array.isArray(data.target) && data.target.length === 3) {
-                    this._controls.target.set(data.target[0], data.target[1], data.target[2]);
-                }
-                if (Array.isArray(data.up) && data.up.length === 3) {
-                    cam.up.set(data.up[0], data.up[1], data.up[2]).normalize();
-                }
-                if (data.fov != null && cam.isPerspectiveCamera) {
-                    cam.fov = Math.min(FOV_MAX, Math.max(FOV_MIN, data.fov));
-                    cam.updateProjectionMatrix();
-                }
-                if (data.zoom != null && data.zoom > 0) {
-                    cam.zoom = data.zoom;
-                    cam.updateProjectionMatrix();
-                }
-                // ViewerControls never re-orients the camera from its target
-                // (update() deliberately does no lookAt — see controls.js),
-                // so orient explicitly or the camera would move while still
-                // facing its old direction.
-                cam.lookAt(this._controls.target);
-                cam.updateMatrixWorld(true);
-                this._controls.update();
+            case 'set_camera':
+                this.setCameraPose(data);
                 break;
-            }
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
@@ -10840,6 +10854,148 @@ export class ThreeJSViewer {
      * @param {(pick:any|null)=>void} cb @returns {() => void} unsubscribe
      */
     onPolylineHover(cb) { return this._polylinePick.onHover(cb); }
+
+    // ========== Embedder camera / pick / controls API (issue #77) ==========
+
+    /**
+     * Read the live camera pose. `fov` is null while the ortho camera is
+     * active; `zoom` is the ortho framing control (round-trips faithfully
+     * under both cameras).
+     * @returns {{position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number}}
+     */
+    getCameraPose() {
+        const p = this._camera.position, t = this._controls.target, u = this._camera.up;
+        const cam = /** @type {any} */ (this._camera);
+        return {
+            position: { x: p.x, y: p.y, z: p.z },
+            target: { x: t.x, y: t.y, z: t.z },
+            up: { x: u.x, y: u.y, z: u.z },
+            fov: cam.isPerspectiveCamera ? cam.fov : null,
+            zoom: cam.zoom,
+        };
+    }
+
+    /**
+     * One-shot camera pose set. Only the provided fields are applied;
+     * vectors accept `{x,y,z}` or `[x,y,z]`. Keeps ViewerControls
+     * consistent and re-orients explicitly — ViewerControls.update()
+     * deliberately never calls lookAt, so without it the camera would move
+     * while still facing its old direction. Also the implementation behind
+     * the `set_camera` WS message.
+     * @param {{position?:any, target?:any, up?:any, fov?:number, zoom?:number}} pose
+     */
+    setCameraPose(pose) {
+        if (!pose) return;
+        const cam = /** @type {any} */ (this._camera);
+        const p = vec3Tuple(pose.position);
+        if (p) cam.position.set(p[0], p[1], p[2]);
+        const t = vec3Tuple(pose.target);
+        if (t) this._controls.target.set(t[0], t[1], t[2]);
+        const u = vec3Tuple(pose.up);
+        if (u) cam.up.set(u[0], u[1], u[2]).normalize();
+        if (pose.fov != null && cam.isPerspectiveCamera) {
+            cam.fov = Math.min(FOV_MAX, Math.max(FOV_MIN, pose.fov));
+            cam.updateProjectionMatrix();
+        }
+        if (pose.zoom != null && pose.zoom > 0) {
+            cam.zoom = pose.zoom;
+            cam.updateProjectionMatrix();
+        }
+        cam.lookAt(this._controls.target);
+        cam.updateMatrixWorld(true);
+        this._controls.update();
+    }
+
+    /**
+     * Fit the camera to a world-space AABB — `frameObject` for a box (e.g.
+     * auto-focus a just-committed region of interest). Vectors accept
+     * `{x,y,z}` or `[x,y,z]`.
+     * @param {any} min @param {any} max @param {number} [margin] fit margin
+     *   (1 = box exactly fills the view; default 1.5 like frameObject)
+     */
+    frameBox(min, max, margin = 1.5) {
+        const lo = vec3Tuple(min), hi = vec3Tuple(max);
+        if (!lo || !hi) {
+            console.warn('frameBox: min/max must be finite 3-vectors');
+            return;
+        }
+        const box = new THREE.Box3(
+            new THREE.Vector3(lo[0], lo[1], lo[2]),
+            new THREE.Vector3(hi[0], hi[1], hi[2]));
+        if (box.isEmpty()) {
+            console.warn('frameBox: empty box (min > max on some axis)');
+            return;
+        }
+        this._fitCameraToBox(box, margin);
+    }
+
+    /**
+     * Pick a world point on the displayed content (meshes + point clouds)
+     * from a screen position — e.g. to seat an embedder-owned selection box.
+     * `clientX/clientY` are viewport (event.clientX-style) coordinates.
+     * Lines are deliberately excluded: `enablePolylinePicking` is the
+     * dedicated, arc-length-aware path for those. Hidden subtrees are
+     * skipped (three's raycaster does not check visibility itself).
+     * @param {number} clientX @param {number} clientY
+     * @param {{pointsThreshold?:number, ids?:string[]}} [opts]
+     *   `pointsThreshold`: world-space pick radius for point clouds
+     *   (default 1). `ids`: restrict the pick to these object ids.
+     * @returns {{point:{x:number,y:number,z:number}, objectId:string|null, distance:number, object3D:THREE.Object3D}|null}
+     *   nearest hit, or null. `objectId` is the top-level tracked id (walks
+     *   ancestors, so a GLTF sub-mesh resolves to its model's id); the raw
+     *   `object3D` is included for embedders that need the exact node.
+     */
+    pick(clientX, clientY, opts = {}) {
+        const rect = this._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        _pickNdc.set(
+            ((clientX - rect.left) / rect.width) * 2 - 1,
+            -((clientY - rect.top) / rect.height) * 2 + 1);
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(_pickNdc, this._camera);
+        raycaster.params.Points.threshold = opts.pointsThreshold ?? 1;
+        /** @type {THREE.Object3D[]} */
+        const roots = [];
+        if (opts.ids) {
+            for (const id of opts.ids) {
+                const o = this._objects.get(id);
+                if (o) roots.push(o);
+            }
+        } else {
+            roots.push(...this._objects.values());
+        }
+        if (!roots.length) return null;
+        const hits = raycaster.intersectObjects(roots, true);
+        for (const hit of hits) {
+            const ho = /** @type {any} */ (hit.object);
+            if (!(ho.isMesh || ho.isPoints)) continue;
+            let visible = true;
+            for (let n = ho; n; n = n.parent) {
+                if (n.visible === false) { visible = false; break; }
+            }
+            if (!visible) continue;
+            let objectId = null;
+            for (let n = ho; n; n = n.parent) {
+                const uid = n.userData && n.userData.id;
+                if (uid != null && this._objects.get(uid) === n) { objectId = uid; break; }
+            }
+            return {
+                point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+                objectId,
+                distance: hit.distance,
+                object3D: ho,
+            };
+        }
+        return null;
+    }
+
+    /**
+     * Enable/disable the orbit controls — e.g. suppress orbiting while the
+     * embedder drags its own handle (the built-in gizmos already do this
+     * themselves via `dragging-changed`).
+     * @param {boolean} enabled
+     */
+    setControlsEnabled(enabled) { this._controls.enabled = !!enabled; }
 
     /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
