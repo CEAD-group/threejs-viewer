@@ -1062,15 +1062,17 @@ class ViewerClient:
             cmin: Min value for colormap scaling (auto from ``colors`` if None).
             cmax: Max value for colormap scaling (auto from ``colors`` if None).
             color: Flat point color (hex) — used when ``colors`` is None.
-            size: Base point size. Its unit depends on ``size_attenuation``:
-                with attenuation ON (default) it is in **world units** (a point
-                is drawn as a screen quad of this world extent, shrinking with
-                distance), so a good default is roughly the point spacing; with
-                attenuation OFF it is a constant size in **screen pixels**.
+            size: Base point size. With ``size_attenuation`` ON (default)
+                points shrink with camera distance like world geometry
+                (``∝ 1/depth``) and ``size`` acts as an *approximate*
+                world-space extent — the exact pixel footprint also scales
+                with viewport height, so treat it as a relative knob; roughly
+                the point spacing is a good starting value. With attenuation
+                OFF it is a constant size in **screen pixels**.
             size_attenuation: When ``True`` (default), points shrink with
-                distance (perspective) and ``size`` is in world units. When
-                ``False``, every point is drawn at a constant pixel size
-                (``size`` in px) regardless of depth.
+                distance (perspective, viewport-aware). When ``False``, every
+                point is drawn at a constant pixel size (``size`` in px)
+                regardless of depth.
             birth_times: Optional (N,) per-point times: a point becomes
                 visible once the cloud's scrub time ``t`` reaches its birth
                 time (``birth_time <= t``). NaN/-inf = always existed.
@@ -1100,9 +1102,13 @@ class ViewerClient:
                 optional ``"origin"``) to build the octree with integer Morton
                 arithmetic instead of the general float builder — ~2-3× faster
                 and flat as N grows, so 30M–70M+ clouds build in seconds rather
-                than a minute+. The result is otherwise identical (same sampled
-                octree, time stratification, and shuffled-Morton order) and the
-                wire format is unchanged. Only declare it for genuinely
+                than a minute+. The result is structurally identical (same
+                sampled octree and shuffled-Morton vertex order; wire format
+                unchanged), but node samples are plain strided *spatial*
+                subsamples rather than time-stratified — carve removal times
+                are spatially correlated so a spatial sample stays honest
+                under the scrub, and skipping the time sort keeps the build
+                bit-reproducible for external producers. Only declare it for genuinely
                 lattice-aligned clouds; for arbitrary clouds omit it (the float
                 builder makes no grid assumption). An external producer (e.g.
                 mill-sim's Rust kernel) can additionally supply

@@ -334,6 +334,15 @@ def test_grid_octree_precomputed_rejects_bad_inputs():
     bad[0] = bad[1]
     with pytest.raises(ValueError, match="permutation"):
         build_points_octree_grid(pts, spacing=sp, codes=codes, order=bad, n_bits=n_bits)
+    # out-of-range order indices: negative (would wrap in numpy) and >= N
+    neg = np.argsort(codes).astype(np.int64)
+    neg[0] -= n  # same element via wraparound, but not a valid index
+    with pytest.raises(ValueError, match=r"\[0, "):
+        build_points_octree_grid(pts, spacing=sp, codes=codes, order=neg, n_bits=n_bits)
+    big = np.argsort(codes).copy()
+    big[0] = n
+    with pytest.raises(ValueError, match=r"\[0, "):
+        build_points_octree_grid(pts, spacing=sp, codes=codes, order=big, n_bits=n_bits)
     # order that does not sort the codes (identity is not Morton order here)
     with pytest.raises(ValueError, match="monotonic"):
         build_points_octree_grid(

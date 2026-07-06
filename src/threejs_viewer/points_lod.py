@@ -565,6 +565,10 @@ def build_points_octree_grid(
             raise ValueError(
                 f"order must be 1-D length {n} to match positions (got shape {ordr.shape})"
             )
+        if n > 0 and (int(ordr.min()) < 0 or int(ordr.max()) >= n):
+            raise ValueError(
+                f"order indices must be in [0, {n}) (negative indices are not accepted)"
+            )
         seen = np.zeros(n, dtype=bool)
         seen[ordr] = True  # a duplicate index leaves some slot unseen => caught below
         if not seen.all():
