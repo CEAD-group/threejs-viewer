@@ -5,6 +5,7 @@ A lightweight client for controlling the Three.js viewer from Python/Jupyter.
 Runs a WebSocket server that the browser connects to directly.
 """
 
+import functools
 import json
 import logging
 import math
@@ -20,6 +21,15 @@ from typing import Dict, List, Literal, Optional, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
+
+from .points_lod import (
+    DEFAULT_MAX_DEPTH,
+    DEFAULT_NODE_CAPACITY,
+    DEFAULT_POINT_BUDGET,
+    DEFAULT_REFINE_PIXELS,
+    build_points_octree,
+    pack_node_payload,
+)
 
 
 _ALLOWED_TONE_MAPPING_MODES = frozenset(
@@ -53,8 +63,41 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
     return f
 
 
+# "Unbounded" sentinel for point-cloud time-window ends: NaN/±inf in
+# birth_times/removal_times are mapped to ±FLT_MAX before packing, because
+# NaN comparisons in GLSL are undefined and would make points flicker in or
+# out arbitrarily per driver.
+_TIME_UNBOUNDED = float(np.finfo(np.float32).max)
+
+
+def _sanitize_point_times(values, name: str, n_points: int, nan_to: float):
+    """Validate and pack a per-point time array for add_points.
+
+    NaN maps to ``nan_to`` (−FLT_MAX for birth_times = "always existed",
+    +FLT_MAX for removal_times = "never removed"); ±inf clamp to ±FLT_MAX.
+    """
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.shape[0] != n_points:
+        raise ValueError(
+            f"{name} must have length {n_points} (one per point), got {arr.shape[0]}"
+        )
+    arr = np.nan_to_num(
+        arr, nan=nan_to, posinf=_TIME_UNBOUNDED, neginf=-_TIME_UNBOUNDED
+    )
+    return np.clip(arr, -_TIME_UNBOUNDED, _TIME_UNBOUNDED).astype(np.float32)
+
+
 _LOD_DEFAULT = object()  # sentinel: header "lod" key omitted
 _LOD_ALLOWED_KEYS = {"epsilon_divisor", "threshold"}
+
+# add_points(lod=...) option keys (distinct from the parametric-tube lod).
+_POINTS_LOD_ALLOWED_KEYS = {
+    "node_capacity",
+    "point_budget",
+    "refine_pixels",
+    "max_depth",
+    "seed",
+}
 
 
 def _serialize_lod(lod):
@@ -156,6 +199,17 @@ class _BlobHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         blob = self.server.blob_store.get(self.path)
+        # LOD point-cloud nodes are registered as callables and synthesized
+        # on demand (quantize + pack a slice), so the full per-node payload
+        # set never has to be materialized up front.
+        if callable(blob):
+            try:
+                blob = blob()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "blob provider for %s failed", self.path
+                )
+                blob = None
         if blob is not None:
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -265,6 +319,14 @@ class ViewerClient:
         self._current_animation = None  # Stored for re-sending on reconnect
         self._http_server = None
         self._blob_store: Dict[str, bytes] = {}
+        # HTTP sidecar port; connect() re-derives the same value when it
+        # actually binds the server. Set here too so URL construction (e.g.
+        # add_points lod headers) works before/without connect().
+        self._http_port = port + 1
+        # LOD point clouds: id -> blob-store key prefix (hierarchy + lazy
+        # per-node payload providers live under it). Released on replace,
+        # delete(id), and clear().
+        self._points_lod: Dict[str, str] = {}
         # Polyline picking: callbacks invoked when the user clicks a point on a
         # polyline in the viewer, and the desired enable state (re-sent on
         # reconnect so picking survives a browser refresh).
@@ -971,6 +1033,9 @@ class ViewerClient:
         color: int = 0xFFFFFF,
         size: float = 2.0,
         size_attenuation: bool = True,
+        birth_times: Optional[np.ndarray] = None,
+        removal_times: Optional[np.ndarray] = None,
+        lod: Optional[Union[bool, dict]] = None,
         parent: Optional[str] = None,
     ) -> None:
         """
@@ -997,20 +1062,47 @@ class ViewerClient:
             size_attenuation: When ``True`` (default), points shrink with
                 distance (perspective). When ``False``, every point is drawn at
                 a constant pixel size regardless of depth.
+            birth_times: Optional (N,) per-point times: a point becomes
+                visible once the cloud's scrub time ``t`` reaches its birth
+                time (``birth_time <= t``). NaN/-inf = always existed.
+            removal_times: Optional (N,) per-point times: a point disappears
+                once ``t`` reaches its removal time (``t < removal_time``
+                keeps it visible). NaN/+inf = never removed.
+            lod: Opt-in octree LOD for clouds too large for one draw call
+                (see ``plans/points-octree-lod.md``). ``True`` enables with
+                defaults; a dict tunes ``node_capacity`` (points per octree
+                node sample, default 15000), ``point_budget`` (max points
+                drawn per frame, default 1.5M), ``refine_pixels`` (projected
+                node size in px below which children are not refined,
+                default 12), ``max_depth`` and ``seed``. The cloud is
+                reordered into an additive sampled octree Python-side and
+                the browser streams nodes on demand as the camera moves —
+                the Python process must stay alive to serve refinement.
+                LOD clouds ignore ``set_draw_range`` (buffer order is
+                per-node Morton, so a prefix is spatially meaningless);
+                use the time window instead. Node samples are
+                time-stratified over ``birth_times`` (falling back to
+                ``removal_times``) so time filtering thins every LOD level
+                uniformly.
             parent: Optional parent group id.
 
         Reveal a cloud progressively (e.g. a cheap material-removal animation)
         with :meth:`set_draw_range` or the ``draw_ranges`` animation channel —
         the fraction maps onto the leading ``frac * N`` points of the buffer.
+
+        For out-of-order appearance/removal (issue #79: material removal is
+        not a buffer prefix), pass ``birth_times``/``removal_times`` and
+        drive the scrub time with :meth:`set_points_time` or an animation's
+        ``point_times`` channel (``Animation.set_point_time_data``) — the
+        filter runs per point in the vertex shader, independent of buffer
+        order. The scrub time starts at ``0.0`` when the cloud is created.
         """
         # reshape(-1, 3) enforces (N, 3) or a 1D multiple of 3 — a stray length
         # would otherwise be silently truncated by // 3.
-        positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3)
-        n_points = positions.shape[0]
-        positions = positions.reshape(-1)
+        positions3 = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3)
+        n_points = positions3.shape[0]
 
-        color_bytes = b""
-        has_vertex_colors = False
+        colors_rgb_u8 = None
         if colors is not None:
             colors = np.asarray(colors)
             if colors.ndim == 0 or colors.shape[0] != n_points:
@@ -1030,11 +1122,44 @@ class ViewerClient:
                 raise ValueError(
                     f"colors must be (N,) scalar or (N, 3) RGB float, got shape {colors.shape}"
                 )
-            colors_rgb = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
-            color_bytes = colors_rgb.tobytes()
-            has_vertex_colors = True
+            colors_rgb_u8 = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
 
-        raw_bytes = positions.tobytes() + color_bytes
+        birth_arr = None
+        if birth_times is not None:
+            birth_arr = _sanitize_point_times(
+                birth_times, "birth_times", n_points, nan_to=-_TIME_UNBOUNDED
+            )
+        removal_arr = None
+        if removal_times is not None:
+            removal_arr = _sanitize_point_times(
+                removal_times, "removal_times", n_points, nan_to=_TIME_UNBOUNDED
+            )
+
+        # Explicit None/False check: `lod={}` is a legitimate "all defaults"
+        # opt-in and must not fall through to the flat path via truthiness.
+        if lod is not None and lod is not False:
+            self._add_points_lod(
+                id,
+                positions3,
+                colors_rgb_u8,
+                birth_arr,
+                removal_arr,
+                color=color,
+                size=size,
+                size_attenuation=size_attenuation,
+                parent=parent,
+                lod=lod,
+            )
+            return
+
+        color_bytes = colors_rgb_u8.tobytes() if colors_rgb_u8 is not None else b""
+        time_bytes = b""
+        if birth_arr is not None:
+            time_bytes += birth_arr.tobytes()
+        if removal_arr is not None:
+            time_bytes += removal_arr.tobytes()
+
+        raw_bytes = positions3.reshape(-1).tobytes() + color_bytes + time_bytes
 
         header = {
             "type": "add_points_binary",
@@ -1042,12 +1167,124 @@ class ViewerClient:
             "color": color,
             "size": float(size),
             "sizeAttenuation": bool(size_attenuation),
-            "hasVertexColors": has_vertex_colors,
+            "hasVertexColors": colors_rgb_u8 is not None,
             "numPoints": n_points,
         }
+        if birth_arr is not None:
+            header["hasBirthTimes"] = True
+        if removal_arr is not None:
+            header["hasRemovalTimes"] = True
         if parent:
             header["parent"] = parent
         self._send_binary(header, raw_bytes)
+
+    def _add_points_lod(
+        self,
+        id: str,
+        positions3: np.ndarray,
+        colors_u8: Optional[np.ndarray],
+        birth: Optional[np.ndarray],
+        removal: Optional[np.ndarray],
+        *,
+        color: int,
+        size: float,
+        size_attenuation: bool,
+        parent: Optional[str],
+        lod: Union[bool, dict],
+    ) -> None:
+        """Build the sampled octree, register lazy node providers on the
+        blob store, and send the add_points_lod header (see
+        plans/points-octree-lod.md D5–D8)."""
+        opts = {} if lod is True else dict(lod)
+        unknown = set(opts) - _POINTS_LOD_ALLOWED_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown lod option(s) {sorted(unknown)}; "
+                f"allowed: {sorted(_POINTS_LOD_ALLOWED_KEYS)}"
+            )
+        node_capacity = int(opts.get("node_capacity", DEFAULT_NODE_CAPACITY))
+        point_budget = int(opts.get("point_budget", DEFAULT_POINT_BUDGET))
+        refine_pixels = float(opts.get("refine_pixels", DEFAULT_REFINE_PIXELS))
+        max_depth = int(opts.get("max_depth", DEFAULT_MAX_DEPTH))
+        seed = int(opts.get("seed", 0))
+        if node_capacity < 1:
+            raise ValueError(f"node_capacity must be >= 1 (got {node_capacity})")
+        if point_budget < node_capacity:
+            raise ValueError(
+                f"point_budget ({point_budget}) must be >= node_capacity "
+                f"({node_capacity}) or nothing can ever be drawn"
+            )
+
+        # Stratify node samples over birth times (or removal as fallback) so
+        # the time filter thins each LOD level uniformly.
+        strat = birth if birth is not None else removal
+        octree = build_points_octree(
+            positions3,
+            strat_times=strat,
+            node_capacity=node_capacity,
+            max_depth=max_depth,
+            seed=seed,
+        )
+        order = octree.order
+        pos_r = positions3[order]
+        colors_r = colors_u8[order] if colors_u8 is not None else None
+        birth_r = birth[order] if birth is not None else None
+        removal_r = removal[order] if removal is not None else None
+
+        self._release_points_lod(id)
+        key_base = f"/points_lod_{uuid.uuid4().hex}"
+        self._blob_store[f"{key_base}/hierarchy"] = octree.pack_hierarchy(
+            birth_r, removal_r
+        )
+
+        def node_payload(i: int) -> bytes:
+            lo = int(octree.offsets[i])
+            hi = lo + int(octree.counts[i])
+            return pack_node_payload(
+                pos_r[lo:hi],
+                colors_r[lo:hi] if colors_r is not None else None,
+                birth_r[lo:hi] if birth_r is not None else None,
+                removal_r[lo:hi] if removal_r is not None else None,
+                octree.centers[i],
+                float(octree.half_sizes[i]),
+            )
+
+        for i in range(octree.n_nodes):
+            self._blob_store[f"{key_base}/{i}"] = functools.partial(node_payload, i)
+        self._points_lod[id] = key_base
+
+        base_url = f"http://{self.host}:{self._http_port}{key_base}"
+        header = {
+            "type": "add_points_lod",
+            "id": id,
+            "numPoints": int(len(pos_r)),
+            "nodeCount": int(octree.n_nodes),
+            "maxLevel": int(octree.max_level),
+            "color": color,
+            "size": float(size),
+            "sizeAttenuation": bool(size_attenuation),
+            "hasVertexColors": colors_r is not None,
+            "pointBudget": point_budget,
+            "refinePixels": refine_pixels,
+            "hierarchy_url": f"{base_url}/hierarchy",
+            "node_url_base": f"{base_url}/",
+        }
+        if birth_r is not None:
+            header["hasBirthTimes"] = True
+        if removal_r is not None:
+            header["hasRemovalTimes"] = True
+        if parent:
+            header["parent"] = parent
+        self._send(header)
+
+    def _release_points_lod(self, id: str) -> None:
+        """Drop the blob-store entries (hierarchy + node providers) held for
+        a LOD cloud, freeing the reordered arrays they close over."""
+        key_base = self._points_lod.pop(id, None)
+        if not key_base:
+            return
+        for k in [k for k in self._blob_store if k.startswith(key_base)]:
+            del self._blob_store[k]
 
     def add_parametric_tube(
         self,
@@ -1713,6 +1950,7 @@ class ViewerClient:
 
     def delete(self, id: str) -> None:
         """Delete an object from the scene."""
+        self._release_points_lod(id)
         self._send({"type": "delete_object", "id": id})
 
     def set_visible(self, id: str, visible: bool = True):
@@ -1741,6 +1979,26 @@ class ViewerClient:
     def set_draw_range(self, id: str, value: float) -> None:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
+
+    def frame_object(self, id: str) -> None:
+        """Fit the camera to an object's bounding box (the programmatic
+        equivalent of double-clicking it in the viewer)."""
+        self._send({"type": "frame_object", "id": id})
+
+    def set_points_time(self, id: str, time: float) -> None:
+        """Set the time-window scrub time for a point cloud.
+
+        Only affects point clouds created with ``birth_times`` and/or
+        ``removal_times``: the vertex shader shows points whose window
+        contains the scrub time (``birth_time <= time < removal_time``).
+        Silently no-ops on objects without a time window. For pre-computed
+        playback, drive the same value from the animation slider via the
+        ``point_times`` channel (:meth:`Animation.set_point_time_data`).
+        """
+        t = float(time)
+        if not math.isfinite(t):
+            raise ValueError(f"time must be a finite number (got {time!r})")
+        self._send({"type": "set_points_time", "id": id, "time": t})
 
     def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
         """Toggle strand_collapse on a parametric_tube without re-uploading geometry.
@@ -2273,6 +2531,8 @@ class ViewerClient:
         # scene clear, so forget them here too (else a reconnect would re-pin them
         # to ids that no longer exist).
         self._gizmos = []
+        for cloud_id in list(self._points_lod):
+            self._release_points_lod(cloud_id)
         self._send({"type": "clear_scene"})
 
     # === Animation ===
@@ -2433,6 +2693,8 @@ class ViewerClient:
                 meta["clip_times"] = frame.clip_times
             if frame.draw_ranges and "draw_ranges" not in binary_channel_names:
                 meta["draw_ranges"] = frame.draw_ranges
+            if frame.point_times and "point_times" not in binary_channel_names:
+                meta["point_times"] = frame.point_times
             if meta:
                 meta["index"] = fi
                 frames_meta.append(meta)

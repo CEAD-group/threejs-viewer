@@ -304,6 +304,157 @@ def test_set_draw_range_on_points(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_points_time_window_attributes_and_scrub(viewer_client, viewer_page):
+    """birth/removal times land as vertex attributes, the patched shader
+    compiles cleanly, and set_points_time drives the shared uniform."""
+    shader_errors = []
+    viewer_page.on(
+        "console",
+        lambda msg: (
+            shader_errors.append(msg.text)
+            if "Shader Error" in msg.text or "THREE.WebGLProgram" in msg.text
+            else None
+        ),
+    )
+    pts = np.array([[i, 0.0, 0.0] for i in range(4)], dtype=np.float32)
+    birth = np.array([0.0, 1.0, 2.0, np.nan])  # NaN = always existed
+    removal = np.array([10.0, 10.0, 10.0, 1.5])
+    viewer_client.add_points("pc", pts, birth_times=birth, removal_times=removal)
+    info = None
+    for _ in range(40):
+        time.sleep(0.05)
+        info = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('pc');"
+            " if (!o) return null;"
+            " return {"
+            "  hasBirth: !!o.geometry.getAttribute('birthTime'),"
+            "  hasRemoval: !!o.geometry.getAttribute('removalTime'),"
+            "  time: o.userData.timeUniform ? o.userData.timeUniform.value : null,"
+            " };"
+            "}"
+        )
+        if info:
+            break
+    assert info == {"hasBirth": True, "hasRemoval": True, "time": 0}
+
+    viewer_client.set_points_time("pc", 2.5)
+    t = None
+    for _ in range(40):
+        time.sleep(0.05)
+        t = viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('pc').userData.timeUniform.value"
+        )
+        if t == 2.5:
+            break
+    assert t == 2.5
+    # Let a couple of frames render with the patched program before checking
+    # for compile errors.
+    time.sleep(0.2)
+    assert not shader_errors, f"shader errors with time filter: {shader_errors}"
+
+
+@pytest.mark.browser
+def test_point_times_channel_drives_uniform(viewer_client, viewer_page):
+    """The point_times binary animation channel scrubs the cloud's time
+    uniform from the playhead (lerped between keyframes)."""
+    pts = np.zeros((3, 3), dtype=np.float32)
+    viewer_client.add_points("pc", pts, removal_times=np.array([1.0, 2.0, 3.0]))
+    time.sleep(0.2)
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    anim.set_point_time_data(["pc"], np.array([[0.0], [5.0]], dtype=np.float32))
+    viewer_client.load_animation(anim, autoplay=False, initial_time="end")
+    t = None
+    for _ in range(40):
+        time.sleep(0.05)
+        t = viewer_page.evaluate(
+            "() => {"
+            " const o = window.threejsViewer._objects.get('pc');"
+            " return o && o.userData.timeUniform ? o.userData.timeUniform.value : null;"
+            "}"
+        )
+        if t == 5.0:
+            break
+    assert t == 5.0, f"expected playhead at end to scrub uniform to 5.0, got {t!r}"
+
+
+@pytest.mark.browser
+def test_points_lod_streams_nodes_within_budget(viewer_client, viewer_page):
+    """add_points(lod=...) creates a streamed octree cloud: the hierarchy
+    loads, node payloads stream on demand, the visible set respects the
+    point budget, and the scrub-time uniform reaches the shared material."""
+    rng = np.random.default_rng(3)
+    n = 60_000
+    pts = (rng.random((n, 3)) * [8, 3, 1.5]).astype(np.float32)
+    birth = pts[:, 0].astype(np.float64)
+    viewer_client.add_points(
+        "cloud",
+        pts,
+        colors=pts[:, 2],
+        birth_times=birth,
+        removal_times=birth + 4.0,
+        lod={"node_capacity": 4000, "point_budget": 30_000, "refine_pixels": 2},
+    )
+    # All births are > 0, so at the default scrub time t=0 every node is
+    # time-culled and nothing streams (that per-node culling is itself part
+    # of the design). Scrub into the live range to start streaming.
+    viewer_client.set_points_time("cloud", 3.5)
+    info = None
+    for _ in range(100):
+        time.sleep(0.1)
+        info = viewer_page.evaluate(
+            "() => {"
+            " const g = window.threejsViewer._objects.get('cloud');"
+            " if (!g || !g.userData.pointsLOD) return null;"
+            " const lod = g.userData.pointsLOD;"
+            " let loaded = 0, visiblePts = 0, visibleNodes = 0;"
+            " for (let i = 0; i < lod.nodes.count; i++) {"
+            "   const o = lod.objects[i];"
+            "   if (!o) continue;"
+            "   loaded++;"
+            "   if (o.visible) { visibleNodes++; visiblePts += lod.nodes.counts[i]; }"
+            " }"
+            " return {"
+            "  isGroup: g.isGroup === true,"
+            "  nodeCount: lod.nodes.count,"
+            "  loaded: loaded, visibleNodes: visibleNodes, visiblePts: visiblePts,"
+            "  budget: lod.budget,"
+            "  time: g.userData.timeUniform ? g.userData.timeUniform.value : null,"
+            " };"
+            "}"
+        )
+        # Wait until streaming has materialized more than just the root.
+        if info and info["loaded"] >= 2 and info["visibleNodes"] >= 1:
+            break
+    assert info, "LOD cloud never appeared"
+    assert info["isGroup"] and info["nodeCount"] > 8
+    assert info["loaded"] >= 2, f"nodes never streamed in: {info}"
+    assert 0 < info["visiblePts"] <= info["budget"], (
+        f"visible points {info['visiblePts']} exceed budget {info['budget']}"
+    )
+    assert info["time"] == 3.5  # set_points_time reached the shared uniform
+
+    # Scrub past every removal time: all nodes must time-cull back out.
+    viewer_client.set_points_time("cloud", 100.0)
+    visible = None
+    for _ in range(40):
+        time.sleep(0.05)
+        visible = viewer_page.evaluate(
+            "() => {"
+            " const lod = window.threejsViewer._objects.get('cloud').userData.pointsLOD;"
+            " let v = 0;"
+            " for (const o of lod.objects) if (o && o.visible) v++;"
+            " return v;"
+            "}"
+        )
+        if visible == 0:
+            break
+    assert visible == 0, f"{visible} nodes still visible after all removals"
+
+
+@pytest.mark.browser
 def test_add_swept_tool_appears_in_scene(viewer_client, viewer_page):
     """add_swept_tool lofts an oriented tool-body mesh into the scene."""
     n = 30

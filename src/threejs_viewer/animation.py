@@ -65,6 +65,9 @@ class Frame:
     draw_ranges: dict[str, float] | None = (
         None  # object_id -> 0.0-1.0 fraction visible (optional)
     )
+    point_times: dict[str, float] | None = (
+        None  # object_id -> point-cloud time-window scrub time (optional)
+    )
 
 
 @dataclass
@@ -141,6 +144,7 @@ class Animation:
         opacity: dict[str, float] | None = None,
         clip_times: dict[str, float] | None = None,
         draw_ranges: dict[str, float] | None = None,
+        point_times: dict[str, float] | None = None,
     ) -> None:
         """Add a frame to the animation."""
         self.frames.append(
@@ -152,6 +156,7 @@ class Animation:
                 opacity=opacity,
                 clip_times=clip_times,
                 draw_ranges=draw_ranges,
+                point_times=point_times,
             )
         )
 
@@ -262,6 +267,29 @@ class Animation:
             interpolation=interpolation,
         )
 
+    def set_point_time_data(
+        self,
+        object_ids: list[str],
+        data: np.ndarray,
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
+        """Convenience: add a 'point_times' channel.
+
+        point_times drives the per-point time-window filter on point clouds
+        created with ``birth_times``/``removal_times``: each frame's value
+        becomes the cloud's scrub time ``t`` and the shader shows only points
+        with ``birth_time <= t < removal_time``. Linear (the default) scrubs
+        smoothly between keyframes; pass "hold" for stepwise time jumps.
+        """
+        self.add_channel(
+            "point_times",
+            object_ids,
+            data,
+            dtype="float32",
+            stride=1,
+            interpolation=interpolation,
+        )
+
     def set_camera_target(
         self,
         data: np.ndarray,
@@ -311,6 +339,7 @@ class Animation:
                     **({"opacity": f.opacity} if f.opacity else {}),
                     **({"clip_times": f.clip_times} if f.clip_times else {}),
                     **({"draw_ranges": f.draw_ranges} if f.draw_ranges else {}),
+                    **({"point_times": f.point_times} if f.point_times else {}),
                 }
                 for f in self.frames
             ],

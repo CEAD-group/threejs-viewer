@@ -95,6 +95,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {Record<string, number>}   [opacity]
  * @property {Record<string, number>}   [clip_times]
  * @property {Record<string, number>}   [draw_ranges]
+ * @property {Record<string, number>}   [point_times]
  */
 
 /**
@@ -121,6 +122,12 @@ function refreshRefs(refs, ids, map) {
         refs[i] = map.get(ids[i]) || null;
     }
 }
+
+// Scratch objects for the points-LOD traversal. Module-scope to avoid per-frame alloc.
+const _lodInvMat = new THREE.Matrix4();
+const _lodCamLocal = new THREE.Vector3();
+const _lodScaleVec = new THREE.Vector3();
+const _lodBoundsBox = new THREE.Box3();
 
 // Scratch objects for matrix decompose/lerp. Module-scope to avoid per-frame alloc.
 const _lerpPosA = new THREE.Vector3();
@@ -390,10 +397,192 @@ function makeChannelApply(viewer) {
             }
         },
 
+        /**
+         * @param {BinaryChannel} ch
+         * @param {Array<any>} refs
+         * @param {number} base
+         * @param {number | null} baseNext
+         * @param {number} t
+         */
+        point_times(ch, refs, base, baseNext, t) {
+            if (ch._objGen !== viewer._objGeneration) {
+                refreshRefs(refs, ch.ids, viewer._objects);
+                ch._objGen = viewer._objGeneration;
+            }
+            const nObj = ch.ids.length;
+            const interp = shouldInterpChannel(ch, baseNext, t);
+            for (let i = 0; i < nObj; i++) {
+                const obj = refs[i];
+                if (!obj) continue;
+                const uniform = obj.userData.timeUniform;
+                if (!uniform) continue;
+                let val = ch.data[base + i];
+                if (interp) {
+                    val = val * (1 - t) + ch.data[baseNext + i] * t;
+                }
+                uniform.value = val;
+            }
+        },
+
         // No-ops: data is read directly in _applyCameraTracking, not per-object
         camera_target: () => {},
         camera_position: () => {},
     };
+}
+
+// ---- Point-cloud time-window filter ----------------------------------------
+// Per-point [birthTime, removalTime) visibility against a shared scrub-time
+// uniform, patched into the stock PointsMaterial via onBeforeCompile. Culled
+// points get their gl_Position shoved outside the clip volume, so they are
+// clipped before rasterization and cost nothing past the vertex stage
+// (Potree's GPS-time-filter trick). The uniform object is shared by
+// reference: writing `timeUniform.value` reaches every program compiled from
+// this material — including the EDL depth pre-pass — with no per-frame
+// material work.
+/**
+ * @param {THREE.PointsMaterial} material
+ * @param {{ value: number }} timeUniform
+ * @param {boolean} hasBirth
+ * @param {boolean} hasRemoval
+ */
+function applyPointsTimeWindow(material, timeUniform, hasBirth, hasRemoval) {
+    if (!hasBirth && !hasRemoval) return;
+    material.onBeforeCompile = (shader) => {
+        shader.uniforms.uPointsTime = timeUniform;
+        let decl = 'uniform float uPointsTime;\n';
+        if (hasBirth) decl += 'attribute float birthTime;\n';
+        if (hasRemoval) decl += 'attribute float removalTime;\n';
+        const conds = [];
+        if (hasBirth) conds.push('uPointsTime < birthTime');
+        if (hasRemoval) conds.push('uPointsTime >= removalTime');
+        shader.vertexShader = decl + shader.vertexShader.replace(
+            '#include <project_vertex>',
+            '#include <project_vertex>\n'
+            + `    if (${conds.join(' || ')}) { gl_Position = vec4(2.0e10, 2.0e10, 2.0e10, 1.0); }`
+        );
+    };
+    // Distinct program per attribute combination — onBeforeCompile edits are
+    // invisible to three's default program cache key, so without this a
+    // plain cloud could reuse (or be handed) a time-filtered program.
+    material.customProgramCacheKey = () =>
+        `tjsvPointsTime|${hasBirth ? 'b' : ''}${hasRemoval ? 'r' : ''}`;
+}
+
+// ========== Points LOD (octree-streamed point clouds) ==========
+// Potree-style additive sampled octree built Python-side (see
+// plans/points-octree-lod.md): every node carries a time-stratified sample
+// of the points in its cube, children add detail. The viewer traverses the
+// hierarchy each frame in projected-screen-size priority order up to a
+// point budget, fetches missing node payloads on demand from the HTTP
+// sidecar, and LRU-evicts nodes it hasn't wanted recently.
+
+const POINTS_LOD_MAX_FETCHES = 6;    // concurrent node payload fetches per cloud
+const POINTS_LOD_SIZE_BOOST_MAX = 2; // max point-size multiplier for coarse nodes
+const SQRT3 = Math.sqrt(3);
+const FLT_MAX = 3.4028234663852886e38;
+const POINTS_LOD_NO_CHILD = 0xFFFFFFFF;
+// 40-byte hierarchy record — must match HIERARCHY_DTYPE in points_lod.py.
+const POINTS_LOD_RECORD_BYTES = 40;
+
+/**
+ * Parsed structure-of-arrays view of the 40-byte-per-node hierarchy blob.
+ * Node bounds are explicit (center + half edge length); children of node i
+ * occupy consecutive slots starting at firstChild[i] (BFS emission).
+ *
+ * @typedef {Object} PointsLodNodes
+ * @property {number} count
+ * @property {Float32Array} centers   3*i .. 3*i+2
+ * @property {Float32Array} halfs
+ * @property {Uint32Array} offsets    into the reordered cloud (serving-side)
+ * @property {Uint32Array} counts     node's own (sample) point count
+ * @property {Float32Array} tmins     min own birth  (-FLT_MAX when unbounded)
+ * @property {Float32Array} tmaxs     max own removal (+FLT_MAX when unbounded)
+ * @property {Uint32Array} firstChild POINTS_LOD_NO_CHILD for leaves
+ * @property {Uint8Array} childMask   bit k set = octant-k child present
+ * @property {Uint8Array} levels
+ */
+
+/**
+ * @param {ArrayBuffer} buffer
+ * @param {number} nodeCount
+ * @returns {PointsLodNodes}
+ */
+function parsePointsLodHierarchy(buffer, nodeCount) {
+    if (buffer.byteLength < nodeCount * POINTS_LOD_RECORD_BYTES) {
+        throw new Error(
+            `points LOD hierarchy too short: ${buffer.byteLength} bytes for ${nodeCount} nodes`);
+    }
+    const dv = new DataView(buffer);
+    const nodes = {
+        count: nodeCount,
+        centers: new Float32Array(nodeCount * 3),
+        halfs: new Float32Array(nodeCount),
+        offsets: new Uint32Array(nodeCount),
+        counts: new Uint32Array(nodeCount),
+        tmins: new Float32Array(nodeCount),
+        tmaxs: new Float32Array(nodeCount),
+        firstChild: new Uint32Array(nodeCount),
+        childMask: new Uint8Array(nodeCount),
+        levels: new Uint8Array(nodeCount),
+    };
+    for (let i = 0; i < nodeCount; i++) {
+        const o = i * POINTS_LOD_RECORD_BYTES;
+        nodes.centers[3 * i] = dv.getFloat32(o, true);
+        nodes.centers[3 * i + 1] = dv.getFloat32(o + 4, true);
+        nodes.centers[3 * i + 2] = dv.getFloat32(o + 8, true);
+        nodes.halfs[i] = dv.getFloat32(o + 12, true);
+        nodes.offsets[i] = dv.getUint32(o + 16, true);
+        nodes.counts[i] = dv.getUint32(o + 20, true);
+        nodes.tmins[i] = dv.getFloat32(o + 24, true);
+        nodes.tmaxs[i] = dv.getFloat32(o + 28, true);
+        nodes.firstChild[i] = dv.getUint32(o + 32, true);
+        nodes.childMask[i] = dv.getUint8(o + 36);
+        nodes.levels[i] = dv.getUint8(o + 37);
+    }
+    return nodes;
+}
+
+// Tiny binary max-heap on {px} entries for the priority traversal — the
+// budget cut must keep the biggest-on-screen nodes, and children may only
+// be considered after their parent is accepted (additive refinement).
+/**
+ * @param {Array<{i: number, px: number}>} heap
+ * @param {{i: number, px: number}} item
+ */
+function lodHeapPush(heap, item) {
+    heap.push(item);
+    let c = heap.length - 1;
+    while (c > 0) {
+        const p = (c - 1) >> 1;
+        if (heap[p].px >= heap[c].px) break;
+        const tmp = heap[p]; heap[p] = heap[c]; heap[c] = tmp;
+        c = p;
+    }
+}
+
+/**
+ * @param {Array<{i: number, px: number}>} heap
+ * @returns {{i: number, px: number} | undefined}
+ */
+function lodHeapPop(heap) {
+    const n = heap.length;
+    if (n === 0) return undefined;
+    const top = heap[0];
+    const last = heap.pop();
+    if (n > 1 && last !== undefined) {
+        heap[0] = last;
+        let p = 0;
+        for (;;) {
+            const l = 2 * p + 1, r = l + 1;
+            let m = p;
+            if (l < heap.length && heap[l].px > heap[m].px) m = l;
+            if (r < heap.length && heap[r].px > heap[m].px) m = r;
+            if (m === p) break;
+            const tmp = heap[p]; heap[p] = heap[m]; heap[m] = tmp;
+            p = m;
+        }
+    }
+    return top;
 }
 
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
@@ -3467,6 +3656,14 @@ class CameraController {
         for (const obj of v._objects.values()) {
             obj.updateWorldMatrix(true, true);
             box.expandByObject(obj);
+            // A LOD point cloud knows its full extent from the hierarchy
+            // even while the group has no (or few) streamed node children —
+            // without this, near/far and framing see an empty box until
+            // the first node payload lands.
+            if (obj.userData.lodRootBox) {
+                box.union(_lodBoundsBox.copy(obj.userData.lodRootBox)
+                    .applyMatrix4(obj.matrixWorld));
+            }
         }
         if (box.isEmpty()) {
             v._sceneSphere.set(new THREE.Vector3(), 0);
@@ -5921,6 +6118,14 @@ export class ThreeJSViewer {
         this._tmpTrackPos = new THREE.Vector3();   // reusable scratch vectors
         this._tmpTrackDelta = new THREE.Vector3();
 
+        // LOD point clouds (add_points_lod): cached list of group objects,
+        // refreshed when the scene graph changes; per-frame traversal in
+        // _updatePointsLOD.
+        /** @type {Array<any>} */
+        this._pointsLODList = [];
+        this._pointsLODGen = -1;
+        this._pointsLODFrame = 0;
+
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
 
@@ -7109,6 +7314,276 @@ export class ThreeJSViewer {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
         } else if (obj.userData.isPoints) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
+        } else if (obj.userData.isPointsLOD && !obj.userData._warnedDrawRange) {
+            // Octree-LOD clouds: buffer order is per-node Morton, a prefix
+            // is spatially meaningless. Warn once instead of silently
+            // no-oping so the mistake is discoverable.
+            obj.userData._warnedDrawRange = true;
+            console.warn(
+                `set_draw_range: '${id}' is an octree-LOD point cloud — draw_range is ` +
+                `ignored (per-node Morton buffer order); use the birth/removal time ` +
+                `window (set_points_time / point_times channel) instead.`);
+        }
+    }
+
+    /**
+     * Set the time-window scrub time on a point cloud created with
+     * birth/removal times. No-op on objects without a time window.
+     * @param {string} id @param {number} time
+     */
+    _setPointsTime(id, time) {
+        const obj = this._objects.get(id);
+        if (!obj) return;
+        const uniform = obj.userData.timeUniform;
+        if (uniform) uniform.value = time;
+    }
+
+    /**
+     * Per-frame driver for octree-streamed point clouds: refresh the cached
+     * cloud list when the scene graph changed, then traverse each cloud.
+     * Cheap (typically well under a millisecond for thousands of nodes), so
+     * it runs unthrottled — node *fetches* are what's rate-limited.
+     */
+    _updatePointsLOD() {
+        if (this._pointsLODGen !== this._objGeneration) {
+            this._pointsLODList = [];
+            for (const obj of this._objects.values()) {
+                if (obj.userData && obj.userData.isPointsLOD) this._pointsLODList.push(obj);
+            }
+            this._pointsLODGen = this._objGeneration;
+        }
+        if (this._pointsLODList.length === 0) return;
+        this._pointsLODFrame++;
+        for (const group of this._pointsLODList) this._updateOnePointsLOD(group);
+    }
+
+    /**
+     * Priority traversal for one cloud: visit nodes biggest-on-screen first
+     * (max-heap on projected node size), refine while a node projects
+     * larger than refinePixels, stop adding once the point budget is
+     * exhausted. Children are only considered after their parent was
+     * visited (additive refinement — parents carry the coarse sample).
+     * Nodes whose own [min birth, max removal) window misses the current
+     * scrub time are skipped for drawing/fetching but still descended
+     * (children carry their own time bounds).
+     * @param {any} group
+     */
+    _updateOnePointsLOD(group) {
+        const lod = group.userData.pointsLOD;
+        if (!lod) return;
+        const nodes = lod.nodes;
+        const cam = /** @type {any} */ (this._camera);
+        const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
+
+        // Camera position in cloud-local space; group world scale (assumed
+        // uniform) folds into the ortho path only — in the perspective
+        // ratio r/dist it cancels.
+        _lodInvMat.copy(group.matrixWorld).invert();
+        _lodCamLocal.copy(cam.position).applyMatrix4(_lodInvMat);
+        const worldScale = _lodScaleVec.setFromMatrixScale(group.matrixWorld).x;
+        const isPersp = !!cam.isPerspectiveCamera;
+        const projFactor = isPersp
+            ? canvasH / (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)))
+            : canvasH * cam.zoom / Math.max(1e-9, cam.top - cam.bottom);
+
+        /** @param {number} i */
+        const pxOf = (i) => {
+            const r = nodes.halfs[i] * SQRT3;
+            if (!isPersp) return 2 * r * worldScale * projFactor;
+            const dx = _lodCamLocal.x - nodes.centers[3 * i];
+            const dy = _lodCamLocal.y - nodes.centers[3 * i + 1];
+            const dz = _lodCamLocal.z - nodes.centers[3 * i + 2];
+            const dist = Math.max(1e-9, Math.sqrt(dx * dx + dy * dy + dz * dz));
+            return (2 * r / dist) * projFactor;
+        };
+
+        const hasTime = lod.hasBirth || lod.hasRemoval;
+        const uTime = lod.timeUniform.value;
+        const wanted = lod.wanted;
+        wanted.fill(0);
+        /** @type {Array<{i: number, px: number}>} */
+        const heap = [];
+        lodHeapPush(heap, { i: 0, px: pxOf(0) });
+        let used = 0;
+        /** @type {number[]} */
+        const wantedList = [];
+        for (;;) {
+            const top = lodHeapPop(heap);
+            if (!top) break;
+            const i = top.i;
+            // Root always renders (something must show); other nodes below
+            // the refinement threshold add no useful density.
+            if (i !== 0 && top.px < lod.refinePixels) continue;
+            const timeCulled = hasTime &&
+                (uTime < nodes.tmins[i] || uTime >= nodes.tmaxs[i]);
+            if (!timeCulled) {
+                const cnt = nodes.counts[i];
+                // Over budget: skip this node AND its subtree (children
+                // refine the parent's sample; rendering them without it
+                // leaves density holes) — but keep popping, a smaller
+                // branch elsewhere may still fit the remaining budget
+                // (a plain `break` here under-filled the budget).
+                if (used + cnt > lod.budget) continue;
+                used += cnt;
+                wanted[i] = 1;
+                wantedList.push(i);
+            }
+            const fc = nodes.firstChild[i];
+            if (fc !== POINTS_LOD_NO_CHILD) {
+                const mask = nodes.childMask[i];
+                let slot = fc;
+                for (let k = 0; k < 8; k++) {
+                    if (mask & (1 << k)) {
+                        lodHeapPush(heap, { i: slot, px: pxOf(slot) });
+                        slot++;
+                    }
+                }
+            }
+        }
+
+        // Apply visibility; fetch missing wanted nodes in priority order
+        // (wantedList is heap-pop order = biggest-on-screen first).
+        let fetchBudget = POINTS_LOD_MAX_FETCHES - lod.loading.size;
+        for (const i of wantedList) {
+            lod.lastWanted[i] = this._pointsLODFrame;
+            const obj = lod.objects[i];
+            if (obj) {
+                obj.visible = true;
+            } else if (fetchBudget > 0 && !lod.loading.has(i)) {
+                this._fetchPointsLodNode(group, i);
+                fetchBudget--;
+            }
+        }
+        for (let i = 0; i < nodes.count; i++) {
+            const obj = lod.objects[i];
+            if (obj && !wanted[i]) obj.visible = false;
+        }
+        this._evictPointsLodNodes(group);
+    }
+
+    /**
+     * Fetch one node payload and materialize it as a THREE.Points child.
+     * Payload layout matches pack_node_payload in points_lod.py: int16 xyz
+     * (node-local, normalized) + optional u8 rgb + optional f32 birth /
+     * removal. Positions dequantize for free: normalized Int16 attribute
+     * (÷32767 in the fixed-function stage) x the node's center/scale
+     * transform.
+     * @param {any} group @param {number} i
+     */
+    _fetchPointsLodNode(group, i) {
+        const lod = group.userData.pointsLOD;
+        lod.loading.add(i);
+        (async () => {
+            try {
+                const resp = await fetch(lod.urlBase + i);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const buffer = await resp.arrayBuffer();
+                // Stale guards: cloud replaced, deleted, or scene cleared.
+                if (this._objects.get(group.userData.id) !== group) return;
+                if (lod.objects[i]) return;
+                const count = lod.nodes.counts[i];
+                const raw = new Uint8Array(buffer);
+                const expect = count * (6 + (lod.hasColors ? 3 : 0) +
+                    (lod.hasBirth ? 4 : 0) + (lod.hasRemoval ? 4 : 0));
+                if (raw.length < expect) throw new Error(
+                    `node ${i}: ${raw.length} bytes, expected ${expect}`);
+                let off = 0;
+                // Copies into fresh buffers: block offsets in the payload
+                // are not guaranteed 2/4-byte aligned (u8 color block).
+                const posBuf = new ArrayBuffer(count * 6);
+                new Uint8Array(posBuf).set(raw.subarray(off, off + count * 6));
+                off += count * 6;
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position',
+                    new THREE.BufferAttribute(new Int16Array(posBuf), 3, true));
+                /** @type {any} */
+                const matOpts = { sizeAttenuation: lod.sizeAttenuation };
+                if (lod.hasColors) {
+                    geometry.setAttribute('color',
+                        new THREE.BufferAttribute(raw.slice(off, off + count * 3), 3, true));
+                    off += count * 3;
+                    matOpts.vertexColors = true;
+                } else {
+                    matOpts.color = lod.flatColor;
+                }
+                /** @param {number} byteOff */
+                const readF32 = (byteOff) => {
+                    const b = new ArrayBuffer(count * 4);
+                    new Uint8Array(b).set(raw.subarray(byteOff, byteOff + count * 4));
+                    return new Float32Array(b);
+                };
+                if (lod.hasBirth) {
+                    geometry.setAttribute('birthTime', new THREE.BufferAttribute(readF32(off), 1));
+                    off += count * 4;
+                }
+                if (lod.hasRemoval) {
+                    geometry.setAttribute('removalTime', new THREE.BufferAttribute(readF32(off), 1));
+                    off += count * 4;
+                }
+                // Local space is the node cube normalized to [-1, 1] — set
+                // bounds explicitly (computing them from a normalized Int16
+                // attribute is a well-known foot-gun) so frustum culling and
+                // scene-bounds fitting are exact per node.
+                geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), SQRT3);
+                geometry.boundingBox = new THREE.Box3(
+                    new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+                // Adaptive point size: coarse nodes draw slightly fatter
+                // points so a partially-refined region doesn't look holey.
+                // Deliberately gentle (√2 per level, capped low): coarse
+                // ancestors also render close to the camera under additive
+                // refinement, and an aggressive boost turns their sparse
+                // samples into giant occluding sprites. Only under
+                // sizeAttenuation, where `size` behaves like a world extent.
+                matOpts.size = lod.sizeAttenuation
+                    ? lod.baseSize * Math.min(POINTS_LOD_SIZE_BOOST_MAX,
+                        Math.pow(2, (lod.maxLevel - lod.nodes.levels[i]) / 2))
+                    : lod.baseSize;
+                const material = new THREE.PointsMaterial(matOpts);
+                applyPointsTimeWindow(material, lod.timeUniform, lod.hasBirth, lod.hasRemoval);
+                const pts = new THREE.Points(geometry, material);
+                pts.position.set(
+                    lod.nodes.centers[3 * i],
+                    lod.nodes.centers[3 * i + 1],
+                    lod.nodes.centers[3 * i + 2]);
+                pts.scale.setScalar(lod.nodes.halfs[i]);
+                pts.layers.enable(EDL_LINE_LAYER);
+                pts.userData.lodNodeIndex = i;
+                group.add(pts);
+                lod.objects[i] = pts;
+                lod.loadedPoints += count;
+                this._sceneBoundsDirty = true;
+            } catch (e) {
+                console.warn(`points LOD node ${i} fetch failed:`, e);
+            } finally {
+                lod.loading.delete(i);
+            }
+        })();
+    }
+
+    /**
+     * LRU eviction: past the cache limit, drop loaded-but-unwanted nodes
+     * least-recently-wanted first. The limit is points-based (bytes/point
+     * is fixed), sized to keep a few screens' worth of refinement around.
+     * @param {any} group
+     */
+    _evictPointsLodNodes(group) {
+        const lod = group.userData.pointsLOD;
+        const limit = Math.max(3 * lod.budget, 2000000);
+        if (lod.loadedPoints <= limit) return;
+        /** @type {number[]} */
+        const candidates = [];
+        for (let i = 0; i < lod.nodes.count; i++) {
+            if (lod.objects[i] && !lod.wanted[i]) candidates.push(i);
+        }
+        candidates.sort((a, b) => lod.lastWanted[a] - lod.lastWanted[b]);
+        for (const i of candidates) {
+            if (lod.loadedPoints <= limit) break;
+            const obj = lod.objects[i];
+            group.remove(obj);
+            obj.geometry.dispose();
+            obj.material.dispose();
+            lod.objects[i] = null;
+            lod.loadedPoints -= lod.nodes.counts[i];
         }
     }
 
@@ -7598,6 +8073,16 @@ export class ThreeJSViewer {
                     v = value * (1 - t) + nextD[id] * t;
                 }
                 this._setDrawRange(id, v);
+            }
+        }
+        if (frame.point_times) {
+            const nextPt = (hasNext && nextFrame.point_times) ? nextFrame.point_times : null;
+            for (const [id, time] of Object.entries(frame.point_times)) {
+                let v = time;
+                if (nextPt && nextPt[id] != null) {
+                    v = time * (1 - t) + nextPt[id] * t;
+                }
+                this._setPointsTime(id, v);
             }
         }
 
@@ -8248,6 +8733,9 @@ export class ThreeJSViewer {
             case 'set_visibility':
                 this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
                 break;
+            case 'frame_object':
+                this._withObject(data.id, 'frame_object', (obj) => { this.frameObject(obj); });
+                break;
             case 'set_scene_visibility':
                 this._setSceneVisibility(data.visibility);
                 break;
@@ -8398,6 +8886,7 @@ export class ThreeJSViewer {
                                 if (meta.opacity) frame.opacity = meta.opacity;
                                 if (meta.clip_times) frame.clip_times = meta.clip_times;
                                 if (meta.draw_ranges) frame.draw_ranges = meta.draw_ranges;
+                                if (meta.point_times) frame.point_times = meta.point_times;
                             }
                             frames.push(frame);
                         }
@@ -8638,6 +9127,22 @@ export class ThreeJSViewer {
                         const numPoints = data.numPoints || (rawData.length / 12);
                         const positionBytes = numPoints * 12;
 
+                        // Validate the full expected layout up front — a
+                        // truncated payload (or flags disagreeing with it)
+                        // would otherwise silently zero-pad the trailing
+                        // time blocks into wrong birth/removal values.
+                        const expectedBytes = positionBytes
+                            + (data.hasVertexColors ? numPoints * 3 : 0)
+                            + (data.hasBirthTimes ? numPoints * 4 : 0)
+                            + (data.hasRemovalTimes ? numPoints * 4 : 0);
+                        if (rawData.length < expectedBytes) {
+                            throw new Error(
+                                `add_points payload too short: ${rawData.length} bytes, ` +
+                                `expected ${expectedBytes} for ${numPoints} points ` +
+                                `(colors=${!!data.hasVertexColors}, birth=${!!data.hasBirthTimes}, ` +
+                                `removal=${!!data.hasRemovalTimes})`);
+                        }
+
                         const posBuffer = new ArrayBuffer(positionBytes);
                         new Uint8Array(posBuffer).set(rawData.slice(0, positionBytes));
                         const pointData = new Float32Array(posBuffer);
@@ -8668,8 +9173,37 @@ export class ThreeJSViewer {
                         } else {
                             matOpts.color = data.color ?? 0xffffff;
                         }
+
+                        // Optional per-point time-window attributes, packed
+                        // after positions (+colors). Copied into fresh
+                        // buffers because the color block is 3 bytes/point,
+                        // so the float32 blocks are not 4-byte aligned
+                        // within the fetched payload.
+                        const hasBirth = !!data.hasBirthTimes;
+                        const hasRemoval = !!data.hasRemovalTimes;
+                        /** @param {number} byteOff */
+                        const readTimeBlock = (byteOff) => {
+                            const buf = new ArrayBuffer(numPoints * 4);
+                            new Uint8Array(buf).set(rawData.subarray(byteOff, byteOff + numPoints * 4));
+                            return new Float32Array(buf);
+                        };
+                        let timeOffset = positionBytes + (data.hasVertexColors ? numPoints * 3 : 0);
+                        if (hasBirth) {
+                            geometry.setAttribute('birthTime', new THREE.BufferAttribute(readTimeBlock(timeOffset), 1));
+                            timeOffset += numPoints * 4;
+                        }
+                        if (hasRemoval) {
+                            geometry.setAttribute('removalTime', new THREE.BufferAttribute(readTimeBlock(timeOffset), 1));
+                            timeOffset += numPoints * 4;
+                        }
+
                         const material = new THREE.PointsMaterial(matOpts);
                         const points = new THREE.Points(geometry, material);
+                        if (hasBirth || hasRemoval) {
+                            const timeUniform = { value: 0 };
+                            applyPointsTimeWindow(material, timeUniform, hasBirth, hasRemoval);
+                            points.userData.timeUniform = timeUniform;
+                        }
                         points.name = data.id;
                         points.userData.id = data.id;
                         points.userData.isPoints = true;
@@ -8689,6 +9223,94 @@ export class ThreeJSViewer {
                         deferred.resolve();
                     } catch (e) {
                         console.error(`Error creating point cloud via HTTP:`, e);
+                        deferred.reject(e);
+                    } finally {
+                        if (this._inflightLoads.get(data.id) === deferred) {
+                            this._inflightLoads.delete(data.id);
+                        }
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
+            case 'add_points_lod': {
+                // Octree-streamed point cloud: fetch only the small binary
+                // hierarchy here; node payloads stream on demand from the
+                // per-frame traversal (_updatePointsLOD).
+                this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._claimLoadToken(data.id);
+                const deferred = this._makeDeferred();
+                deferred.promise.catch(() => {});
+                this._inflightLoads.set(data.id, deferred);
+                (async () => {
+                    try {
+                        const resp = await fetch(data.hierarchy_url);
+                        if (!resp.ok) throw new Error(`hierarchy HTTP ${resp.status}`);
+                        const buffer = await resp.arrayBuffer();
+                        if (this._sceneGeneration !== capturedScene ||
+                            !this._isLoadTokenCurrent(data.id, loadToken)) {
+                            console.log(`Discarding stale LOD points fetch for '${data.id}'`);
+                            deferred.reject(new Error('stale'));
+                            return;
+                        }
+                        const nodes = parsePointsLodHierarchy(buffer, data.nodeCount);
+                        const group = new THREE.Group();
+                        group.name = data.id;
+                        group.userData.id = data.id;
+                        group.userData.isPointsLOD = true;
+                        group.userData.totalPointCount = data.numPoints;
+                        const hasBirth = !!data.hasBirthTimes;
+                        const hasRemoval = !!data.hasRemovalTimes;
+                        // One scrub-time uniform for the whole cloud, shared
+                        // by reference into every node material — so
+                        // set_points_time / the point_times channel address
+                        // the group exactly like a flat cloud.
+                        const timeUniform = { value: 0 };
+                        if (hasBirth || hasRemoval) group.userData.timeUniform = timeUniform;
+                        // Full cloud extent (root octree cube) for framing /
+                        // near-far before any node payload has streamed in.
+                        const rootHalf = nodes.halfs[0];
+                        group.userData.lodRootBox = new THREE.Box3(
+                            new THREE.Vector3(
+                                nodes.centers[0] - rootHalf,
+                                nodes.centers[1] - rootHalf,
+                                nodes.centers[2] - rootHalf),
+                            new THREE.Vector3(
+                                nodes.centers[0] + rootHalf,
+                                nodes.centers[1] + rootHalf,
+                                nodes.centers[2] + rootHalf));
+                        group.userData.pointsLOD = {
+                            nodes,
+                            /** @type {Array<any>} */
+                            objects: new Array(nodes.count).fill(null),
+                            /** @type {Set<number>} */
+                            loading: new Set(),
+                            lastWanted: new Float64Array(nodes.count),
+                            wanted: new Uint8Array(nodes.count),
+                            urlBase: data.node_url_base,
+                            budget: data.pointBudget || 1500000,
+                            refinePixels: data.refinePixels || 12,
+                            maxLevel: data.maxLevel || 0,
+                            baseSize: data.size ?? 2.0,
+                            sizeAttenuation: data.sizeAttenuation !== false,
+                            hasColors: !!data.hasVertexColors,
+                            flatColor: data.color ?? 0xffffff,
+                            hasBirth,
+                            hasRemoval,
+                            timeUniform,
+                            loadedPoints: 0,
+                        };
+                        console.log(
+                            `Creating LOD point cloud ${data.id}: ${data.numPoints} points, ` +
+                            `${nodes.count} nodes, maxLevel ${data.maxLevel}`);
+                        this._deleteObject(data.id, { preserveInflight: true });
+                        this._addToParentOrScene(group, data.parent);
+                        this._objects.set(data.id, group);
+                        this._objGeneration++;
+                        deferred.resolve();
+                    } catch (e) {
+                        console.error(`Error creating LOD point cloud:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -9461,6 +10083,9 @@ export class ThreeJSViewer {
             case 'set_clip_time':
                 this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
                 break;
+            case 'set_points_time':
+                this._withObject(data.id, 'set_points_time', () => this._setPointsTime(data.id, data.time));
+                break;
             case 'set_draw_range':
                 this._withObject(data.id, 'set_draw_range', () => this._setDrawRange(data.id, data.value));
                 break;
@@ -9639,6 +10264,10 @@ export class ThreeJSViewer {
         this._depthCue.update();
         this._updateNearFar();
 
+        // Octree-streamed point clouds: budgeted LOD traversal + on-demand
+        // node fetches (no-op when no LOD cloud is in the scene).
+        this._updatePointsLOD();
+
         // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
         // hide 900ms after the pivot was set (but only once the user stops dragging).
         if (this._pivotMarker && this._pivotMarker.visible) {
@@ -9781,6 +10410,12 @@ export class ThreeJSViewer {
         const bbox = new THREE.Box3();
         object.updateWorldMatrix(true, true);
         bbox.expandByObject(object);
+        // LOD point clouds know their full extent from the hierarchy even
+        // when few (or no) node payloads are streamed in yet.
+        if (object.userData.lodRootBox) {
+            bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
+                .applyMatrix4(object.matrixWorld));
+        }
         this._fitCameraToBox(bbox, 1.5);
     }
 
@@ -9902,6 +10537,14 @@ export class ThreeJSViewer {
                 !this._isPivotMarkerDescendant(child)) {
                 child.updateWorldMatrix(true, false);
                 bbox.expandByObject(child);
+            }
+            // LOD point clouds: frame the full advertised extent (root
+            // octree cube), not just whatever nodes happen to be streamed
+            // in right now.
+            if (child.userData && child.userData.lodRootBox) {
+                child.updateWorldMatrix(true, false);
+                bbox.union(_lodBoundsBox.copy(child.userData.lodRootBox)
+                    .applyMatrix4(child.matrixWorld));
             }
             const kids = child.children;
             for (let i = 0; i < kids.length; i++) visit(kids[i]);

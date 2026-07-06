@@ -260,6 +260,42 @@ Channels are sorted by dtype size descending (float32 first, uint8 last) to avoi
 
 Animation frames can also include `clip_times` to drive embedded animations during playback.
 
+### Point Clouds: Time Windows and Octree LOD
+
+Flat clouds ship like other binary objects (positions + optional colors +
+optional per-point `float32` birth/removal time blocks appended to the blob):
+
+```json
+{"type": "add_points_binary", "id": "pc", "blob_url": "...", "numPoints": 500000,
+ "hasVertexColors": true, "hasBirthTimes": true, "hasRemovalTimes": true, ...}
+{"type": "set_points_time", "id": "pc", "time": 3.0}
+```
+
+The vertex shader shows a point while `birth_time <= t < removal_time` against
+a per-cloud scrub-time uniform (also drivable from the `point_times` animation
+channel, stride 1 float32 like `clip_times`).
+
+Octree LOD clouds use a different, **pull-based** transport — the only place
+the browser requests data the client never pushed:
+
+```json
+{"type": "add_points_lod", "id": "pc", "numPoints": 10000000, "nodeCount": 1962,
+ "maxLevel": 6, "pointBudget": 1500000, "refinePixels": 12,
+ "hierarchy_url": "http://localhost:5667/points_lod_XXXX/hierarchy",
+ "node_url_base": "http://localhost:5667/points_lod_XXXX/", ...}
+```
+
+The hierarchy blob is 40 bytes/node (bounds, point count, `[min birth, max
+removal)` time bounds, BFS `first_child` + `child_mask` topology). Each frame
+the viewer traverses it in projected-screen-size priority order up to the
+point budget and fetches missing wanted nodes as `GET <node_url_base><i>`;
+the Python side answers from lazy per-node providers registered on the blob
+store (quantize + pack a slice on demand — nothing is materialized up front).
+Node payloads are `int16` node-local quantized xyz + `uint8` rgb + `float32`
+times. Refinement is additive (parents keep their coarse sample), unwanted
+nodes LRU-evict, and the Python process must stay alive to serve refinement.
+Full rationale: `plans/points-octree-lod.md`.
+
 ### Binary Messages
 
 For large data (meshes, polylines, animations), the Python client serves binary

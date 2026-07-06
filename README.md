@@ -18,6 +18,8 @@ A Python client runs a WebSocket server that a browser-based Three.js viewer con
 - **Toolpath visualization**: Extruded bead tubes with per-point colors, draw_range animation, and automatic LOD — handles 1M+ point toolpaths at 60 fps with smooth camera-distance-adaptive simplification via Web Worker
 - **5-axis swept tool body**: `add_swept_tool` lofts an oriented shank/holder profile about the per-station tool axis (decoupled from the path tangent) into a swept surface — visualizes 5-axis reorientation rate and tool-body collisions, with per-station heatmap colours and draw_range reveal
 - **GPU point clouds**: `add_points` renders millions of unconnected points (voxel fields, metrology/deviation clouds, LiDAR scans) in a single `THREE.Points` draw call, with per-point colormap colours, distance size-attenuation, and draw_range reveal
+- **Per-point time windows**: give each point a `[birth, removal)` lifetime and scrub a global time — points appear/disappear **out of buffer order** in the vertex shader (material-removal animations that a prefix reveal can't express), driven live or from the animation slider
+- **Octree LOD streaming**: `add_points(lod=True)` builds a Potree-style sampled octree in Python and streams node payloads on demand — draw a ~1.5M-point budget of the biggest-on-screen nodes out of clouds far larger than one draw call, refining as you zoom; composes with the time windows at every LOD
 - **Auto-reconnect**: Browser reconnects automatically, animations persist
 - **Z-up coordinates**: Robotics convention (matches ROS, URDF)
 - **No build step**: Self-contained HTML viewer, just open in browser
@@ -113,6 +115,35 @@ other per-point data at the picked point. A browser embedder can subscribe in
 JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)`
 (every hover move) — for a live readout with no Python round-trip. See
 [examples/22_polyline_picking.py](examples/22_polyline_picking.py).
+
+### Point clouds: time windows & octree LOD
+
+```python
+# Per-point lifetimes: a point is visible while birth_time <= t < removal_time.
+# NaN = unbounded (never born-late / never removed).
+v.add_points("stock", positions, colors=depth, colormap="turbo",
+             birth_times=birth, removal_times=removal)
+v.set_points_time("stock", 3.0)   # scrub the time directly...
+
+# ...or map the animation slider onto it (drag to scrub points in/out):
+anim = Animation(loop=True)
+anim.set_frame_times(times)
+anim.set_point_time_data(["stock"], times.reshape(-1, 1))
+v.load_animation(anim)
+
+# Octree LOD for clouds beyond one draw call (10M+ points): nodes stream
+# on demand from Python under a point budget as the camera moves. Keep the
+# Python process running — it serves node payloads.
+v.add_points("big", positions, colors=scalars, lod=True)
+# tunable: lod={"node_capacity": 15000, "point_budget": 1_500_000,
+#               "refine_pixels": 12, "seed": 0}
+```
+
+Both compose: octree node samples are stratified over the time values, so
+scrubbing thins every LOD level uniformly. On LOD clouds use the time window
+instead of `set_draw_range` (buffer order is spatial there). See
+[examples/27_points_octree_lod.py](examples/27_points_octree_lod.py) — point
+count tunable from the command line.
 
 ### Animations
 
