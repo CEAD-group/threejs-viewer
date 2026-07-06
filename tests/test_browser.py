@@ -3188,6 +3188,7 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
     assert viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 0
 
 
+@pytest.mark.browser
 def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
     """Every gizmo report carries the *effective* mode of the drag, read off
     the live control — so an Alt momentary rotate override is observable by
