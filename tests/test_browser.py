@@ -3019,3 +3019,35 @@ def test_flat_black_color_is_honored_not_falsy_substituted(viewer_client, viewer
     assert got is not None, "objects never landed"
     assert got["pts"] == 0x000000, f"black point cloud rendered {got['pts']:#08x}"
     assert got["tool"] == 0x000000, f"black swept tool rendered {got['tool']:#08x}"
+
+
+@pytest.mark.browser
+def test_camera_set_get_roundtrip_and_orientation(viewer_client, viewer_page):
+    """set_camera moves AND re-orients the camera (ViewerControls never calls
+    lookAt itself — regression: position/target changed but the camera kept
+    facing its old direction); get_camera reads the same pose back."""
+    viewer_client.add_box("b")
+    time.sleep(0.1)
+    viewer_client.set_camera(position=[5.0, -5.0, 4.0], target=[0.5, 0.25, 0.0], fov=45)
+    time.sleep(0.3)
+
+    cam = viewer_client.get_camera()
+    assert cam["position"] == pytest.approx([5.0, -5.0, 4.0], abs=1e-6)
+    assert cam["target"] == pytest.approx([0.5, 0.25, 0.0], abs=1e-6)
+    assert cam["fov"] == pytest.approx(45.0)
+
+    # The view direction must point at the target (dot ~ 1), not wherever
+    # the camera happened to face before.
+    dot = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._camera.updateMatrixWorld(true);"
+        " const e = v._camera.matrixWorld.elements;"
+        " const dir = [-e[8], -e[9], -e[10]];"
+        " const p = v._camera.position, t = v._controls.target;"
+        " const d = [t.x - p.x, t.y - p.y, t.z - p.z];"
+        " const n = Math.hypot(d[0], d[1], d[2]);"
+        " return (dir[0]*d[0] + dir[1]*d[1] + dir[2]*d[2]) / n;"
+        "}"
+    )
+    assert dot > 0.999, f"camera not oriented at target (dot={dot})"
