@@ -21,6 +21,10 @@
 - **`get_camera()` / `set_camera(position=, target=, up=, fov=, zoom=)` — read/write the live camera pose over the socket.** `get_camera()` round-trips `{position, target, up, fov, zoom}` (requestId mechanism like `query_scene`; `fov` is `None` while ortho is active, `zoom` is the ortho framing control so round-trips are faithful under both cameras). `set_camera` applies only the provided fields, clamps `fov` to `[1, 179]`, validates eagerly Python-side (3-vectors, finite, `zoom > 0`), and **explicitly re-orients via `camera.lookAt(target)`** — `ViewerControls.update()` deliberately never calls lookAt, so without it the camera moved while still facing its old direction. Intended workflow: orbit to a view by hand, `get_camera()`, paste into `set_camera(...)` to pin a scripted default. Pose is transient (not replayed on reconnect).
 - **`frame_object(id)`** — fit the camera to one object's bounding box (the programmatic double-click), LOD-root-box aware.
 
+### Follow-path track
+
+- **`set_follow_path(id, times, positions, axes)` — object rides a timed 5-axis path with its pose computed per render tick from the real path.** Animation `transforms` frames may sample a long timeline coarsely (e.g. 10 Hz), which aliases a fast tool on a detailed toolpath; a follow-path track instead binary-searches the full-resolution path at the current animation clock every rendered frame — tip position lerped, tool axis nlerped, minimal rotation of the object's local `+z` onto the axis, the object's own scale preserved. Payload is binary float32 `[t,px,py,pz,ax,ay,az]` rows (K≥2, non-decreasing times, validated Python-side) over the blob sidecar. Tracks are per-id (re-send replaces), dropped on `delete`/`clear`, and a follow-path object is the **preferred `T`-key camera-tracking target** (picked before the transform-channel name hints).
+
 ## 0.0.39
 
 ### Point clouds

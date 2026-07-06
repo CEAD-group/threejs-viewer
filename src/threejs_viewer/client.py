@@ -2042,6 +2042,35 @@ class ViewerClient:
         """Seek embedded GLTF/GLB animation clips to a specific time (seconds)."""
         self._send({"type": "set_clip_time", "id": id, "time": time})
 
+    def set_follow_path(self, id: str, times, positions, axes) -> None:
+        """Attach a follow-path track: object ``id`` rides the timed 5-axis
+        path — per render tick the viewer computes the pose from the REAL
+        path at the current animation time (tip lerp, axis nlerp, minimal
+        rotation of the object's local +z onto the axis). Use for a 1:1 tool
+        body: animation frames may sample a long timeline coarsely, but the
+        tracked object still follows every path point exactly.
+
+        Args:
+            id: Object to drive (its local +z is aligned to the axis).
+            times: (K,) seconds, non-decreasing (the animation clock).
+            positions: (K, 3) tip positions.
+            axes: (K, 3) unit tool-axis vectors.
+        """
+        t = np.asarray(times, np.float32).reshape(-1)
+        P = np.asarray(positions, np.float32).reshape(-1, 3)
+        A = np.asarray(axes, np.float32).reshape(-1, 3)
+        if not (len(t) == len(P) == len(A)) or len(t) < 2:
+            raise ValueError(
+                f"follow path needs K>=2 matching rows: times {t.shape}, "
+                f"positions {P.shape}, axes {A.shape}"
+            )
+        if np.any(np.diff(t) < 0):
+            raise ValueError("follow-path times must be non-decreasing")
+        payload = np.column_stack([t, P, A]).astype(np.float32).tobytes()
+        self._send_binary(
+            {"type": "set_follow_path", "id": id, "count": int(len(t))}, payload
+        )
+
     def set_draw_range(self, id: str, value: float) -> None:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
