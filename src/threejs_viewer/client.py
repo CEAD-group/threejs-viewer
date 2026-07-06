@@ -2095,6 +2095,61 @@ class ViewerClient:
             raise ValueError(f"time must be a finite number (got {time!r})")
         self._send({"type": "set_points_time", "id": id, "time": t})
 
+    def set_points_lod_options(
+        self,
+        id: str,
+        point_budget: Optional[int] = None,
+        refine_pixels: Optional[float] = None,
+        size_boost_max: Optional[float] = None,
+    ) -> None:
+        """Tune a streamed-LOD point cloud's traversal at runtime — no
+        re-upload, no octree rebuild.
+
+        Only affects clouds created with ``add_points(..., lod=...)``; the
+        viewer warns and ignores the message for other objects. Fields left
+        ``None`` are unchanged. ``point_budget`` and ``refine_pixels`` are
+        read fresh by every traversal frame, so the density change is
+        immediate; ``size_boost_max`` also re-derives the point size on
+        every already-streamed node. The values are transient viewer state
+        (like :meth:`set_camera`) — a browser refresh reverts to the
+        ``lod=`` options the cloud was added with.
+
+        Args:
+            id: Id of a LOD point cloud.
+            point_budget: Max points drawn per frame (>= 1).
+            refine_pixels: Projected node size in px below which children
+                are not refined (> 0; lower = denser).
+            size_boost_max: Cap on the coarse-node point-size boost
+                (>= 1.0; 1.0 disables the boost).
+        """
+        msg: dict = {"type": "set_points_lod_options", "id": id}
+        if point_budget is not None:
+            pb = int(point_budget)
+            if pb < 1:
+                raise ValueError(f"point_budget must be >= 1 (got {point_budget!r})")
+            msg["pointBudget"] = pb
+        if refine_pixels is not None:
+            rp = float(refine_pixels)
+            if not math.isfinite(rp) or rp <= 0:
+                raise ValueError(
+                    f"refine_pixels must be a finite number > 0 (got {refine_pixels!r})"
+                )
+            msg["refinePixels"] = rp
+        if size_boost_max is not None:
+            sb = float(size_boost_max)
+            if not math.isfinite(sb) or sb < 1.0:
+                raise ValueError(
+                    f"size_boost_max must be a finite number >= 1.0 "
+                    f"(got {size_boost_max!r})"
+                )
+            msg["sizeBoostMax"] = sb
+        if len(msg) == 2:
+            raise ValueError(
+                "set_points_lod_options: provide at least one of point_budget, "
+                "refine_pixels, size_boost_max"
+            )
+        self._send(msg)
+
     def get_camera(self, timeout: float = 5.0) -> dict:
         """Read the viewer's current camera pose (round-trip over the socket).
 

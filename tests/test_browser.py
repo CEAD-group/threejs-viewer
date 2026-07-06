@@ -3237,3 +3237,86 @@ def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
     assert modes == [["rotate", "end"]], (
         f"Alt override not visible in the report: {modes}"
     )
+
+
+@pytest.mark.browser
+def test_set_points_lod_options_runtime_tuning(viewer_client, viewer_page):
+    """set_points_lod_options re-tunes a streamed cloud's traversal live —
+    no re-upload (issue #87): budget/refine_pixels land on the runtime
+    state the per-frame traversal reads, and size_boost_max re-derives the
+    point size on already-streamed node materials."""
+    rng = np.random.default_rng(11)
+    n = 40_000
+    pts = (rng.random((n, 3)) * [8, 3, 1.5]).astype(np.float32)
+    viewer_client.add_points(
+        "cloud",
+        pts,
+        size=2.0,
+        lod={"node_capacity": 4000, "point_budget": 30_000, "refine_pixels": 2},
+    )
+    state = None
+    for _ in range(100):
+        time.sleep(0.1)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const g = window.threejsViewer._objects.get('cloud');"
+            " if (!g || !g.userData.pointsLOD) return null;"
+            " const lod = g.userData.pointsLOD;"
+            " let loaded = 0;"
+            " for (const o of lod.objects) if (o) loaded++;"
+            " return {loaded, budget: lod.budget};"
+            "}"
+        )
+        if state and state["loaded"] >= 2:
+            break
+    assert state and state["loaded"] >= 2, f"nodes never streamed in: {state}"
+    assert state["budget"] == 30_000
+
+    viewer_client.set_points_lod_options(
+        "cloud", point_budget=10_000, refine_pixels=50, size_boost_max=1.0
+    )
+    tuned = None
+    for _ in range(40):
+        time.sleep(0.05)
+        tuned = viewer_page.evaluate(
+            "() => {"
+            " const lod = window.threejsViewer._objects.get('cloud')"
+            "   .userData.pointsLOD;"
+            " const sizes = [];"
+            " for (const o of lod.objects) if (o) sizes.push(o.material.size);"
+            " return {budget: lod.budget, refinePixels: lod.refinePixels,"
+            "         sizeBoostMax: lod.sizeBoostMax, sizes,"
+            "         baseSize: lod.baseSize};"
+            "}"
+        )
+        if tuned and tuned["budget"] == 10_000:
+            break
+    assert tuned["budget"] == 10_000
+    assert tuned["refinePixels"] == 50
+    assert tuned["sizeBoostMax"] == 1.0
+    # boost capped at 1.0 => every already-loaded node reverts to baseSize
+    assert tuned["sizes"], "no loaded node materials to check"
+    assert all(s == tuned["baseSize"] for s in tuned["sizes"]), tuned["sizes"]
+
+    # The traversal reads the new budget on the next frames: the visible
+    # set shrinks under the tightened budget.
+    visible = None
+    for _ in range(60):
+        time.sleep(0.05)
+        visible = viewer_page.evaluate(
+            "() => {"
+            " const lod = window.threejsViewer._objects.get('cloud')"
+            "   .userData.pointsLOD;"
+            " let v = 0;"
+            " for (let i = 0; i < lod.nodes.count; i++) {"
+            "   const o = lod.objects[i];"
+            "   if (o && o.visible) v += lod.nodes.counts[i];"
+            " }"
+            " return v;"
+            "}"
+        )
+        if visible is not None and 0 < visible <= 10_000:
+            break
+    assert visible is not None and 0 < visible <= 10_000, (
+        f"visible points {visible} did not shrink under the new 10k budget"
+    )
