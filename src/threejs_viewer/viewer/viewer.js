@@ -4072,6 +4072,23 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
             applyParametricTubeDrawRange(child, segFrac);
         }
     }
+    // Travel line (add_toolpath travel="line"): reveal whole hop edges in
+    // lockstep with the beads. endFracs is ascending, so the visible edge
+    // count is an upper_bound binary search — an edge shows once the
+    // global fraction passes its end point.
+    const travelId = grp.userData.toolpathTravelId;
+    if (travelId) {
+        const line = objects.get(travelId);
+        const fracs = grp.userData.toolpathTravelEndFracs;
+        if (line && line.userData.isLineSegments && fracs) {
+            let lo = 0, hi = fracs.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (fracs[mid] <= clamped) lo = mid + 1; else hi = mid;
+            }
+            line.geometry.setDrawRange(0, 2 * lo);
+        }
+    }
 }
 
 // ========== Swept oriented tool body (5-axis shank/holder) ==========
@@ -6251,10 +6268,6 @@ export class ThreeJSViewer {
         /** @type {Array<(state: any) => void>} */
         this._animTimeHooks = [];
 
-        // Reply payload of the most recent query-type message, captured by
-        // _reply() so handleMessage() can return it to no-WebSocket callers.
-        /** @type {any} */
-        this._lastReplyPayload = null;
 
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
@@ -8921,12 +8934,14 @@ export class ThreeJSViewer {
      * @param {any} payload
      */
     _reply(payload) {
-        // Captured so handleMessage() can hand the payload back to a
-        // no-WebSocket caller (the send below is a no-op without a socket).
-        this._lastReplyPayload = payload;
+        // Returns the payload so query cases can `return this._reply(...)`
+        // straight out of handleMessage() — per-invocation, no shared state,
+        // so overlapping (awaited) message handlers can't cross wires. The
+        // send below is a no-op without a socket.
         if (this._ws && this._ws.readyState === WebSocket.OPEN) {
             this._ws.send(JSON.stringify(payload));
         }
+        return payload;
     }
 
     /**
@@ -8946,7 +8961,6 @@ export class ThreeJSViewer {
      * @returns {Promise<any>} the reply payload for query messages, else null.
      */
     async handleMessage(data) {
-        this._lastReplyPayload = null;
         switch (data.type) {
             case 'hello':
                 console.log(`Python client v${data.client_version}`);
@@ -9007,12 +9021,11 @@ export class ThreeJSViewer {
                 this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
                 break;
             case 'list_objects':
-                this._reply({
+                return this._reply({
                     type: 'list_objects_response',
                     requestId: data.requestId,
                     objects: Array.from(this._objects.keys())
                 });
-                break;
             case 'query_scene': {
                 /** @type {Record<string, any>} */
                 const tree = {};
@@ -9045,7 +9058,7 @@ export class ThreeJSViewer {
                         drawRange: drawRange,
                     };
                 }
-                this._reply({
+                return this._reply({
                     type: 'query_scene_response',
                     requestId: data.requestId,
                     tree: tree,
@@ -9308,8 +9321,14 @@ export class ThreeJSViewer {
                             } else {
                                 material = new THREE.LineBasicMaterial({ color: data.color || 0xffffff });
                             }
-                            line = new THREE.Line(geometry, material);
+                            // segments: disjoint edges from consecutive
+                            // point pairs (one draw call, no false
+                            // connectors) — e.g. a toolpath's travel hops.
+                            line = data.segments
+                                ? new THREE.LineSegments(geometry, material)
+                                : new THREE.Line(geometry, material);
                             line.userData.isNativeLine = true;
+                            if (data.segments) line.userData.isLineSegments = true;
                             line.userData.totalPointCount = numPoints;
                             geometry.setDrawRange(0, numPoints);
                         }
@@ -10316,6 +10335,16 @@ export class ThreeJSViewer {
                     grp.userData.isToolpathGroup = true;
                     grp.userData.toolpathSegmentIds = data.segmentIds;
                     grp.userData.toolpathSegmentRanges = data.segmentRanges;
+                    // Optional travel line: ascending per-edge reveal
+                    // thresholds (global spine fraction of each edge's END
+                    // point). Kept on the group — the line itself loads
+                    // async, so the mapping is resolved lazily at
+                    // draw-range time.
+                    if (data.travelId) {
+                        grp.userData.toolpathTravelId = data.travelId;
+                        grp.userData.toolpathTravelEndFracs =
+                            new Float32Array(data.travelEndFracs || []);
+                    }
                 }
                 break;
             }
@@ -10368,7 +10397,7 @@ export class ThreeJSViewer {
             case 'get_camera': {
                 const p = this._camera.position, t = this._controls.target, u = this._camera.up;
                 const cam = /** @type {any} */ (this._camera);
-                this._reply({
+                return this._reply({
                     type: 'get_camera_response',
                     requestId: data.requestId,
                     position: [p.x, p.y, p.z],
@@ -10377,7 +10406,6 @@ export class ThreeJSViewer {
                     fov: cam.isPerspectiveCamera ? cam.fov : null,
                     zoom: cam.zoom,
                 });
-                break;
             }
             case 'set_camera':
                 this.setCameraPose(data);
@@ -10535,7 +10563,7 @@ export class ThreeJSViewer {
             default:
                 console.warn(`Unknown message type: '${data.type}'`);
         }
-        return this._lastReplyPayload;
+        return null;
     }
 
     // ========== Dynamic Near/Far ==========
@@ -11164,7 +11192,13 @@ export class ThreeJSViewer {
         }
         const id = opts.id != null ? String(opts.id) : `__overlay_${++this._overlayAutoId}`;
         const prior = this._overlays.get(id);
-        if (prior) this._scene.remove(prior);
+        if (prior) {
+            this._scene.remove(prior);
+            // Stale metadata on a replaced object would let a later
+            // removeOverlay(oldObject) resolve the id and remove the NEW
+            // overlay registered under it.
+            delete prior.userData.__overlay;
+        }
         object3D.userData.__overlay = { id, includeInBounds: !!opts.includeInBounds };
         this._scene.add(object3D);
         this._overlays.set(id, object3D);
@@ -11185,6 +11219,9 @@ export class ThreeJSViewer {
         } else if (idOrObject && /** @type {any} */ (idOrObject).userData &&
                    /** @type {any} */ (idOrObject).userData.__overlay) {
             id = /** @type {any} */ (idOrObject).userData.__overlay.id;
+            // A stale instance (replaced under this id) must not remove
+            // the overlay currently registered.
+            if (this._overlays.get(id) !== idOrObject) return false;
         }
         const obj = id != null ? this._overlays.get(id) : undefined;
         if (!obj) return false;

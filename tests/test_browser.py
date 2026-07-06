@@ -3584,6 +3584,21 @@ def test_embedder_overlays(viewer_client, viewer_page):
         "}"
     )
 
+    # id reuse: a replaced (stale) instance must not be able to remove the
+    # overlay currently registered under that id (#93 review follow-up)
+    assert viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const a = window.__ov.clone(), b = window.__ov.clone();"
+        " v.addOverlay(a, {id: 'reused'});"
+        " v.addOverlay(b, {id: 'reused'});"  # replaces a
+        " const staleNoop = v.removeOverlay(a) === false;"
+        " const bStill = b.parent === v._scene;"
+        " const bGone = v.removeOverlay(b) === true && b.parent === null;"
+        " return staleNoop && bStill && bGone;"
+        "}"
+    )
+
 
 @pytest.mark.browser
 def test_status_chip_neutral_default_and_set_status(viewer_client, viewer_page):
@@ -3621,3 +3636,57 @@ def test_status_chip_neutral_default_and_set_status(viewer_client, viewer_page):
         "text": "Static demo",
     }
     assert result["fallback"] == "tjsv-status-dot neutral"
+
+
+@pytest.mark.browser
+def test_toolpath_travel_line_lockstep_reveal(viewer_client, viewer_page):
+    """add_toolpath(travel="line") mounts one LineSegments child over the
+    travel hops and reveals whole edges in lockstep with the beads via the
+    group draw-range distribution (issue #88)."""
+    from threejs_viewer import Toolpath
+
+    pts = np.zeros((8, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(8, dtype=np.float32)
+    widths = np.array([0.4, 0.4, 0.0, 0.0, 0.4, 0.4, 0.0, 0.0], dtype=np.float32)
+    heights = np.where(widths > 0, 0.2, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    viewer_client.add_toolpath("tl", tp, travel="line", travel_color=0xFF8800)
+    _wait_for(
+        viewer_page,
+        "() => { const v = window.threejsViewer;"
+        " const g = v._objects.get('tl');"
+        " return !!g && g.userData.isToolpathGroup"
+        "   && !!g.userData.toolpathTravelId"
+        "   && !!v._objects.get('tl_travel'); }",
+    )
+
+    info = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const line = v._objects.get('tl_travel');"
+        " return {type: line.type,"
+        "         isSegs: line.userData.isLineSegments === true,"
+        "         points: line.userData.totalPointCount,"
+        "         parentIsGroup: line.parent === v._objects.get('tl')};"
+        "}"
+    )
+    assert info["type"] == "LineSegments"
+    assert info["isSegs"] is True
+    assert info["points"] == 10  # 5 travel edges
+    assert info["parentIsGroup"] is True
+
+    def travel_count(frac):
+        viewer_client.set_draw_range("tl", frac)
+        time.sleep(0.15)
+        return viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('tl_travel')"
+            ".geometry.drawRange.count"
+        )
+
+    # end fracs are [2/8, 3/8, 4/8, 6/8, 7/8]: whole edges appear as the
+    # global fraction passes each edge's end point.
+    assert travel_count(0.0) == 0
+    assert travel_count(0.20) == 0
+    assert travel_count(0.30) == 2  # first hop edge (ends at 2/8)
+    assert travel_count(0.55) == 6  # the whole first hop (2/8, 3/8, 4/8)
+    assert travel_count(1.0) == 10  # everything

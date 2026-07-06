@@ -783,3 +783,116 @@ def test_set_follow_path_validation(client):
     with pytest.raises(ValueError, match="non-decreasing"):
         client.set_follow_path("t", [0.0, 2.0, 1.0], ok3, ok3)
     assert client._binary_messages == []
+
+
+# === add_polyline segments / add_toolpath travel line ===
+
+
+def test_add_polyline_segments_header_and_constraints(client):
+    pairs = np.array([[0, 0, 0], [1, 0, 0], [5, 0, 0], [6, 0, 0]], dtype=np.float32)
+    client.add_polyline("seg", pairs, segments=True, fat=True, line_width=4)
+    header, payload = client._binary_messages[0]
+    assert header["segments"] is True
+    assert header["fat"] is False  # segments implies the native path
+    assert header["pickable"] is False  # edge soups have no arc length
+    assert header["numPoints"] == 4
+    assert len(payload) == 4 * 12
+    # odd point count rejected
+    with pytest.raises(ValueError, match="even point count"):
+        client.add_polyline("bad", pairs[:3], segments=True)
+
+
+def test_add_toolpath_travel_line(client):
+    """travel="line" adds one LineSegments child covering the travel edges
+    and registers it with ascending end-fraction thresholds."""
+    pts = np.zeros((8, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(8, dtype=np.float32)
+    widths = np.array([0.2, 0.2, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0], dtype=np.float32)
+    heights = np.where(widths > 0, 0.1, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_toolpath("b", tp, travel="line", travel_color=0x334455)
+
+    # group + register with travel mapping
+    assert client._messages[0]["type"] == "add_group"
+    reg = client._messages[-1]
+    assert reg["type"] == "register_toolpath_group"
+    assert reg["travelId"] == "b_travel"
+    # travel edges: every edge not interior to an extrusion run =
+    # (1,2) (2,3) (3,4) and the trailing (5,6) (6,7)
+    assert reg["travelEndFracs"] == pytest.approx([2 / 8, 3 / 8, 4 / 8, 6 / 8, 7 / 8])
+    assert reg["travelEndFracs"] == sorted(reg["travelEndFracs"])
+
+    # the travel polyline itself: segments, parented to the group
+    travel_headers = [
+        h for h, _ in client._binary_messages if h["type"] == "add_polyline_binary"
+    ]
+    assert len(travel_headers) == 1
+    th = travel_headers[0]
+    assert th["id"] == "b_travel"
+    assert th["segments"] is True
+    assert th["parent"] == "b"
+    assert th["color"] == 0x334455
+    assert th["numPoints"] == 10  # 5 edges x 2 endpoints
+
+    # 2 bead segments still present
+    tubes = [
+        h
+        for h, _ in client._binary_messages
+        if h["type"] == "add_parametric_tube_binary"
+    ]
+    assert len(tubes) == 2
+
+
+def test_add_toolpath_travel_line_single_segment_still_groups(client):
+    """A single extrusion run with leading travel still gets the group +
+    travel line (previously a bare tube, which had nowhere to hang the
+    travel mapping)."""
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(5, dtype=np.float32)
+    widths = np.array([0.0, 0.0, 0.2, 0.2, 0.2], dtype=np.float32)
+    heights = np.where(widths > 0, 0.1, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+
+    client.add_toolpath("solo", tp, travel="line")
+    assert client._messages[0]["type"] == "add_group"
+    assert client._messages[-1]["travelId"] == "solo_travel"
+
+    # without travel: unchanged single-tube fast path (no group)
+    client._messages.clear()
+    client._binary_messages.clear()
+    client.add_toolpath("solo2", tp)
+    assert client._messages == []
+    assert client._binary_messages[0][0]["type"] == "add_parametric_tube_binary"
+
+
+def test_add_toolpath_travel_validation_and_noop(client):
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=1.0, bead_height=0.5)
+    with pytest.raises(ValueError, match="travel"):
+        client.add_toolpath("b", tp, travel="dashed")
+    # no travel stretches: travel="line" is a no-op (plain single tube)
+    client.add_toolpath("b", tp, travel="line")
+    assert client._binary_messages[0][0]["type"] == "add_parametric_tube_binary"
+    assert client._messages == []
+
+
+def test_add_toolpath_group_transform_covers_travel_line(client):
+    """Transform kwargs land on the GROUP, not on each child, so the travel
+    line (which has no transform args) stays aligned with the beads
+    (Copilot review on #94)."""
+    pts = np.zeros((8, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(8, dtype=np.float32)
+    widths = np.array([0.2, 0.2, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0], dtype=np.float32)
+    heights = np.where(widths > 0, 0.1, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_toolpath(
+        "b", tp, travel="line", position=[1, 2, 3], rotation=[0, 0, 0.5]
+    )
+    group_msg = client._messages[0]
+    assert group_msg["type"] == "add_group"
+    assert group_msg["transform"]["position"] == [1, 2, 3]
+    assert group_msg["transform"]["rotation"] == [0, 0, 0.5]
+    # no child (tube or travel line) carries its own transform
+    for header, _ in client._binary_messages:
+        assert "position" not in header and "rotation" not in header
+        assert "matrix" not in header

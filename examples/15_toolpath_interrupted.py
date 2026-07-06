@@ -106,7 +106,12 @@ v.add_box(
     "ground", width=80, height=50, depth=0.2, color=0x222222, position=[0, 0, -0.1]
 )
 
-v.add_toolpath("bead", tp, roughness=0.4, metalness=0.1)
+# travel="line" also draws the travel hops (the thin lines every slicer
+# preview shows) as one line-segments object, revealed in lockstep with the
+# beads by the same draw-range animation below.
+v.add_toolpath(
+    "bead", tp, travel="line", travel_color=0xFF8800, roughness=0.4, metalness=0.1
+)
 
 nozzle_h = 5.0  # mm
 v.add_cylinder(
