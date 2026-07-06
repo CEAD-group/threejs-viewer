@@ -3366,7 +3366,6 @@ def test_set_points_lod_options_runtime_tuning(viewer_client, viewer_page):
     assert visible is not None and 0 < visible <= 10_000, (
         f"visible points {visible} did not shrink under the new 10k budget"
     )
-    )
 
 
 @pytest.mark.browser

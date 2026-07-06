@@ -7457,9 +7457,29 @@ export class ThreeJSViewer {
             console.warn(`set_points_lod_options: '${id}' is not a streamed-LOD point cloud`);
             return;
         }
-        if (data.pointBudget != null) lod.budget = data.pointBudget;
-        if (data.refinePixels != null) lod.refinePixels = data.refinePixels;
+        // Validate viewer-side too: the Python client checks eagerly, but a
+        // JS embedder can call handleMessage directly, and a NaN here would
+        // poison the traversal (NaN comparisons never trigger) and the
+        // eviction limit.
+        if (data.pointBudget != null) {
+            if (Number.isFinite(data.pointBudget) && data.pointBudget >= 1) {
+                lod.budget = data.pointBudget;
+            } else {
+                console.warn(`set_points_lod_options: invalid point budget ${data.pointBudget}`);
+            }
+        }
+        if (data.refinePixels != null) {
+            if (Number.isFinite(data.refinePixels) && data.refinePixels > 0) {
+                lod.refinePixels = data.refinePixels;
+            } else {
+                console.warn(`set_points_lod_options: invalid refine_pixels ${data.refinePixels}`);
+            }
+        }
         if (data.sizeBoostMax != null) {
+            if (!Number.isFinite(data.sizeBoostMax) || data.sizeBoostMax < 1) {
+                console.warn(`set_points_lod_options: invalid size_boost_max ${data.sizeBoostMax}`);
+                return;
+            }
             lod.sizeBoostMax = data.sizeBoostMax;
             for (let i = 0; i < lod.nodes.count; i++) {
                 const obj = lod.objects[i];
