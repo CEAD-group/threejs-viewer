@@ -3240,6 +3240,52 @@ def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_embedder_camera_pose_and_frame_box(viewer_client, viewer_page):
+    """getCameraPose/setCameraPose round-trip from JS (both vector forms),
+    re-orient the camera at the target, and frameBox fits a world AABB
+    (issue #77)."""
+    viewer_client.add_box("b")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('b')")
+
+    got = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v.setCameraPose({position: {x: 5, y: -5, z: 4},"
+        "                  target: [0.5, 0.25, 0], fov: 45});"
+        " const pose = v.getCameraPose();"
+        " v._camera.updateMatrixWorld(true);"
+        " const e = v._camera.matrixWorld.elements;"
+        " const dir = [-e[8], -e[9], -e[10]];"
+        " const p = v._camera.position, t = v._controls.target;"
+        " const d = [t.x - p.x, t.y - p.y, t.z - p.z];"
+        " const n = Math.hypot(d[0], d[1], d[2]);"
+        " const dot = (dir[0]*d[0] + dir[1]*d[1] + dir[2]*d[2]) / n;"
+        " return {pose, dot};"
+        "}"
+    )
+    pose = got["pose"]
+    assert [pose["position"][k] for k in "xyz"] == pytest.approx([5, -5, 4])
+    assert [pose["target"][k] for k in "xyz"] == pytest.approx([0.5, 0.25, 0])
+    assert pose["fov"] == pytest.approx(45.0)
+    assert got["dot"] > 0.999, f"camera not oriented at target (dot={got['dot']})"
+
+    target = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v.frameBox([10, 10, 10], {x: 14, y: 14, z: 14});"
+        " const t = v._controls.target;"
+        " return [t.x, t.y, t.z];"
+        "}"
+    )
+    assert target == pytest.approx([12.0, 12.0, 12.0], abs=1e-4)
+
+    # invalid input degrades to a warning, never throws
+    assert viewer_page.evaluate(
+        "() => { window.threejsViewer.frameBox(null, [1,2,3]); return true; }"
+    )
+
+
+@pytest.mark.browser
 def test_set_points_lod_options_runtime_tuning(viewer_client, viewer_page):
     """set_points_lod_options re-tunes a streamed cloud's traversal live —
     no re-upload (issue #87): budget/refine_pixels land on the runtime
@@ -3320,3 +3366,65 @@ def test_set_points_lod_options_runtime_tuning(viewer_client, viewer_page):
     assert visible is not None and 0 < visible <= 10_000, (
         f"visible points {visible} did not shrink under the new 10k budget"
     )
+    )
+
+
+@pytest.mark.browser
+def test_embedder_pick_and_controls_toggle(viewer_client, viewer_page):
+    """viewer.pick() raycasts meshes and point clouds from client coords,
+    resolves the top-level object id, returns null on empty space; and
+    setControlsEnabled toggles orbiting (issue #77)."""
+    viewer_client.add_box("part", position=[0, 0, 0])
+    pts = np.array([[6.0, 0.0, 0.0], [6.0, 1.0, 0.0], [6.0, -1.0, 0.0]])
+    viewer_client.add_points("cloud", pts, size=8.0)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._objects.has('part')"
+        " && window.threejsViewer._objects.has('cloud')",
+    )
+
+    # Screen position of a world point -> client coords -> pick.
+    pick_at = (
+        "(args) => {"
+        " const [wx, wy, wz, opts] = args;"
+        " const v = window.threejsViewer;"
+        " const rect = v._renderer.domElement.getBoundingClientRect();"
+        " v._camera.updateMatrixWorld(true);"
+        " const nd = v._camera.position.clone().set(wx, wy, wz).project(v._camera);"
+        " const cx = rect.left + (nd.x * 0.5 + 0.5) * rect.width;"
+        " const cy = rect.top + (-nd.y * 0.5 + 0.5) * rect.height;"
+        " const hit = v.pick(cx, cy, opts || {});"
+        " return hit && {objectId: hit.objectId, point: hit.point,"
+        "                distance: hit.distance};"
+        "}"
+    )
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [0, 0, 9], target: [0, 0, 0], up: [0, 1, 0]})"
+    )
+    hit = viewer_page.evaluate(pick_at, [0.0, 0.0, 0.0, None])
+    assert hit is not None, "pick at box centre missed"
+    assert hit["objectId"] == "part"
+    # box is 1 unit deep centred at origin, camera on +Z: front face at z=0.5
+    assert hit["point"]["z"] == pytest.approx(0.5, abs=1e-3)
+
+    # Empty space -> null (aim well away from both objects).
+    assert viewer_page.evaluate(pick_at, [0.0, 3.5, 0.0, None]) is None
+
+    # Point cloud pick with a world-space threshold.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [6, 0, 9], target: [6, 0, 0]})"
+    )
+    hit = viewer_page.evaluate(pick_at, [6.0, 0.0, 0.0, {"pointsThreshold": 0.5}])
+    assert hit is not None and hit["objectId"] == "cloud"
+
+    # ids filter: restricted to the part, the same click misses the cloud.
+    assert viewer_page.evaluate(pick_at, [6.0, 0.0, 0.0, {"ids": ["part"]}]) is None
+
+    # Controls toggle.
+    assert viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.setControlsEnabled(false); const off = v._controls.enabled;"
+        " v.setControlsEnabled(true); return {off, on: v._controls.enabled}; }"
+    ) == {"off": False, "on": True}

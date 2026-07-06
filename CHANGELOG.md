@@ -30,6 +30,10 @@
 
 - **Gizmo reports now carry the *effective* drag mode** (`mode: "translate" | "rotate" | "scale"`, Python: `move["mode"]`), read off the live `TransformControls` — so an **Alt** momentary rotate override is observable: the report says `"rotate"` even though the gizmo's base mode is still translate. Previously the payload had no mode field at all, so an embedder whose handler must interpret the drag per mode (position-only vs orientation) could only branch on the base mode, ran the translate branch on an Alt rotate-drag (position unchanged → no-op), and the rotation was silently wiped on drag-end (#84). Branch on the payload's `mode`, not the mode you configured.
 
+### Embedding
+
+- **JS camera / pick / controls surface for embedders (#77)** — no more reaching into `viewer._camera` / `_controls` / `_renderer`: `viewer.getCameraPose()` → `{position, target, up, fov, zoom}`; `viewer.setCameraPose({...})` (partial, vectors as `{x,y,z}` or `[x,y,z]`, explicitly re-orients at the target; now also the implementation behind the `set_camera` WS case so the two can't drift); `viewer.frameBox(min, max, margin=1.5)` fits the camera to a world AABB; `viewer.pick(clientX, clientY, {pointsThreshold, ids})` raycasts meshes + point clouds from viewport coordinates, skips hidden subtrees, resolves the top-level tracked id by walking ancestors, and returns `{point, objectId, distance, object3D}` of the nearest hit or `null` (lines stay on the dedicated arc-length `enablePolylinePicking` path); `viewer.setControlsEnabled(bool)` suppresses orbiting while an embedder drags its own handle.
+
 ## 0.0.39
 
 ### Point clouds
