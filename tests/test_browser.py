@@ -3690,3 +3690,83 @@ def test_toolpath_travel_line_lockstep_reveal(viewer_client, viewer_page):
     assert travel_count(0.30) == 2  # first hop edge (ends at 2/8)
     assert travel_count(0.55) == 6  # the whole first hop (2/8, 3/8, 4/8)
     assert travel_count(1.0) == 10  # everything
+
+
+@pytest.mark.browser
+def test_uniform_dt_fast_path_with_offset_start_time(viewer_client, viewer_page):
+    """_getFrameAtTime's uniform-dt fast path must be relative to
+    frames[0].time: a uniformly spaced timeline starting at t=100000
+    previously clamped every lookup to the last frame (issue #96)."""
+    viewer_client.add_box("obox")
+    time.sleep(0.1)
+    n = 200
+    times = 100_000.0 + np.arange(n, dtype=np.float64) * 0.01
+    transforms = np.zeros((n, 1, 16), dtype=np.float32)
+    transforms[:, 0, [0, 5, 10, 15]] = 1.0
+    transforms[:, 0, 12] = np.linspace(0.0, 1.0, n)  # x slides 0 -> 1
+    anim = Animation(loop=False)
+    anim.set_frame_times(times)
+    anim.set_transform_data(["obox"], transforms)
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(viewer_page)
+
+    state = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const mid = v._getFrameAtTime(100_001.005);"
+        " v._seekToTime(100_001.0);"
+        " const x = v._objects.get('obox').matrix.elements[12];"
+        " return {index: mid.index, t: mid.t, x,"
+        "         uniformDt: v._animation.uniformDt};"
+        "}"
+    )
+    assert state["uniformDt"] > 0, "test premise: fast path must be active"
+    assert state["index"] == 100
+    assert state["t"] == pytest.approx(0.5, abs=1e-6)
+    # seek to halfway: the box sits mid-slide, not at the end
+    assert state["x"] == pytest.approx(0.5, abs=0.02)
+
+
+@pytest.mark.browser
+def test_playback_pacing_smooths_and_clamps_stalls(viewer_client, viewer_page):
+    """The playhead advances by a smoothed frame delta (issue #97): during
+    playback the EMA is live, and a simulated 5 s stall (fake old
+    _lastAnimationUpdate) must NOT teleport the playhead by 5 s x speed —
+    the clamp caps the advance near the smoothed average."""
+    viewer_client.add_box("pbox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=10_000, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(viewer_page)
+
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.seekAnimationTime(0); v.setAnimationSpeed(100);"
+        " v.setAnimationPlaying(true); }"
+    )
+    time.sleep(0.5)
+    live = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return {t: v.getAnimationState().time,"
+        "         ema: v._smoothedFrameDelta}; }"
+    )
+    assert live["ema"] > 0, "EMA never seeded during playback"
+    assert live["t"] > 5, f"playhead barely advanced: {live}"
+
+    # Fake a 5 s render stall: raw delta would advance 5 s x 100 = 500 s;
+    # the clamp must keep the next tick near the ~16 ms average instead.
+    jump = viewer_page.evaluate(
+        "() => new Promise(resolve => {"
+        " const v = window.threejsViewer;"
+        " const before = v._animationTime;"
+        " v._lastAnimationUpdate = performance.now() - 5000;"
+        " requestAnimationFrame(() => requestAnimationFrame("
+        "   () => resolve(v._animationTime - before)));"
+        "})"
+    )
+    assert jump < 50, (
+        f"stalled frame teleported the playhead by {jump}s (unclamped would be ~500s)"
+    )

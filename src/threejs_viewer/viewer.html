@@ -1141,6 +1141,14 @@ const VIEWER_BACKGROUND_CSS = '#222222';
 
 // Logarithmic speed steps: 0.001x to 1000x
 const SPEED_STEPS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000];
+// Playback pace smoothing (issue #97): the playhead advances by a short EMA
+// of the per-rAF wall-clock delta instead of the raw delta, so render-cost
+// jitter doesn't modulate playback velocity. Alpha 0.1 ≈ a 10-frame window;
+// raw deltas are clamped to CLAMP× the current average before entering the
+// EMA so one stalled frame (GC pause, background tab) can't teleport the
+// playhead or poison the average.
+const PLAYBACK_DELTA_EMA_ALPHA = 0.1;
+const PLAYBACK_DELTA_CLAMP = 3;
 
 const CLIP_AXIS_NORMALS = {
     'x+': new THREE.Vector3(1, 0, 0),
@@ -7306,6 +7314,9 @@ class ThreeJSViewer {
         this._animationPlaying = false;
         this._animationTime = 0;
         this._animationSpeed = 1;
+        // EMA of the per-rAF wall-clock delta (s) used to pace playback
+        // (issue #97); 0 = unseeded, primed from the first played frame.
+        this._smoothedFrameDelta = 0;
         this._animationLoop = true;
         this._lastAnimationUpdate = 0;
         this._baselineVisibility = new Map();
@@ -9544,7 +9555,11 @@ class ThreeJSViewer {
         const frames = this._animation.frames;
         const lastIdx = frames.length - 1;
         if (this._animation.uniformDt > 0) {
-            const raw = time / this._animation.uniformDt;
+            // Offset by the first frame time: `raw` is only a frame index
+            // relative to frames[0], and uniformly spaced timelines need
+            // not start at 0 (issue #96 — a 100000+arange(n)*dt timeline
+            // clamped every seek to the last frame).
+            const raw = (time - frames[0].time) / this._animation.uniformDt;
             const idx = Math.floor(raw);
             if (idx < 0) return { index: 0, t: 0 };
             if (idx >= lastIdx) return { index: lastIdx, t: 0 };
@@ -11694,7 +11709,24 @@ class ThreeJSViewer {
             const deltaTime = (now - this._lastAnimationUpdate) / 1000;
             this._lastAnimationUpdate = now;
 
-            this._animationTime += deltaTime * this._animationSpeed;
+            // Pace smoothing (issue #97): advancing by the raw wall-clock
+            // delta passes every render-cost fluctuation straight into
+            // playback velocity — on heavy scenes (tube morph, LOD, growing
+            // geometry) the frame cost varies continuously, so the playhead
+            // visibly accelerates/decelerates, amplified by the speed
+            // multiplier (one 4x-slow frame = a 4x playhead jump). Advance
+            // by a short EMA of the delta instead: velocity stays visually
+            // constant while still tracking real time on average. The raw
+            // delta is clamped before entering the EMA so a single stalled
+            // frame (GC pause, tab back from background) can neither
+            // teleport the playhead nor poison the average.
+            if (this._smoothedFrameDelta <= 0) this._smoothedFrameDelta = deltaTime;
+            const clampedDelta = Math.min(
+                deltaTime, PLAYBACK_DELTA_CLAMP * this._smoothedFrameDelta);
+            this._smoothedFrameDelta +=
+                (clampedDelta - this._smoothedFrameDelta) * PLAYBACK_DELTA_EMA_ALPHA;
+
+            this._animationTime += this._smoothedFrameDelta * this._animationSpeed;
 
             if (this._animationTime >= this._animation.duration) {
                 if (this._animationLoop) {
