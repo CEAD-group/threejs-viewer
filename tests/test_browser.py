@@ -3186,3 +3186,53 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
     viewer_client.clear()
     time.sleep(0.2)
     assert viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 0
+
+
+def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
+    """Every gizmo report carries the *effective* mode of the drag, read off
+    the live control — so an Alt momentary rotate override is observable by
+    consumers even though the base mode stays translate (issue #84: without
+    the field, embedders branched on the base mode and silently discarded
+    Alt rotate-drags)."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_gizmo("box", x=True, y=False, z=False)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._extra[0];"
+        " return g && g.helper.visible; }",
+    )
+    viewer_page.evaluate(
+        "() => { window.__modes = [];"
+        " window.threejsViewer.onObjectMove(p => window.__modes.push("
+        "   [p.mode, p.phase])); }"
+    )
+
+    # A plain arrow drag: every report (throttled moves + final end) says
+    # translate.
+    _drag_handle(viewer_page, 0, "X", +10, 0)
+    modes = viewer_page.evaluate("() => window.__modes")
+    assert modes, "drag produced no reports"
+    assert all(m == "translate" for m, _ in modes), modes
+    assert modes[-1][1] == "end"
+
+    # Hold Alt: the live control flips to rotate while the base mode stays
+    # translate; a report issued during the override must say rotate.
+    viewer_page.keyboard.down("Alt")
+    _wait_for(
+        viewer_page,
+        "() => { const tg = window.threejsViewer._transformGizmo;"
+        " const g = tg._extra[0];"
+        " return g.control.getMode() === 'rotate' && g.mode === 'translate'; }",
+    )
+    viewer_page.evaluate(
+        "() => { window.__modes = [];"
+        " const tg = window.threejsViewer._transformGizmo;"
+        " tg._report(tg._extra[0], true); }"
+    )
+    viewer_page.keyboard.up("Alt")
+    modes = viewer_page.evaluate("() => window.__modes")
+    assert modes == [["rotate", "end"]], (
+        f"Alt override not visible in the report: {modes}"
+    )

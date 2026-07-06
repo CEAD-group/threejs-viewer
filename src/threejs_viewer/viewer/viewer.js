@@ -5851,6 +5851,12 @@ class TransformGizmoController {
             // original world matrix from the report instead of snapshotting it itself.
             positionStart: [so.x, so.y, so.z],
             quaternionStart: [sq.x, sq.y, sq.z, sq.w],
+            // Effective mode of THIS drag, read off the live control — not the
+            // caller-set base mode. The Alt momentary rotate override switches
+            // the control without touching g.mode, so without this field a
+            // consumer that branches translate-vs-rotate silently discards
+            // Alt rotate-drags (issue #84).
+            mode: g.control.getMode(),
             phase: flush ? 'end' : 'move',
         };
         const ws = this.v._ws;
