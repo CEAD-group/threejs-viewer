@@ -40,6 +40,10 @@ const SPEED_STEPS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300,
 // playhead or poison the average.
 const PLAYBACK_DELTA_EMA_ALPHA = 0.1;
 const PLAYBACK_DELTA_CLAMP = 3;
+// Consecutive same-side out-of-band deltas that constitute a frame-rate
+// regime change (background-tab throttling, bad seed) rather than a one-off
+// outlier — the EMA snaps to the live delta instead of slow-walking there.
+const PLAYBACK_PACE_SNAP_TICKS = 3;
 
 const CLIP_AXIS_NORMALS = {
     'x+': new THREE.Vector3(1, 0, 0),
@@ -3086,9 +3090,40 @@ function remapDrawRangeToReducedPairs(lod, value) {
         const mid = (lo + hi) >> 1;
         if (kept[mid] <= targetIdx) lo = mid; else hi = mid;
     }
-    // Interpolate between kept[lo] and kept[hi]
     const span = kept[hi] - kept[lo];
-    const frac = span > 0 ? (targetIdx - kept[lo]) / span : 0;
+    if (span <= 0) return Math.min(lo, nRed - 1);
+    // Interpolating by INDEX across the kept span is only right when the
+    // collapsed original points are evenly spaced — RDP collapses collinear
+    // runs regardless of spacing, so a long straight segment followed by a
+    // dense cluster (flatten-tolerance G-code) put the frontier tens of mm
+    // from the true point (nozzle visibly desynced from the bead frontier).
+    // Instead: take the TRUE frontier position from the original spine at
+    // the fractional index and project it onto the reduced chord — RDP
+    // guarantees every collapsed point lies within epsilon of that chord,
+    // so the placement error is bounded by the same tolerance the reduced
+    // geometry is drawn at.
+    const spine = lod.originalSpine;
+    if (!spine) {
+        const frac = (targetIdx - kept[lo]) / span;
+        return Math.min(lo + frac, nRed - 1);
+    }
+    const i0 = Math.floor(targetIdx);
+    const f = targetIdx - i0;
+    const i1 = Math.min(i0 + 1, lod.originalCount - 1);
+    const px = spine[i0 * 3] * (1 - f) + spine[i1 * 3] * f;
+    const py = spine[i0 * 3 + 1] * (1 - f) + spine[i1 * 3 + 1] * f;
+    const pz = spine[i0 * 3 + 2] * (1 - f) + spine[i1 * 3 + 2] * f;
+    const a = kept[lo] * 3, b = kept[hi] * 3;
+    const abx = spine[b] - spine[a];
+    const aby = spine[b + 1] - spine[a + 1];
+    const abz = spine[b + 2] - spine[a + 2];
+    const abLen2 = abx * abx + aby * aby + abz * abz;
+    let frac = 0;
+    if (abLen2 > 1e-20) {
+        frac = ((px - spine[a]) * abx + (py - spine[a + 1]) * aby +
+                (pz - spine[a + 2]) * abz) / abLen2;
+        frac = Math.max(0, Math.min(1, frac));
+    }
     return Math.min(lo + frac, nRed - 1);
 }
 
@@ -6208,6 +6243,7 @@ export class ThreeJSViewer {
         // EMA of the per-rAF wall-clock delta (s) used to pace playback
         // (issue #97); 0 = unseeded, primed from the first played frame.
         this._smoothedFrameDelta = 0;
+        this._paceOutlierTicks = 0;  // signed run length of out-of-band deltas
         this._animationLoop = true;
         this._lastAnimationUpdate = 0;
         this._baselineVisibility = new Map();
@@ -10607,17 +10643,37 @@ export class ThreeJSViewer {
             // visibly accelerates/decelerates, amplified by the speed
             // multiplier (one 4x-slow frame = a 4x playhead jump). Advance
             // by a short EMA of the delta instead: velocity stays visually
-            // constant while still tracking real time on average. The raw
-            // delta is clamped before entering the EMA so a single stalled
-            // frame (GC pause, tab back from background) can neither
-            // teleport the playhead nor poison the average.
-            if (this._smoothedFrameDelta <= 0) this._smoothedFrameDelta = deltaTime;
-            const clampedDelta = Math.min(
-                deltaTime, PLAYBACK_DELTA_CLAMP * this._smoothedFrameDelta);
-            this._smoothedFrameDelta +=
-                (clampedDelta - this._smoothedFrameDelta) * PLAYBACK_DELTA_EMA_ALPHA;
+            // constant while still tracking real time on average.
+            //
+            // Outlier vs regime change: a SINGLE out-of-band delta (GC
+            // pause, double-fired rAF) is clamped into [ema/C, ema*C] so it
+            // can neither teleport the playhead nor poison the average; but
+            // PLAYBACK_PACE_SNAP_TICKS consecutive deltas on the same side
+            // mean the frame rate really changed (rAF throttled in a
+            // background tab, or an unrepresentative seed) — snap the EMA
+            // to the live delta instead of letting the clamp slow-walk it
+            // there over dozens of frames.
+            let ema = this._smoothedFrameDelta;
+            if (ema <= 0) ema = deltaTime;
+            let paced = deltaTime;
+            if (deltaTime > ema * PLAYBACK_DELTA_CLAMP) {
+                paced = ema * PLAYBACK_DELTA_CLAMP;
+                this._paceOutlierTicks = Math.max(1, this._paceOutlierTicks + 1);
+            } else if (deltaTime < ema / PLAYBACK_DELTA_CLAMP) {
+                paced = ema / PLAYBACK_DELTA_CLAMP;
+                this._paceOutlierTicks = Math.min(-1, this._paceOutlierTicks - 1);
+            } else {
+                this._paceOutlierTicks = 0;
+            }
+            if (Math.abs(this._paceOutlierTicks) >= PLAYBACK_PACE_SNAP_TICKS) {
+                ema = deltaTime;
+                this._paceOutlierTicks = 0;
+            } else {
+                ema += (paced - ema) * PLAYBACK_DELTA_EMA_ALPHA;
+            }
+            this._smoothedFrameDelta = ema;
 
-            this._animationTime += this._smoothedFrameDelta * this._animationSpeed;
+            this._animationTime += ema * this._animationSpeed;
 
             if (this._animationTime >= this._animation.duration) {
                 if (this._animationLoop) {

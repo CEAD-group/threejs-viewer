@@ -819,8 +819,13 @@ def test_add_toolpath_travel_line(client):
     assert reg["travelId"] == "b_travel"
     # travel edges: every edge not interior to an extrusion run =
     # (1,2) (2,3) (3,4) and the trailing (5,6) (6,7)
-    assert reg["travelEndFracs"] == pytest.approx([2 / 8, 3 / 8, 4 / 8, 6 / 8, 7 / 8])
+    # fractions use the draw_range convention index/(n-1); dividing by n
+    # skewed the recovered frontier index by `value` points (the
+    # nozzle-vs-frontier desync on long moves)
+    assert reg["travelEndFracs"] == pytest.approx([2 / 7, 3 / 7, 4 / 7, 6 / 7, 7 / 7])
     assert reg["travelEndFracs"] == sorted(reg["travelEndFracs"])
+    flat = [x for pair in reg["segmentRanges"] for x in pair]
+    assert flat == pytest.approx([0 / 7, 1 / 7, 4 / 7, 5 / 7])
 
     # the travel polyline itself: segments, parented to the group
     travel_headers = [
