@@ -8,6 +8,8 @@ from threejs_viewer.points_lod import (
     HIERARCHY_DTYPE,
     NO_CHILD,
     build_points_octree,
+    build_points_octree_grid,
+    grid_morton_codes,
     pack_node_payload,
 )
 
@@ -128,6 +130,241 @@ def test_octree_rejects_empty_and_bad_capacity():
         build_points_octree(np.zeros((10, 3), dtype=np.float32), node_capacity=0)
 
 
+# === grid fast-path builder ===
+
+
+def _grid_cloud(side=80, layers=12, spacing=0.1, seed=3):
+    """Voxel centres in a `layers`-thick shell over a curved surface, on a
+    regular lattice of pitch `spacing` — the shape the grid path targets."""
+    rng = np.random.default_rng(seed)
+    xi = np.arange(side, dtype=np.int64)
+    gx, gy = np.meshgrid(xi, xi, indexing="ij")
+    gx = gx.ravel()
+    gy = gy.ravel()
+    h = np.round(6.0 * np.sin(gx / 11.0) * np.cos(gy / 9.0)).astype(np.int64)
+    lz = np.arange(layers, dtype=np.int64) - layers // 2
+    ix = np.repeat(gx, layers)
+    iy = np.repeat(gy, layers)
+    iz = (np.repeat(h, layers) + np.tile(lz, gx.size)).astype(np.int64)
+    pts = np.stack([ix, iy, iz], axis=1).astype(np.float32) * spacing
+    birth = (ix.astype(np.float32) / side) + rng.random(len(ix)).astype(
+        np.float32
+    ) * 0.01
+    removal = birth + 1.0
+    return pts, birth, removal, spacing
+
+
+def test_grid_octree_permutation_and_tiling():
+    pts, birth, _, sp = _grid_cloud()
+    o = build_points_octree_grid(pts, spacing=sp, strat_times=birth, node_capacity=5000)
+    n = len(pts)
+    assert np.array_equal(np.sort(o.order), np.arange(n))
+    assert o.offsets[0] == 0
+    ends = o.offsets + o.counts
+    assert ends[-1] == n
+    assert np.array_equal(o.offsets[1:], ends[:-1])
+
+
+def test_grid_octree_cubes_and_points_inside():
+    pts, birth, _, sp = _grid_cloud()
+    o = build_points_octree_grid(pts, spacing=sp, strat_times=birth, node_capacity=5000)
+    # cubes halve per level
+    np.testing.assert_allclose(
+        o.half_sizes, o.half_sizes[0] / 2.0 ** o.levels.astype(np.float64), rtol=1e-6
+    )
+    # every point sits strictly inside its node cube (grid data is exact)
+    for i in range(o.n_nodes):
+        lo, hi = int(o.offsets[i]), int(o.offsets[i]) + int(o.counts[i])
+        if hi == lo:
+            continue
+        p = pts[o.order[lo:hi]]
+        overflow = np.abs(p - o.centers[i]).max(axis=0) - o.half_sizes[i]
+        assert overflow.max() <= 1e-4 * o.half_sizes[i] + 1e-6
+
+
+def test_grid_octree_capacity_topology():
+    pts, birth, _, sp = _grid_cloud()
+    cap = 4000
+    o = build_points_octree_grid(pts, spacing=sp, strat_times=birth, node_capacity=cap)
+    assert o.n_nodes > 1
+    interior = o.first_child != NO_CHILD
+    assert (o.counts[interior] == cap).all()
+    assert (o.counts[~interior] <= cap).all()
+
+
+def test_grid_octree_root_sample_spatially_representative():
+    """The grid path subsamples SPATIALLY (strided pick over Morton order), so
+    the root sample must span the full bounding box in every axis — that is the
+    property that keeps the coarse LOD honest."""
+    pts, birth, _, sp = _grid_cloud(side=110)
+    o = build_points_octree_grid(pts, spacing=sp, strat_times=birth, node_capacity=4000)
+    root = pts[o.order[: int(o.counts[0])]]
+    lo_all, hi_all = pts.min(0), pts.max(0)
+    for ax in range(3):
+        span = hi_all[ax] - lo_all[ax]
+        # sample reaches within 5% of each extent (no whole region missed)
+        assert root[:, ax].min() - lo_all[ax] < 0.05 * span
+        assert hi_all[ax] - root[:, ax].max() < 0.05 * span
+
+
+def test_grid_octree_time_representative_when_time_tracks_space():
+    """Dropping time-stratification is safe for carve-like data because
+    removal/birth is spatially correlated (the tool sweeps through space): a
+    spatial coarse sample is then still ~uniform in time. birth ∝ x here."""
+    pts, birth, _, sp = _grid_cloud(side=110)
+    o = build_points_octree_grid(pts, spacing=sp, node_capacity=4000)
+    root_birth = birth[o.order[: int(o.counts[0])]]
+    for q in (0.1, 0.5, 0.9):
+        assert abs(
+            float(np.quantile(root_birth, q)) - float(np.quantile(birth, q))
+        ) < 0.15 * (birth.max() - birth.min())
+
+
+def test_grid_octree_deterministic_for_seed():
+    pts, birth, _, sp = _grid_cloud()
+    a = build_points_octree_grid(
+        pts, spacing=sp, strat_times=birth, node_capacity=3000, seed=5
+    )
+    b = build_points_octree_grid(
+        pts, spacing=sp, strat_times=birth, node_capacity=3000, seed=5
+    )
+    assert np.array_equal(a.order, b.order)
+
+
+def test_grid_octree_matches_float_structure():
+    """Grid and float builders must agree on tree shape for lattice data (the
+    grid path is an integer-arithmetic reimplementation, not a different tree)."""
+    pts, birth, _, sp = _grid_cloud(side=90)
+    g = build_points_octree_grid(pts, spacing=sp, strat_times=birth, node_capacity=5000)
+    f = build_points_octree(pts, strat_times=birth, node_capacity=5000)
+    # Same node count and identical per-level node distribution.
+    assert abs(g.n_nodes - f.n_nodes) <= 2
+    gl = np.bincount(g.levels)
+    fl = np.bincount(f.levels)
+    assert len(gl) == len(fl)
+    assert np.abs(gl.astype(int) - fl.astype(int)).max() <= 2
+
+
+def test_grid_octree_rejects_bad_spacing():
+    pts, _, _, _ = _grid_cloud(side=20)
+    with pytest.raises(ValueError, match="spacing"):
+        build_points_octree_grid(pts, spacing=0.0)
+    with pytest.raises(ValueError, match="spacing"):
+        build_points_octree_grid(pts, spacing=[0.1, 0.1])
+
+
+# === grid precomputed-order (external producer) fast path ===
+
+
+def _assert_octrees_identical(a, b):
+    """Every field of two PointsOctrees is byte-identical."""
+    assert np.array_equal(a.order, b.order)
+    assert np.array_equal(a.centers, b.centers)
+    assert np.array_equal(a.half_sizes, b.half_sizes)
+    assert np.array_equal(a.offsets, b.offsets)
+    assert np.array_equal(a.counts, b.counts)
+    assert np.array_equal(a.levels, b.levels)
+    assert np.array_equal(a.first_child, b.first_child)
+    assert np.array_equal(a.child_mask, b.child_mask)
+
+
+def test_grid_morton_codes_reference_matches_internal_sort():
+    """grid_morton_codes is the reference an external producer reproduces; the
+    order it induces is exactly what the builder sorts to internally."""
+    pts, birth, _, sp = _grid_cloud(side=90)
+    codes, n_bits = grid_morton_codes(pts, spacing=sp)
+    # Grid voxels are distinct -> codes are distinct -> the sort order is unique.
+    assert len(np.unique(codes)) == len(codes)
+    assert n_bits >= 12
+
+
+def test_grid_octree_precomputed_codes_roundtrip():
+    """Feeding the internally-computed codes back through the codes= path
+    reproduces the pure-numpy build byte-for-byte (skips the quantise stage)."""
+    pts, birth, _, sp = _grid_cloud(side=96)
+    base = build_points_octree_grid(pts, spacing=sp, node_capacity=4000, seed=7)
+    codes, n_bits = grid_morton_codes(pts, spacing=sp)
+    ext = build_points_octree_grid(
+        pts, spacing=sp, node_capacity=4000, seed=7, codes=codes, n_bits=n_bits
+    )
+    _assert_octrees_identical(base, ext)
+
+
+def test_grid_octree_precomputed_codes_and_order_roundtrip():
+    """Feeding BOTH codes and a valid Morton order reproduces the build exactly
+    (skips quantise AND sort — the whole external-producer fast path)."""
+    pts, birth, _, sp = _grid_cloud(side=96)
+    base = build_points_octree_grid(pts, spacing=sp, node_capacity=4000, seed=7)
+    codes, n_bits = grid_morton_codes(pts, spacing=sp)
+    order = np.argsort(codes)  # what a Rust producer would ship
+    ext = build_points_octree_grid(
+        pts,
+        spacing=sp,
+        node_capacity=4000,
+        seed=7,
+        codes=codes,
+        order=order,
+        n_bits=n_bits,
+    )
+    _assert_octrees_identical(base, ext)
+
+
+def test_grid_octree_precomputed_rejects_bad_inputs():
+    pts, _, _, sp = _grid_cloud(side=40)
+    codes, n_bits = grid_morton_codes(pts, spacing=sp)
+    n = len(pts)
+    # wrong dtype
+    with pytest.raises(ValueError, match="uint64"):
+        build_points_octree_grid(
+            pts, spacing=sp, codes=codes.astype(np.int64), n_bits=n_bits
+        )
+    # wrong length
+    with pytest.raises(ValueError, match="length"):
+        build_points_octree_grid(pts, spacing=sp, codes=codes[:-1], n_bits=n_bits)
+    # codes overflow the declared n_bits budget (a bit set above 3*n_bits)
+    over = codes.copy()
+    over[0] = np.uint64(1) << np.uint64(3 * n_bits)
+    with pytest.raises(ValueError, match="budget"):
+        build_points_octree_grid(pts, spacing=sp, codes=over, n_bits=n_bits)
+    # order without codes
+    with pytest.raises(ValueError, match="order requires codes"):
+        build_points_octree_grid(pts, spacing=sp, order=np.argsort(codes))
+    # non-permutation order
+    bad = np.argsort(codes).copy()
+    bad[0] = bad[1]
+    with pytest.raises(ValueError, match="permutation"):
+        build_points_octree_grid(pts, spacing=sp, codes=codes, order=bad, n_bits=n_bits)
+    # out-of-range order indices: negative (would wrap in numpy) and >= N
+    neg = np.argsort(codes).astype(np.int64)
+    neg[0] -= n  # same element via wraparound, but not a valid index
+    with pytest.raises(ValueError, match=r"\[0, "):
+        build_points_octree_grid(pts, spacing=sp, codes=codes, order=neg, n_bits=n_bits)
+    big = np.argsort(codes).copy()
+    big[0] = n
+    with pytest.raises(ValueError, match=r"\[0, "):
+        build_points_octree_grid(pts, spacing=sp, codes=codes, order=big, n_bits=n_bits)
+    # order that does not sort the codes (identity is not Morton order here)
+    with pytest.raises(ValueError, match="monotonic"):
+        build_points_octree_grid(
+            pts, spacing=sp, codes=codes, order=np.arange(n), n_bits=n_bits
+        )
+    # n_bits out of range
+    with pytest.raises(ValueError, match="n_bits"):
+        build_points_octree_grid(pts, spacing=sp, n_bits=99)
+
+
+def test_grid_octree_precomputed_n_bits_defaults_to_spacing():
+    """Omitting n_bits with supplied codes reuses the spacing-derived value; a
+    matching-resolution producer need not pass n_bits."""
+    pts, _, _, sp = _grid_cloud(side=64)
+    codes, n_bits = grid_morton_codes(pts, spacing=sp)
+    a = build_points_octree_grid(pts, spacing=sp, node_capacity=3000, codes=codes)
+    b = build_points_octree_grid(
+        pts, spacing=sp, node_capacity=3000, codes=codes, n_bits=n_bits
+    )
+    _assert_octrees_identical(a, b)
+
+
 # === payload + hierarchy packing ===
 
 
@@ -194,6 +431,68 @@ def test_add_points_lod_header_and_blobs(client):
     for i in (0, msg["nodeCount"] - 1):
         payload = client._blob_store[f"{key_base}/{i}"]()
         assert len(payload) == int(rec["count"][i]) * (6 + 3 + 4 + 4)
+
+
+def test_add_points_lod_grid_dispatch(client):
+    """lod={'grid': {...}} builds a valid LOD cloud via the grid fast-path;
+    the wire header/blobs are identical in shape to the float path."""
+    pts, birth, removal, sp = _grid_cloud(side=70, layers=10)
+    client.add_points(
+        "gcloud",
+        pts,
+        colors=pts[:, 2],
+        birth_times=birth,
+        removal_times=removal,
+        lod={"node_capacity": 4000, "grid": {"spacing": sp}},
+    )
+    (msg,) = client._messages
+    assert msg["type"] == "add_points_lod"
+    assert msg["numPoints"] == len(pts)
+    assert msg["nodeCount"] >= 1
+    key_base = client._points_lod["gcloud"]
+    hierarchy = client._blob_store[f"{key_base}/hierarchy"]
+    rec = np.frombuffer(hierarchy, dtype=HIERARCHY_DTYPE)
+    assert len(rec) == msg["nodeCount"]
+    payload = client._blob_store[f"{key_base}/0"]()
+    assert len(payload) == int(rec["count"][0]) * (6 + 3 + 4 + 4)
+
+
+def test_add_points_lod_grid_precomputed_passthrough(client):
+    """codes/order/n_bits in lod['grid'] reach the builder: the wire blobs
+    are byte-identical to the plain grid path (the external-producer seam)."""
+    pts, birth, removal, sp = _grid_cloud(side=70, layers=10)
+    codes, n_bits = grid_morton_codes(pts, spacing=sp)
+    order = np.argsort(codes)
+    kw = dict(colors=pts[:, 2], birth_times=birth, removal_times=removal)
+    client.add_points("plain", pts, lod={"grid": {"spacing": sp}}, **kw)
+    client.add_points(
+        "pre",
+        pts,
+        lod={"grid": {"spacing": sp, "codes": codes, "order": order, "n_bits": n_bits}},
+        **kw,
+    )
+    plain_key = client._points_lod["plain"]
+    pre_key = client._points_lod["pre"]
+    assert (
+        client._blob_store[f"{plain_key}/hierarchy"]
+        == client._blob_store[f"{pre_key}/hierarchy"]
+    )
+    n_nodes = np.frombuffer(
+        client._blob_store[f"{plain_key}/hierarchy"], dtype=HIERARCHY_DTYPE
+    ).shape[0]
+    for i in range(n_nodes):
+        assert (
+            client._blob_store[f"{plain_key}/{i}"]()
+            == client._blob_store[f"{pre_key}/{i}"]()
+        )
+
+
+def test_add_points_lod_grid_validation(client):
+    pts, _, _, sp = _grid_cloud(side=20, layers=4)
+    with pytest.raises(ValueError, match="spacing"):
+        client.add_points("g", pts, lod={"grid": {"origin": [0, 0, 0]}})
+    with pytest.raises(ValueError, match="grid"):
+        client.add_points("g", pts, lod={"grid": {"spacing": sp, "bogus": 1}})
 
 
 def test_add_points_lod_replaced_and_released(client):

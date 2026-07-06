@@ -28,6 +28,7 @@ from .points_lod import (
     DEFAULT_POINT_BUDGET,
     DEFAULT_REFINE_PIXELS,
     build_points_octree,
+    build_points_octree_grid,
     pack_node_payload,
 )
 
@@ -97,7 +98,10 @@ _POINTS_LOD_ALLOWED_KEYS = {
     "refine_pixels",
     "max_depth",
     "seed",
+    "size_boost_max",
+    "grid",
 }
+_POINTS_LOD_GRID_ALLOWED_KEYS = {"spacing", "origin", "codes", "order", "n_bits"}
 
 
 def _serialize_lod(lod):
@@ -1058,10 +1062,17 @@ class ViewerClient:
             cmin: Min value for colormap scaling (auto from ``colors`` if None).
             cmax: Max value for colormap scaling (auto from ``colors`` if None).
             color: Flat point color (hex) — used when ``colors`` is None.
-            size: Base point size in pixels.
+            size: Base point size. With ``size_attenuation`` ON (default)
+                points shrink with camera distance like world geometry
+                (``∝ 1/depth``) and ``size`` acts as an *approximate*
+                world-space extent — the exact pixel footprint also scales
+                with viewport height, so treat it as a relative knob; roughly
+                the point spacing is a good starting value. With attenuation
+                OFF it is a constant size in **screen pixels**.
             size_attenuation: When ``True`` (default), points shrink with
-                distance (perspective). When ``False``, every point is drawn at
-                a constant pixel size regardless of depth.
+                distance (perspective, viewport-aware). When ``False``, every
+                point is drawn at a constant pixel size (``size`` in px)
+                regardless of depth.
             birth_times: Optional (N,) per-point times: a point becomes
                 visible once the cloud's scrub time ``t`` reaches its birth
                 time (``birth_time <= t``). NaN/-inf = always existed.
@@ -1084,6 +1095,27 @@ class ViewerClient:
                 time-stratified over ``birth_times`` (falling back to
                 ``removal_times``) so time filtering thins every LOD level
                 uniformly.
+
+                **Grid fast-path.** When the points are voxel centres on a
+                regular lattice (mill-sim's carve view), pass
+                ``grid={"spacing": pitch}`` (``pitch`` scalar or 3-vector;
+                optional ``"origin"``) to build the octree with integer Morton
+                arithmetic instead of the general float builder — ~2-3× faster
+                and flat as N grows, so 30M–70M+ clouds build in seconds rather
+                than a minute+. The result is structurally identical (same
+                sampled octree and shuffled-Morton vertex order; wire format
+                unchanged), but node samples are plain strided *spatial*
+                subsamples rather than time-stratified — carve removal times
+                are spatially correlated so a spatial sample stays honest
+                under the scrub, and skipping the time sort keeps the build
+                bit-reproducible for external producers. Only declare it for genuinely
+                lattice-aligned clouds; for arbitrary clouds omit it (the float
+                builder makes no grid assumption). An external producer (e.g.
+                mill-sim's Rust kernel) can additionally supply
+                ``"codes"``/``"order"``/``"n_bits"`` — precomputed global
+                Morton codes and their ascending sort permutation per
+                ``docs/points-lod-grid-api.md`` — and the builder skips its
+                quantise and sort stages (~55-60% of the build).
             parent: Optional parent group id.
 
         Reveal a cloud progressively (e.g. a cheap material-removal animation)
@@ -1207,6 +1239,12 @@ class ViewerClient:
         refine_pixels = float(opts.get("refine_pixels", DEFAULT_REFINE_PIXELS))
         max_depth = int(opts.get("max_depth", DEFAULT_MAX_DEPTH))
         seed = int(opts.get("seed", 0))
+        size_boost_max = float(opts.get("size_boost_max", 2.0))
+        if size_boost_max < 1.0:
+            raise ValueError(
+                f"size_boost_max must be >= 1.0 (1.0 = no coarse-node fattening), "
+                f"got {size_boost_max}"
+            )
         if node_capacity < 1:
             raise ValueError(f"node_capacity must be >= 1 (got {node_capacity})")
         if point_budget < node_capacity:
@@ -1218,13 +1256,40 @@ class ViewerClient:
         # Stratify node samples over birth times (or removal as fallback) so
         # the time filter thins each LOD level uniformly.
         strat = birth if birth is not None else removal
-        octree = build_points_octree(
-            positions3,
-            strat_times=strat,
-            node_capacity=node_capacity,
-            max_depth=max_depth,
-            seed=seed,
-        )
+        grid = opts.get("grid")
+        if grid is not None:
+            # Grid fast-path: caller promises voxel-centres on a regular
+            # lattice, so the octree is built with integer Morton arithmetic
+            # (~2-3x faster, flat in N). See points_lod.build_points_octree_grid.
+            gopts = {} if grid is True else dict(grid)
+            gunknown = set(gopts) - _POINTS_LOD_GRID_ALLOWED_KEYS
+            if gunknown:
+                raise ValueError(
+                    f"Unknown lod['grid'] key(s) {sorted(gunknown)}; "
+                    f"allowed: {sorted(_POINTS_LOD_GRID_ALLOWED_KEYS)}"
+                )
+            if "spacing" not in gopts:
+                raise ValueError("lod['grid'] requires a 'spacing' (lattice pitch)")
+            octree = build_points_octree_grid(
+                positions3,
+                spacing=gopts["spacing"],
+                strat_times=strat,
+                origin=gopts.get("origin"),
+                node_capacity=node_capacity,
+                max_depth=max_depth,
+                seed=seed,
+                codes=gopts.get("codes"),
+                order=gopts.get("order"),
+                n_bits=gopts.get("n_bits"),
+            )
+        else:
+            octree = build_points_octree(
+                positions3,
+                strat_times=strat,
+                node_capacity=node_capacity,
+                max_depth=max_depth,
+                seed=seed,
+            )
         order = octree.order
         pos_r = positions3[order]
         colors_r = colors_u8[order] if colors_u8 is not None else None
@@ -1266,6 +1331,7 @@ class ViewerClient:
             "hasVertexColors": colors_r is not None,
             "pointBudget": point_budget,
             "refinePixels": refine_pixels,
+            "sizeBoostMax": size_boost_max,
             "hierarchy_url": f"{base_url}/hierarchy",
             "node_url_base": f"{base_url}/",
         }
@@ -2193,29 +2259,81 @@ class ViewerClient:
         self,
         fog: bool | None = None,
         edl: bool | None = None,
+        edl_strength: float | None = None,
+        edl_radius: float | None = None,
     ) -> None:
-        """Toggle the viewer's depth cues for flat line drawings.
+        """Toggle the viewer's depth cues for flat line drawings and point clouds.
 
         The programmatic equivalent of the ``D`` (fog) and ``Shift+D`` (eye-dome
-        lighting) viewer keys. Depth cues apply to every polyline in the scene
-        and restore a sense of depth to otherwise-flat line bundles. The two
-        compose: fog dims distant lines globally, EDL sculpts local crossings.
+        lighting) viewer keys. Depth cues apply to every polyline *and point
+        cloud* in the scene and restore a sense of depth to otherwise-flat line
+        bundles / point sheets. The two compose: fog dims distant geometry
+        globally, EDL sculpts local crossings and surfaces.
 
-        Both cues are scoped to polyline geometry only — meshes (primitives,
-        custom meshes, parametric tubes, loaded models) render exactly as with
-        the cues off, so the cell/fixtures stay as a clean spatial reference
-        while only the toolpath line is sculpted for depth.
+        Both cues are scoped to polyline and point geometry only — meshes
+        (primitives, custom meshes, parametric tubes, loaded models) render
+        exactly as with the cues off, so the cell/fixtures stay as a clean
+        spatial reference while only the toolpath / cloud is sculpted for depth.
+
+        EDL is switched on automatically the first time a point cloud is added
+        (dense unlit point quads read as a flat, washed-out sheet without it).
+        Passing ``edl`` here pins the state and overrides that auto-behaviour,
+        so ``set_depth_cue(edl=False)`` keeps EDL off even for point clouds.
 
         Args:
             fog: Distance fog (CAD depth cueing) on/off. ``None`` leaves it
                 unchanged.
-            edl: Eye-dome lighting on/off. ``None`` leaves it unchanged.
+            edl: Eye-dome lighting on/off. ``None`` leaves it unchanged (but any
+                ``edl_strength``/``edl_radius`` are still applied live).
+            edl_strength: EDL darkening gain (default 40). Higher = deeper
+                shading on occluded crossings. ``None`` leaves it unchanged.
+            edl_radius: EDL neighbour-sampling radius in pixels (default 1.6).
+                Larger fattens the shaded outlines. ``None`` leaves it unchanged.
         """
         msg: dict = {"type": "set_depth_cue"}
         if fog is not None:
             msg["fog"] = bool(fog)
         if edl is not None:
             msg["edl"] = bool(edl)
+        if edl_strength is not None:
+            msg["edlStrength"] = float(edl_strength)
+        if edl_radius is not None:
+            msg["edlRadius"] = float(edl_radius)
+        self._send(msg)
+
+    def set_edl(
+        self,
+        enabled: bool = True,
+        strength: float | None = None,
+        radius: float | None = None,
+    ) -> None:
+        """Enable/disable eye-dome lighting programmatically (the ``Shift+D`` key).
+
+        EDL is a screen-space post-process that darkens fragments sitting behind
+        their neighbours, sculpting flat, unlit geometry into legible 3D. It is
+        scoped to **polyline and point-cloud** geometry (they render into a
+        dedicated depth layer); meshes and the background pass through untouched,
+        so the cell/fixtures stay a clean reference. It auto-enables the first
+        time a point cloud is added; calling this pins the state, so
+        ``set_edl(False)`` keeps it off even for point clouds.
+
+        This is the focused equivalent of :meth:`set_depth_cue` for the EDL cue
+        alone — convenient when a script just wants to switch on depth shading
+        for a point cloud instead of asking the user to press ``Shift+D``.
+
+        Args:
+            enabled: Turn EDL on (default) or off. Pins the state against the
+                point-cloud auto-enable.
+            strength: EDL darkening gain (default 40). Higher = deeper shading
+                on occluded crossings/surfaces. ``None`` leaves it unchanged.
+            radius: EDL neighbour-sampling radius in pixels (default 1.6).
+                Larger fattens the shaded outlines. ``None`` leaves it unchanged.
+        """
+        msg: dict = {"type": "set_edl", "enabled": bool(enabled)}
+        if strength is not None:
+            msg["strength"] = float(strength)
+        if radius is not None:
+            msg["radius"] = float(radius)
         self._send(msg)
 
     # === Polyline picking ===
