@@ -4072,6 +4072,23 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
             applyParametricTubeDrawRange(child, segFrac);
         }
     }
+    // Travel line (add_toolpath travel="line"): reveal whole hop edges in
+    // lockstep with the beads. endFracs is ascending, so the visible edge
+    // count is an upper_bound binary search — an edge shows once the
+    // global fraction passes its end point.
+    const travelId = grp.userData.toolpathTravelId;
+    if (travelId) {
+        const line = objects.get(travelId);
+        const fracs = grp.userData.toolpathTravelEndFracs;
+        if (line && line.userData.isLineSegments && fracs) {
+            let lo = 0, hi = fracs.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (fracs[mid] <= clamped) lo = mid + 1; else hi = mid;
+            }
+            line.geometry.setDrawRange(0, 2 * lo);
+        }
+    }
 }
 
 // ========== Swept oriented tool body (5-axis shank/holder) ==========
@@ -9308,8 +9325,14 @@ export class ThreeJSViewer {
                             } else {
                                 material = new THREE.LineBasicMaterial({ color: data.color || 0xffffff });
                             }
-                            line = new THREE.Line(geometry, material);
+                            // segments: disjoint edges from consecutive
+                            // point pairs (one draw call, no false
+                            // connectors) — e.g. a toolpath's travel hops.
+                            line = data.segments
+                                ? new THREE.LineSegments(geometry, material)
+                                : new THREE.Line(geometry, material);
                             line.userData.isNativeLine = true;
+                            if (data.segments) line.userData.isLineSegments = true;
                             line.userData.totalPointCount = numPoints;
                             geometry.setDrawRange(0, numPoints);
                         }
@@ -10316,6 +10339,16 @@ export class ThreeJSViewer {
                     grp.userData.isToolpathGroup = true;
                     grp.userData.toolpathSegmentIds = data.segmentIds;
                     grp.userData.toolpathSegmentRanges = data.segmentRanges;
+                    // Optional travel line: ascending per-edge reveal
+                    // thresholds (global spine fraction of each edge's END
+                    // point). Kept on the group — the line itself loads
+                    // async, so the mapping is resolved lazily at
+                    // draw-range time.
+                    if (data.travelId) {
+                        grp.userData.toolpathTravelId = data.travelId;
+                        grp.userData.toolpathTravelEndFracs =
+                            new Float32Array(data.travelEndFracs || []);
+                    }
                 }
                 break;
             }

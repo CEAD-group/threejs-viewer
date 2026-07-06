@@ -877,6 +877,7 @@ class ViewerClient:
         parent: Optional[str] = None,
         fat: bool = True,
         pickable: bool = True,
+        segments: bool = False,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -907,6 +908,16 @@ class ViewerClient:
                 it). Picking is still globally gated by
                 :meth:`enable_polyline_picking`; ``pickable`` only narrows
                 *which* objects participate.
+            segments: When ``True``, render disjoint line *segments* instead
+                of one connected polyline: consecutive point pairs
+                ``(0,1), (2,3), ...`` each draw an independent edge
+                (``THREE.LineSegments``) — many separate episodes (e.g. the
+                travel moves of a toolpath) in a single object/draw call with
+                no false connectors between them. Requires an even point
+                count and implies the native path (``fat`` is ignored);
+                per-vertex ``colors`` and ``set_draw_range`` (leading
+                ``frac*N`` points ⇒ whole edges) work as usual. Segment
+                soups have no arc length, so the object is never pickable.
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
@@ -914,6 +925,14 @@ class ViewerClient:
             points = points.flatten()
         else:
             n_points = len(points) // 3
+        if segments:
+            if n_points % 2 != 0:
+                raise ValueError(
+                    f"segments=True needs an even point count "
+                    f"(pairs of edge endpoints), got {n_points}"
+                )
+            fat = False
+            pickable = False
 
         # Process colors if provided
         color_bytes = b""
@@ -944,6 +963,8 @@ class ViewerClient:
             "fat": bool(fat),
             "pickable": bool(pickable),
         }
+        if segments:
+            header["segments"] = True
         if parent:
             header["parent"] = parent
         self._send_binary(header, raw_bytes)
@@ -1794,7 +1815,14 @@ class ViewerClient:
         }
         self._send_binary(header, colors_rgb.tobytes())
 
-    def add_toolpath(self, id: str, toolpath, **kwargs) -> None:
+    def add_toolpath(
+        self,
+        id: str,
+        toolpath,
+        travel: Optional[str] = None,
+        travel_color: int = 0x666666,
+        **kwargs,
+    ) -> None:
         """Add a Toolpath as one or more parametric tubes.
 
         When the toolpath has zero-width travel segments, it is split into
@@ -1806,9 +1834,28 @@ class ViewerClient:
         Args:
             id: Unique object identifier.
             toolpath: A :class:`Toolpath` instance.
+            travel: Pass ``"line"`` to also draw the travel moves themselves
+                — the thin hop lines every slicer preview shows. The travel
+                edges (every spine edge not interior to an extrusion run, so
+                each hop runs from the last extruded point through the
+                zero-width points to the next extruded point) render as
+                **one** native line-segments object (a single draw call for
+                any number of disjoint travel episodes, no false connectors
+                between them), wired into the group's draw-range
+                distribution: ``set_draw_range(id, frac)`` and the
+                ``draw_ranges`` channel reveal travel hops in exact lockstep
+                with the beads by global spine fraction — a contract, not
+                the draw-a-line-under-the-bead occlusion trick (which breaks
+                under ``opacity < 1`` and LOD thinning). No-op when the
+                toolpath has no travel stretches.
+            travel_color: Flat color (hex) of the travel line
+                (``travel="line"`` only).
             **kwargs: Forwarded to :meth:`add_parametric_tube` (e.g.
                 ``roughness``, ``metalness``, ``opacity``, ``parent``).
         """
+        if travel not in (None, False, "line"):
+            raise ValueError(f"travel must be None or 'line' (got {travel!r})")
+        want_travel = travel == "line"
         if "colors" not in kwargs:
             packed = toolpath.packed_colors
             if packed is not None:
@@ -1847,7 +1894,13 @@ class ViewerClient:
         if not segments:
             return
 
-        if len(segments) == 1:
+        # Travel edges: every spine edge NOT interior to an extrusion run —
+        # each hop spans from the last extruded point through the zero-width
+        # points to the next extruded point, so the line meets the bead ends.
+        travel_edge_idx = np.flatnonzero(~(extruding[:-1] & extruding[1:]))
+        use_group = len(segments) > 1 or (want_travel and len(travel_edge_idx) > 0)
+
+        if not use_group:
             s, e = segments[0]
             colors = kwargs.pop("colors", None)
             seg_colors = colors[s:e] if colors is not None else None
@@ -1892,15 +1945,35 @@ class ViewerClient:
                 **kwargs,
             )
 
-        # Tell the viewer this group is a toolpath with segment mapping
-        self._send(
-            {
-                "type": "register_toolpath_group",
-                "id": id,
-                "segmentIds": seg_ids,
-                "segmentRanges": seg_ranges,
-            }
-        )
+        # The travel line: one LineSegments object over all travel edges,
+        # revealed edge-by-edge in lockstep with the beads (an edge shows
+        # once the global spine fraction passes its END point, matching the
+        # segmentRanges convention above).
+        msg = {
+            "type": "register_toolpath_group",
+            "id": id,
+            "segmentIds": seg_ids,
+            "segmentRanges": seg_ranges,
+        }
+        if want_travel and len(travel_edge_idx) > 0:
+            pts = np.asarray(toolpath.points, dtype=np.float32).reshape(-1, 3)
+            pairs = np.empty((2 * len(travel_edge_idx), 3), dtype=np.float32)
+            pairs[0::2] = pts[travel_edge_idx]
+            pairs[1::2] = pts[travel_edge_idx + 1]
+            travel_id = f"{id}_travel"
+            self.add_polyline(
+                travel_id,
+                pairs,
+                color=travel_color,
+                fat=False,
+                segments=True,
+                parent=id,
+            )
+            msg["travelId"] = travel_id
+            msg["travelEndFracs"] = (
+                (travel_edge_idx + 1).astype(np.float64) / n_total
+            ).tolist()
+        self._send(msg)
 
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
