@@ -1936,12 +1936,19 @@ class ViewerClient:
 
         n_total = len(toolpath)
         seg_ids = []
-        seg_ranges = []  # (start_frac, end_frac) in [0,1] over total spine
+        # (start_frac, end_frac) per segment, in the draw_range value
+        # convention: value = fractional_point_index / (n_total - 1).
+        # Dividing by n_total instead skewed the recovered frontier index by
+        # exactly `value` points — up to one full G-code segment at the end
+        # of the path, i.e. hundreds of mm on long raster moves (the
+        # nozzle-vs-frontier desync).
+        seg_ranges = []
+        denom = float(n_total - 1)
 
         for i, (s, e) in enumerate(segments):
             seg_id = f"{id}_seg_{i}"
             seg_ids.append(seg_id)
-            seg_ranges.append([s / n_total, (e - 1) / n_total])
+            seg_ranges.append([s / denom, (e - 1) / denom])
             seg_colors = colors[s:e] if colors is not None else None
             # Thread the deposition-order bias ramp across the whole toolpath
             # (global spine index, not per-segment) so a retrace that crosses
@@ -1984,7 +1991,7 @@ class ViewerClient:
             )
             msg["travelId"] = travel_id
             msg["travelEndFracs"] = (
-                (travel_edge_idx + 1).astype(np.float64) / n_total
+                (travel_edge_idx + 1).astype(np.float64) / denom
             ).tolist()
         self._send(msg)
 

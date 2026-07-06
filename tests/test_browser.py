@@ -3683,10 +3683,196 @@ def test_toolpath_travel_line_lockstep_reveal(viewer_client, viewer_page):
             ".geometry.drawRange.count"
         )
 
-    # end fracs are [2/8, 3/8, 4/8, 6/8, 7/8]: whole edges appear as the
-    # global fraction passes each edge's end point.
+    # end fracs are [2/7, 3/7, 4/7, 6/7, 7/7] (draw_range convention
+    # index/(n-1)): whole edges appear as the global fraction passes each
+    # edge's end point.
     assert travel_count(0.0) == 0
     assert travel_count(0.20) == 0
-    assert travel_count(0.30) == 2  # first hop edge (ends at 2/8)
-    assert travel_count(0.55) == 6  # the whole first hop (2/8, 3/8, 4/8)
+    assert travel_count(0.30) == 2  # first hop edge (ends at 2/7 ~ 0.286)
+    assert travel_count(0.45) == 4  # second edge (3/7 ~ 0.429)
+    assert travel_count(0.60) == 6  # the whole first hop (4/7 ~ 0.571)
     assert travel_count(1.0) == 10  # everything
+
+
+@pytest.mark.browser
+def test_uniform_dt_fast_path_with_offset_start_time(viewer_client, viewer_page):
+    """_getFrameAtTime's uniform-dt fast path must be relative to
+    frames[0].time: a uniformly spaced timeline starting at t=100000
+    previously clamped every lookup to the last frame (issue #96)."""
+    viewer_client.add_box("obox")
+    time.sleep(0.1)
+    n = 200
+    times = 100_000.0 + np.arange(n, dtype=np.float64) * 0.01
+    transforms = np.zeros((n, 1, 16), dtype=np.float32)
+    transforms[:, 0, [0, 5, 10, 15]] = 1.0
+    transforms[:, 0, 12] = np.linspace(0.0, 1.0, n)  # x slides 0 -> 1
+    anim = Animation(loop=False)
+    anim.set_frame_times(times)
+    anim.set_transform_data(["obox"], transforms)
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(viewer_page)
+
+    state = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const mid = v._getFrameAtTime(100_001.005);"
+        " v._seekToTime(100_001.0);"
+        " const x = v._objects.get('obox').matrix.elements[12];"
+        " return {index: mid.index, t: mid.t, x,"
+        "         uniformDt: v._animation.uniformDt};"
+        "}"
+    )
+    assert state["uniformDt"] > 0, "test premise: fast path must be active"
+    assert state["index"] == 100
+    assert state["t"] == pytest.approx(0.5, abs=1e-6)
+    # seek to halfway: the box sits mid-slide, not at the end
+    assert state["x"] == pytest.approx(0.5, abs=0.02)
+
+
+@pytest.mark.browser
+def test_playback_pacing_smooths_and_clamps_stalls(viewer_client, viewer_page):
+    """The playhead advances by a smoothed frame delta (issue #97): during
+    playback the EMA is live, and a simulated 5 s stall (fake old
+    _lastAnimationUpdate) must NOT teleport the playhead by 5 s x speed —
+    the clamp caps the advance near the smoothed average."""
+    viewer_client.add_box("pbox")
+    time.sleep(0.1)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=10_000, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(viewer_page)
+
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.seekAnimationTime(0); v.setAnimationSpeed(100);"
+        " v.setAnimationPlaying(true); }"
+    )
+    time.sleep(0.5)
+    live = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return {t: v.getAnimationState().time,"
+        "         ema: v._smoothedFrameDelta}; }"
+    )
+    assert live["ema"] > 0, "EMA never seeded during playback"
+    assert live["t"] > 5, f"playhead barely advanced: {live}"
+
+    # Fake a 5 s render stall: raw delta would advance 5 s x 100 = 500 s;
+    # the clamp must keep the next tick near the ~16 ms average instead.
+    jump = viewer_page.evaluate(
+        "() => new Promise(resolve => {"
+        " const v = window.threejsViewer;"
+        " const before = v._animationTime;"
+        " v._lastAnimationUpdate = performance.now() - 5000;"
+        " requestAnimationFrame(() => requestAnimationFrame("
+        "   () => resolve(v._animationTime - before)));"
+        "})"
+    )
+    assert jump < 50, (
+        f"stalled frame teleported the playhead by {jump}s (unclamped would be ~500s)"
+    )
+
+
+@pytest.mark.browser
+def test_lod_frontier_lands_on_true_point_under_rdp_collapse(
+    viewer_client, viewer_page
+):
+    """Tube-LOD draw-range remap: RDP collapses collinear runs regardless of
+    point spacing, and interpolating across the collapsed span BY INDEX put
+    the frontier ~arbitrarily far from the true point (one long segment +
+    a dense flatten-tolerance cluster => ~98 mm error). The remap now
+    projects the true original-spine position onto the reduced chord."""
+    n_dense = 60
+    xs = np.concatenate([[0.0, 100.0], 100.0 + 0.1 * np.arange(1, n_dense + 1)])
+    n = len(xs)
+    spine = np.zeros((n, 3), dtype=np.float32)
+    spine[:, 0] = xs
+    viewer_client.add_parametric_tube(
+        "tube",
+        spine,
+        np.full(n, 2.0, dtype=np.float32),
+        np.full(n, 1.0, dtype=np.float32),
+        lod={"threshold": 0},
+    )
+    _wait_for(
+        viewer_page,
+        "() => { const o = window.threejsViewer._objects.get('tube');"
+        " return !!o && !!o.userData.tubeLOD"
+        "   && !!o.userData.tubeLOD.keptIndices; }",
+        timeout=20000,
+    )
+    # frontier at original point index 1 => true position x = 100.0
+    viewer_client.set_draw_range("tube", 1.0 / (n - 1))
+    time.sleep(0.3)
+    x = viewer_page.evaluate(
+        "() => {"
+        " const o = window.threejsViewer._objects.get('tube');"
+        " const md = o.userData.tubeMorphData;"
+        " if (!md || md.savedRingIndex == null) return null;"
+        " const nCs = o.userData.tubeNCs;"
+        " const pos = o.geometry.getAttribute('position').array;"
+        " let s = 0;"
+        " const rb = md.savedRingIndex * nCs;"
+        " for (let j = 0; j < nCs; j++) s += pos[(rb + j) * 3];"
+        " return s / nCs;"
+        "}"
+    )
+    assert x is not None, "no morphed frontier ring"
+    # buggy index-lerp put this at ~1.74; chord projection puts it at 100
+    assert x == pytest.approx(100.0, abs=0.5), f"frontier at x={x}, want ~100"
+
+
+@pytest.mark.browser
+def test_group_frontier_tracks_true_point_index(viewer_client, viewer_page):
+    """Travel-split toolpath groups: segmentRanges divided by n instead of
+    n-1, skewing the recovered frontier index by `value` points — up to a
+    full G-code segment near the end of the path (hundreds of mm on long
+    moves: the nozzle-vs-frontier desync). The frontier must land on the
+    exact point the draw_range value addresses, in every segment."""
+    from threejs_viewer import Toolpath
+
+    # segments with wildly different point spacing + a long trailing move
+    pts = np.zeros((10, 3), dtype=np.float32)
+    pts[:, 0] = [0, 1, 2, 3, 50, 51, 52, 53, 300, 301]
+    widths = np.array(
+        [0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.5, 0.5], dtype=np.float32
+    )
+    heights = np.where(widths > 0, 0.3, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    viewer_client.add_toolpath("g", tp)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._objects.get('g');"
+        " return !!g && g.userData.isToolpathGroup"
+        "   && g.children.filter(c => c.userData.isParametricTube).length === 3; }",
+    )
+
+    def frontier_x(value):
+        viewer_client.set_draw_range("g", value)
+        time.sleep(0.2)
+        return viewer_page.evaluate(
+            "() => {"
+            " const g = window.threejsViewer._objects.get('g');"
+            " for (const c of g.children) {"
+            "   const md = c.userData.tubeMorphData;"
+            "   if (!md || md.savedRingIndex == null) continue;"
+            "   const nCs = c.userData.tubeNCs;"
+            "   const pos = c.geometry.getAttribute('position').array;"
+            "   let s = 0;"
+            "   const rb = md.savedRingIndex * nCs;"
+            "   for (let j = 0; j < nCs; j++) s += pos[(rb + j) * 3];"
+            "   return s / nCs;"
+            " }"
+            " return null;"
+            "}"
+        )
+
+    n = len(pts)
+    # halfway between points 1 and 2 (x = 1.5), early in the path
+    x = frontier_x(1.5 / (n - 1))
+    assert x == pytest.approx(1.5, abs=0.05), f"early frontier at {x}"
+    # halfway into the LAST segment's first edge (points 8-9, x = 300.5):
+    # with the /n skew this recovered index ~9.4 -> clamped/wrong position
+    x = frontier_x(8.5 / (n - 1))
+    assert x == pytest.approx(300.5, abs=0.05), f"late frontier at {x}"
