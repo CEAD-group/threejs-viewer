@@ -491,26 +491,38 @@ def test_parametric_tube_frontier_restores_on_full(viewer_client, viewer_page):
     )
     _wait_for_object(viewer_page, "tube_restore")
 
-    # Morph ring 5 by setting draw_range to 0.5
-    viewer_client.set_draw_range("tube_restore", 0.5)
-    time.sleep(0.1)
-
-    # Now set to 1.0 — all rings should be at original positions
-    viewer_client.set_draw_range("tube_restore", 1.0)
-    time.sleep(0.1)
-
-    x_avg = viewer_page.evaluate(
-        """(id) => {
-            const obj = window.threejsViewer._objects.get(id);
-            const pos = obj.geometry.getAttribute('position').array;
-            const nCs = obj.userData.tubeNCs;
-            const ring5 = 5;
-            let sum = 0;
-            for (let j = 0; j < nCs; j++) sum += pos[(ring5 * nCs + j) * 3];
-            return sum / nCs;
-        }""",
-        "tube_restore",
+    ring5_x = (
+        "() => {"
+        " const obj = window.threejsViewer._objects.get('tube_restore');"
+        " const pos = obj.geometry.getAttribute('position').array;"
+        " const nCs = obj.userData.tubeNCs;"
+        " let sum = 0;"
+        " for (let j = 0; j < nCs; j++) sum += pos[(5 * nCs + j) * 3];"
+        " return sum / nCs;"
+        "}"
     )
+
+    # Morph ring 5 by setting draw_range to 0.5 — POLL until the morph has
+    # actually applied (fixed sleeps raced the WS delivery under full-suite
+    # load and read the ring mid-restore, #95).
+    viewer_client.set_draw_range("tube_restore", 0.5)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if abs(viewer_page.evaluate(ring5_x) - 4.5) < 0.05:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("draw_range 0.5 never morphed ring 5 to x~4.5")
+
+    # Now set to 1.0 — all rings should return to original positions.
+    viewer_client.set_draw_range("tube_restore", 1.0)
+    x_avg = None
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        x_avg = viewer_page.evaluate(ring5_x)
+        if abs(x_avg - 5.0) < 0.05:
+            break
+        time.sleep(0.02)
     assert abs(x_avg - 5.0) < 0.05, (
         f"Expected restored ring 5 center X ~5.0, got {x_avg}"
     )
