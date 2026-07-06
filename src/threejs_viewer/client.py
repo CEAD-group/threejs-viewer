@@ -1918,7 +1918,20 @@ class ViewerClient:
 
         # Multiple segments — create group + child tubes
         parent = kwargs.pop("parent", None)
-        self.add_group(id, parent=parent)
+        # Local-transform kwargs go on the GROUP (one transform node), not on
+        # each child: children stay in local coordinates, so the beads AND
+        # the travel line move together. Forwarding them per-child looked the
+        # same for tubes but silently left the travel line untransformed
+        # (add_polyline has no transform args).
+        xform = {
+            k: v
+            for k in ("position", "rotation", "scale")
+            if (v := kwargs.pop(k, None)) is not None
+        }
+        matrix = kwargs.pop("matrix", None)
+        self.add_group(id, parent=parent, **xform)
+        if matrix is not None:
+            self.set_matrix(id, matrix)
         colors = kwargs.pop("colors", None)
 
         n_total = len(toolpath)

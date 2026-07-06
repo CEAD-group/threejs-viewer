@@ -874,3 +874,25 @@ def test_add_toolpath_travel_validation_and_noop(client):
     client.add_toolpath("b", tp, travel="line")
     assert client._binary_messages[0][0]["type"] == "add_parametric_tube_binary"
     assert client._messages == []
+
+
+def test_add_toolpath_group_transform_covers_travel_line(client):
+    """Transform kwargs land on the GROUP, not on each child, so the travel
+    line (which has no transform args) stays aligned with the beads
+    (Copilot review on #94)."""
+    pts = np.zeros((8, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(8, dtype=np.float32)
+    widths = np.array([0.2, 0.2, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0], dtype=np.float32)
+    heights = np.where(widths > 0, 0.1, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_toolpath(
+        "b", tp, travel="line", position=[1, 2, 3], rotation=[0, 0, 0.5]
+    )
+    group_msg = client._messages[0]
+    assert group_msg["type"] == "add_group"
+    assert group_msg["transform"]["position"] == [1, 2, 3]
+    assert group_msg["transform"]["rotation"] == [0, 0, 0.5]
+    # no child (tube or travel line) carries its own transform
+    for header, _ in client._binary_messages:
+        assert "position" not in header and "rotation" not in header
+        assert "matrix" not in header
