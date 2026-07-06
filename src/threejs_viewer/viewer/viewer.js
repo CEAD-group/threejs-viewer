@@ -204,7 +204,6 @@ const _fpPos = new THREE.Vector3();
 const _fpAxis = new THREE.Vector3();
 const _fpQuat = new THREE.Quaternion();
 const _fpZ = new THREE.Vector3(0, 0, 1);
-const _fpOne = new THREE.Vector3(1, 1, 1);
 
 function sanitizeInterpolation(value, fallback) {
     if (value === 'hold' || value === 'linear') return value;
@@ -6182,6 +6181,12 @@ export class ThreeJSViewer {
         this._pointsLODGen = -1;
         this._pointsLODFrame = 0;
 
+        // Follow-path tracks (set_follow_path): id -> Float32Array rows of
+        // [t, px, py, pz, ax, ay, az]; pose computed per tick from the real
+        // path in _applyFollowPaths.
+        /** @type {Map<string, Float32Array>} */
+        this._followPaths = new Map();
+
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
 
@@ -7747,6 +7752,9 @@ export class ThreeJSViewer {
         // reads the baseline into a local before calling _deleteObject, so the
         // race fix is unaffected.
         this._baselineVisibility.delete(id);
+        // Same for follow-path tracks: a deleted id must not keep its path
+        // (a later re-add with the same id would silently snap to it).
+        this._followPaths.delete(id);
         const obj = this._objects.get(id);
         if (obj) {
             /** @type {string[]} */
@@ -7817,6 +7825,7 @@ export class ThreeJSViewer {
         for (const id of this._objects.keys()) {
             this._deleteObject(id);
         }
+        this._followPaths.clear();
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
@@ -8055,7 +8064,7 @@ export class ThreeJSViewer {
 
         this._applyFollowPaths();
 
-        // JSON frame path: every lerp-able field interpolates by default,        // JSON frame path: every lerp-able field interpolates by default,
+        // JSON frame path: every lerp-able field interpolates by default,
         // matching the binary-channel defaults. Visibility left-holds (no
         // meaningful linear for booleans).
         if (frame.transforms) {
@@ -8373,7 +8382,9 @@ export class ThreeJSViewer {
                         arr[a + 6] + w * (arr[b + 6] - arr[a + 6])).normalize();
             _fpQuat.setFromUnitVectors(_fpZ, _fpAxis);
             obj.matrixAutoUpdate = false;
-            obj.matrix.compose(_fpPos, _fpQuat, _fpOne);
+            // Keep the object's own scale — composing with (1,1,1) would
+            // silently un-scale a tool mesh that was scaled at add time.
+            obj.matrix.compose(_fpPos, _fpQuat, obj.scale);
             obj.matrixWorldNeedsUpdate = true;
         }
         this._sceneBoundsDirty = true;
@@ -10207,7 +10218,6 @@ export class ThreeJSViewer {
                     try {
                         const resp = await fetch(data.blob_url);
                         const buffer = await resp.arrayBuffer();
-                        this._followPaths ??= new Map();
                         this._followPaths.set(data.id, new Float32Array(buffer));
                         this._applyFollowPaths();   // place it at the current time
                         this._updateTrackingUI();   // followed object = valid camera-track target

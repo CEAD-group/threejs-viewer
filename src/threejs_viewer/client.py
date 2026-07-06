@@ -2062,12 +2062,14 @@ class ViewerClient:
         if not (len(t) == len(P) == len(A)) or len(t) < 2:
             raise ValueError(
                 f"follow path needs K>=2 matching rows: times {t.shape}, "
-                f"positions {P.shape}, axes {A.shape}")
+                f"positions {P.shape}, axes {A.shape}"
+            )
         if np.any(np.diff(t) < 0):
             raise ValueError("follow-path times must be non-decreasing")
         payload = np.column_stack([t, P, A]).astype(np.float32).tobytes()
-        self._send_binary({"type": "set_follow_path", "id": id,
-                           "count": int(len(t))}, payload)
+        self._send_binary(
+            {"type": "set_follow_path", "id": id, "count": int(len(t))}, payload
+        )
 
     def set_draw_range(self, id: str, value: float) -> None:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""

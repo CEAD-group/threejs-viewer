@@ -754,3 +754,32 @@ def test_set_camera_validation(client):
     with pytest.raises(ValueError, match="zoom"):
         client.set_camera(zoom=0)
     assert client._messages == []
+
+
+# === follow path ===
+
+
+def test_set_follow_path_payload(client):
+    times = np.array([0.0, 1.0, 3.0])
+    pos = np.array([[0, 0, 0], [1, 0, 0], [1, 2, 0]], dtype=np.float32)
+    axes = np.array([[0, 0, 1], [0, 0, 1], [1, 0, 0]], dtype=np.float32)
+    client.set_follow_path("tool", times, pos, axes)
+    header, payload = client._binary_messages[0]
+    assert header["type"] == "set_follow_path"
+    assert header["id"] == "tool"
+    assert header["count"] == 3
+    rows = np.frombuffer(payload, dtype=np.float32).reshape(3, 7)
+    np.testing.assert_array_equal(rows[:, 0], times.astype(np.float32))
+    np.testing.assert_array_equal(rows[:, 1:4], pos)
+    np.testing.assert_array_equal(rows[:, 4:7], axes)
+
+
+def test_set_follow_path_validation(client):
+    ok3 = np.zeros((3, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="K>=2"):
+        client.set_follow_path("t", [0.0], ok3[:1], ok3[:1])
+    with pytest.raises(ValueError, match="K>=2"):
+        client.set_follow_path("t", [0.0, 1.0, 2.0], ok3[:2], ok3)
+    with pytest.raises(ValueError, match="non-decreasing"):
+        client.set_follow_path("t", [0.0, 2.0, 1.0], ok3, ok3)
+    assert client._binary_messages == []

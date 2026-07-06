@@ -3097,3 +3097,92 @@ def test_edl_auto_enables_on_points_and_pin_wins(viewer_client, viewer_page):
         if vals == [77.0, 3.5]:
             break
     assert vals == [77.0, 3.5], f"EDL tuning did not reach the shader: {vals}"
+
+
+@pytest.mark.browser
+def test_follow_path_pose_scale_and_track_target(viewer_client, viewer_page):
+    """set_follow_path drives the object's exact pose from the path at the
+    animation playhead: position lerped, local +z onto the (nlerped) axis,
+    and the object's own scale preserved (regression: composing with
+    (1,1,1) silently un-scaled the tool). The followed object is also the
+    preferred camera-track target."""
+    viewer_client.add_box("fp_tool")
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_tool')"):
+            break
+    viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('fp_tool').scale.set(2, 2, 2)"
+    )
+    viewer_client.set_follow_path(
+        "fp_tool",
+        times=[0.0, 2.0],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+    )
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=2, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time=1.0)
+    _wait_for_animation_loaded(viewer_page)
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " if (!v._followPaths || !v._followPaths.has('fp_tool')) return null;"
+            " const e = v._objects.get('fp_tool').matrix.elements;"
+            " return {pos: [e[12], e[13], e[14]],"
+            "         zcol: [e[8], e[9], e[10]],"
+            "         xlen: Math.hypot(e[0], e[1], e[2])};"
+            "}"
+        )
+        if state is not None:
+            break
+    assert state is not None, "follow-path track never arrived in the browser"
+    # position: halfway along the path at t=1 of [0, 2]
+    assert state["pos"] == pytest.approx([2.0, 0.0, 0.0], abs=1e-5)
+    # local +z: nlerp of [0,0,1] and [1,0,0] at w=0.5, scaled by 2
+    zdir = np.array(state["zcol"]) / np.linalg.norm(state["zcol"])
+    assert zdir == pytest.approx([2**-0.5, 0.0, 2**-0.5], abs=1e-5)
+    # scale survives the per-tick matrix compose
+    assert state["xlen"] == pytest.approx(2.0, abs=1e-5)
+    assert np.linalg.norm(state["zcol"]) == pytest.approx(2.0, abs=1e-5)
+
+    # The followed object is the preferred auto camera-track target.
+    guess = viewer_page.evaluate("() => window.threejsViewer._guessTrackTarget()")
+    assert guess == "fp_tool"
+
+
+@pytest.mark.browser
+def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
+    """Follow-path tracks must not leak: delete_object drops that id's
+    track, clear() empties the map (issue #85)."""
+    viewer_client.add_box("fp_a")
+    viewer_client.add_box("fp_b")
+    time.sleep(0.1)
+    path = dict(
+        times=[0.0, 1.0],
+        positions=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+    viewer_client.set_follow_path("fp_a", **path)
+    viewer_client.set_follow_path("fp_b", **path)
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 2:
+            break
+    assert viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 2
+
+    viewer_client.delete("fp_a")
+    time.sleep(0.2)
+    assert viewer_page.evaluate(
+        "() => [...window.threejsViewer._followPaths.keys()]"
+    ) == ["fp_b"]
+
+    viewer_client.clear()
+    time.sleep(0.2)
+    assert viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 0
