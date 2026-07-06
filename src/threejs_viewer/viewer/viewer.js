@@ -8174,6 +8174,13 @@ export class ThreeJSViewer {
     }
 
     _guessTrackTarget() {
+        // Follow-path objects (set_follow_path) ride a timed toolpath — the
+        // natural thing to track. Prefer them over transform-channel ids.
+        if (this._followPaths?.size) {
+            for (const id of this._followPaths.keys()) {
+                if (this._objects.has(id)) return id;
+            }
+        }
         if (!this._animation?.channels?.transforms) return null;
         const ids = this._animation.channels.transforms.ids;
         const hints = ['nozzle', 'tip', 'tool', 'effector'];
@@ -8186,7 +8193,8 @@ export class ThreeJSViewer {
 
     _updateTrackingUI() {
         if (!this._btnTrack) return;
-        const hasTracking = this._trackTargetId || this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
+        const hasTracking = this._trackTargetId || this._followPaths?.size ||
+            this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
         this._btnTrack.style.display = (this._animation && hasTracking) ? '' : 'none';
         this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
 
@@ -10202,6 +10210,7 @@ export class ThreeJSViewer {
                         this._followPaths ??= new Map();
                         this._followPaths.set(data.id, new Float32Array(buffer));
                         this._applyFollowPaths();   // place it at the current time
+                        this._updateTrackingUI();   // followed object = valid camera-track target
                     } catch (e) {
                         console.error('set_follow_path failed:', e);
                     } finally {

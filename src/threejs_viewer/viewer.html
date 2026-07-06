@@ -679,7 +679,7 @@ const HTML_TEMPLATE = `<div class="tjsv-toolbar">
         <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">&#x27F3; Loop</button>
         <div class="frame-display">Frame <span class="tjsv-current-frame">0</span>/<span class="tjsv-total-frames">0</span></div>
     </div>
-    <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | &uarr;&darr;: Speed</div>
+    <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
 </div>
 
 <button class="tjsv-view-home" title="Reset view (F)" aria-label="Reset view">
@@ -9281,6 +9281,13 @@ class ThreeJSViewer {
     }
 
     _guessTrackTarget() {
+        // Follow-path objects (set_follow_path) ride a timed toolpath — the
+        // natural thing to track. Prefer them over transform-channel ids.
+        if (this._followPaths?.size) {
+            for (const id of this._followPaths.keys()) {
+                if (this._objects.has(id)) return id;
+            }
+        }
         if (!this._animation?.channels?.transforms) return null;
         const ids = this._animation.channels.transforms.ids;
         const hints = ['nozzle', 'tip', 'tool', 'effector'];
@@ -9293,7 +9300,8 @@ class ThreeJSViewer {
 
     _updateTrackingUI() {
         if (!this._btnTrack) return;
-        const hasTracking = this._trackTargetId || this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
+        const hasTracking = this._trackTargetId || this._followPaths?.size ||
+            this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
         this._btnTrack.style.display = (this._animation && hasTracking) ? '' : 'none';
         this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
 
@@ -11309,6 +11317,7 @@ class ThreeJSViewer {
                         this._followPaths ??= new Map();
                         this._followPaths.set(data.id, new Float32Array(buffer));
                         this._applyFollowPaths();   // place it at the current time
+                        this._updateTrackingUI();   // followed object = valid camera-track target
                     } catch (e) {
                         console.error('set_follow_path failed:', e);
                     } finally {
