@@ -200,6 +200,12 @@ function lerpHexColor(a, b, t) {
  * @param {unknown} value
  * @param {string} fallback
  */
+const _fpPos = new THREE.Vector3();
+const _fpAxis = new THREE.Vector3();
+const _fpQuat = new THREE.Quaternion();
+const _fpZ = new THREE.Vector3(0, 0, 1);
+const _fpOne = new THREE.Vector3(1, 1, 1);
+
 function sanitizeInterpolation(value, fallback) {
     if (value === 'hold' || value === 'linear') return value;
     if (value != null) {
@@ -8047,7 +8053,9 @@ export class ThreeJSViewer {
             }
         }
 
-        // JSON frame path: every lerp-able field interpolates by default,
+        this._applyFollowPaths();
+
+        // JSON frame path: every lerp-able field interpolates by default,        // JSON frame path: every lerp-able field interpolates by default,
         // matching the binary-channel defaults. Visibility left-holds (no
         // meaningful linear for booleans).
         if (frame.transforms) {
@@ -8317,6 +8325,50 @@ export class ThreeJSViewer {
         this._animationTime = this._animation.frames[newFrame].time;
         this._applyFrame(newFrame);
         this._updateAnimationUI();
+    }
+
+    /**
+     * Follow-path tracks: an object rides a timed 5-axis path (times, tips,
+     * axes) — the pose is computed HERE from the real path at the current
+     * animation time (lerp tip, nlerp axis, minimal rotation of local +z
+     * onto the axis), so the motion is exact regardless of how coarsely the
+     * animation frames sample the timeline (a 4-hour cut at 240 frames
+     * would otherwise linearize a 300k-point path into 240 chords).
+     * Data: Float32Array rows of 7 = [t, px, py, pz, ax, ay, az], t ascending.
+     */
+    _applyFollowPaths() {
+        if (!this._followPaths || this._followPaths.size === 0) return;
+        const time = this._animationTime;
+        for (const [id, arr] of this._followPaths) {
+            const obj = this._objects.get(id);
+            if (!obj) continue;
+            const K = (arr.length / 7) | 0;
+            if (K < 1) continue;
+            // binary search: last key with t <= time
+            let lo = 0, hi = K - 1;
+            if (time <= arr[0]) { hi = 0; lo = 0; }
+            else if (time >= arr[(K - 1) * 7]) { lo = K - 1; hi = K - 1; }
+            else {
+                while (hi - lo > 1) {
+                    const mid = (lo + hi) >> 1;
+                    if (arr[mid * 7] <= time) lo = mid; else hi = mid;
+                }
+            }
+            const a = lo * 7, b = Math.min(lo + 1, K - 1) * 7;
+            const dt = arr[b] - arr[a];
+            const w = dt > 0 ? Math.min(1, Math.max(0, (time - arr[a]) / dt)) : 0;
+            _fpPos.set(arr[a + 1] + w * (arr[b + 1] - arr[a + 1]),
+                       arr[a + 2] + w * (arr[b + 2] - arr[a + 2]),
+                       arr[a + 3] + w * (arr[b + 3] - arr[a + 3]));
+            _fpAxis.set(arr[a + 4] + w * (arr[b + 4] - arr[a + 4]),
+                        arr[a + 5] + w * (arr[b + 5] - arr[a + 5]),
+                        arr[a + 6] + w * (arr[b + 6] - arr[a + 6])).normalize();
+            _fpQuat.setFromUnitVectors(_fpZ, _fpAxis);
+            obj.matrixAutoUpdate = false;
+            obj.matrix.compose(_fpPos, _fpQuat, _fpOne);
+            obj.matrixWorldNeedsUpdate = true;
+        }
+        this._sceneBoundsDirty = true;
     }
 
     /** @param {number} time */
@@ -10141,6 +10193,23 @@ export class ThreeJSViewer {
             case 'set_clip_time':
                 this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
                 break;
+            case 'set_follow_path': {
+                this._onFetchStart();
+                (async () => {
+                    try {
+                        const resp = await fetch(data.blob_url);
+                        const buffer = await resp.arrayBuffer();
+                        this._followPaths ??= new Map();
+                        this._followPaths.set(data.id, new Float32Array(buffer));
+                        this._applyFollowPaths();   // place it at the current time
+                    } catch (e) {
+                        console.error('set_follow_path failed:', e);
+                    } finally {
+                        this._onFetchEnd();
+                    }
+                })();
+                break;
+            }
             case 'set_points_time':
                 this._withObject(data.id, 'set_points_time', () => this._setPointsTime(data.id, data.time));
                 break;
