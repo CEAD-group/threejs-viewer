@@ -3584,6 +3584,21 @@ def test_embedder_overlays(viewer_client, viewer_page):
         "}"
     )
 
+    # id reuse: a replaced (stale) instance must not be able to remove the
+    # overlay currently registered under that id (#93 review follow-up)
+    assert viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const a = window.__ov.clone(), b = window.__ov.clone();"
+        " v.addOverlay(a, {id: 'reused'});"
+        " v.addOverlay(b, {id: 'reused'});"  # replaces a
+        " const staleNoop = v.removeOverlay(a) === false;"
+        " const bStill = b.parent === v._scene;"
+        " const bGone = v.removeOverlay(b) === true && b.parent === null;"
+        " return staleNoop && bStill && bGone;"
+        "}"
+    )
+
 
 @pytest.mark.browser
 def test_status_chip_neutral_default_and_set_status(viewer_client, viewer_page):
