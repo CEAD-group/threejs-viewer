@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.41
+
+### Float64 time/fraction precision on long toolpaths (#100)
+
+- **Follow-path key times are now float64 on the wire.** `set_follow_path` packs `(K,)` float64 seconds followed by `(K,6)` float32 `[px,py,pz,ax,ay,az]` (was float32 rows of 7); the viewer binary-searches the f64 times against the f64 playhead. Float32's time resolution degrades with absolute magnitude — ~1 ms ulp at t=10,000 s, ~4 ms at 40,000 s, ~15.6 ms at 160,000 s — which wobbled the tool's per-segment velocity (up to ~0.8 mm position error at 50 mm/s late in an hours-long timeline) and collapsed keys spaced closer than the ulp to `dt=0` (hold-then-jump stutter). Positions/axes stay float32: mm-scale geometry has ~1e-5 mm resolution there and was never the problem.
+- **`draw_ranges`, `clip_times`, and `point_times` channels pack float64** (and `add_channel` accepts `dtype="float64"` generally). A draw-range value is a fraction of *total* arc length, so one float32 ulp near 1.0 (~6e-8) is ~0.5 mm of frontier position on a multi-km spine — keyframe knots visibly wobbled the frontier against a follow-path-driven tool; clip/point times are absolute seconds with the same magnitude collapse. `transforms` and camera channels stay float32 (mm-scale values; doubling would be real memory at 16 floats/object/frame). The payload packer sorts channels by element size descending so the float64 block leads the blob and every channel's byte offset is aligned to its element size; the viewer copies misaligned hand-packed `handleMessage` payloads instead of throwing.
+- **The uniform-dt fast-path gate now bounds *cumulative* deviation** (`|t_i − (t0 + i·dt0)| ≤ dt0·1e-3`), not the interval-to-interval delta. The fast path derives the frame index from `dt0` alone, so the old per-interval tolerance let error accumulate linearly along the timeline — a "nearly uniform" cumsum timeline could drift tens of frames near its end, desyncing keyframed channels from follow-path tracks (which binary-search their true key times). Timelines outside the tightened gate fall back to the exact binary search (16 comparisons on a 40k-frame timeline — not a real cost).
+- **The 0.0.40 EMA pace smoothing (#97) is removed.** It papered over playhead jitter whose actual source was the float32 quantization above, and it added its own artefact: the playhead lags/leads wall time while the average catches up. Playback now advances by the raw per-rAF wall-clock delta — real time is the pacing reference — with a single-delta cap (`PLAYBACK_MAX_FRAME_DELTA = 0.25 s`) so a backgrounded tab or GC stall still can't teleport the playhead by minutes × speed.
+
 ## 0.0.40
 
 ### Point clouds: per-point time windows (#79)
