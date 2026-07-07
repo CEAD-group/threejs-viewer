@@ -113,7 +113,7 @@ def test_set_draw_range_data():
 
     assert len(animation._channels) == 1
     assert animation._channels[0].name == "draw_ranges"
-    assert animation._channels[0].dtype == "float32"
+    assert animation._channels[0].dtype == "float64"
     assert animation._channels[0].stride == 1
 
 
@@ -128,7 +128,7 @@ def test_set_clip_time_data():
 
     assert len(animation._channels) == 1
     assert animation._channels[0].name == "clip_times"
-    assert animation._channels[0].dtype == "float32"
+    assert animation._channels[0].dtype == "float64"
     assert animation._channels[0].stride == 1
 
 
@@ -143,7 +143,7 @@ def test_set_point_time_data():
 
     assert len(animation._channels) == 1
     assert animation._channels[0].name == "point_times"
-    assert animation._channels[0].dtype == "float32"
+    assert animation._channels[0].dtype == "float64"
     assert animation._channels[0].stride == 1
     assert animation._channels[0].interpolation == "linear"
 

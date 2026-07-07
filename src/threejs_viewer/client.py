@@ -2149,7 +2149,7 @@ class ViewerClient:
             positions: (K, 3) tip positions.
             axes: (K, 3) unit tool-axis vectors.
         """
-        t = np.asarray(times, np.float32).reshape(-1)
+        t = np.asarray(times, np.float64).reshape(-1)
         P = np.asarray(positions, np.float32).reshape(-1, 3)
         A = np.asarray(axes, np.float32).reshape(-1, 3)
         if not (len(t) == len(P) == len(A)) or len(t) < 2:
@@ -2159,7 +2159,13 @@ class ViewerClient:
             )
         if np.any(np.diff(t) < 0):
             raise ValueError("follow-path times must be non-decreasing")
-        payload = np.column_stack([t, P, A]).astype(np.float32).tobytes()
+        # Times ship as float64: float32's time resolution degrades with
+        # magnitude (~4 ms ulp at t=40,000 s, ~16 ms at 160,000 s), which on
+        # hours-long timelines turns into visible nozzle jitter and frontier
+        # desync — and collapses sub-ulp-spaced keys to dt=0. Positions/axes
+        # stay float32 (mm-scale geometry is fine at ~1e-5 mm resolution).
+        # Layout: (K,) f64 times, then (K, 6) f32 [px, py, pz, ax, ay, az].
+        payload = t.tobytes() + np.column_stack([P, A]).astype(np.float32).tobytes()
         self._send_binary(
             {"type": "set_follow_path", "id": id, "count": int(len(t))}, payload
         )
@@ -3087,11 +3093,18 @@ class ViewerClient:
             )
 
         # Build binary payload from channels
-        # Sort by dtype byte size descending (float32/uint32 first, uint8 last)
-        # to avoid alignment padding between channels.
-        dtype_bytes = {"float32": 4, "uint32": 4, "uint8": 1}
+        # Sort by dtype byte size descending (float64 first, then
+        # float32/uint32, uint8 last) so every channel's byte offset is a
+        # multiple of its element size — Float64Array views require 8-byte
+        # alignment in the browser.
+        dtype_bytes = {"float64": 8, "float32": 4, "uint32": 4, "uint8": 1}
         sorted_channels = sorted(channels, key=lambda ch: -dtype_bytes[ch.dtype])
-        np_dtypes = {"float32": np.float32, "uint32": np.uint32, "uint8": np.uint8}
+        np_dtypes = {
+            "float64": np.float64,
+            "float32": np.float32,
+            "uint32": np.uint32,
+            "uint8": np.uint8,
+        }
 
         binary_parts = []
         channel_manifest = []

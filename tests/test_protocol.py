@@ -768,10 +768,56 @@ def test_set_follow_path_payload(client):
     assert header["type"] == "set_follow_path"
     assert header["id"] == "tool"
     assert header["count"] == 3
-    rows = np.frombuffer(payload, dtype=np.float32).reshape(3, 7)
-    np.testing.assert_array_equal(rows[:, 0], times.astype(np.float32))
-    np.testing.assert_array_equal(rows[:, 1:4], pos)
-    np.testing.assert_array_equal(rows[:, 4:7], axes)
+    # Layout: (K,) f64 times, then (K, 6) f32 [px, py, pz, ax, ay, az].
+    t = np.frombuffer(payload[: 3 * 8], dtype=np.float64)
+    rows = np.frombuffer(payload[3 * 8 :], dtype=np.float32).reshape(3, 6)
+    np.testing.assert_array_equal(t, times)
+    np.testing.assert_array_equal(rows[:, 0:3], pos)
+    np.testing.assert_array_equal(rows[:, 3:6], axes)
+
+
+def test_set_follow_path_times_keep_float64_precision(client):
+    # Millisecond-spaced keys late in an hours-long timeline: float32's ulp
+    # at t=160,000 s is ~15.6 ms, so f32 packing would collapse these to
+    # equal (or 1-ulp-stepped) values. The f64 payload must round-trip them
+    # bit-exactly.
+    times = 160_000.0 + np.array([0.0, 0.005, 0.010])
+    pos = np.zeros((3, 3), dtype=np.float32)
+    axes = np.tile(np.array([0, 0, 1], dtype=np.float32), (3, 1))
+    client.set_follow_path("tool", times, pos, axes)
+    _, payload = client._binary_messages[0]
+    t = np.frombuffer(payload[: 3 * 8], dtype=np.float64)
+    np.testing.assert_array_equal(t, times)
+    assert np.all(np.diff(t) > 0), "adjacent keys must stay distinct"
+
+
+def test_animation_float64_channels_layout_and_precision(client):
+    """draw_ranges/clip_times/point_times pack as float64: the packer sorts
+    channels size-descending so the float64 block leads the payload (8-byte
+    aligned for the browser's Float64Array view), and fraction values that
+    would collapse to 1.0 in float32 stay distinct."""
+    from threejs_viewer import Animation
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0, 2.0]))
+    # uint8 channel added FIRST — the packer must still emit float64 first.
+    anim.add_channel(
+        "visibility", ["a"], np.ones((3, 1), dtype=np.uint8), dtype="uint8"
+    )
+    # Adjacent fractions ~1e-9 apart near 1.0: one float32 ulp there is
+    # ~6e-8, so f32 packing would quantize all three to exactly 1.0.
+    fracs = 1.0 - np.array([[3e-9], [2e-9], [1e-9]])
+    anim.set_draw_range_data(["a"], fracs)
+    client.load_animation(anim, autoplay=False)
+
+    header = next(m for m in client._messages if m["type"] == "load_animation_http")
+    assert [ch["dtype"] for ch in header["channels"]] == ["float64", "uint8"]
+    blob_key = "/" + header["blob_url"].rsplit("/", 1)[1]
+    payload = client._blob_store[blob_key]
+    packed = np.frombuffer(payload[: 3 * 8], dtype=np.float64)
+    np.testing.assert_array_equal(packed, fracs.ravel())
+    assert np.all(np.diff(packed) > 0), "fractions must stay distinct"
+    assert not np.any(packed == 1.0)
 
 
 def test_set_follow_path_validation(client):
