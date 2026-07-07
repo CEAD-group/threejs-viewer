@@ -115,7 +115,7 @@ Binary channel API:
 - `animation.add_channel(name, ids, data, dtype, stride, metadata)` — generic channel
 
 Supported channel types: `transforms` (stride=16), `draw_ranges`, `colors`, `visibility`, `opacity`, `clip_times`, `point_times`
-Supported dtypes: `float32`, `uint32`, `uint8`
+Supported dtypes: `float64`, `float32`, `uint32`, `uint8`. The `draw_ranges`, `clip_times`, and `point_times` convenience setters pack **float64**: their values are fractions of total arc length / absolute seconds, where one float32 ulp is ~0.5 mm of frontier position on a multi-km toolpath or ~16 ms at t=160,000 s (knots wobble, ms-spaced keys collapse to equal values). `transforms` and camera channels stay float32 (mm-scale values, and 2x the bytes would be real memory there). The packer sorts channels by element size descending so the float64 block leads the payload and every channel's byte offset is aligned to its element size; the viewer copies misaligned hand-packed `handleMessage` payloads instead of throwing.
 Indexed colors: `dtype="uint8"` + `metadata={"colormap": [0x44AA44, 0xFF3333]}`
 
 Binary channels and Frame-based JSON can coexist. A binary channel supersedes the same-named Frame field.

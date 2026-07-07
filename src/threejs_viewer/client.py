@@ -3093,11 +3093,18 @@ class ViewerClient:
             )
 
         # Build binary payload from channels
-        # Sort by dtype byte size descending (float32/uint32 first, uint8 last)
-        # to avoid alignment padding between channels.
-        dtype_bytes = {"float32": 4, "uint32": 4, "uint8": 1}
+        # Sort by dtype byte size descending (float64 first, then
+        # float32/uint32, uint8 last) so every channel's byte offset is a
+        # multiple of its element size — Float64Array views require 8-byte
+        # alignment in the browser.
+        dtype_bytes = {"float64": 8, "float32": 4, "uint32": 4, "uint8": 1}
         sorted_channels = sorted(channels, key=lambda ch: -dtype_bytes[ch.dtype])
-        np_dtypes = {"float32": np.float32, "uint32": np.uint32, "uint8": np.uint8}
+        np_dtypes = {
+            "float64": np.float64,
+            "float32": np.float32,
+            "uint32": np.uint32,
+            "uint8": np.uint8,
+        }
 
         binary_parts = []
         channel_manifest = []

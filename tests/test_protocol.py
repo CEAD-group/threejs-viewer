@@ -791,6 +791,35 @@ def test_set_follow_path_times_keep_float64_precision(client):
     assert np.all(np.diff(t) > 0), "adjacent keys must stay distinct"
 
 
+def test_animation_float64_channels_layout_and_precision(client):
+    """draw_ranges/clip_times/point_times pack as float64: the packer sorts
+    channels size-descending so the float64 block leads the payload (8-byte
+    aligned for the browser's Float64Array view), and fraction values that
+    would collapse to 1.0 in float32 stay distinct."""
+    from threejs_viewer import Animation
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0, 2.0]))
+    # uint8 channel added FIRST — the packer must still emit float64 first.
+    anim.add_channel(
+        "visibility", ["a"], np.ones((3, 1), dtype=np.uint8), dtype="uint8"
+    )
+    # Adjacent fractions ~1e-9 apart near 1.0: one float32 ulp there is
+    # ~6e-8, so f32 packing would quantize all three to exactly 1.0.
+    fracs = 1.0 - np.array([[3e-9], [2e-9], [1e-9]])
+    anim.set_draw_range_data(["a"], fracs)
+    client.load_animation(anim, autoplay=False)
+
+    header = next(m for m in client._messages if m["type"] == "load_animation_http")
+    assert [ch["dtype"] for ch in header["channels"]] == ["float64", "uint8"]
+    blob_key = "/" + header["blob_url"].rsplit("/", 1)[1]
+    payload = client._blob_store[blob_key]
+    packed = np.frombuffer(payload[: 3 * 8], dtype=np.float64)
+    np.testing.assert_array_equal(packed, fracs.ravel())
+    assert np.all(np.diff(packed) > 0), "fractions must stay distinct"
+    assert not np.any(packed == 1.0)
+
+
 def test_set_follow_path_validation(client):
     ok3 = np.zeros((3, 3), dtype=np.float32)
     with pytest.raises(ValueError, match="K>=2"):

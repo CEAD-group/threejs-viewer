@@ -10,7 +10,7 @@ from typing import Literal, get_args
 
 import numpy as np
 
-ALLOWED_DTYPES = {"float32", "uint32", "uint8"}
+ALLOWED_DTYPES = {"float64", "float32", "uint32", "uint8"}
 
 # Valid interpolation modes:
 #   "linear" — lerp/slerp between keyframes (smooth playback); default
@@ -41,7 +41,7 @@ class AnimationChannel:
     name: str
     ids: list[str]
     data: np.ndarray  # (n_frames, n_ids, stride) or (n_frames, n_ids) for stride=1
-    dtype: str  # "float32", "uint32", "uint8"
+    dtype: str  # "float64", "float32", "uint32", "uint8"
     stride: int  # elements per object per frame (16 for 4x4 matrices, 1 for scalars)
     metadata: dict | None  # e.g. {"colormap": [0x44AA44, 0xFF3333]}
     # How this channel blends between keyframes. Always set to a concrete
@@ -178,7 +178,10 @@ class Animation:
             name: Channel name (e.g. "transforms", "colors", "visibility").
             object_ids: Ordered list of object IDs matching axis 1 of data.
             data: Array of shape (n_frames, n_objects * stride). Will be cast to dtype.
-            dtype: Element type — "float32", "uint32", or "uint8".
+            dtype: Element type — "float64", "float32", "uint32", or "uint8".
+                Use float64 for values whose absolute magnitude eats float32
+                precision (times in seconds on hours-long timelines, arc-length
+                fractions of very long toolpaths).
             stride: Elements per object per frame (16 for 4x4 matrices, 1 for scalars).
             metadata: Extra info sent in the header (e.g. colormap for indexed colors).
             interpolation: How this channel blends between keyframes — "linear"
@@ -236,12 +239,18 @@ class Animation:
         data: np.ndarray,
         interpolation: InterpolationMode = "linear",
     ) -> None:
-        """Convenience: add a 'draw_ranges' channel."""
+        """Convenience: add a 'draw_ranges' channel.
+
+        Packed float64: the value is a fraction of TOTAL arc length, so one
+        float32 ulp near 1.0 (~6e-8) is half a millimetre of frontier
+        position on a multi-kilometre toolpath — the keyframe knots visibly
+        wobble against a follow-path-driven tool.
+        """
         self.add_channel(
             "draw_ranges",
             object_ids,
             data,
-            dtype="float32",
+            dtype="float64",
             stride=1,
             interpolation=interpolation,
         )
@@ -257,12 +266,14 @@ class Animation:
         clip_times drives an AnimationMixer seek into an embedded GLTF clip.
         Linear (the default) produces smooth playback; pass "hold" for
         frame-accurate seeks that don't advance between keyframes.
+        Packed float64 — values are absolute seconds, and float32 quantizes
+        to milliseconds at hours-long magnitudes.
         """
         self.add_channel(
             "clip_times",
             object_ids,
             data,
-            dtype="float32",
+            dtype="float64",
             stride=1,
             interpolation=interpolation,
         )
@@ -280,12 +291,15 @@ class Animation:
         becomes the cloud's scrub time ``t`` and the shader shows only points
         with ``birth_time <= t < removal_time``. Linear (the default) scrubs
         smoothly between keyframes; pass "hold" for stepwise time jumps.
+        Packed float64 — values are absolute seconds, and float32 quantizes
+        to milliseconds at hours-long magnitudes (the GPU-side compare stays
+        float32, but keyframe knots no longer collapse to equal values).
         """
         self.add_channel(
             "point_times",
             object_ids,
             data,
-            dtype="float32",
+            dtype="float64",
             stride=1,
             interpolation=interpolation,
         )

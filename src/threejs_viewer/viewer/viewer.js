@@ -9164,6 +9164,7 @@ export class ThreeJSViewer {
                         const nFrames = data.frame_count;
                         /** @type {Record<string, {ArrayType: any, bytes: number}>} */
                         const DTYPE_INFO = {
+                            float64: { ArrayType: Float64Array, bytes: 8 },
                             float32: { ArrayType: Float32Array, bytes: 4 },
                             uint32:  { ArrayType: Uint32Array,  bytes: 4 },
                             uint8:   { ArrayType: Uint8Array,   bytes: 1 },
@@ -9181,8 +9182,15 @@ export class ThreeJSViewer {
                                 const info = DTYPE_INFO[ch.dtype];
                                 if (!info) { console.error(`Unknown channel dtype '${ch.dtype}' for '${ch.name}', skipping`); continue; }
                                 const count = nFrames * ch.ids.length * ch.stride;
+                                // Typed-array views need byteOffset aligned to the
+                                // element size. The Python packer sorts channels
+                                // size-descending so this never copies, but a
+                                // hand-packed handleMessage payload might not.
+                                const data = byteOffset % info.bytes === 0
+                                    ? new info.ArrayType(buffer, byteOffset, count)
+                                    : new info.ArrayType(buffer.slice(byteOffset, byteOffset + count * info.bytes));
                                 channels[ch.name] = {
-                                    data: new info.ArrayType(buffer, byteOffset, count),
+                                    data,
                                     ids: ch.ids,
                                     stride: ch.stride,
                                     refs: null,
