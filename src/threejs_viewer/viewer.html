@@ -7405,10 +7405,13 @@ class ThreeJSViewer {
         this._pointsLODGen = -1;
         this._pointsLODFrame = 0;
 
-        // Follow-path tracks (set_follow_path): id -> Float32Array rows of
-        // [t, px, py, pz, ax, ay, az]; pose computed per tick from the real
-        // path in _applyFollowPaths.
-        /** @type {Map<string, Float32Array>} */
+        // Follow-path tracks (set_follow_path): id -> {times: Float64Array
+        // (K), data: Float32Array rows of [px, py, pz, ax, ay, az]}; pose
+        // computed per tick from the real path in _applyFollowPaths. Times
+        // are float64 on purpose — float32's ulp is milliseconds at
+        // hours-long absolute times, which jitters the tool and collapses
+        // densely-spaced keys to dt=0.
+        /** @type {Map<string, {times: Float64Array, data: Float32Array}>} */
         this._followPaths = new Map();
 
         // Embedder-owned overlays (addOverlay): id -> Object3D. Not part of
@@ -9167,12 +9170,21 @@ class ThreeJSViewer {
         }
 
         if (this._animation.frames.length >= 2) {
-            const dt0 = this._animation.frames[1].time - this._animation.frames[0].time;
+            const frames = this._animation.frames;
+            const t0 = frames[0].time;
+            const dt0 = frames[1].time - t0;
             let uniform = dt0 > 0;
             if (uniform) {
-                for (let i = 2; i < this._animation.frames.length; i++) {
-                    const dt = this._animation.frames[i].time - this._animation.frames[i - 1].time;
-                    if (Math.abs(dt - dt0) > dt0 * 1e-3) { uniform = false; break; }
+                // Gate on CUMULATIVE deviation from t0 + i*dt0, not on the
+                // interval-to-interval delta: the fast path derives the frame
+                // index from dt0 alone, so a per-interval tolerance lets the
+                // error accumulate linearly along the timeline (0.1% of dt
+                // per frame ≈ tens of frames of drift near the end of a
+                // 40k-frame cumsum timeline — keyframed objects visibly
+                // desynced from follow-path tracks, which binary-search
+                // their true key times).
+                for (let i = 2; i < frames.length; i++) {
+                    if (Math.abs(frames[i].time - (t0 + i * dt0)) > dt0 * 1e-3) { uniform = false; break; }
                 }
             }
             this._animation.uniformDt = uniform ? dt0 : 0;
@@ -9641,35 +9653,40 @@ class ThreeJSViewer {
      * onto the axis), so the motion is exact regardless of how coarsely the
      * animation frames sample the timeline (a 4-hour cut at 240 frames
      * would otherwise linearize a 300k-point path into 240 chords).
-     * Data: Float32Array rows of 7 = [t, px, py, pz, ax, ay, az], t ascending.
+     * Data: (K,) Float64Array times (ascending) + Float32Array rows of
+     * 6 = [px, py, pz, ax, ay, az]. Times must stay float64: the playhead
+     * is float64, and float32 key times quantize to whole milliseconds at
+     * hours-long absolute times (ulp ≈ 16 ms at t = 160,000 s).
      */
     _applyFollowPaths() {
         if (!this._followPaths || this._followPaths.size === 0) return;
         const time = this._animationTime;
-        for (const [id, arr] of this._followPaths) {
+        for (const [id, track] of this._followPaths) {
             const obj = this._objects.get(id);
             if (!obj) continue;
-            const K = (arr.length / 7) | 0;
+            const times = track.times, arr = track.data;
+            const K = times.length;
             if (K < 1) continue;
             // binary search: last key with t <= time
             let lo = 0, hi = K - 1;
-            if (time <= arr[0]) { hi = 0; lo = 0; }
-            else if (time >= arr[(K - 1) * 7]) { lo = K - 1; hi = K - 1; }
+            if (time <= times[0]) { hi = 0; lo = 0; }
+            else if (time >= times[K - 1]) { lo = K - 1; hi = K - 1; }
             else {
                 while (hi - lo > 1) {
                     const mid = (lo + hi) >> 1;
-                    if (arr[mid * 7] <= time) lo = mid; else hi = mid;
+                    if (times[mid] <= time) lo = mid; else hi = mid;
                 }
             }
-            const a = lo * 7, b = Math.min(lo + 1, K - 1) * 7;
-            const dt = arr[b] - arr[a];
-            const w = dt > 0 ? Math.min(1, Math.max(0, (time - arr[a]) / dt)) : 0;
-            _fpPos.set(arr[a + 1] + w * (arr[b + 1] - arr[a + 1]),
-                       arr[a + 2] + w * (arr[b + 2] - arr[a + 2]),
-                       arr[a + 3] + w * (arr[b + 3] - arr[a + 3]));
-            _fpAxis.set(arr[a + 4] + w * (arr[b + 4] - arr[a + 4]),
-                        arr[a + 5] + w * (arr[b + 5] - arr[a + 5]),
-                        arr[a + 6] + w * (arr[b + 6] - arr[a + 6])).normalize();
+            const hiIdx = Math.min(lo + 1, K - 1);
+            const a = lo * 6, b = hiIdx * 6;
+            const dt = times[hiIdx] - times[lo];
+            const w = dt > 0 ? Math.min(1, Math.max(0, (time - times[lo]) / dt)) : 0;
+            _fpPos.set(arr[a] + w * (arr[b] - arr[a]),
+                       arr[a + 1] + w * (arr[b + 1] - arr[a + 1]),
+                       arr[a + 2] + w * (arr[b + 2] - arr[a + 2]));
+            _fpAxis.set(arr[a + 3] + w * (arr[b + 3] - arr[a + 3]),
+                        arr[a + 4] + w * (arr[b + 4] - arr[a + 4]),
+                        arr[a + 5] + w * (arr[b + 5] - arr[a + 5])).normalize();
             _fpQuat.setFromUnitVectors(_fpZ, _fpAxis);
             obj.matrixAutoUpdate = false;
             // Keep the object's own scale — composing with (1,1,1) would
@@ -11533,7 +11550,13 @@ class ThreeJSViewer {
                     try {
                         const resp = await fetch(data.blob_url);
                         const buffer = await resp.arrayBuffer();
-                        this._followPaths.set(data.id, new Float32Array(buffer));
+                        // Layout: (K,) f64 times, then (K, 6) f32
+                        // [px, py, pz, ax, ay, az] — see client.set_follow_path.
+                        const K = data.count;
+                        this._followPaths.set(data.id, {
+                            times: new Float64Array(buffer, 0, K),
+                            data: new Float32Array(buffer, K * 8, K * 6),
+                        });
                         this._applyFollowPaths();   // place it at the current time
                         this._updateTrackingUI();   // followed object = valid camera-track target
                     } catch (e) {

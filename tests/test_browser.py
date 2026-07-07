@@ -3158,6 +3158,49 @@ def test_follow_path_pose_scale_and_track_target(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_follow_path_float64_time_precision(viewer_client, viewer_page):
+    """Keys 8 ms apart at t=160,000 s must interpolate, not collapse.
+    float32's ulp at that magnitude is ~15.6 ms, so the old f32-packed
+    times quantized both keys to the same value (dt=0 -> the tool held at
+    the first key); the (K,) float64 time vector keeps them distinct and
+    the pose lands halfway."""
+    viewer_client.add_box("fp_prec")
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_prec')"):
+            break
+    t0, t1 = 160_000.0, 160_000.008
+    viewer_client.set_follow_path(
+        "fp_prec",
+        times=[t0, t1],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+    anim = Animation(
+        frames=[Frame(time=t0, transforms={}), Frame(time=t1, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time=(t0 + t1) / 2)
+    _wait_for_animation_loaded(viewer_page)
+
+    pos = None
+    for _ in range(40):
+        time.sleep(0.05)
+        pos = viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " if (!v._followPaths || !v._followPaths.has('fp_prec')) return null;"
+            " const e = v._objects.get('fp_prec').matrix.elements;"
+            " return [e[12], e[13], e[14]];"
+            "}"
+        )
+        if pos is not None:
+            break
+    assert pos is not None, "follow-path track never arrived in the browser"
+    assert pos == pytest.approx([2.0, 0.0, 0.0], abs=1e-3)
+
+
+@pytest.mark.browser
 def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
     """Follow-path tracks must not leak: delete_object drops that id's
     track, clear() empties the map (issue #85)."""

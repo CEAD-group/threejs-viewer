@@ -768,10 +768,27 @@ def test_set_follow_path_payload(client):
     assert header["type"] == "set_follow_path"
     assert header["id"] == "tool"
     assert header["count"] == 3
-    rows = np.frombuffer(payload, dtype=np.float32).reshape(3, 7)
-    np.testing.assert_array_equal(rows[:, 0], times.astype(np.float32))
-    np.testing.assert_array_equal(rows[:, 1:4], pos)
-    np.testing.assert_array_equal(rows[:, 4:7], axes)
+    # Layout: (K,) f64 times, then (K, 6) f32 [px, py, pz, ax, ay, az].
+    t = np.frombuffer(payload[: 3 * 8], dtype=np.float64)
+    rows = np.frombuffer(payload[3 * 8 :], dtype=np.float32).reshape(3, 6)
+    np.testing.assert_array_equal(t, times)
+    np.testing.assert_array_equal(rows[:, 0:3], pos)
+    np.testing.assert_array_equal(rows[:, 3:6], axes)
+
+
+def test_set_follow_path_times_keep_float64_precision(client):
+    # Millisecond-spaced keys late in an hours-long timeline: float32's ulp
+    # at t=160,000 s is ~15.6 ms, so f32 packing would collapse these to
+    # equal (or 1-ulp-stepped) values. The f64 payload must round-trip them
+    # bit-exactly.
+    times = 160_000.0 + np.array([0.0, 0.005, 0.010])
+    pos = np.zeros((3, 3), dtype=np.float32)
+    axes = np.tile(np.array([0, 0, 1], dtype=np.float32), (3, 1))
+    client.set_follow_path("tool", times, pos, axes)
+    _, payload = client._binary_messages[0]
+    t = np.frombuffer(payload[: 3 * 8], dtype=np.float64)
+    np.testing.assert_array_equal(t, times)
+    assert np.all(np.diff(t) > 0), "adjacent keys must stay distinct"
 
 
 def test_set_follow_path_validation(client):
