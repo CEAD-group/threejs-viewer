@@ -32,18 +32,15 @@ const VIEWER_BACKGROUND_CSS = '#222222';
 
 // Logarithmic speed steps: 0.001x to 1000x
 const SPEED_STEPS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000];
-// Playback pace smoothing (issue #97): the playhead advances by a short EMA
-// of the per-rAF wall-clock delta instead of the raw delta, so render-cost
-// jitter doesn't modulate playback velocity. Alpha 0.1 ≈ a 10-frame window;
-// raw deltas are clamped to CLAMP× the current average before entering the
-// EMA so one stalled frame (GC pause, background tab) can't teleport the
-// playhead or poison the average.
-const PLAYBACK_DELTA_EMA_ALPHA = 0.1;
-const PLAYBACK_DELTA_CLAMP = 3;
-// Consecutive same-side out-of-band deltas that constitute a frame-rate
-// regime change (background-tab throttling, bad seed) rather than a one-off
-// outlier — the EMA snaps to the live delta instead of slow-walking there.
-const PLAYBACK_PACE_SNAP_TICKS = 3;
+// Playback advances by the RAW per-rAF wall-clock delta — real time is the
+// pacing reference. (The issue #97 EMA smoothing is gone: the jitter it
+// papered over was float32 time/fraction quantization, fixed at the source
+// in PR #100, and the EMA added its own artefact — the playhead lags/leads
+// wall time while the average catches up.) A single delta above this cap
+// means the tab was backgrounded or the main thread stalled (GC, tab
+// switch); cap it so one stalled frame can't teleport the playhead by
+// minutes × speed.
+const PLAYBACK_MAX_FRAME_DELTA = 0.25;
 
 const CLIP_AXIS_NORMALS = {
     'x+': new THREE.Vector3(1, 0, 0),
@@ -6242,8 +6239,6 @@ export class ThreeJSViewer {
         this._animationSpeed = 1;
         // EMA of the per-rAF wall-clock delta (s) used to pace playback
         // (issue #97); 0 = unseeded, primed from the first played frame.
-        this._smoothedFrameDelta = 0;
-        this._paceOutlierTicks = 0;  // signed run length of out-of-band deltas
         this._animationLoop = true;
         this._lastAnimationUpdate = 0;
         this._baselineVisibility = new Map();
@@ -10667,44 +10662,10 @@ export class ThreeJSViewer {
             const deltaTime = (now - this._lastAnimationUpdate) / 1000;
             this._lastAnimationUpdate = now;
 
-            // Pace smoothing (issue #97): advancing by the raw wall-clock
-            // delta passes every render-cost fluctuation straight into
-            // playback velocity — on heavy scenes (tube morph, LOD, growing
-            // geometry) the frame cost varies continuously, so the playhead
-            // visibly accelerates/decelerates, amplified by the speed
-            // multiplier (one 4x-slow frame = a 4x playhead jump). Advance
-            // by a short EMA of the delta instead: velocity stays visually
-            // constant while still tracking real time on average.
-            //
-            // Outlier vs regime change: a SINGLE out-of-band delta (GC
-            // pause, double-fired rAF) is clamped into [ema/C, ema*C] so it
-            // can neither teleport the playhead nor poison the average; but
-            // PLAYBACK_PACE_SNAP_TICKS consecutive deltas on the same side
-            // mean the frame rate really changed (rAF throttled in a
-            // background tab, or an unrepresentative seed) — snap the EMA
-            // to the live delta instead of letting the clamp slow-walk it
-            // there over dozens of frames.
-            let ema = this._smoothedFrameDelta;
-            if (ema <= 0) ema = deltaTime;
-            let paced = deltaTime;
-            if (deltaTime > ema * PLAYBACK_DELTA_CLAMP) {
-                paced = ema * PLAYBACK_DELTA_CLAMP;
-                this._paceOutlierTicks = Math.max(1, this._paceOutlierTicks + 1);
-            } else if (deltaTime < ema / PLAYBACK_DELTA_CLAMP) {
-                paced = ema / PLAYBACK_DELTA_CLAMP;
-                this._paceOutlierTicks = Math.min(-1, this._paceOutlierTicks - 1);
-            } else {
-                this._paceOutlierTicks = 0;
-            }
-            if (Math.abs(this._paceOutlierTicks) >= PLAYBACK_PACE_SNAP_TICKS) {
-                ema = deltaTime;
-                this._paceOutlierTicks = 0;
-            } else {
-                ema += (paced - ema) * PLAYBACK_DELTA_EMA_ALPHA;
-            }
-            this._smoothedFrameDelta = ema;
-
-            this._animationTime += ema * this._animationSpeed;
+            // Raw wall-clock advance, capped: a delta past the cap is a
+            // stall (backgrounded tab, GC pause), not playback.
+            const paced = Math.min(deltaTime, PLAYBACK_MAX_FRAME_DELTA);
+            this._animationTime += paced * this._animationSpeed;
 
             if (this._animationTime >= this._animation.duration) {
                 if (this._animationLoop) {

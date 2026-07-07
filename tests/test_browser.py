@@ -3773,11 +3773,13 @@ def test_uniform_dt_fast_path_with_offset_start_time(viewer_client, viewer_page)
 
 
 @pytest.mark.browser
-def test_playback_pacing_smooths_and_clamps_stalls(viewer_client, viewer_page):
-    """The playhead advances by a smoothed frame delta (issue #97): during
-    playback the EMA is live, and a simulated 5 s stall (fake old
-    _lastAnimationUpdate) must NOT teleport the playhead by 5 s x speed —
-    the clamp caps the advance near the smoothed average."""
+def test_playback_advances_by_wall_clock_and_caps_stalls(viewer_client, viewer_page):
+    """The playhead advances by the RAW wall-clock delta (the issue #97 EMA
+    smoothing is gone — the jitter it papered over was float32 quantization,
+    fixed at the source), but a single stalled frame (fake 5 s old
+    _lastAnimationUpdate, e.g. a backgrounded tab) is capped at
+    PLAYBACK_MAX_FRAME_DELTA so it can't teleport the playhead by
+    5 s x speed."""
     viewer_client.add_box("pbox")
     time.sleep(0.1)
     anim = Animation(
@@ -3793,16 +3795,13 @@ def test_playback_pacing_smooths_and_clamps_stalls(viewer_client, viewer_page):
         " v.setAnimationPlaying(true); }"
     )
     time.sleep(0.5)
-    live = viewer_page.evaluate(
-        "() => { const v = window.threejsViewer;"
-        " return {t: v.getAnimationState().time,"
-        "         ema: v._smoothedFrameDelta}; }"
-    )
-    assert live["ema"] > 0, "EMA never seeded during playback"
-    assert live["t"] > 5, f"playhead barely advanced: {live}"
+    t = viewer_page.evaluate("() => window.threejsViewer.getAnimationState().time")
+    # Raw pacing: ~0.5 s of wall time x 100 = ~50 s of timeline (generous
+    # bounds — headless rAF cadence is noisy under suite load).
+    assert t > 5, f"playhead barely advanced: {t}"
 
     # Fake a 5 s render stall: raw delta would advance 5 s x 100 = 500 s;
-    # the clamp must keep the next tick near the ~16 ms average instead.
+    # the cap must limit the next tick to <= 0.25 s x 100 = 25 s.
     jump = viewer_page.evaluate(
         "() => new Promise(resolve => {"
         " const v = window.threejsViewer;"
@@ -3812,8 +3811,8 @@ def test_playback_pacing_smooths_and_clamps_stalls(viewer_client, viewer_page):
         "   () => resolve(v._animationTime - before)));"
         "})"
     )
-    assert jump < 50, (
-        f"stalled frame teleported the playhead by {jump}s (unclamped would be ~500s)"
+    assert jump < 30, (
+        f"stalled frame advanced the playhead by {jump}s (uncapped would be ~500s)"
     )
 
 
