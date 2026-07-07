@@ -69,3 +69,18 @@ def test_unknown_colormap_defaults_to_viridis():
 
     # Should use viridis instead
     assert result.shape == (3, 3)
+
+
+def test_colormap_tables_are_exact_reference_data():
+    """The lookup tables are the real 256-entry reference colormaps (matplotlib
+    color data), not stop approximations: pin first/mid/last entries."""
+    client = ViewerClient()
+    # 0, 128/255 and 1 hit table nodes exactly (0.5 would land between nodes)
+    ends = client._apply_colormap(np.array([0.0, 128 / 255, 1.0]), "viridis", 0.0, 1.0)
+    np.testing.assert_allclose(ends[0], [0.267004, 0.004874, 0.329415], atol=1e-6)
+    np.testing.assert_allclose(ends[2], [0.993248, 0.906157, 0.143936], atol=1e-6)
+    # node 128 is the teal ~#21918c (the old approximation had no exact entry here)
+    np.testing.assert_allclose(ends[1], [0.127568, 0.566949, 0.550556], atol=1e-6)
+    plasma = client._apply_colormap(np.array([0.0, 1.0]), "plasma", 0.0, 1.0)
+    np.testing.assert_allclose(plasma[0], [0.050383, 0.029803, 0.527975], atol=1e-6)
+    np.testing.assert_allclose(plasma[1], [0.940015, 0.975158, 0.131326], atol=1e-6)
