@@ -209,6 +209,65 @@ def test_add_parametric_tube_lod_non_dict_rejected():
         c.add_parametric_tube("t", spine, widths, heights, lod="bogus")
 
 
+def _base_payload_len(n):
+    """Bytes for spine + widths + heights only (no colours/orientations)."""
+    return n * 3 * 4 + n * 4 + n * 4
+
+
+def test_add_parametric_tube_break_before_none_is_byte_identical():
+    """No break_before → no flag, no trailing bytes (default blob unchanged)."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights)
+    header, payload = c._binary_messages[-1]
+    assert header["hasBreakMask"] is False
+    assert len(payload) == _base_payload_len(4)
+
+
+def test_add_parametric_tube_break_before_all_zero_omits_mask():
+    """An all-zero mask carries no information → treated as no breaks."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t", spine, widths, heights, break_before=np.zeros(4, dtype=bool)
+    )
+    header, payload = c._binary_messages[-1]
+    assert header["hasBreakMask"] is False
+    assert len(payload) == _base_payload_len(4)
+
+
+def test_add_parametric_tube_break_before_packs_trailing_uint8():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    mask = np.array([0, 0, 1, 0], dtype=bool)  # break before spine point 2
+    c.add_parametric_tube("t", spine, widths, heights, break_before=mask)
+    header, payload = c._binary_messages[-1]
+    assert header["hasBreakMask"] is True
+    tail = np.frombuffer(payload[_base_payload_len(4) :], dtype=np.uint8)
+    assert tail.tolist() == [0, 0, 1, 0]
+
+
+def test_add_parametric_tube_break_before_non_bool_normalized():
+    """Any non-zero value is a break; the mask is packed as 0/1 uint8."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    mask = np.array([0, 3, 0, -2], dtype=np.int32)
+    c.add_parametric_tube("t", spine, widths, heights, break_before=mask)
+    header, payload = c._binary_messages[-1]
+    assert header["hasBreakMask"] is True
+    tail = np.frombuffer(payload[_base_payload_len(4) :], dtype=np.uint8)
+    assert tail.tolist() == [0, 1, 0, 1]
+
+
+def test_add_parametric_tube_break_before_wrong_length_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="break_before must have length"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, break_before=np.zeros(3, dtype=bool)
+        )
+
+
 def test_add_parametric_tube_strand_collapse_default_omits_header_key():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
@@ -405,6 +464,132 @@ def test_parametric_tube_builds_expected_geometry(viewer_client, viewer_page):
     assert info["bbLength"] < 2.5, info
     assert abs(info["bbWidth"] - 0.4) < 0.05, info
     assert abs(info["bbHeight"] - 0.2) < 0.05, info
+
+
+def _tube_geom_probe(page, obj_id):
+    """Return {vertexCount, indexCount, totalIndex, maxEdge} for a tube. maxEdge
+    is the longest triangle edge (degenerate triangles contribute 0), so a
+    stray bridge across a spatial gap shows up as a large value."""
+    return page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            if (!obj) return null;
+            const geom = obj.geometry;
+            const pos = geom.getAttribute('position').array;
+            const idx = geom.getIndex().array;
+            let maxEdge = 0;
+            for (let t = 0; t < idx.length; t += 3) {
+                const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+                const tri = [[a, b], [b, c], [c, a]];
+                for (const [i, j] of tri) {
+                    const dx = pos[i*3]-pos[j*3], dy = pos[i*3+1]-pos[j*3+1], dz = pos[i*3+2]-pos[j*3+2];
+                    const d = Math.hypot(dx, dy, dz);
+                    if (d > maxEdge) maxEdge = d;
+                }
+            }
+            return {
+                vertexCount: geom.getAttribute('position').count,
+                indexCount: geom.getIndex().count,
+                totalIndex: obj.userData.totalIndexCount,
+                maxEdge,
+            };
+        }""",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_parametric_tube_break_before_splits_and_caps(viewer_client, viewer_page):
+    """A break_before at a spatial gap splits the tube into two capped strips:
+    no triangle bridges the gap, index layout (pacing) is unchanged vs the
+    un-broken tube, and the two flat caps add exactly 2*nCs vertices."""
+    n_cs = 6
+    # Two collinear parts with a 4-unit gap: A at x∈[0,1], B at x∈[5,6].
+    part_a = np.linspace(0.0, 1.0, 10, dtype=np.float32)
+    part_b = np.linspace(5.0, 6.0, 10, dtype=np.float32)
+    x = np.concatenate([part_a, part_b])
+    n = x.shape[0]
+    spine = np.column_stack([x, np.zeros(n, np.float32), np.zeros(n, np.float32)])
+    widths = np.full(n, 0.4, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    mask = np.zeros(n, dtype=bool)
+    mask[10] = True  # break before the first point of part B
+
+    # Same spine, no break → the reference (bridged) geometry.
+    viewer_client.add_parametric_tube(
+        "tube_nobreak", spine=spine, widths=widths, heights=heights, lod=False
+    )
+    viewer_client.add_parametric_tube(
+        "tube_break",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        break_before=mask,
+        lod=False,
+    )
+    _wait_for_object(viewer_page, "tube_nobreak")
+    _wait_for_object(viewer_page, "tube_break")
+
+    ref = _tube_geom_probe(viewer_page, "tube_nobreak")
+    brk = _tube_geom_probe(viewer_page, "tube_break")
+
+    # Pacing parity: same index count / totalIndex (caps ride in the pair slot).
+    assert brk["indexCount"] == ref["indexCount"], (ref, brk)
+    assert brk["totalIndex"] == ref["totalIndex"], (ref, brk)
+    # One break adds two flat caps = 2 * nCs rim verts.
+    assert brk["vertexCount"] == ref["vertexCount"] + 2 * n_cs, (ref, brk)
+    # The un-broken tube bridges the 4-unit gap (a long stray quad edge); the
+    # broken tube must not — its longest edge stays within a single part.
+    assert ref["maxEdge"] > 3.5, ref
+    assert brk["maxEdge"] < 1.5, brk
+
+
+@pytest.mark.browser
+def test_parametric_tube_break_before_survives_lod(viewer_client, viewer_page):
+    """The break mask is remapped onto the LOD-reduced spine: with LOD forced
+    on (threshold=0), the un-broken tube still bridges the gap but the broken
+    tube stays split — breaks are not lost to simplification."""
+
+    # Two shallow-zigzag parts (curvature makes RDP retain points) with a
+    # 4-unit x gap between them, so a bridge would be a long stray edge.
+    def _zigzag(x0):
+        x = np.linspace(x0, x0 + 1.0, 12, dtype=np.float32)
+        y = 0.3 * np.sin(np.linspace(0, 6.0, 12)).astype(np.float32)
+        return np.column_stack([x, y, np.zeros(12, np.float32)])
+
+    spine = np.concatenate([_zigzag(0.0), _zigzag(5.0)]).astype(np.float32)
+    n = spine.shape[0]
+    widths = np.full(n, 0.4, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    mask = np.zeros(n, dtype=bool)
+    mask[12] = True  # break before part B
+
+    lod = {"threshold": 0}  # force LOD on this short spine
+    viewer_client.add_parametric_tube(
+        "lod_nobreak", spine=spine, widths=widths, heights=heights, lod=lod
+    )
+    viewer_client.add_parametric_tube(
+        "lod_break",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        break_before=mask,
+        lod=lod,
+    )
+    _wait_for_object(viewer_page, "lod_nobreak")
+    _wait_for_object(viewer_page, "lod_break")
+
+    # Confirm LOD actually engaged (reduced spine present).
+    lod_on = viewer_page.evaluate(
+        "(id) => !!(window.threejsViewer._objects.get(id).userData.tubeLOD)",
+        "lod_break",
+    )
+    assert lod_on, "LOD did not engage"
+
+    ref = _tube_geom_probe(viewer_page, "lod_nobreak")
+    brk = _tube_geom_probe(viewer_page, "lod_break")
+    assert ref["maxEdge"] > 3.5, ref  # bridge across the gap under LOD
+    assert brk["maxEdge"] < 1.5, brk  # break preserved through remap
 
 
 @pytest.mark.browser
