@@ -68,6 +68,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {Object<string, string>} [cubemapData]       Map of face name -> base64 JPEG
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
+ * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
@@ -639,10 +640,12 @@ const DEFAULT_TONE_MAPPING_EXPOSURE = 1.0;
 const DEFAULT_ENVIRONMENT_INTENSITY = 2.0;
 const DEFAULT_AMBIENT_INTENSITY = 1.5;
 const DEFAULT_TONE_MAPPING = 'aces';
+const DEFAULT_ENVIRONMENT_MAP = true;
 const LS_KEY_TONE_MAPPING_EXPOSURE = 'tjsv.toneMappingExposure';
 const LS_KEY_ENVIRONMENT_INTENSITY = 'tjsv.environmentIntensity';
 const LS_KEY_AMBIENT_INTENSITY = 'tjsv.ambientIntensity';
 const LS_KEY_TONE_MAPPING = 'tjsv.toneMapping';
+const LS_KEY_ENVIRONMENT_MAP = 'tjsv.environmentMap';
 
 // Tone-mapping mode name -> THREE.* constant. Resolved lazily so THREE only
 // needs to be loaded when the viewer actually instantiates.
@@ -718,11 +721,13 @@ function resolveFov(options, urlParams) {
  * @returns {{
  *     exposure: number,
  *     envIntensity: number,
+ *     envEnabled: boolean,
  *     ambientIntensity: number,
  *     toneMapping: string,
  *     reset: {
  *         exposure: number,
  *         envIntensity: number,
+ *         envEnabled: boolean,
  *         ambientIntensity: number,
  *         toneMapping: string,
  *     },
@@ -735,6 +740,15 @@ function resolveLightingDefaults(options, urlParams) {
         const n = typeof raw === 'number' ? raw : parseFloat(raw);
         return Number.isFinite(n) ? n : null;
     };
+    /** @type {(raw: (string|null|number|boolean|undefined)) => (boolean|null)} */
+    const parseBool = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        if (typeof raw === 'boolean') return raw;
+        const s = String(raw).toLowerCase();
+        if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+        if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
+        return null;
+    };
     /** @type {(raw: (string|null|undefined)) => (string|null)} */
     const parseToneMapping = (raw) => {
         if (raw === null || raw === undefined || raw === '') return null;
@@ -743,19 +757,23 @@ function resolveLightingDefaults(options, urlParams) {
     };
     const urlExp = parseFinite(urlParams.get('tone_mapping_exposure'));
     const urlEnv = parseFinite(urlParams.get('environment_intensity'));
+    const urlEnvMap = parseBool(urlParams.get('environment_map'));
     const urlAmb = parseFinite(urlParams.get('ambient_intensity'));
     const urlTm = parseToneMapping(urlParams.get('tone_mapping'));
     const optExp = parseFinite(options.toneMappingExposure);
     const optEnv = parseFinite(options.environmentIntensity);
+    const optEnvMap = parseBool(options.environmentMap);
     const optAmb = parseFinite(options.ambientIntensity);
     const optTm = parseToneMapping(options.toneMapping);
     let lsExp = null;
     let lsEnv = null;
+    let lsEnvMap = null;
     let lsAmb = null;
     let lsTm = null;
     try {
         lsExp = parseFinite(localStorage.getItem(LS_KEY_TONE_MAPPING_EXPOSURE));
         lsEnv = parseFinite(localStorage.getItem(LS_KEY_ENVIRONMENT_INTENSITY));
+        lsEnvMap = parseBool(localStorage.getItem(LS_KEY_ENVIRONMENT_MAP));
         lsAmb = parseFinite(localStorage.getItem(LS_KEY_AMBIENT_INTENSITY));
         lsTm = parseToneMapping(localStorage.getItem(LS_KEY_TONE_MAPPING));
     } catch (e) { /* ignore storage errors */ }
@@ -767,6 +785,9 @@ function resolveLightingDefaults(options, urlParams) {
     const resetEnvIntensity = urlEnv != null ? urlEnv
         : optEnv != null ? optEnv
         : DEFAULT_ENVIRONMENT_INTENSITY;
+    const resetEnvEnabled = urlEnvMap != null ? urlEnvMap
+        : optEnvMap != null ? optEnvMap
+        : DEFAULT_ENVIRONMENT_MAP;
     const resetAmbientIntensity = urlAmb != null ? urlAmb
         : optAmb != null ? optAmb
         : DEFAULT_AMBIENT_INTENSITY;
@@ -784,6 +805,10 @@ function resolveLightingDefaults(options, urlParams) {
         : optEnv != null ? optEnv
         : lsEnv != null ? lsEnv
         : DEFAULT_ENVIRONMENT_INTENSITY;
+    const envEnabled = urlEnvMap != null ? urlEnvMap
+        : optEnvMap != null ? optEnvMap
+        : lsEnvMap != null ? lsEnvMap
+        : DEFAULT_ENVIRONMENT_MAP;
     const ambientIntensity = urlAmb != null ? urlAmb
         : optAmb != null ? optAmb
         : lsAmb != null ? lsAmb
@@ -795,11 +820,13 @@ function resolveLightingDefaults(options, urlParams) {
     return {
         exposure,
         envIntensity,
+        envEnabled,
         ambientIntensity,
         toneMapping,
         reset: {
             exposure: resetExposure,
             envIntensity: resetEnvIntensity,
+            envEnabled: resetEnvEnabled,
             ambientIntensity: resetAmbientIntensity,
             toneMapping: resetToneMapping,
         },
@@ -6202,6 +6229,10 @@ export class ThreeJSViewer {
         // URL param is always authoritative (developer's explicit choice) — panel edits go to
         // localStorage but don't override a URL-provided value on reload.
         this._lightingDefaults = resolveLightingDefaults(options, urlParams);
+        // IBL environment map on/off (uglier-but-faster toggle). The PMREM map
+        // is retained on `_envMap` so the toggle can restore it without a rebuild.
+        this._envEnabled = this._lightingDefaults.envEnabled;
+        this._envMap = null;
 
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
@@ -6363,6 +6394,7 @@ export class ThreeJSViewer {
         this._lightingExposureValue = q('.tjsv-lighting-exposure-value');
         this._lightingEnvSlider = q('.tjsv-lighting-env');
         this._lightingEnvValue = q('.tjsv-lighting-env-value');
+        this._lightingEnvMapCheck = q('.tjsv-lighting-env-map');
         this._lightingAmbientSlider = q('.tjsv-lighting-ambient');
         this._lightingAmbientValue = q('.tjsv-lighting-ambient-value');
         this._lightingToneMappingSelect = q('.tjsv-lighting-tone-mapping');
@@ -6735,7 +6767,8 @@ export class ThreeJSViewer {
                 if (loaded === 6) {
                     cubeTexture.needsUpdate = true;
                     const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
-                    scene.environment = envMap;
+                    this._envMap = envMap;
+                    scene.environment = this._envEnabled ? envMap : null;
                     scene.environmentIntensity = this._lightingDefaults.envIntensity;
                     cubeTexture.dispose();
                     pmremGenerator.dispose();
@@ -7159,6 +7192,18 @@ export class ThreeJSViewer {
         this._scene.environmentIntensity = value;
     }
 
+    /**
+     * Toggle the IBL environment map. Off drops `scene.environment` (no per-pixel
+     * PBR reflection lookups) for a flatter, uglier, but faster render; on restores
+     * the retained PMREM map. A no-op-safe null when the cubemap never loaded.
+     * @param {boolean} enabled
+     */
+    _applyEnvironmentEnabled(enabled) {
+        this._envEnabled = enabled;
+        this._scene.environment = enabled ? (this._envMap || null) : null;
+        if (this._lightingEnvSlider) this._lightingEnvSlider.disabled = !enabled;
+    }
+
     _applyAmbientIntensity(value) {
         if (this._ambientLight) this._ambientLight.intensity = value;
     }
@@ -7204,17 +7249,20 @@ export class ThreeJSViewer {
         const d = this._lightingDefaults.reset;
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING_EXPOSURE); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_ENVIRONMENT_INTENSITY); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem(LS_KEY_ENVIRONMENT_MAP); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_AMBIENT_INTENSITY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING); } catch (e) { /* ignore */ }
         this._applyToneMapping(d.toneMapping);
         this._applyToneMappingExposure(d.exposure);
         this._applyEnvironmentIntensity(d.envIntensity);
+        this._applyEnvironmentEnabled(d.envEnabled);
         this._applyAmbientIntensity(d.ambientIntensity);
         this._lightingToneMappingSelect.value = d.toneMapping;
         this._lightingExposureSlider.value = String(d.exposure);
         this._lightingExposureValue.textContent = d.exposure.toFixed(2);
         this._lightingEnvSlider.value = String(d.envIntensity);
         this._lightingEnvValue.textContent = d.envIntensity.toFixed(2);
+        this._lightingEnvMapCheck.checked = d.envEnabled;
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
     }
@@ -7227,6 +7275,8 @@ export class ThreeJSViewer {
         this._lightingExposureValue.textContent = d.exposure.toFixed(2);
         this._lightingEnvSlider.value = String(d.envIntensity);
         this._lightingEnvValue.textContent = d.envIntensity.toFixed(2);
+        this._lightingEnvMapCheck.checked = d.envEnabled;
+        this._lightingEnvSlider.disabled = !d.envEnabled;
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
@@ -7252,6 +7302,11 @@ export class ThreeJSViewer {
             this._applyEnvironmentIntensity(v);
             this._lightingEnvValue.textContent = v.toFixed(2);
             this._writeLightingLocalStorage(LS_KEY_ENVIRONMENT_INTENSITY, v);
+        });
+        this._lightingEnvMapCheck.addEventListener('change', () => {
+            const enabled = this._lightingEnvMapCheck.checked;
+            this._applyEnvironmentEnabled(enabled);
+            this._writeLightingLocalStorage(LS_KEY_ENVIRONMENT_MAP, enabled);
         });
         this._lightingAmbientSlider.addEventListener('input', () => {
             const v = parseFloat(this._lightingAmbientSlider.value);

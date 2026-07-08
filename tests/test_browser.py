@@ -1435,6 +1435,64 @@ def test_tone_mapping_change_flushes_materials(page):
 
 
 @pytest.mark.browser
+def test_environment_map_toggle_drops_and_restores(page):
+    """The lighting panel's Environment map checkbox nulls scene.environment
+    (uglier-but-faster) and restores the retained PMREM map when re-checked."""
+    client = _start_client()
+    try:
+        page.goto(f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}")
+        _wait_for_viewer(page)
+        # Wait for the cubemap PMREM env map to finish loading (async images).
+        page.wait_for_function(
+            "() => window.threejsViewer._envMap != null", timeout=10_000
+        )
+        assert page.evaluate("() => window.threejsViewer._scene.environment != null")
+        # Uncheck -> scene.environment nulled, retained map preserved.
+        page.evaluate(
+            """() => {
+                const cb = window.threejsViewer._lightingEnvMapCheck;
+                cb.checked = false;
+                cb.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        assert page.evaluate("() => window.threejsViewer._scene.environment == null")
+        assert page.evaluate("() => window.threejsViewer._envMap != null")
+        # Re-check -> restored from the retained map.
+        page.evaluate(
+            """() => {
+                const cb = window.threejsViewer._lightingEnvMapCheck;
+                cb.checked = true;
+                cb.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        assert page.evaluate("() => window.threejsViewer._scene.environment != null")
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.browser
+def test_environment_map_url_param_starts_disabled(page):
+    """environment_map=false in the URL starts with the env map off."""
+    client = _start_client()
+    try:
+        page.goto(
+            f"{client.viewer_path.resolve().as_uri()}"
+            f"?ws_port={client.port}&environment_map=false"
+        )
+        _wait_for_viewer(page)
+        page.wait_for_function(
+            "() => window.threejsViewer._envMap != null", timeout=10_000
+        )
+        # Map loaded but not attached; checkbox reflects the off state.
+        assert page.evaluate("() => window.threejsViewer._scene.environment == null")
+        assert page.evaluate(
+            "() => window.threejsViewer._lightingEnvMapCheck.checked === false"
+        )
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.browser
 def test_polyline_pick_roundtrip(viewer_client, viewer_page):
     """Hovering + clicking a polyline in the browser sends a pick back to
     Python with the right arc-length fraction and on-line coordinate."""
