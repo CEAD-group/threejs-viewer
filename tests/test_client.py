@@ -115,6 +115,14 @@ def test_viewer_client_rejects_invalid_tone_mapping():
         ViewerClient(tone_mapping="bogus")
 
 
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1, "off"])
+def test_viewer_client_rejects_non_bool_environment_map(bad):
+    """A stray non-bool (e.g. "false") must raise, not silently coerce to
+    environment_map=true via bool()."""
+    with pytest.raises(ValueError, match="environment_map must be a bool or None"):
+        ViewerClient(environment_map=bad)
+
+
 @pytest.mark.parametrize("bad_fov", [0, 180, -10, 200])
 def test_viewer_client_rejects_out_of_range_fov(bad_fov):
     with pytest.raises(ValueError, match=r"fov must be in the open interval"):

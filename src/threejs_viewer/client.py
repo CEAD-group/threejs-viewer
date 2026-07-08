@@ -301,10 +301,13 @@ class ViewerClient:
             "environment_intensity", environment_intensity
         )
         # Environment map on/off. `None` means "not specified" (viewer default /
-        # localStorage). Coerced to a plain bool so it serializes as "true"/"false".
-        self.environment_map = (
-            None if environment_map is None else bool(environment_map)
-        )
+        # localStorage). Validated as a real bool (not just truthy) so a stray
+        # `"false"` can't silently serialize to `environment_map=true`.
+        if environment_map is not None and not isinstance(environment_map, bool):
+            raise ValueError(
+                f"environment_map must be a bool or None, got {environment_map!r}"
+            )
+        self.environment_map = environment_map
         self.ambient_intensity = _validate_finite(
             "ambient_intensity", ambient_intensity
         )

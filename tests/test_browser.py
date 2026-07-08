@@ -1440,7 +1440,13 @@ def test_environment_map_toggle_drops_and_restores(page):
     (uglier-but-faster) and restores the retained PMREM map when re-checked."""
     client = _start_client()
     try:
-        page.goto(f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}")
+        # Pin environment_map=true in the URL so a persisted localStorage
+        # `tjsv.environmentMap=false` from another test/run can't make the
+        # "starts enabled" assertion flaky.
+        page.goto(
+            f"{client.viewer_path.resolve().as_uri()}"
+            f"?ws_port={client.port}&environment_map=true"
+        )
         _wait_for_viewer(page)
         # Wait for the cubemap PMREM env map to finish loading (async images).
         page.wait_for_function(
