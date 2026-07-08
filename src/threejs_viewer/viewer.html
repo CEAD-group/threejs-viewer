@@ -3347,14 +3347,24 @@ function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
 
 // ---- Geometry build (plain math, no Three.js) ----
 
-function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs) {
+function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMask) {
     const nSpine = spine.length / 3;
     const capAngles = new Float32Array(N_CAP_RINGS);
     for (let k = 0; k < N_CAP_RINGS; k++) capAngles[k] = ((k + 1) / N_CAP_RINGS) * (Math.PI * 0.5);
 
     const startCapBase = nSpine * N_CS;
     const endCapBase = startCapBase + N_CAP_RINGS * N_CS;
-    const totalVerts = endCapBase + N_CAP_RINGS * N_CS;
+    const revCapEnd = endCapBase + N_CAP_RINGS * N_CS;
+    // Flat break caps (mirror of buildParametricTubeGeometry): the mask here is
+    // the reduced-spine mask remapped from keptIndices. Rim verts appended after
+    // the revolution caps; fan indices packed into each broken pair's slot.
+    const breakPairs = [];
+    if (breakMask) {
+        for (let i = 1; i < nSpine; i++) if (breakMask[i]) breakPairs.push(i);
+    }
+    const nBreaks = breakPairs.length;
+    const breakCapBase = revCapEnd;
+    const totalVerts = revCapEnd + nBreaks * 2 * N_CS;
     const capIndicesPerCap = N_CAP_RINGS * N_CS * 6;
 
     const positions = new Float32Array(totalVerts * 3);
@@ -3455,6 +3465,28 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs) {
         }
     }
 
+    // Flat break-cap rim vertices (positions + colors); normals below.
+    for (let s = 0; s < nBreaks; s++) {
+        const bi = breakPairs[s];
+        const capA = breakCapBase + s * 2 * N_CS;
+        const capB = capA + N_CS;
+        const ringAv = (bi - 1) * N_CS;
+        const ringBv = bi * N_CS;
+        for (let j = 0; j < N_CS; j++) {
+            const da = (capA + j) * 3, ra = (ringAv + j) * 3;
+            positions[da] = positions[ra]; positions[da+1] = positions[ra+1]; positions[da+2] = positions[ra+2];
+            const db = (capB + j) * 3, rb = (ringBv + j) * 3;
+            positions[db] = positions[rb]; positions[db+1] = positions[rb+1]; positions[db+2] = positions[rb+2];
+        }
+        if (colors) {
+            const ca = (bi-1)*3, cb = bi*3;
+            for (let j = 0; j < N_CS; j++) {
+                const da = (capA+j)*3; colors[da]=ringColors[ca]; colors[da+1]=ringColors[ca+1]; colors[da+2]=ringColors[ca+2];
+                const db = (capB+j)*3; colors[db]=ringColors[cb]; colors[db+1]=ringColors[cb+1]; colors[db+2]=ringColors[cb+2];
+            }
+        }
+    }
+
     // Index buffer: [start_cap | ring_pairs | end_cap]
     const ringPairs = nSpine - 1;
     const indicesPerRingPair = N_CS * 6;
@@ -3479,8 +3511,19 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs) {
         }
     }
     buildCapIdx(0, startCapBase, true);
+    let bp = 0;
     for (let i = 0; i < ringPairs; i++) {
         const a0 = i*N_CS, b0 = (i+1)*N_CS;
+        if (breakMask && breakMask[i + 1]) {
+            const capA = breakCapBase + bp * 2 * N_CS;
+            const capB = capA + N_CS;
+            bp++;
+            let q = 0;
+            for (let j = 1; j < N_CS - 1; j++) { indices[p++]=capA; indices[p++]=capA+j; indices[p++]=capA+j+1; q += 3; }
+            for (let j = 1; j < N_CS - 1; j++) { indices[p++]=capB; indices[p++]=capB+j; indices[p++]=capB+j+1; q += 3; }
+            while (q < N_CS * 6) { indices[p++]=capA; q++; }
+            continue;
+        }
         for (let j = 0; j < N_CS; j++) {
             const jN = (j+1)%N_CS;
             indices[p++]=a0+j; indices[p++]=a0+jN; indices[p++]=b0+jN;
@@ -3515,6 +3558,20 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs) {
         widths[lastI], heights[lastI], localFrames, lastI, +1, section, sectionNormals,
         tangents[lastI*3], tangents[lastI*3+1], tangents[lastI*3+2]);
 
+    // Break-cap rim normals: axial (±T).
+    for (let s = 0; s < nBreaks; s++) {
+        const bi = breakPairs[s];
+        const capA = breakCapBase + s * 2 * N_CS;
+        const capB = capA + N_CS;
+        const iA = bi - 1;
+        const tAx = tangents[iA*3], tAy = tangents[iA*3+1], tAz = tangents[iA*3+2];
+        const tBx = tangents[bi*3], tBy = tangents[bi*3+1], tBz = tangents[bi*3+2];
+        for (let j = 0; j < N_CS; j++) {
+            const a = (capA+j)*3; normals[a]=tAx; normals[a+1]=tAy; normals[a+2]=tAz;
+            const b = (capB+j)*3; normals[b]=-tBx; normals[b+1]=-tBy; normals[b+2]=-tBz;
+        }
+    }
+
     return { positions, normals, colors, indices, localFrames, miters, tangents, capAngles, endCapPattern,
              ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
              nSpine, totalVerts, is32bit: totalVerts > 65535 };
@@ -3537,6 +3594,7 @@ self.onmessage = function(e) {
             upVec: msg.upVec,
             nPoints: msg.nPoints,
             vOffs: msg.vOffs || null,
+            breakMask: msg.breakMask || null,
             boundingRadius: msg.boundingRadius || 0,
             epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
             // Stored as the original value (bool | {maxSnapFactor: number}) so
@@ -3674,8 +3732,22 @@ self.onmessage = function(e) {
         if (redVOffs) redVOffs[i] = vOffs[oi];
     }
 
+    // Remap the break mask onto the reduced spine: a reduced pair (j-1, j)
+    // breaks if any original break falls in its spanned index range
+    // (keptIndices[j-1], keptIndices[j]]. The reduced ranges partition the
+    // original span, so this is O(nSpine) overall.
+    let redBreakMask = null;
+    if (tube.breakMask) {
+        redBreakMask = new Uint8Array(nRed);
+        for (let j = 1; j < nRed; j++) {
+            for (let k = keptIndices[j-1] + 1; k <= keptIndices[j]; k++) {
+                if (tube.breakMask[k]) { redBreakMask[j] = 1; break; }
+            }
+        }
+    }
+
     // Build geometry in worker
-    const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, redVOffs);
+    const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, redVOffs, redBreakMask);
 
     // Strand-collapse pass on the reduced spine. The reduced mesh sees
     // the same fold geometry as the full-resolution main-thread build,
@@ -3874,11 +3946,22 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
  * @param {Float32Array | null} ringColors
  * @param {Float32Array | null} vOffs - per-ring anchor offset along V (from
  *   the UNBIASED heights — see TUBE_DEPOSITION_BIAS); null when anchor=center
+ * @param {Uint8Array | null} [breakMask] - per-spine-point break flags; a 1 at
+ *   index i breaks the ribbon before ring i (see the body comment). null/undefined = no breaks.
  */
 function buildParametricTubeGeometry(
     spine, widths, heights,
-    orientations, upVector, ringColors, vOffs,
+    orientations, upVector, ringColors, vOffs, breakMask,
 ) {
+    // breakMask (optional Uint8Array, len nSpine): a 1 at index i BREAKS the
+    // ribbon before vertex i — the ring pair (i-1, i) is not stitched, so a
+    // genuine interior travel between two separate parts renders as two
+    // disjoint strips instead of a stray cone bridging them. Each break's two
+    // open ends are closed with a flat fan cap (dedicated axial-normal rim
+    // verts appended after the revolution caps). The cap fans are emitted into
+    // the broken pair's own fixed 36-index slot, so the ring-pair→index layout
+    // (and therefore draw-range / animation pacing) is byte-for-byte identical
+    // to the un-broken tube. null ⇒ no breaks, byte-identical geometry.
     const nCs = N_CROSS_SECTION;
     const nSpine = spine.length / 3;
     if (nSpine < 2) {
@@ -3905,7 +3988,22 @@ function buildParametricTubeGeometry(
     }
     const startCapBase = nSpine * nCs;
     const endCapBase = startCapBase + nCapRings * nCs;
-    const totalVerts = endCapBase + nCapRings * nCs;
+    const revCapEnd = endCapBase + nCapRings * nCs;
+    // Break caps: each interior break (breakMask[i], i>=1 — see the header note)
+    // closes the two open strip ends with a flat fan cap (strip-A end at ring
+    // i-1 facing +T, strip-B start at ring i facing -T). Dedicated rim verts —
+    // copies of the ring positions but with axial (±T) normals so the end face
+    // shades correctly — are appended after the revolution caps; the fan indices
+    // are emitted inside the broken pair's own 36-index slot, so draw-range /
+    // animation pacing is byte-for-byte unchanged. null mask ⇒ nBreaks 0 ⇒
+    // totalVerts identical to before.
+    const breakPairs = [];
+    if (breakMask) {
+        for (let i = 1; i < nSpine; i++) if (breakMask[i]) breakPairs.push(i);
+    }
+    const nBreaks = breakPairs.length;
+    const breakCapBase = revCapEnd;  // first break-cap rim vertex
+    const totalVerts = revCapEnd + nBreaks * 2 * nCs;
     // Per cap: nCapRings quad strips with spoke triangulation
     const capIndicesPerCap = nCapRings * nCs * 6;
 
@@ -4082,6 +4180,28 @@ function buildParametricTubeGeometry(
                      ringColors[iN * 3], ringColors[iN * 3 + 1], ringColors[iN * 3 + 2]);
     }
 
+    // --- Flat break-cap rim vertices (positions + colors) ---
+    // Rim positions copy the strip-end ring's final vertices; the axial normal
+    // is written in the normal pass below. Order matches the ring-pair loop's
+    // break slots so index emission can address caps by slot index.
+    for (let s = 0; s < nBreaks; s++) {
+        const bi = breakPairs[s];
+        const capA = breakCapBase + s * 2 * nCs;  // ring bi-1 end (+T)
+        const capB = capA + nCs;                  // ring bi start (-T)
+        const ringAv = (bi - 1) * nCs;
+        const ringBv = bi * nCs;
+        for (let j = 0; j < nCs; j++) {
+            const da = (capA + j) * 3, ra = (ringAv + j) * 3;
+            positions[da] = positions[ra]; positions[da + 1] = positions[ra + 1]; positions[da + 2] = positions[ra + 2];
+            const db = (capB + j) * 3, rb = (ringBv + j) * 3;
+            positions[db] = positions[rb]; positions[db + 1] = positions[rb + 1]; positions[db + 2] = positions[rb + 2];
+        }
+        if (colors) {
+            fillRGBBlock(colors, capA * 3, nCs, ringColors[(bi - 1) * 3], ringColors[(bi - 1) * 3 + 1], ringColors[(bi - 1) * 3 + 2]);
+            fillRGBBlock(colors, capB * 3, nCs, ringColors[bi * 3], ringColors[bi * 3 + 1], ringColors[bi * 3 + 2]);
+        }
+    }
+
     // --- Index buffer: [start_cap_dome | ring_pairs | end_cap_dome] ---
     const ringPairs = nSpine - 1;
     const indicesPerRingPair = nCs * 6;
@@ -4123,9 +4243,28 @@ function buildParametricTubeGeometry(
     }
     buildCapSpokeIndices(0, startCapBase, true);
     // Ring pairs
+    let bp = 0;  // running break slot, advances with breakPairs (ascending)
     for (let i = 0; i < ringPairs; i++) {
         const a0 = i * nCs;
         const b0 = (i + 1) * nCs;
+        // Break before vertex i+1 ⇒ do not stitch this pair. Emit the two flat
+        // cap fans (strip-A end at ring i, strip-B start at ring i+1) into this
+        // pair's fixed 36-index slot, padding the remainder with a degenerate
+        // (zero-area) triangle so ring-pair index pacing stays identical.
+        if (breakMask && breakMask[i + 1]) {
+            const capA = breakCapBase + bp * 2 * nCs;  // ring i end (+T)
+            const capB = capA + nCs;                   // ring i+1 start (-T)
+            bp++;
+            let q = 0;
+            for (let j = 1; j < nCs - 1; j++) {
+                indices[p++] = capA; indices[p++] = capA + j; indices[p++] = capA + j + 1; q += 3;
+            }
+            for (let j = 1; j < nCs - 1; j++) {
+                indices[p++] = capB; indices[p++] = capB + j; indices[p++] = capB + j + 1; q += 3;
+            }
+            while (q < nCs * 6) { indices[p++] = capA; q++; }
+            continue;
+        }
         for (let j = 0; j < nCs; j++) {
             const jNext = (j + 1) % nCs;
             const a = a0 + j;
@@ -4176,6 +4315,21 @@ function buildParametricTubeGeometry(
     writeAnalyticCapNormals(normalArr, endCapBase, nCs, nCapRings, capAngles,
         widths[lastIdx], heights[lastIdx], localFrames, lastIdx, +1,
         tangents[lastIdx * 3], tangents[lastIdx * 3 + 1], tangents[lastIdx * 3 + 2]);
+    // Break-cap rim normals: axial (±T) so each flat cap shades as an end face.
+    for (let s = 0; s < nBreaks; s++) {
+        const bi = breakPairs[s];
+        const capA = breakCapBase + s * 2 * nCs;
+        const capB = capA + nCs;
+        const iA = bi - 1;
+        const tAx = tangents[iA * 3], tAy = tangents[iA * 3 + 1], tAz = tangents[iA * 3 + 2];
+        const tBx = tangents[bi * 3], tBy = tangents[bi * 3 + 1], tBz = tangents[bi * 3 + 2];
+        for (let j = 0; j < nCs; j++) {
+            const a = (capA + j) * 3;
+            normalArr[a] = tAx; normalArr[a + 1] = tAy; normalArr[a + 2] = tAz;
+            const b = (capB + j) * 3;
+            normalArr[b] = -tBx; normalArr[b + 1] = -tBy; normalArr[b + 2] = -tBz;
+        }
+    }
     geometry.setAttribute('normal', new THREE.BufferAttribute(normalArr, 3));
 
     return {
@@ -11008,6 +11162,18 @@ class ThreeJSViewer {
                                 ringColors[i * 3 + 2] = (c & 0xff) / 255;
                             }
                         }
+                        // Optional trailing break-mask (uint8, len n): a 1 at
+                        // index i breaks the ribbon before spine point i (see
+                        // buildParametricTubeGeometry). Read when the header
+                        // flags it; the leftover-bytes check is a back-compat
+                        // fallback for producers that append the block without
+                        // setting hasBreakMask. The default tube blob (no break)
+                        // carries no trailing bytes and stays byte-identical.
+                        let breakMask = null;
+                        if (data.hasBreakMask || offset + n <= buffer.byteLength) {
+                            breakMask = new Uint8Array(buffer, offset, n);
+                            offset += n;
+                        }
                         const nCs = N_CROSS_SECTION;
                         const hasColors = !!ringColors;
                         const upVector = data.upVector || null;
@@ -11055,8 +11221,13 @@ class ThreeJSViewer {
                         let buildSpine = spine, buildWidths = widths, buildHeights = heights;
                         let buildOrientations = orientations, buildRingColors = ringColors;
                         let buildVOffs = vOffs;
+                        let buildBreakMask = breakMask;
                         let buildN = n;
                         if (lodCfg.enabled && n >= lodCfg.threshold) {
+                            // The break mask is remapped onto the reduced spine
+                            // below (a reduced pair breaks if any original break
+                            // falls in its span), so breaks survive LOD.
+                            buildBreakMask = null;
                             // Bounding sphere from original spine (stable across LOD rebuilds).
                             // Includes cross-section extent so `boundingRadius` reflects the
                             // tube's actual on-screen size — color weight scales with it.
@@ -11101,12 +11272,24 @@ class ThreeJSViewer {
                                 }
                                 if (buildVOffs) buildVOffs[i] = vOffs[oi];
                             }
+                            // Remap the break mask onto the reduced spine: a
+                            // reduced pair (j-1, j) breaks if any original break
+                            // falls in (keptIndices[j-1], keptIndices[j]].
+                            if (breakMask) {
+                                buildBreakMask = new Uint8Array(nRed);
+                                for (let j = 1; j < nRed; j++) {
+                                    for (let k = keptIndices[j - 1] + 1; k <= keptIndices[j]; k++) {
+                                        if (breakMask[k]) { buildBreakMask[j] = 1; break; }
+                                    }
+                                }
+                            }
                             tubeLOD = {
                                 originalSpine: new Float32Array(spine),
                                 originalWidths: new Float32Array(widths),
                                 originalHeights: new Float32Array(heights),
                                 originalRingColors: ringColors ? new Float32Array(ringColors) : null,
                                 originalVOffs: vOffs ? new Float32Array(vOffs) : null,
+                                originalBreakMask: breakMask ? new Uint8Array(breakMask) : null,
                                 originalCount: n,
                                 upVector,
                                 keptIndices,
@@ -11138,7 +11321,7 @@ class ThreeJSViewer {
                         }
                         const { geometry, ringPairs, indicesPerRingPair, localFrames, miters, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                             buildSpine, buildWidths, buildHeights,
-                            buildOrientations, upVector, buildRingColors, buildVOffs,
+                            buildOrientations, upVector, buildRingColors, buildVOffs, buildBreakMask,
                         );
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
@@ -11223,6 +11406,7 @@ class ThreeJSViewer {
                                 upVec: upVector,
                                 nPoints: tubeLOD.originalCount,
                                 vOffs: tubeLOD.originalVOffs,
+                                breakMask: tubeLOD.originalBreakMask,
                                 boundingRadius: tubeLOD.boundingRadius,
                                 epsilonDivisor: tubeLOD.epsilonDivisor,
                                 strandCollapse: strandCollapseCfg,
