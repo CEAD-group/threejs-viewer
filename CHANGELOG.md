@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.42
+
+### Bead tube break mask (#107)
+
+- **`add_parametric_tube(..., break_before=mask)` — an optional `(N,)` bool/uint8 mask that splits the ribbon at genuine interior discontinuities.** A non-zero entry at index `i` breaks the ribbon before spine point `i` (the ring pair `(i-1, i)` is not stitched), so a rapid/travel hop between two separate parts — or an end-wipe across empty space — renders as two disconnected strips instead of a stray cone bridging the gap. Each break's two open ends get a **flat axial-normal fan cap**, emitted **inside the broken pair's own fixed 36-index slot**, so `draw_range`/animation pacing and the whole ring-pair→index layout stay **byte-for-byte identical** to the un-broken tube. A `None`/all-zero mask sends no trailing bytes and is byte-identical on the wire (a `hasBreakMask` header flag signals its presence, with a leftover-bytes auto-detect fallback for producers that append the block without the flag). Breaks **survive LOD**: the mask is remapped onto the RDP-reduced spine (a reduced pair breaks if any original break falls in its spanned range) through both the main-thread sync fallback and the worker rebuild. `break_before[0]` (no pair before it) is ignored. New demo `examples/28_tube_breaks.py` and `update_parametric_tube_colors` still applies.
+
+### Lighting panel: environment-map on/off toggle (#109)
+
+- **A Lighting-panel checkbox (press `E`) that toggles the IBL environment map — an uglier-but-faster perf knob.** Off nulls `scene.environment`, dropping the per-pixel PBR reflection lookups for a flatter but faster render; on restores the retained PMREM texture (`_envMap`, kept off the scene while disabled so there's no rebuild). The env-intensity slider disables while the map is off. Persists in `localStorage` as `tjsv.environmentMap` (`"true"`/`"false"`); Reset clears it and restores the page-load baseline. Resolution follows the existing lighting precedence — URL `environment_map` param > `ThreeJSViewer` option > localStorage > hard default (on) — with a `parseBool` that accepts `true/false/1/0/on/off/yes/no`. Python parity: **`ViewerClient(environment_map=True|False)`** forwards `environment_map=true|false` as an authoritative query param (validated as a real bool; a non-bool raises `ValueError`).
+
+### Animation transport: NaN-time guard + narrow-viewport wrap (#105)
+
+- **The transport time readout no longer renders `"NaN"`** — a new `_formatTime()` clamps non-finite seconds (from an empty/malformed keyframe stream) to `0` before `.toFixed(2)`, applied to both current and total time, and the progress-bar width is guarded the same way.
+- **The `.timeline-row` wraps on narrow viewports** — the scrubber (`.tjsv-timeline-container`) gets a `min-width` and drops to its own second row instead of shrinking to nothing or overflowing horizontally (verified 360–1400 px).
+
 ## 0.0.41
 
 ### Float64 time/fraction precision on long toolpaths (#100)
