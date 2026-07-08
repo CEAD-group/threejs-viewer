@@ -8088,7 +8088,7 @@ export class ThreeJSViewer {
         // updates (reflow on resize, content changes) flow through the
         // observer.
         this._refreshAnimLift();
-        this._totalTimeEl.textContent = this._animation.duration.toFixed(2);
+        this._totalTimeEl.textContent = this._formatTime(this._animation.duration);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
         this._btnLoop.classList.toggle('active', this._animationLoop);
@@ -8511,12 +8511,24 @@ export class ThreeJSViewer {
         return { index: lo, t: dt > 0 ? (time - frames[lo].time) / dt : 0 };
     }
 
+    /**
+     * Format a seconds value for the transport readout, guarding against
+     * non-finite inputs. A NaN/Inf animation time (e.g. an empty or malformed
+     * keyframe stream) must never reach the DOM as "NaN" — it renders as the
+     * numeric zero fallback instead, matching the 2-dp format.
+     * @param {number} seconds
+     * @returns {string}
+     */
+    _formatTime(seconds) {
+        return (Number.isFinite(seconds) ? seconds : 0).toFixed(2);
+    }
+
     _updateAnimationUI() {
         if (!this._animation) return;
         const { index: frameIndex } = this._getFrameAtTime(this._animationTime);
         const progress = this._animation.duration > 0 ? (this._animationTime / this._animation.duration) * 100 : 0;
-        this._timelineProgressEl.style.width = `${progress}%`;
-        this._currentTimeEl.textContent = this._animationTime.toFixed(2);
+        this._timelineProgressEl.style.width = `${Number.isFinite(progress) ? progress : 0}%`;
+        this._currentTimeEl.textContent = this._formatTime(this._animationTime);
         this._currentFrameEl.textContent = frameIndex + 1;
         this._btnPlay.textContent = this._animationPlaying ? '\u23F8' : '\u25B6';
     }

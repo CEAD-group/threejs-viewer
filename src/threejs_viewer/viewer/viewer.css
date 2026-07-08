@@ -82,6 +82,19 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    /* On narrow viewports the transport controls no longer fit one line: wrap
+       so the scrubber drops to its own second row instead of overflowing. The
+       timeline-container's flex-basis (below) forces the wrap once the row is
+       too tight. The toolbar ResizeObserver picks up the taller row and lifts
+       the viewport content accordingly. */
+    flex-wrap: wrap;
+}
+.threejs-viewer .timeline-row .tjsv-timeline-container {
+    /* min-width stops flex-shrink from collapsing the scrubber to nothing on a
+       tight row — once it can't hold its min width beside the other controls it
+       wraps to its own line instead. flex-basis keeps it wide when there's room. */
+    flex: 1 1 220px;
+    min-width: 200px;
 }
 .threejs-viewer .transport-buttons {
     display: flex;
