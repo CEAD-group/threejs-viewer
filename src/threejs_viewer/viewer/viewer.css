@@ -424,6 +424,23 @@
     min-width: 52px;
     text-align: right;
 }
+.threejs-viewer .lighting-check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.threejs-viewer .lighting-check-row input[type="checkbox"] {
+    accent-color: #0066cc;
+    cursor: pointer;
+    margin: 0;
+}
+.threejs-viewer .lighting-check-row .lighting-check-label {
+    font-size: 12px;
+    color: #ccc;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: pointer;
+}
 .threejs-viewer .lighting-select-row {
     display: flex;
     align-items: center;

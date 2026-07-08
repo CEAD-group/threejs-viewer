@@ -242,6 +242,7 @@ class ViewerClient:
         open_browser: bool = True,
         tone_mapping_exposure: Optional[float] = None,
         environment_intensity: Optional[float] = None,
+        environment_map: Optional[bool] = None,
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
         fov: Optional[float] = None,
@@ -257,6 +258,10 @@ class ViewerClient:
                 ``ValueError``.
             environment_intensity: Override ``scene.environmentIntensity``
                 (default ``2.0``). Must be finite.
+            environment_map: Enable the IBL environment map / cube reflections
+                (default ``True``). Pass ``False`` for a flatter, uglier, but
+                faster render (drops the per-pixel PBR reflection lookups).
+                Toggleable at runtime from the browser Lighting panel.
             ambient_intensity: Override the ambient light's ``intensity``
                 (default ``1.5``). Must be finite.
             tone_mapping: Tone-mapping mode, one of ``"none"``, ``"linear"``,
@@ -295,6 +300,14 @@ class ViewerClient:
         self.environment_intensity = _validate_finite(
             "environment_intensity", environment_intensity
         )
+        # Environment map on/off. `None` means "not specified" (viewer default /
+        # localStorage). Validated as a real bool (not just truthy) so a stray
+        # `"false"` can't silently serialize to `environment_map=true`.
+        if environment_map is not None and not isinstance(environment_map, bool):
+            raise ValueError(
+                f"environment_map must be a bool or None, got {environment_map!r}"
+            )
+        self.environment_map = environment_map
         self.ambient_intensity = _validate_finite(
             "ambient_intensity", ambient_intensity
         )
@@ -417,8 +430,9 @@ class ViewerClient:
         """Full file:// URL to the viewer.
 
         Always includes `ws_port`. Appends `tone_mapping`,
-        `tone_mapping_exposure`, `environment_intensity`, `ambient_intensity`,
-        and/or `fov` query params when the caller passed explicit overrides —
+        `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
+        `ambient_intensity`, and/or `fov` query params when the caller passed
+        explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
         """
@@ -429,6 +443,10 @@ class ViewerClient:
             params.append(("tone_mapping_exposure", str(self.tone_mapping_exposure)))
         if self.environment_intensity is not None:
             params.append(("environment_intensity", str(self.environment_intensity)))
+        if self.environment_map is not None:
+            params.append(
+                ("environment_map", "true" if self.environment_map else "false")
+            )
         if self.ambient_intensity is not None:
             params.append(("ambient_intensity", str(self.ambient_intensity)))
         if self.fov is not None:

@@ -75,6 +75,27 @@ def test_viewer_url_partial_overrides():
     assert params["environment_intensity"] == ["1.25"]
 
 
+def test_viewer_url_environment_map_false():
+    """environment_map=False emits environment_map=false (the perf toggle)."""
+    client = ViewerClient(environment_map=False)
+    params = _params(client.viewer_url)
+    assert set(params) == {"ws_port", "environment_map"}
+    assert params["environment_map"] == ["false"]
+
+
+def test_viewer_url_environment_map_true():
+    """environment_map=True emits environment_map=true."""
+    client = ViewerClient(environment_map=True)
+    params = _params(client.viewer_url)
+    assert params["environment_map"] == ["true"]
+
+
+def test_viewer_url_default_omits_environment_map():
+    """No environment_map kwarg → no param (viewer/localStorage default)."""
+    client = ViewerClient()
+    assert "environment_map" not in _params(client.viewer_url)
+
+
 def test_viewer_url_default_omits_fov():
     """No fov kwarg → no fov param (viewer uses its own default)."""
     client = ViewerClient()
@@ -92,6 +113,14 @@ def test_viewer_url_with_fov():
 def test_viewer_client_rejects_invalid_tone_mapping():
     with pytest.raises(ValueError, match="tone_mapping must be one of"):
         ViewerClient(tone_mapping="bogus")
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1, "off"])
+def test_viewer_client_rejects_non_bool_environment_map(bad):
+    """A stray non-bool (e.g. "false") must raise, not silently coerce to
+    environment_map=true via bool()."""
+    with pytest.raises(ValueError, match="environment_map must be a bool or None"):
+        ViewerClient(environment_map=bad)
 
 
 @pytest.mark.parametrize("bad_fov", [0, 180, -10, 200])
