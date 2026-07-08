@@ -1415,6 +1415,7 @@ class ViewerClient:
         pickable: bool = True,
         bias_index_offset: int = 0,
         bias_index_total: Optional[int] = None,
+        break_before: Optional[np.ndarray] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -1517,6 +1518,17 @@ class ViewerClient:
                 crosses a travel split still nests deterministically
                 (later-deposited outside). Leave at the defaults for a
                 standalone tube (ramp over its own spine).
+            break_before: Optional (N,) mask (bool or uint8, non-zero = break).
+                A non-zero entry at index ``i`` **breaks the ribbon before
+                spine point i**: the ring pair ``(i-1, i)`` is not stitched, so
+                a genuine interior discontinuity (a rapid/travel hop between two
+                separate parts, or an end-wipe across empty space) renders as
+                two disconnected strips instead of a stray cone bridging the
+                gap. Each break's two open ends are closed with a flat cap so
+                the strips read as solid. ``break_before[0]`` has no pair before
+                it and is ignored. Breaks survive LOD simplification (they are
+                remapped onto the reduced spine). ``None`` (default) → the
+                current fully-connected tube, byte-identical on the wire.
         """
         lod_header = _serialize_lod(lod)
 
@@ -1575,12 +1587,30 @@ class ViewerClient:
         if has_colors:
             parts.append(color_arr_in.tobytes())
 
+        # Optional break-mask: a trailing uint8 block (len n), appended past the
+        # colour block. The viewer reads it when hasBreakMask is set (and also
+        # auto-detects a bare trailing block for producers that append without
+        # the flag). Omitted entirely when there are no breaks so the default
+        # blob stays byte-identical.
+        has_break_mask = False
+        if break_before is not None:
+            break_arr = np.ascontiguousarray(break_before).reshape(-1)
+            if break_arr.shape[0] != n:
+                raise ValueError(
+                    f"break_before must have length {n}, got {break_arr.shape[0]}"
+                )
+            break_u8 = (break_arr != 0).astype(np.uint8)
+            if break_u8.any():
+                has_break_mask = True
+                parts.append(break_u8.tobytes())
+
         header = {
             "type": "add_parametric_tube_binary",
             "id": id,
             "numSpinePoints": n,
             "hasOrientations": has_orientations,
             "hasColors": has_colors,
+            "hasBreakMask": has_break_mask,
             "color": color,
             "opacity": opacity,
             "metalness": metalness,
