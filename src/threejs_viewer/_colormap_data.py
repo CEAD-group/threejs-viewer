@@ -6,8 +6,11 @@ so scalar colouring matches the reference colormaps exactly instead of a
 hand-picked stop approximation. Regenerate:
     arr = matplotlib.colormaps[name](np.linspace(0, 1, 256))[:, :3]
 """
+
 import numpy as np
 
+# fmt: off
+# Hand-laid 3-per-row RGB grid; keep ruff from exploding it to one float/line.
 VIRIDIS = np.array([
     0.267004, 0.004874, 0.329415,
     0.268510, 0.009605, 0.335427,
@@ -784,5 +787,6 @@ TURBO = np.array([
     0.493210, 0.019630, 0.009550,
     0.479600, 0.015830, 0.010550,
 ]).reshape(256, 3)
+# fmt: on
 
 TABLES = {"viridis": VIRIDIS, "plasma": PLASMA, "turbo": TURBO}
