@@ -947,3 +947,28 @@ def test_add_toolpath_group_transform_covers_travel_line(client):
     for header, _ in client._binary_messages:
         assert "position" not in header and "rotation" not in header
         assert "matrix" not in header
+
+
+# === polyline picking ===
+
+
+def test_enable_polyline_picking_defaults(client):
+    """Default enable stores no decimation (maxPickPoints=0 = exact full scan)."""
+    client.enable_polyline_picking()
+    msg = client._polyline_picking
+    assert msg["type"] == "set_polyline_picking"
+    assert msg["enabled"] is True
+    assert msg["maxPickPoints"] == 0
+
+
+def test_enable_polyline_picking_max_pick_points(client):
+    """max_pick_points is forwarded as an int maxPickPoints for the coarse-scan
+    decimation (issue #111)."""
+    client.enable_polyline_picking(
+        marker_color=0x112233, threshold_px=8.0, max_pick_points=50_000
+    )
+    msg = client._polyline_picking
+    assert msg["markerColor"] == 0x112233
+    assert msg["thresholdPx"] == 8.0
+    assert msg["maxPickPoints"] == 50_000
+    assert isinstance(msg["maxPickPoints"], int)
