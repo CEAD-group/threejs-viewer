@@ -5142,6 +5142,12 @@ class PolylinePickController {
         this.v = viewer;
         this.enabled = false;
         this.thresholdPx = 14;
+        // Optional pick decimation: cap the number of spine nodes visited in the
+        // coarse per-move scan to ~maxPickPoints (0 = off, scan every node). The
+        // nearest coarse segment is then refined at full resolution in a local
+        // index window, so a huge (multi-million-point) toolpath hovers in
+        // O(maxPickPoints + stride) instead of O(N). See issue #111.
+        this.maxPickPoints = 0;
         /** @type {{id:string, kind:string, segment:number, t:number, fraction:number, point:THREE.Vector3}|null} */
         this.hover = null;
 
@@ -5205,7 +5211,21 @@ class PolylinePickController {
         this._ndcV = new THREE.Vector2();
         this._raycaster = new THREE.Raycaster();
 
+        // Hover picks are coalesced to one per animation frame: a fast mouse
+        // move fires many `pointermove` events, but only the latest cursor
+        // position matters, so we run at most one full scan per rAF (issue #111).
+        this._rafPending = false;
+        this._pendingX = 0;
+        this._pendingY = 0;
+        // If the pointer leaves the canvas before a coalesced move's rAF
+        // fires, _onLeave() clears hover but the pending _onMoveRaf() would
+        // otherwise still run and re-show the marker/cursor. Tracked
+        // separately from `hover` (which is also cleared by a genuine no-hit
+        // move) so only a real leave suppresses the pending frame.
+        this._pointerOver = false;
+
         this._onMove = this._onMove.bind(this);
+        this._onMoveRaf = this._onMoveRaf.bind(this);
         this._onDown = this._onDown.bind(this);
         this._onUp = this._onUp.bind(this);
         this._onLeave = this._onLeave.bind(this);
@@ -5220,11 +5240,15 @@ class PolylinePickController {
         window.addEventListener('pointerup', this._onUp);
     }
 
-    /** @param {{markerColor?:number, thresholdPx?:number}} [opts] */
+    /** @param {{markerColor?:number, thresholdPx?:number, maxPickPoints?:number}} [opts] */
     enable(opts = {}) {
         this.enabled = true;
         if (typeof opts.thresholdPx === 'number' && isFinite(opts.thresholdPx)) {
             this.thresholdPx = Math.max(0, opts.thresholdPx);
+        }
+        if (typeof opts.maxPickPoints === 'number' && isFinite(opts.maxPickPoints)) {
+            // Need at least 2 coarse nodes to form a segment; <2 disables decimation.
+            this.maxPickPoints = opts.maxPickPoints >= 2 ? Math.floor(opts.maxPickPoints) : 0;
         }
         if (typeof opts.markerColor === 'number') {
             const hex = opts.markerColor >>> 0;
@@ -5347,6 +5371,76 @@ class PolylinePickController {
     }
 
     /**
+     * Scan one object's spine for the sub-segment nearest the cursor in screen
+     * space, over node range [iStart, iEndNode] visiting one segment per `step`
+     * nodes. With `step > 1` the tested segment is the *chord* node i → node
+     * i+step (a decimated coarse pass); with `step === 1` it's the real
+     * consecutive segment. Returns `{seg, dist}` (seg = the sub-segment's start
+     * node index) for the nearest segment within its pixel gate, or null if
+     * nothing in range projected in front of the camera inside the gate.
+     *
+     * Distances are compared squared (no `Math.sqrt` in the per-segment hot
+     * path — this runs over every segment of a huge spine); `dist2` in the
+     * result is the squared pixel distance, not pixels.
+     * @param {Float32Array} pts @param {number} n @param {THREE.Matrix4} mw
+     * @param {any} cam @param {number} W @param {number} H
+     * @param {number} cursorX @param {number} cursorY
+     * @param {boolean} isTube @param {Float32Array|null} halfExtents @param {number} lineGate
+     * @param {number} iStart @param {number} iEndNode @param {number} step
+     * @returns {{seg:number, dist2:number}|null}
+     */
+    _scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, iStart, iEndNode, step) {
+        let bestSeg = -1;
+        let bestDist2 = Infinity;
+        let prev = this._ps0;
+        let cur = this._ps1;
+        let i = iStart;
+        this._nodeScreenInto(pts, i, mw, cam, W, H, prev);
+        while (i < iEndNode) {
+            let j = i + step;
+            if (j > iEndNode) j = iEndNode;
+            this._nodeScreenInto(pts, j, mw, cam, W, H, cur);
+            if (prev.ok && cur.ok) {
+                let gate = lineGate;
+                if (isTube && halfExtents) {
+                    const extWorld = Math.max(halfExtents[i], halfExtents[j]);
+                    // Nearer node (view-Z closest to 0) → larger pixel footprint → wider gate.
+                    const wpp = this._worldPerPixelAtViewZ(Math.max(prev.viewZ, cur.viewZ));
+                    gate = this.thresholdPx + extWorld / wpp;
+                }
+                const abx = cur.x - prev.x;
+                const aby = cur.y - prev.y;
+                const ab2 = abx * abx + aby * aby;
+                let t = ab2 > 0 ? ((cursorX - prev.x) * abx + (cursorY - prev.y) * aby) / ab2 : 0;
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                const dx = cursorX - (prev.x + abx * t);
+                const dy = cursorY - (prev.y + aby * t);
+                const d2 = dx * dx + dy * dy;
+                if (d2 <= gate * gate && d2 < bestDist2) { bestDist2 = d2; bestSeg = i; }
+            }
+            const tmp = prev;
+            prev = cur;
+            cur = tmp;
+            i = j;
+        }
+        return bestSeg < 0 ? null : { seg: bestSeg, dist2: bestDist2 };
+    }
+
+    /**
+     * The per-object pixel gate + tube half-extents. Recomputed for the winning
+     * object at refine time; cheap (no per-node work). @param {any} o
+     * @returns {{isTube:boolean, halfExtents:Float32Array|null, lineGate:number}}
+     */
+    _objectGate(o) {
+        const udo = o.userData;
+        const isTube = !!udo.isPickableTube;
+        const halfExtents = isTube ? this._ensureTubeHalfExtents(udo) : null;
+        const mat = /** @type {any} */ (o.material);
+        const lineGate = this.thresholdPx + (mat && typeof mat.linewidth === 'number' ? mat.linewidth : 1) * 0.5;
+        return { isTube, halfExtents, lineGate };
+    }
+
+    /**
      * Find the point on the nearest polyline to the cursor.
      *
      * Two stages with different metrics:
@@ -5383,8 +5477,10 @@ class PolylinePickController {
         let bestUd = null;
         let bestSeg = 0;
         let bestIsTube = false;
-        let bestDist = Infinity;
+        let bestDist2 = Infinity;
+        let bestStride = 1;
 
+        const maxPP = this.maxPickPoints;
         for (const o of this.v._objects.values()) {
             const udo = o && o.userData;
             const pickable = udo && udo.pickPoints && (udo.isPolyline || udo.isPickableTube);
@@ -5395,52 +5491,42 @@ class PolylinePickController {
             const n = (pts.length / 3) | 0;
             o.updateWorldMatrix(true, false);
             const mw = o.matrixWorld;
-            const isTube = !!udo.isPickableTube;
             // Gate = how close (px) the cursor must be to count as "on" this
             // object. A line uses its half line-width; a tube uses its bead
             // half-extent (per node, projected to pixels at that depth) so a
             // click anywhere on the bead body — not just the centre-line —
             // registers. Tube half-extents are built lazily on first pick.
-            const halfExtents = isTube ? this._ensureTubeHalfExtents(udo) : null;
-            const mat = /** @type {any} */ (o.material);
-            const lineGate = this.thresholdPx + (mat && typeof mat.linewidth === 'number' ? mat.linewidth : 1) * 0.5;
-
-            let prev = this._ps0;
-            let cur = this._ps1;
-            this._nodeScreenInto(pts, 0, mw, cam, W, H, prev);
-            for (let i = 0; i < n - 1; i++) {
-                this._nodeScreenInto(pts, i + 1, mw, cam, W, H, cur);
-                if (prev.ok && cur.ok) {
-                    let gate = lineGate;
-                    if (isTube && halfExtents) {
-                        const extWorld = Math.max(halfExtents[i], halfExtents[i + 1]);
-                        // Nearer node (view-Z closest to 0) → larger pixel footprint → wider gate.
-                        const wpp = this._worldPerPixelAtViewZ(Math.max(prev.viewZ, cur.viewZ));
-                        gate = this.thresholdPx + extWorld / wpp;
-                    }
-                    const abx = cur.x - prev.x;
-                    const aby = cur.y - prev.y;
-                    const ab2 = abx * abx + aby * aby;
-                    let t = ab2 > 0 ? ((cursorX - prev.x) * abx + (cursorY - prev.y) * aby) / ab2 : 0;
-                    t = t < 0 ? 0 : t > 1 ? 1 : t;
-                    const dx = cursorX - (prev.x + abx * t);
-                    const dy = cursorY - (prev.y + aby * t);
-                    const d = Math.sqrt(dx * dx + dy * dy);
-                    if (d <= gate && d < bestDist) {
-                        bestDist = d;
-                        bestObj = o;
-                        bestUd = ud;
-                        bestSeg = i;
-                        bestIsTube = isTube;
-                    }
-                }
-                const tmp = prev;
-                prev = cur;
-                cur = tmp;
+            const { isTube, halfExtents, lineGate } = this._objectGate(o);
+            // Decimate the coarse scan to ~maxPickPoints nodes for a big spine;
+            // the winner is refined at full resolution below.
+            const stride = (maxPP && n > maxPP) ? Math.ceil((n - 1) / (maxPP - 1)) : 1;
+            const res = this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, n - 1, stride);
+            if (res && res.dist2 < bestDist2) {
+                bestDist2 = res.dist2;
+                bestObj = o;
+                bestUd = ud;
+                bestSeg = res.seg;
+                bestIsTube = isTube;
+                bestStride = stride;
             }
         }
 
         if (!bestObj) return null;
+
+        // Refine a decimated coarse hit: the winning chord spanned `bestStride`
+        // nodes, so rescan the real consecutive segments in a local window
+        // around it to land `bestSeg` on the true nearest full-resolution
+        // segment (the placement stage below assumes bestSeg / bestSeg+1 are
+        // adjacent nodes).
+        if (bestStride > 1) {
+            const pts = bestUd.pickPoints;
+            const n = (pts.length / 3) | 0;
+            const { isTube, halfExtents, lineGate } = this._objectGate(bestObj);
+            const lo = Math.max(0, bestSeg - bestStride);
+            const hi = Math.min(n - 1, bestSeg + 2 * bestStride);
+            const r = this._scanObjectSegments(pts, n, bestObj.matrixWorld, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, lo, hi, 1);
+            if (r) bestSeg = r.seg;
+        }
 
         // Segment chosen by screen distance; now place the point by the 3D
         // ray↔segment closest-point. Screen-space `t` would be wrong under
@@ -5484,10 +5570,34 @@ class PolylinePickController {
         };
     }
 
-    /** @param {PointerEvent} e */
+    /**
+     * Coalesce pointer moves to one pick per animation frame: a fast mouse
+     * move fires many `pointermove` events, but only the latest position is
+     * meaningful, so we defer the (potentially O(N)) scan to the next rAF and
+     * collapse any moves in between. @param {PointerEvent} e
+     */
     _onMove(e) {
         if (!this.enabled) return;
-        const pick = this._pickAt(e.clientX, e.clientY);
+        this._pointerOver = true;
+        this._pendingX = e.clientX;
+        this._pendingY = e.clientY;
+        if (this._rafPending) return;
+        this._rafPending = true;
+        requestAnimationFrame(this._onMoveRaf);
+    }
+
+    _onMoveRaf() {
+        this._rafPending = false;
+        // The pointer may have left the canvas (_onLeave) since this frame
+        // was scheduled; don't resurrect the hover marker/cursor for a
+        // cursor that's no longer over the canvas.
+        if (!this.enabled || !this._pointerOver) return;
+        this._doHover(this._pendingX, this._pendingY);
+    }
+
+    /** @param {number} clientX @param {number} clientY */
+    _doHover(clientX, clientY) {
+        const pick = this._pickAt(clientX, clientY);
         const dom = this.v._renderer.domElement;
         if (!pick) {
             this.clearHover();
@@ -5503,8 +5613,8 @@ class PolylinePickController {
         const rect = dom.getBoundingClientRect();
         const p = pick.point;
         el.textContent = `${(pick.fraction * 100).toFixed(1)}%  (${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`;
-        el.style.left = (e.clientX - rect.left + 14) + 'px';
-        el.style.top = (e.clientY - rect.top + 14) + 'px';
+        el.style.left = (clientX - rect.left + 14) + 'px';
+        el.style.top = (clientY - rect.top + 14) + 'px';
         el.style.display = 'block';
 
         // Notify client-side hover hooks (live tooltip without a Python round-trip).
@@ -5536,6 +5646,7 @@ class PolylinePickController {
     }
 
     _onLeave() {
+        this._pointerOver = false;
         if (!this.enabled) return;
         this.clearHover();
         this.v._renderer.domElement.style.cursor = '';
@@ -10834,6 +10945,7 @@ export class ThreeJSViewer {
                     this._polylinePick.enable({
                         markerColor: data.markerColor,
                         thresholdPx: data.thresholdPx,
+                        maxPickPoints: data.maxPickPoints,
                     });
                 } else {
                     this._polylinePick.disable();
@@ -11239,7 +11351,9 @@ export class ThreeJSViewer {
 
     /**
      * Enable interactive picking of points along polylines and parametric tubes.
-     * @param {{markerColor?:number, thresholdPx?:number}} [opts]
+     * `maxPickPoints` (0 = off) caps the coarse per-hover scan to ~that many
+     * spine nodes and refines the nearest hit locally, for huge toolpaths.
+     * @param {{markerColor?:number, thresholdPx?:number, maxPickPoints?:number}} [opts]
      */
     enablePolylinePicking(opts) { this._polylinePick.enable(opts || {}); }
 

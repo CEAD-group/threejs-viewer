@@ -2542,6 +2542,7 @@ class ViewerClient:
         self,
         marker_color: int = 0x00E5FF,
         threshold_px: float = 14.0,
+        max_pick_points: int = 0,
     ) -> None:
         """Enable interactive picking of points *along* polylines and parametric
         tubes (beads) in the viewer.
@@ -2565,6 +2566,16 @@ class ViewerClient:
             threshold_px: How close (in screen pixels) the cursor must be to a
                 line for it to register as a hover. Larger values make thin
                 lines easier to grab.
+            max_pick_points: Cap on the number of spine nodes visited in the
+                coarse per-hover scan. ``0`` (default) scans every node — exact
+                but O(N) per mouse move, which dominates the frame budget on
+                multi-million-point toolpaths. Set e.g. ``50_000`` to decimate
+                the coarse pass to ~that many nodes and refine the nearest hit
+                at full resolution locally, making a hover O(max_pick_points)
+                instead of O(N). The picked ``segment``/``fraction`` stay exact
+                (the refine runs on the true spine); only nearest-segment
+                *selection* is approximate on sub-stride wiggles. Values below 2
+                disable decimation.
 
         Notes:
             Each pick is delivered as a dict with keys:
@@ -2583,11 +2594,18 @@ class ViewerClient:
             - ``t`` — interpolation parameter within that segment, in
               ``[0, 1]``.
         """
+        # Normalize like the viewer does: fewer than 2 nodes can't form a
+        # coarse segment, so treat that (and negatives) as "off" here too,
+        # keeping the stored/replayed state consistent with viewer behavior.
+        max_pick_points = int(max_pick_points)
+        if max_pick_points < 2:
+            max_pick_points = 0
         self._polyline_picking = {
             "type": "set_polyline_picking",
             "enabled": True,
             "markerColor": int(marker_color),
             "thresholdPx": float(threshold_px),
+            "maxPickPoints": max_pick_points,
         }
         # Send now if connected; otherwise the connect handler replays it.
         if self._ws is not None:
