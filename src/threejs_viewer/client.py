@@ -2625,12 +2625,18 @@ class ViewerClient:
             - ``t`` — interpolation parameter within that segment, in
               ``[0, 1]``.
         """
+        # Normalize like the viewer does: fewer than 2 nodes can't form a
+        # coarse segment, so treat that (and negatives) as "off" here too,
+        # keeping the stored/replayed state consistent with viewer behavior.
+        max_pick_points = int(max_pick_points)
+        if max_pick_points < 2:
+            max_pick_points = 0
         self._polyline_picking = {
             "type": "set_polyline_picking",
             "enabled": True,
             "markerColor": int(marker_color),
             "thresholdPx": float(threshold_px),
-            "maxPickPoints": int(max_pick_points),
+            "maxPickPoints": max_pick_points,
         }
         # Send now if connected; otherwise the connect handler replays it.
         if self._ws is not None:

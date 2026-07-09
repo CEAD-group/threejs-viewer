@@ -5217,6 +5217,12 @@ class PolylinePickController {
         this._rafPending = false;
         this._pendingX = 0;
         this._pendingY = 0;
+        // If the pointer leaves the canvas before a coalesced move's rAF
+        // fires, _onLeave() clears hover but the pending _onMoveRaf() would
+        // otherwise still run and re-show the marker/cursor. Tracked
+        // separately from `hover` (which is also cleared by a genuine no-hit
+        // move) so only a real leave suppresses the pending frame.
+        this._pointerOver = false;
 
         this._onMove = this._onMove.bind(this);
         this._onMoveRaf = this._onMoveRaf.bind(this);
@@ -5372,16 +5378,20 @@ class PolylinePickController {
      * consecutive segment. Returns `{seg, dist}` (seg = the sub-segment's start
      * node index) for the nearest segment within its pixel gate, or null if
      * nothing in range projected in front of the camera inside the gate.
+     *
+     * Distances are compared squared (no `Math.sqrt` in the per-segment hot
+     * path — this runs over every segment of a huge spine); `dist2` in the
+     * result is the squared pixel distance, not pixels.
      * @param {Float32Array} pts @param {number} n @param {THREE.Matrix4} mw
      * @param {any} cam @param {number} W @param {number} H
      * @param {number} cursorX @param {number} cursorY
      * @param {boolean} isTube @param {Float32Array|null} halfExtents @param {number} lineGate
      * @param {number} iStart @param {number} iEndNode @param {number} step
-     * @returns {{seg:number, dist:number}|null}
+     * @returns {{seg:number, dist2:number}|null}
      */
     _scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, iStart, iEndNode, step) {
         let bestSeg = -1;
-        let bestDist = Infinity;
+        let bestDist2 = Infinity;
         let prev = this._ps0;
         let cur = this._ps1;
         let i = iStart;
@@ -5405,15 +5415,15 @@ class PolylinePickController {
                 t = t < 0 ? 0 : t > 1 ? 1 : t;
                 const dx = cursorX - (prev.x + abx * t);
                 const dy = cursorY - (prev.y + aby * t);
-                const d = Math.sqrt(dx * dx + dy * dy);
-                if (d <= gate && d < bestDist) { bestDist = d; bestSeg = i; }
+                const d2 = dx * dx + dy * dy;
+                if (d2 <= gate * gate && d2 < bestDist2) { bestDist2 = d2; bestSeg = i; }
             }
             const tmp = prev;
             prev = cur;
             cur = tmp;
             i = j;
         }
-        return bestSeg < 0 ? null : { seg: bestSeg, dist: bestDist };
+        return bestSeg < 0 ? null : { seg: bestSeg, dist2: bestDist2 };
     }
 
     /**
@@ -5467,7 +5477,7 @@ class PolylinePickController {
         let bestUd = null;
         let bestSeg = 0;
         let bestIsTube = false;
-        let bestDist = Infinity;
+        let bestDist2 = Infinity;
         let bestStride = 1;
 
         const maxPP = this.maxPickPoints;
@@ -5491,8 +5501,8 @@ class PolylinePickController {
             // the winner is refined at full resolution below.
             const stride = (maxPP && n > maxPP) ? Math.ceil((n - 1) / (maxPP - 1)) : 1;
             const res = this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, n - 1, stride);
-            if (res && res.dist < bestDist) {
-                bestDist = res.dist;
+            if (res && res.dist2 < bestDist2) {
+                bestDist2 = res.dist2;
                 bestObj = o;
                 bestUd = ud;
                 bestSeg = res.seg;
@@ -5568,6 +5578,7 @@ class PolylinePickController {
      */
     _onMove(e) {
         if (!this.enabled) return;
+        this._pointerOver = true;
         this._pendingX = e.clientX;
         this._pendingY = e.clientY;
         if (this._rafPending) return;
@@ -5577,7 +5588,10 @@ class PolylinePickController {
 
     _onMoveRaf() {
         this._rafPending = false;
-        if (!this.enabled) return;
+        // The pointer may have left the canvas (_onLeave) since this frame
+        // was scheduled; don't resurrect the hover marker/cursor for a
+        // cursor that's no longer over the canvas.
+        if (!this.enabled || !this._pointerOver) return;
         this._doHover(this._pendingX, this._pendingY);
     }
 
@@ -5632,6 +5646,7 @@ class PolylinePickController {
     }
 
     _onLeave() {
+        this._pointerOver = false;
         if (!this.enabled) return;
         this.clearHover();
         this.v._renderer.domElement.style.cursor = '';

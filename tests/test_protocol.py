@@ -972,3 +972,14 @@ def test_enable_polyline_picking_max_pick_points(client):
     assert msg["thresholdPx"] == 8.0
     assert msg["maxPickPoints"] == 50_000
     assert isinstance(msg["maxPickPoints"], int)
+
+
+@pytest.mark.parametrize("raw", [1, 0, -5])
+def test_enable_polyline_picking_max_pick_points_below_two_normalizes_to_zero(
+    client, raw
+):
+    """Values below 2 can't form a coarse segment; normalize to 0 (off) so the
+    stored/replayed state matches what the viewer itself does (Copilot review
+    on #112)."""
+    client.enable_polyline_picking(max_pick_points=raw)
+    assert client._polyline_picking["maxPickPoints"] == 0
