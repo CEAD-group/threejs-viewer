@@ -2046,60 +2046,29 @@ class ViewerClient:
     def _apply_colormap(
         self, values: np.ndarray, colormap: str, cmin: float, cmax: float
     ) -> np.ndarray:
-        """Apply a colormap to scalar values."""
+        """Apply a colormap to scalar values.
+
+        Uses the exact 256-entry reference tables (`_colormap_data`), linearly
+        interpolated between entries — not an approximation.
+        """
+        from threejs_viewer._colormap_data import TABLES
+
         if cmax == cmin:
             normalized = np.zeros_like(values)
         else:
             normalized = (values - cmin) / (cmax - cmin)
-        normalized = np.clip(normalized, 0, 1)
+        # float32 keeps the interpolation math single-precision to match the
+        # float32 tables (the result is float32 anyway).
+        normalized = np.clip(normalized, 0, 1).astype(np.float32)
 
-        colormaps = {
-            "viridis": [
-                (0.267, 0.004, 0.329),
-                (0.282, 0.140, 0.458),
-                (0.254, 0.265, 0.530),
-                (0.207, 0.372, 0.553),
-                (0.164, 0.471, 0.558),
-                (0.128, 0.567, 0.551),
-                (0.135, 0.659, 0.518),
-                (0.267, 0.749, 0.441),
-                (0.478, 0.821, 0.318),
-                (0.741, 0.873, 0.150),
-                (0.993, 0.906, 0.144),
-            ],
-            "plasma": [
-                (0.050, 0.030, 0.528),
-                (0.295, 0.012, 0.615),
-                (0.492, 0.012, 0.659),
-                (0.665, 0.139, 0.614),
-                (0.798, 0.280, 0.470),
-                (0.899, 0.396, 0.301),
-                (0.973, 0.559, 0.055),
-                (0.940, 0.975, 0.131),
-            ],
-            "turbo": [
-                (0.190, 0.072, 0.232),
-                (0.217, 0.336, 0.855),
-                (0.134, 0.659, 0.918),
-                (0.121, 0.866, 0.706),
-                (0.400, 0.974, 0.371),
-                (0.691, 0.974, 0.171),
-                (0.938, 0.847, 0.102),
-                (0.999, 0.582, 0.084),
-                (0.945, 0.278, 0.086),
-                (0.700, 0.072, 0.150),
-            ],
-        }
-
-        cmap = colormaps.get(colormap, colormaps["viridis"])
-        n_colors = len(cmap)
+        cmap_arr = TABLES.get(colormap, TABLES["viridis"])
+        n_colors = len(cmap_arr)
 
         indices = normalized * (n_colors - 1)
         lower = np.floor(indices).astype(int)
         upper = np.minimum(lower + 1, n_colors - 1)
         frac = indices - lower
 
-        cmap_arr = np.array(cmap)
         result = (
             cmap_arr[lower] * (1 - frac[:, np.newaxis])
             + cmap_arr[upper] * frac[:, np.newaxis]
