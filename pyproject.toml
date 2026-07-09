@@ -46,7 +46,13 @@ include = [
     "/src",
     "/README.md",
     "/DESIGN.md",
+    "/THIRD_PARTY_NOTICES.md",
 ]
+
+# Ship the third-party notices inside the wheel too (Apache-2.0 §4(a)/(d) for
+# the embedded turbo colormap data).
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY_NOTICES.md" = "threejs_viewer/THIRD_PARTY_NOTICES.md"
 
 # Force include viewer.html in wheel (it's not a .py file)
 [tool.hatch.build]

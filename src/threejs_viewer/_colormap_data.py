@@ -5,6 +5,9 @@ Smith & Stefan van der Walt, CC0; turbo: Anton Mikhailov/Google, Apache-2.0)
 so scalar colouring matches the reference colormaps exactly instead of a
 hand-picked stop approximation. Regenerate:
     arr = matplotlib.colormaps[name](np.linspace(0, 1, 256))[:, :3]
+
+Attribution / licensing of this embedded color data is recorded in
+``THIRD_PARTY_NOTICES.md`` at the repo root (the turbo table is Apache-2.0).
 """
 
 import numpy as np
@@ -789,4 +792,10 @@ TURBO = np.array([
 ]).reshape(256, 3)
 # fmt: on
 
-TABLES = {"viridis": VIRIDIS, "plasma": PLASMA, "turbo": TURBO}
+# Stored as float32: `_apply_colormap` casts its result to float32 anyway, so
+# float32 tables keep the same values while avoiding a redundant float64 pass
+# over potentially large (millions-of-points) color arrays.
+TABLES = {
+    name: arr.astype(np.float32)
+    for name, arr in (("viridis", VIRIDIS), ("plasma", PLASMA), ("turbo", TURBO))
+}

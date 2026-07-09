@@ -2009,7 +2009,9 @@ class ViewerClient:
             normalized = np.zeros_like(values)
         else:
             normalized = (values - cmin) / (cmax - cmin)
-        normalized = np.clip(normalized, 0, 1)
+        # float32 keeps the interpolation math single-precision to match the
+        # float32 tables (the result is float32 anyway).
+        normalized = np.clip(normalized, 0, 1).astype(np.float32)
 
         cmap_arr = TABLES.get(colormap, TABLES["viridis"])
         n_colors = len(cmap_arr)

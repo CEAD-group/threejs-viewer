@@ -84,3 +84,9 @@ def test_colormap_tables_are_exact_reference_data():
     plasma = client._apply_colormap(np.array([0.0, 1.0]), "plasma", 0.0, 1.0)
     np.testing.assert_allclose(plasma[0], [0.050383, 0.029803, 0.527975], atol=1e-6)
     np.testing.assert_allclose(plasma[1], [0.940015, 0.975158, 0.131326], atol=1e-6)
+    # turbo (Apache-2.0 reference data): pin first/mid/last so an accidental
+    # edit to the embedded table is caught.
+    turbo = client._apply_colormap(np.array([0.0, 128 / 255, 1.0]), "turbo", 0.0, 1.0)
+    np.testing.assert_allclose(turbo[0], [0.18995, 0.07176, 0.23217], atol=1e-6)
+    np.testing.assert_allclose(turbo[1], [0.64362, 0.98999, 0.23356], atol=1e-6)
+    np.testing.assert_allclose(turbo[2], [0.47960, 0.01583, 0.01055], atol=1e-6)
