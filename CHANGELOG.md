@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.43
+
+### Exact reference colormaps (#106)
+
+- **Scalar colouring (`viridis`/`plasma`/`turbo`) now matches the true matplotlib/Google reference ramps exactly**, instead of a sparse ~8–11-stop hand-picked approximation. Measured against 1000 samples along each ramp, the old approximation was visibly wrong for plasma and turbo (mean ΔRGB 25.5 and 30.7 out of 255, ~98–99% of the ramp off by more than a just-noticeable difference) — viridis's near-linear shape happened to survive it, but plasma and turbo cut the corners off their non-linear features. `_colormap_data.py` embeds the exact 256-entry tables (viridis/plasma CC0, turbo Apache-2.0) as float32 arrays; `ViewerClient._apply_colormap` and `Toolpath._apply_colormap` (bead colouring) both now interpolate from the same 256-entry tables, so scalar colouring and toolpath bead colouring can no longer drift apart. Same interpolation code, no API change.
+- Redistributing the Apache-2.0-licensed turbo table adds `THIRD_PARTY_NOTICES.md` (full license text + attribution), shipped in both the sdist and the wheel.
+
+### Accelerated polyline/tube picking on huge spines (#111)
+
+- **Hover-picking a polyline or parametric tube no longer tanks the frame rate on multi-million-point toolpaths.** The per-`pointermove` pick scan projected every spine node to screen space — O(N) per mouse move, independent of render LOD — which dominated the frame budget on a ~5M-point toolpath (~63% of frame time in a profile) even though the render itself is one cheap draw call.
+  - Hover picks are now **coalesced to one scan per animation frame**: a fast mouse move fires many `pointermove` events, but only the latest cursor position matters, so the scan is deferred to `requestAnimationFrame` and collapses to at most one run per frame. Always on.
+  - New opt-in **`enable_polyline_picking(..., max_pick_points=N)`** (JS: `enablePolylinePicking({maxPickPoints})`) decimates the coarse per-hover scan: a spine with more than `N` nodes is visited with a stride so only ~`N` chord-segments are screen-tested, then the winning coarse hit is refined at full resolution in a local index window — hover cost drops from O(N_spine) to O(N_pick). The resolved `segment`/`fraction`/`point` stay exact; only nearest-segment *selection* is approximate on sub-stride wiggles. `0` (default) / values below 2 disable decimation (exact full scan).
+  - The per-segment hot path now compares squared pixel distances instead of taking a `Math.sqrt` per segment.
+
 ## 0.0.42
 
 ### Bead tube break mask (#107)
