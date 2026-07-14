@@ -1499,15 +1499,22 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         if (widths[i] > maxDim) maxDim = widths[i];
         if (heights[i] > maxDim) maxDim = heights[i];
     }
-    // Per-segment length, retained for the large-segment exemption (#119):
-    // segLen[k] = ‖spine[k+1] − spine[k]‖.
-    const segLen = new Float32Array(nSeg);
+    // Large-segment exemption factor (#119). 0 disables the exemption; when
+    // off we skip the per-segment sqrt/allocation below entirely.
+    const LARGE_SEG_FACTOR_DEFAULT = 1.0;
+    const exemptSeg = (typeof largeSegFactor === 'number' && largeSegFactor >= 0)
+        ? largeSegFactor : LARGE_SEG_FACTOR_DEFAULT;
+    // Per-segment length, retained only for the large-segment exemption:
+    // segLen[k] = ‖spine[k+1] − spine[k]‖. Allocated (and sqrt'd) only when the
+    // exemption is active; maxSegLen2 (needed always, for `reject`) is tracked
+    // from the squared length so the sqrt is genuinely skipped when off.
+    const segLen = exemptSeg > 0 ? new Float32Array(nSeg) : null;
     for (let i = 0; i < nSeg; i++) {
         const dx = spine[(i + 1) * 3]     - spine[i * 3];
         const dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
         const dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        segLen[i] = Math.sqrt(d2);
+        if (segLen) segLen[i] = Math.sqrt(d2);
         if (d2 > maxSegLen2) maxSegLen2 = d2;
     }
     if (maxDim <= 0) return;
@@ -1559,12 +1566,18 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // triangles (rings yanked sideways) or degenerate "striped gap"
     // fans (rings collapsed to a far point, connector triangles slivered).
     //
-    // MAX_SNAP_FACTOR · max(W, H) bounds the per-ring displacement from
-    // its mitered baseline. 1.0 = "ring may move at most one bead-width".
-    // The strand offset magnitude is ~0.5·W, so 1.0 still allows the
-    // strand to fully reach the cross-section's opposite side. Beyond
-    // that the snap is geometrically nonsensical for a fold.
-    const MAX_SNAP_FACTOR_DEFAULT = 1.0;
+    // MAX_SNAP_FACTOR · max(W, H) bounds the per-ring displacement from its
+    // mitered baseline. The full-bead-width reach (1.0) over-snaps a *tight*
+    // fold — inside-bend rings pile onto an apex beyond the surface and render
+    // as a spiky fin at the cusp plus a z-fighting sawtooth. Dropping too far
+    // (0.25) under-shoots real wide-bead corners: the strands stop short of
+    // the apex and leave a protruding wedge (measured pixel-for-pixel against
+    // the #50 ribweaver-bulb tuned baseline). 0.5 is the sweet spot — it
+    // reaches the apex on real corners identically to 1.0 (0.00% pixel diff on
+    // the #50 bulb apexes) while staying gentle enough to avoid the tight-fold
+    // fin. The large-segment exemption below independently removes the far-
+    // field false snaps that motivated the old 1.0.
+    const MAX_SNAP_FACTOR_DEFAULT = 0.5;
     const snapFactor = (typeof maxSnapFactor === 'number' && maxSnapFactor > 0)
         ? maxSnapFactor : MAX_SNAP_FACTOR_DEFAULT;
 
@@ -1574,15 +1587,12 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // open straight (both adjacent spine segments long relative to the bead)
     // is never inside such a fold, yet the seg-seg fold detector can still
     // fire there on degenerate tangents from nearby micro-segments/breaks
-    // (see #117) and yank the ring metres off the true path. Exempt any ring
-    // whose SHORTER adjacent segment is ≥ LARGE_SEG_FACTOR bead-widths: the
-    // snap pass then only acts within genuinely dense regions. A transition
-    // ring (one long + one short neighbour) keeps its shorter neighbour and
-    // stays eligible, so real fold entries/exits are unaffected.
-    // Factor 0 disables the exemption (A/B / legacy behaviour).
-    const LARGE_SEG_FACTOR_DEFAULT = 1.0;
-    const exemptSeg = (typeof largeSegFactor === 'number' && largeSegFactor >= 0)
-        ? largeSegFactor : LARGE_SEG_FACTOR_DEFAULT;
+    // (see #117) and yank the ring metres off the true path. `exemptSeg`
+    // (computed above) exempts any ring whose SHORTER adjacent segment is ≥
+    // LARGE_SEG_FACTOR bead-widths so the snap pass only acts within genuinely
+    // dense regions. A transition ring (one long + one short neighbour) keeps
+    // its shorter neighbour and stays eligible, so real fold entries/exits are
+    // unaffected. Factor 0 disables the exemption (A/B / legacy behaviour).
 
     // Minimum peak per-vertex turn (radians) inside the fold range for a
     // candidate to be considered a real corner fold. Below this, the
@@ -6477,6 +6487,11 @@ class TransformGizmoController {
     }
 }
 
+// Reusable scratch vectors for the per-frame LOD skip gate, so it computes a
+// tube's world-space center/scale without allocating a Vector3 each frame.
+const _LOD_CENTER_SCRATCH = new THREE.Vector3();
+const _LOD_SCALE_SCRATCH = new THREE.Vector3();
+
 export class ThreeJSViewer {
     /**
      * @param {HTMLElement} container - The DOM element to mount into
@@ -11206,12 +11221,24 @@ export class ThreeJSViewer {
                 let refDist = lod.boundingRadius * 2;
                 const bs = obj.geometry && obj.geometry.boundingSphere;
                 if (bs) {
-                    const c = bs.center.clone().applyMatrix4(obj.matrixWorld);
-                    const cx = camX - c.x, cy = camY - c.y, cz = camZ - c.z;
+                    // World-space center + radius, no per-frame allocation.
+                    // bs.radius is local geometry space, so scale it by the
+                    // object's max world-axis scale (non-uniform-safe) — an
+                    // un-scaled radius would make the surface distance wrong
+                    // for a transformed tube.
+                    _LOD_CENTER_SCRATCH.copy(bs.center).applyMatrix4(obj.matrixWorld);
+                    _LOD_SCALE_SCRATCH.setFromMatrixScale(obj.matrixWorld);
+                    const worldRadius = bs.radius * Math.max(
+                        Math.abs(_LOD_SCALE_SCRATCH.x),
+                        Math.abs(_LOD_SCALE_SCRATCH.y),
+                        Math.abs(_LOD_SCALE_SCRATCH.z));
+                    const cx = camX - _LOD_CENTER_SCRATCH.x;
+                    const cy = camY - _LOD_CENTER_SCRATCH.y;
+                    const cz = camZ - _LOD_CENTER_SCRATCH.z;
                     // Near the surface the center distance overstates how
                     // close we are; the bounding-sphere SURFACE distance is
                     // the honest zoom scale (floored to stay positive inside).
-                    const surf = Math.sqrt(cx * cx + cy * cy + cz * cz) - bs.radius;
+                    const surf = Math.sqrt(cx * cx + cy * cy + cz * cz) - worldRadius;
                     refDist = Math.min(refDist, Math.max(Math.abs(surf), lod.boundingRadius * 0.01));
                 }
                 const threshold = Math.max(1e-6, refDist) * 0.05;

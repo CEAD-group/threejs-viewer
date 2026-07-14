@@ -298,7 +298,10 @@ def test_add_parametric_tube_strand_collapse_large_seg_factor_in_header():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
     c.add_parametric_tube(
-        "t", spine, widths, heights,
+        "t",
+        spine,
+        widths,
+        heights,
         strand_collapse={"max_snap_factor": 1.0, "large_seg_factor": 2.0},
     )
     header, _ = c._binary_messages[-1]
@@ -1301,16 +1304,16 @@ def test_parametric_tube_strand_collapse_repro_renders_clean(
     base = info["repro_baseline"]
     coll = info["repro_collapsed"]
 
-    # The genuine fold must still fire under the default max_snap_factor=1.0
-    # guard — at least one ring vertex should have moved noticeably from its
-    # mitered baseline. Use the smallest width in the bead (~50 mm at scale)
-    # as a conservative lower bound; the actual fold pulls strands by a
-    # larger fraction of W on this dataset.
+    # The genuine fold must still fire under the default snap factor (0.25) —
+    # at least one ring vertex should have moved noticeably from its mitered
+    # baseline. Use the smallest width in the bead (~50 mm at scale) as a
+    # conservative lower bound; the actual fold pulls strands by a larger
+    # fraction of W on this dataset even at the gentler default.
     min_w = float(np.min(widths))
     assert coll["maxMove"] > 0.1 * min_w, (
         "strand_collapse fold did not fire: max ring movement "
         f"{coll['maxMove']:.3f} ≤ 0.1·minW ({0.1 * min_w:.3f}) — "
-        "default max_snap_factor=1.0 may have over-rejected the genuine fold"
+        "the default snap factor may have over-rejected the genuine fold"
     )
 
     assert base["nonFinite"] == 0, f"baseline has {base['nonFinite']} NaN/Inf positions"
@@ -1802,4 +1805,3 @@ def test_add_toolpath_threads_bias_ramp_across_segments():
     assert seg1["id"] == "tp_seg_1"
     assert seg1["biasIndexOffset"] == 4
     assert seg1["biasIndexTotal"] == 7
-
