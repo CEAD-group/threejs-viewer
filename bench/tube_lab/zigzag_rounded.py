@@ -165,7 +165,8 @@ def run_input(R, tag):
         br = p.chromium.launch(headless=True)
         pg = br.new_page(viewport={"width": 1400, "height": 1000})
         pg.goto(f"file://{c.viewer_path.resolve()}?ws_port={c.port}")
-        c._connected_event.wait(timeout=15)
+        if not c._connected_event.wait(timeout=15):
+            raise RuntimeError("viewer never connected")
         c.clear()
         c.add_polyline("t", points=sp, color=0x2266DD, line_width=2.5)
         time.sleep(0.4)
@@ -192,7 +193,8 @@ def run(R, sc, tag, wire=2):
         br = p.chromium.launch(headless=True)
         pg = br.new_page(viewport={"width": 1400, "height": 1000})
         pg.goto(f"file://{c.viewer_path.resolve()}?ws_port={c.port}")
-        c._connected_event.wait(timeout=15)
+        if not c._connected_event.wait(timeout=15):
+            raise RuntimeError("viewer never connected")
         c.clear()
         c.add_parametric_tube(
             "t",

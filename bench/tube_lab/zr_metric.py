@@ -374,7 +374,8 @@ def main():
         br = p.chromium.launch(headless=True)
         pg = br.new_page(viewport=VIEW)
         pg.goto(f"file://{c.viewer_path.resolve()}?ws_port={c.port}")
-        c._connected_event.wait(timeout=15)
+        if not c._connected_event.wait(timeout=15):
+            raise RuntimeError("viewer never connected")
         for scene_name, scene_fn in SCENES:
             sc0 = scene_fn()
             d = sc0["ext"] / (2 * math.tan(math.radians(20))) * 1.05
