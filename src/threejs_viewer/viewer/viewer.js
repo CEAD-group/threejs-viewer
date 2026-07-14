@@ -1139,12 +1139,18 @@ function computeMiterFrames(spine, nSpine, outFrames, outMiters, outTangents,
     let pX = 1, pY = 0, pZ = 0;
     let cX = 1, cY = 0, cZ = 0;
     if (nSeg > 0) {
-        let dx = spine[3]     - spine[0];
-        let dy = spine[4]     - spine[1];
-        let dz = spine[5]     - spine[2];
-        const len = Math.hypot(dx, dy, dz);
-        if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
-        else { dx = 1; dy = 0; dz = 0; }
+        // Seed from the first NON-degenerate segment: a zero-length segment
+        // (an exactly-duplicated spine vertex, e.g. a sharp width-step twin)
+        // must not inject an arbitrary +X tangent — that rotates its ring off
+        // the true path direction and fans the tube open at bends.
+        let dx = 1, dy = 0, dz = 0;
+        for (let k = 0; k < nSeg; k++) {
+            const ex = spine[(k + 1) * 3]     - spine[k * 3];
+            const ey = spine[(k + 1) * 3 + 1] - spine[k * 3 + 1];
+            const ez = spine[(k + 1) * 3 + 2] - spine[k * 3 + 2];
+            const len = Math.hypot(ex, ey, ez);
+            if (len > 1e-12) { dx = ex / len; dy = ey / len; dz = ez / len; break; }
+        }
         pX = cX = dx; pY = cY = dy; pZ = cZ = dz;
     }
     for (let i = 0; i < nSpine; i++) {
@@ -1157,9 +1163,11 @@ function computeMiterFrames(spine, nSpine, outFrames, outMiters, outTangents,
             let dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
             let dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
             const len = Math.hypot(dx, dy, dz);
-            if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
-            else { dx = 1; dy = 0; dz = 0; }
-            cX = dx; cY = dy; cZ = dz;
+            // Zero-length (duplicated vertex): carry the previous direction
+            // through instead of snapping to +X, so the twin ring stays
+            // aligned with the path and the sharp width step renders as a
+            // clean step, not a fold-fan.
+            if (len > 1e-12) { cX = dx / len; cY = dy / len; cZ = dz / len; }
         }
         const isEnd = i === 0 || i === nSpine - 1;
         const inX  = isEnd ? cX : pX, inY  = isEnd ? cY : pY, inZ  = isEnd ? cZ : pZ;
@@ -1475,8 +1483,11 @@ const TUBE_STRAND_COLLAPSE_TOL_FRAC = 0.04;
  * @param {Float32Array} localFrames
  * @param {number} nSpine
  * @param {number} nCs
+ * @param {number} [maxSnapFactor]   per-ring snap cap in bead-widths (default 1.0)
+ * @param {number} [largeSegFactor]  exempt rings whose shorter adjacent segment
+ *                                   is ≥ this many bead-widths (default 1.0; 0 = off)
  */
-function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs, maxSnapFactor) {
+function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs, maxSnapFactor, largeSegFactor) {
     const minGap = TUBE_STRAND_COLLAPSE_MIN_GAP;
     const winMax = TUBE_STRAND_COLLAPSE_WIN;
     const stride = winMax - minGap + 1;
@@ -1488,11 +1499,22 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         if (widths[i] > maxDim) maxDim = widths[i];
         if (heights[i] > maxDim) maxDim = heights[i];
     }
-    for (let i = 0; i < nSpine - 1; i++) {
+    // Large-segment exemption factor (#119). 0 disables the exemption; when
+    // off we skip the per-segment sqrt/allocation below entirely.
+    const LARGE_SEG_FACTOR_DEFAULT = 1.0;
+    const exemptSeg = (typeof largeSegFactor === 'number' && largeSegFactor >= 0)
+        ? largeSegFactor : LARGE_SEG_FACTOR_DEFAULT;
+    // Per-segment length, retained only for the large-segment exemption:
+    // segLen[k] = ‖spine[k+1] − spine[k]‖. Allocated (and sqrt'd) only when the
+    // exemption is active; maxSegLen2 (needed always, for `reject`) is tracked
+    // from the squared length so the sqrt is genuinely skipped when off.
+    const segLen = exemptSeg > 0 ? new Float32Array(nSeg) : null;
+    for (let i = 0; i < nSeg; i++) {
         const dx = spine[(i + 1) * 3]     - spine[i * 3];
         const dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
         const dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
+        if (segLen) segLen[i] = Math.sqrt(d2);
         if (d2 > maxSegLen2) maxSegLen2 = d2;
     }
     if (maxDim <= 0) return;
@@ -1544,14 +1566,33 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // triangles (rings yanked sideways) or degenerate "striped gap"
     // fans (rings collapsed to a far point, connector triangles slivered).
     //
-    // MAX_SNAP_FACTOR · max(W, H) bounds the per-ring displacement from
-    // its mitered baseline. 1.0 = "ring may move at most one bead-width".
-    // The strand offset magnitude is ~0.5·W, so 1.0 still allows the
-    // strand to fully reach the cross-section's opposite side. Beyond
-    // that the snap is geometrically nonsensical for a fold.
-    const MAX_SNAP_FACTOR_DEFAULT = 1.0;
+    // MAX_SNAP_FACTOR · max(W, H) bounds the per-ring displacement from its
+    // mitered baseline. The full-bead-width reach (1.0) over-snaps a *tight*
+    // fold — inside-bend rings pile onto an apex beyond the surface and render
+    // as a spiky fin at the cusp plus a z-fighting sawtooth. Dropping too far
+    // (0.25) under-shoots real wide-bead corners: the strands stop short of
+    // the apex and leave a protruding wedge (measured pixel-for-pixel against
+    // the #50 ribweaver-bulb tuned baseline). 0.5 is the sweet spot — it
+    // reaches the apex on real corners identically to 1.0 (0.00% pixel diff on
+    // the #50 bulb apexes) while staying gentle enough to avoid the tight-fold
+    // fin. The large-segment exemption below independently removes the far-
+    // field false snaps that motivated the old 1.0.
+    const MAX_SNAP_FACTOR_DEFAULT = 0.5;
     const snapFactor = (typeof maxSnapFactor === 'number' && maxSnapFactor > 0)
         ? maxSnapFactor : MAX_SNAP_FACTOR_DEFAULT;
+
+    // Large-segment exemption (#119). strand_collapse exists for tight wipe
+    // loops — dense runs of SHORT segments where the bead is wider than the
+    // local turn radius and the swept tube must fold. A ring sitting on an
+    // open straight (both adjacent spine segments long relative to the bead)
+    // is never inside such a fold, yet the seg-seg fold detector can still
+    // fire there on degenerate tangents from nearby micro-segments/breaks
+    // (see #117) and yank the ring metres off the true path. `exemptSeg`
+    // (computed above) exempts any ring whose SHORTER adjacent segment is ≥
+    // LARGE_SEG_FACTOR bead-widths so the snap pass only acts within genuinely
+    // dense regions. A transition ring (one long + one short neighbour) keeps
+    // its shorter neighbour and stays eligible, so real fold entries/exits are
+    // unaffected. Factor 0 disables the exemption (A/B / legacy behaviour).
 
     // Minimum peak per-vertex turn (radians) inside the fold range for a
     // candidate to be considered a real corner fold. Below this, the
@@ -1997,6 +2038,15 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         if (dxC * dxC + dyC * dyC + dzC * dzC > clusterCapSq) continue;
         for (const strand of c.strands) {
             for (let r = sLo; r <= sHi; r++) {
+                // Large-segment exemption (#119): skip rings on open straights.
+                // Ring r's adjacent segments are segLen[r-1] and segLen[r]
+                // (both valid here since 1 ≤ sLo ≤ r ≤ sHi ≤ nSpine-2).
+                if (exemptSeg > 0) {
+                    const segA = segLen[r - 1];
+                    const segB = segLen[r];
+                    const shorter = segA < segB ? segA : segB;
+                    if (shorter >= exemptSeg * Math.max(widths[r], heights[r])) continue;
+                }
                 const ip = r * ringStride + strand * 3;
                 const cap = snapFactor * Math.max(widths[r], heights[r]);
                 const capSq = cap * cap;
@@ -2529,9 +2579,10 @@ self.onmessage = function(e) {
     if (msg.type === 'collapseOnly') {
         const sc = msg.strandCollapse;
         const msf = (sc && typeof sc === 'object') ? sc.maxSnapFactor : undefined;
+        const lsf = (sc && typeof sc === 'object') ? sc.largeSegFactor : undefined;
         collapseTubeStrandFolds(
             msg.positions, msg.spine, msg.widths, msg.heights, msg.localFrames,
-            msg.nSpine, N_CS, msf,
+            msg.nSpine, N_CS, msf, lsf,
         );
         self.postMessage({
             type: 'collapseOnlyResult',
@@ -2665,7 +2716,8 @@ self.onmessage = function(e) {
         uncollapsedPositions = new Float32Array(geo.positions);
         const sc = tube.strandCollapse;
         const msf = (sc && typeof sc === 'object') ? sc.maxSnapFactor : undefined;
-        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS, msf);
+        const lsf = (sc && typeof sc === 'object') ? sc.largeSegFactor : undefined;
+        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS, msf, lsf);
     }
 
     // Transfer ownership of large buffers
@@ -3335,6 +3387,63 @@ function expandRingColors(packedColors, nSpine, nCs, out) {
     return out;
 }
 
+// Per-draw WebGL index-count ceiling for a single parametric tube. A tube
+// whose index buffer exceeds the context's `webgl.max-vert-ids-per-draw`
+// limit (30,000,000 on Firefox/ANGLE; driver-dependent) is silently
+// truncated — `drawElementsInstanced` draws only the first N indices and the
+// tail of the tube vanishes with just a console warning (issues #113/#114).
+// The limit is not reliably queryable (MAX_ELEMENTS_INDICES is a hint, not the
+// hard cap), so we use a conservative constant comfortably under 30M. A
+// ~833k-ring-pair tube (30M/36) is the largest single draw; beyond that the
+// geometry is split into groups (see applyTubeDrawCap).
+const MAX_TUBE_INDICES_PER_DRAW = 24000000;
+
+// Split a tube whose index buffer exceeds MAX_TUBE_INDICES_PER_DRAW into
+// geometry groups + a 1-element material array, so three.js issues one
+// drawElements call per group (each under the cap) instead of a single
+// oversized draw the driver truncates. Under the cap: a single material and no
+// groups — byte-identical to the un-chunked tube. Idempotent; re-run after any
+// geometry (re)assignment (e.g. an LOD rebuild that grows/shrinks the buffer).
+//
+// Groups partition the WHOLE index range [0, count) positionally (aligned to
+// whole triangles), and the r183 renderer intersects `geometry.drawRange` with
+// each group's [start, start+count). So the existing single `setDrawRange(0,
+// N)` reveal (and the endCap relocation that rewrites indices in place) keeps
+// working verbatim: groups fully within the range draw whole, the group
+// straddling N draws partially, groups past N draw nothing — the reveal simply
+// spans chunks. This also subsumes #114: an LOD tube that refines past the cap
+// up close is chunked too, so it never truncates regardless of camera distance.
+/**
+ * @param {THREE.Mesh} mesh
+ * @param {THREE.Material} baseMaterial  the tube's single material (retained across rebuilds)
+ */
+function applyTubeDrawCap(mesh, baseMaterial) {
+    const geo = mesh.geometry;
+    const idx = geo.getIndex();
+    const total = idx ? idx.count : 0;
+    // Test seam: a browser test can lower the cap via window.__tubeDrawCapOverride
+    // to exercise chunking without building a genuinely 24M-index tube. Ignored
+    // (undefined) in production.
+    const capOverride = typeof window !== 'undefined'
+        ? /** @type {any} */ (window).__tubeDrawCapOverride : 0;
+    const cap = capOverride > 0 ? capOverride : MAX_TUBE_INDICES_PER_DRAW;
+    geo.clearGroups();
+    if (total <= cap) {
+        // Restore the single-material form if a previous (larger) geometry had
+        // chunked it — a plain material draws the whole index in one call.
+        if (Array.isArray(mesh.material)) mesh.material = baseMaterial;
+        return;
+    }
+    // Largest whole-triangle-aligned chunk ≤ the cap.
+    const chunk = Math.floor(cap / 3) * 3;
+    for (let start = 0; start < total; start += chunk) {
+        geo.addGroup(start, Math.min(chunk, total - start), 0);
+    }
+    // three.js only iterates groups (⇒ multiple draw calls) when the mesh's
+    // material is an array; every group uses materialIndex 0 = the one material.
+    mesh.material = [baseMaterial];
+}
+
 // ParametricTube — namespaces the operations that read / mutate a tube mesh
 // built by `buildParametricTubeGeometry`. State continues to live on
 // `mesh.userData.tube*` so stream-mode code, tests, and the LOD worker can
@@ -3362,6 +3471,13 @@ class ParametricTube {
 
         mesh.geometry.dispose();
         mesh.geometry = geometry;
+        // Re-chunk for the per-draw index cap on the new (reduced) buffer: a
+        // close-in zoom refines LOD toward full resolution and can push the
+        // index count back over the cap, so the LOD tube must chunk too or it
+        // truncates again up close (#114). Under the cap this reverts to the
+        // single-material form.
+        applyTubeDrawCap(mesh, mesh.userData.tubeBaseMaterial
+            || (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material));
         if (mesh.userData.wireframeOverlay) {
             mesh.userData.wireframeOverlay.geometry = geometry;
         }
@@ -4165,7 +4281,12 @@ class ShadingDebugController {
         if (obj.userData.originalMaterial === undefined) {
             obj.userData.originalMaterial = obj.material;
         }
-        obj.material = debugMat;
+        // A tube split into geometry groups for the per-draw index cap
+        // (#113) only renders every group when its material is an array;
+        // wrap the debug material to match so a >cap tube doesn't truncate
+        // in normals/UV debug view.
+        const grouped = obj.geometry && obj.geometry.groups && obj.geometry.groups.length > 1;
+        obj.material = grouped ? [debugMat] : debugMat;
     }
 
     /** @param {any} obj */
@@ -6434,6 +6555,11 @@ class TransformGizmoController {
         }
     }
 }
+
+// Reusable scratch vectors for the per-frame LOD skip gate, so it computes a
+// tube's world-space center/scale without allocating a Vector3 each frame.
+const _LOD_CENTER_SCRATCH = new THREE.Vector3();
+const _LOD_SCALE_SCRATCH = new THREE.Vector3();
 
 export class ThreeJSViewer {
     /**
@@ -10359,9 +10485,14 @@ export class ThreeJSViewer {
                         } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
                             strandCollapse = true;
                             const msf = data.strandCollapse.maxSnapFactor;
-                            strandCollapseCfg = (typeof msf === 'number' && msf > 0)
-                                ? { maxSnapFactor: msf }
-                                : true;
+                            const lsf = data.strandCollapse.largeSegFactor;
+                            const cfg = {};
+                            if (typeof msf === 'number' && msf > 0) cfg.maxSnapFactor = msf;
+                            if (typeof lsf === 'number' && lsf >= 0) cfg.largeSegFactor = lsf;
+                            // Keep the object form whenever any tuned field survives so
+                            // largeSegFactor (incl. 0 = exemption off) reaches the
+                            // collapse pass; else fall back to defaults-enabled.
+                            strandCollapseCfg = Object.keys(cfg).length ? cfg : true;
                         }
                         const { geometry, ringPairs, indicesPerRingPair, localFrames, miters, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                             buildSpine, buildWidths, buildHeights,
@@ -10383,6 +10514,14 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
+                        // Retained single material so applyTubeDrawCap can flip
+                        // between plain / [material] as the geometry crosses the
+                        // per-draw index cap across LOD rebuilds (#113/#114).
+                        mesh.userData.tubeBaseMaterial = material;
+                        // Chunk the draw into ≤cap groups if the full geometry
+                        // exceeds the per-draw WebGL index limit (#113). No-op
+                        // (single material, no groups) for tubes under the cap.
+                        applyTubeDrawCap(mesh, material);
                         mesh.userData.parametricTube = new ParametricTube(mesh);
                         mesh.userData.tubeNumSpinePoints = buildN;
                         mesh.userData.tubeNCs = nCs;
@@ -11145,14 +11284,41 @@ export class ThreeJSViewer {
             if (!obj.userData.isParametricTube || !obj.userData.tubeLOD) continue;
             const lod = obj.userData.tubeLOD;
 
-            // Skip if camera hasn't moved enough (5% of distance to tube center)
+            // Skip if camera hasn't moved enough — 5% of the camera's ACTUAL
+            // distance to the tube, not of the model size. The old
+            // boundingRadius-based threshold was absolute: close-in zooming
+            // moves the camera a few cm while the LOD epsilon (∝ camera
+            // distance) shrinks by an order of magnitude, so the rebuild
+            // never fired and a stale coarse tube rendered up close.
             if (lod.keptIndices) {
                 const dx = camX - lod.lastCameraPos.x;
                 const dy = camY - lod.lastCameraPos.y;
                 const dz = camZ - lod.lastCameraPos.z;
                 const deltaSq = dx * dx + dy * dy + dz * dz;
-                const centerDist = Math.max(1e-6, lod.boundingRadius * 2);
-                const threshold = centerDist * 0.05;
+                let refDist = lod.boundingRadius * 2;
+                const bs = obj.geometry && obj.geometry.boundingSphere;
+                if (bs) {
+                    // World-space center + radius, no per-frame allocation.
+                    // bs.radius is local geometry space, so scale it by the
+                    // object's max world-axis scale (non-uniform-safe) — an
+                    // un-scaled radius would make the surface distance wrong
+                    // for a transformed tube.
+                    _LOD_CENTER_SCRATCH.copy(bs.center).applyMatrix4(obj.matrixWorld);
+                    _LOD_SCALE_SCRATCH.setFromMatrixScale(obj.matrixWorld);
+                    const worldRadius = bs.radius * Math.max(
+                        Math.abs(_LOD_SCALE_SCRATCH.x),
+                        Math.abs(_LOD_SCALE_SCRATCH.y),
+                        Math.abs(_LOD_SCALE_SCRATCH.z));
+                    const cx = camX - _LOD_CENTER_SCRATCH.x;
+                    const cy = camY - _LOD_CENTER_SCRATCH.y;
+                    const cz = camZ - _LOD_CENTER_SCRATCH.z;
+                    // Near the surface the center distance overstates how
+                    // close we are; the bounding-sphere SURFACE distance is
+                    // the honest zoom scale (floored to stay positive inside).
+                    const surf = Math.sqrt(cx * cx + cy * cy + cz * cz) - worldRadius;
+                    refDist = Math.min(refDist, Math.max(Math.abs(surf), lod.boundingRadius * 0.01));
+                }
+                const threshold = Math.max(1e-6, refDist) * 0.05;
                 if (deltaSq < threshold * threshold) continue;
             }
 

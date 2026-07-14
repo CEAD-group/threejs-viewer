@@ -153,7 +153,7 @@ def _serialize_lod(lod):
     return out
 
 
-_STRAND_COLLAPSE_ALLOWED_KEYS = {"max_snap_factor"}
+_STRAND_COLLAPSE_ALLOWED_KEYS = {"max_snap_factor", "large_seg_factor"}
 
 
 def _serialize_strand_collapse(sc):
@@ -192,6 +192,19 @@ def _serialize_strand_collapse(sc):
                 f"number (got {msf!r})"
             )
         out["maxSnapFactor"] = msf
+    if "large_seg_factor" in sc:
+        lsf = sc["large_seg_factor"]
+        if isinstance(lsf, bool) or not isinstance(lsf, numbers.Real):
+            raise ValueError(
+                f"strand_collapse.large_seg_factor must be a number (got {lsf!r})"
+            )
+        lsf = float(lsf)
+        if not math.isfinite(lsf) or lsf < 0:
+            raise ValueError(
+                "strand_collapse.large_seg_factor must be a finite number "
+                f">= 0 (got {lsf!r})"
+            )
+        out["largeSegFactor"] = lsf
     # Empty dict (or dict with no recognised settings) means "enabled with
     # defaults". Returning {} would be falsy at the caller and silently
     # disable collapse, which is the opposite of what the user asked for.
@@ -1488,19 +1501,31 @@ class ViewerClient:
                         strand_collapse={"max_snap_factor": 1.0},
                     )
 
-                ``max_snap_factor`` (default ``1.0``) bounds how far a ring
-                may be displaced from its mitered baseline by the snap
-                pass, measured in units of ``max(width, height)``. On
-                real-world toolpaths whose neighbouring passes place
-                offset strands within tolerance of each other in 3D,
-                the seg-seg midpoint can land multiple bead-widths from
-                where the spine put the ring — those snaps render as
-                lateral spike triangles or degenerate striped-gap fans.
-                The guard rejects them while leaving genuine inside-
-                bend folds (where the apex sits within one bead-width)
-                intact. Use lower values (e.g. 0.5) to be more
-                aggressive about rejecting outliers, higher values
-                (e.g. 2.0) to catch only the most pathological cases.
+                ``max_snap_factor`` (default ``0.5``) bounds how far a
+                ring may be displaced from its mitered baseline by the
+                snap pass, measured in units of ``max(width, height)``.
+                The full-bead-width reach (``1.0``) over-snaps a *tight*
+                fold — inside-bend rings pile onto an apex beyond the
+                surface and render as a spiky fin at the cusp plus a
+                z-fighting sawtooth. Dropping too far (``0.25``) under-
+                shoots real wide-bead corners, leaving the strands short
+                of the apex as a protruding wedge. ``0.5`` reaches the
+                apex on real corners identically to ``1.0`` while staying
+                gentle enough to avoid the tight-fold fin. The far-field
+                outliers on real toolpaths (neighbouring passes whose
+                offset strands come within tolerance in 3D) are handled
+                by ``large_seg_factor`` (below), the primary such guard.
+
+                ``large_seg_factor`` (default ``1.0``) exempts rings on
+                open straights from the snap pass entirely: a ring whose
+                shorter adjacent spine segment is at least this many
+                bead-widths long is treated as outside any wipe-loop fold
+                and is never moved, no matter what the fold detector
+                claims. This confines collapse to genuinely dense regions
+                (consecutive short segments — the actual wipe-loop class)
+                and removes false snaps triggered by degenerate tangents
+                at nearby micro-segments or breaks. Pass ``0`` to disable
+                the exemption (legacy behaviour).
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
