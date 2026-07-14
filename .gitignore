@@ -35,3 +35,6 @@ package-lock.json
 # Claude Code local config (personal permissions + agent worktrees)
 .claude/
 
+
+# tube_lab bench outputs
+bench/tube_lab/out/
