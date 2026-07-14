@@ -1805,3 +1805,116 @@ def test_add_toolpath_threads_bias_ramp_across_segments():
     assert seg1["id"] == "tp_seg_1"
     assert seg1["biasIndexOffset"] == 4
     assert seg1["biasIndexTotal"] == 7
+
+
+# --- Per-draw WebGL index-cap chunking (issues #113/#114) ------------------
+
+
+def _helix_tube_args(n):
+    """A helix spine of n points — enough ring-pairs to exceed a lowered cap."""
+    t = np.linspace(0.0, 6.0 * np.pi, n)
+    spine = np.column_stack(
+        [np.cos(t) * 20.0, np.sin(t) * 20.0, np.linspace(0.0, 60.0, n)]
+    ).astype(np.float32)
+    widths = np.full(n, 3.0, np.float32)
+    heights = np.full(n, 2.0, np.float32)
+    return spine, widths, heights
+
+
+@pytest.mark.browser
+def test_parametric_tube_chunks_when_over_draw_cap(viewer_client, viewer_page):
+    """A tube whose index count exceeds the per-draw WebGL cap is split into
+    geometry groups + a material array so it renders in multiple draw calls
+    instead of silently truncating (#113). Uses a lowered cap test seam so we
+    don't have to build a genuinely 24M-index tube."""
+    # 5000-index cap: a 400-pt tube (399 ring-pairs * 36 = 14364 idx + caps)
+    # exceeds it and must chunk into 3 groups.
+    viewer_page.evaluate("() => { window.__tubeDrawCapOverride = 5000; }")
+    spine, widths, heights = _helix_tube_args(400)
+    viewer_client.add_parametric_tube("big", spine, widths, heights, lod=False)
+    _wait_for_object(viewer_page, "big")
+
+    info = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            const geo = obj.geometry;
+            const groups = geo.groups.map(g => ({ start: g.start, count: g.count }));
+            return {
+                total: geo.getIndex().count,
+                cap: 5000,
+                isArray: Array.isArray(obj.material),
+                matLen: Array.isArray(obj.material) ? obj.material.length : 1,
+                groups,
+            };
+        }""",
+        "big",
+    )
+
+    assert info["total"] > info["cap"], "tube should exceed the lowered cap"
+    assert info["isArray"], "over-cap tube must use a material array for multi-draw"
+    assert len(info["groups"]) > 1, "over-cap tube must be split into >1 group"
+    # Groups must tile [0, total) contiguously, each <= cap and triangle-aligned.
+    expected_start = 0
+    covered = 0
+    for g in info["groups"]:
+        assert g["start"] == expected_start, "groups must be contiguous"
+        assert g["count"] <= info["cap"], "each group must fit under the cap"
+        assert g["count"] % 3 == 0, "each group must be whole triangles"
+        expected_start += g["count"]
+        covered += g["count"]
+    assert covered == info["total"], "groups must cover the whole index buffer"
+
+
+@pytest.mark.browser
+def test_parametric_tube_draw_range_spans_chunks(viewer_client, viewer_page):
+    """set_draw_range on a chunked tube reveals a single contiguous [0, N)
+    range that the renderer intersects with each group — the reveal spans
+    chunks with no special handling."""
+    viewer_page.evaluate("() => { window.__tubeDrawCapOverride = 5000; }")
+    spine, widths, heights = _helix_tube_args(400)
+    viewer_client.add_parametric_tube("dr", spine, widths, heights, lod=False)
+    _wait_for_object(viewer_page, "dr")
+
+    viewer_client.set_draw_range("dr", 0.5)
+    time.sleep(0.3)
+    info = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            return {
+                total: obj.geometry.getIndex().count,
+                drawStart: obj.geometry.drawRange.start,
+                drawCount: obj.geometry.drawRange.count,
+                nGroups: obj.geometry.groups.length,
+            };
+        }""",
+        "dr",
+    )
+    # Half-reveal draws a partial contiguous range that crosses group
+    # boundaries; groups stay intact (they partition the buffer positionally).
+    assert info["drawStart"] == 0
+    assert 0 < info["drawCount"] < info["total"], (
+        f"draw range {info['drawCount']} should be a partial reveal of {info['total']}"
+    )
+    assert info["nGroups"] > 1, "chunking must survive a draw-range update"
+
+
+@pytest.mark.browser
+def test_parametric_tube_under_cap_no_chunking(viewer_client, viewer_page):
+    """A tube under the cap keeps a single material and no geometry groups —
+    byte-identical to the pre-#113 behaviour."""
+    viewer_page.evaluate("() => { window.__tubeDrawCapOverride = 0; }")  # default cap
+    spine, widths, heights = _simple_tube_args()
+    viewer_client.add_parametric_tube("small", spine, widths, heights, lod=False)
+    _wait_for_object(viewer_page, "small")
+    info = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            return {
+                isArray: Array.isArray(obj.material),
+                nGroups: obj.geometry.groups.length,
+            };
+        }""",
+        "small",
+    )
+    assert not info["isArray"], "under-cap tube must keep a single material"
+    assert info["nGroups"] == 0, "under-cap tube must have no geometry groups"
