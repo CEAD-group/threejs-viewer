@@ -153,7 +153,7 @@ def _serialize_lod(lod):
     return out
 
 
-_STRAND_COLLAPSE_ALLOWED_KEYS = {"max_snap_factor"}
+_STRAND_COLLAPSE_ALLOWED_KEYS = {"max_snap_factor", "large_seg_factor"}
 
 
 def _serialize_strand_collapse(sc):
@@ -192,6 +192,19 @@ def _serialize_strand_collapse(sc):
                 f"number (got {msf!r})"
             )
         out["maxSnapFactor"] = msf
+    if "large_seg_factor" in sc:
+        lsf = sc["large_seg_factor"]
+        if isinstance(lsf, bool) or not isinstance(lsf, numbers.Real):
+            raise ValueError(
+                f"strand_collapse.large_seg_factor must be a number (got {lsf!r})"
+            )
+        lsf = float(lsf)
+        if not math.isfinite(lsf) or lsf < 0:
+            raise ValueError(
+                "strand_collapse.large_seg_factor must be a finite number "
+                f">= 0 (got {lsf!r})"
+            )
+        out["largeSegFactor"] = lsf
     # Empty dict (or dict with no recognised settings) means "enabled with
     # defaults". Returning {} would be falsy at the caller and silently
     # disable collapse, which is the opposite of what the user asked for.
@@ -1501,6 +1514,17 @@ class ViewerClient:
                 intact. Use lower values (e.g. 0.5) to be more
                 aggressive about rejecting outliers, higher values
                 (e.g. 2.0) to catch only the most pathological cases.
+
+                ``large_seg_factor`` (default ``1.0``) exempts rings on
+                open straights from the snap pass entirely: a ring whose
+                shorter adjacent spine segment is at least this many
+                bead-widths long is treated as outside any wipe-loop fold
+                and is never moved, no matter what the fold detector
+                claims. This confines collapse to genuinely dense regions
+                (consecutive short segments — the actual wipe-loop class)
+                and removes false snaps triggered by degenerate tangents
+                at nearby micro-segments or breaks. Pass ``0`` to disable
+                the exemption (legacy behaviour).
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.

@@ -2285,12 +2285,18 @@ function computeMiterFrames(spine, nSpine, outFrames, outMiters, outTangents,
     let pX = 1, pY = 0, pZ = 0;
     let cX = 1, cY = 0, cZ = 0;
     if (nSeg > 0) {
-        let dx = spine[3]     - spine[0];
-        let dy = spine[4]     - spine[1];
-        let dz = spine[5]     - spine[2];
-        const len = Math.hypot(dx, dy, dz);
-        if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
-        else { dx = 1; dy = 0; dz = 0; }
+        // Seed from the first NON-degenerate segment: a zero-length segment
+        // (an exactly-duplicated spine vertex, e.g. a sharp width-step twin)
+        // must not inject an arbitrary +X tangent — that rotates its ring off
+        // the true path direction and fans the tube open at bends.
+        let dx = 1, dy = 0, dz = 0;
+        for (let k = 0; k < nSeg; k++) {
+            const ex = spine[(k + 1) * 3]     - spine[k * 3];
+            const ey = spine[(k + 1) * 3 + 1] - spine[k * 3 + 1];
+            const ez = spine[(k + 1) * 3 + 2] - spine[k * 3 + 2];
+            const len = Math.hypot(ex, ey, ez);
+            if (len > 1e-12) { dx = ex / len; dy = ey / len; dz = ez / len; break; }
+        }
         pX = cX = dx; pY = cY = dy; pZ = cZ = dz;
     }
     for (let i = 0; i < nSpine; i++) {
@@ -2303,9 +2309,11 @@ function computeMiterFrames(spine, nSpine, outFrames, outMiters, outTangents,
             let dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
             let dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
             const len = Math.hypot(dx, dy, dz);
-            if (len > 1e-12) { dx /= len; dy /= len; dz /= len; }
-            else { dx = 1; dy = 0; dz = 0; }
-            cX = dx; cY = dy; cZ = dz;
+            // Zero-length (duplicated vertex): carry the previous direction
+            // through instead of snapping to +X, so the twin ring stays
+            // aligned with the path and the sharp width step renders as a
+            // clean step, not a fold-fan.
+            if (len > 1e-12) { cX = dx / len; cY = dy / len; cZ = dz / len; }
         }
         const isEnd = i === 0 || i === nSpine - 1;
         const inX  = isEnd ? cX : pX, inY  = isEnd ? cY : pY, inZ  = isEnd ? cZ : pZ;
@@ -2621,8 +2629,11 @@ const TUBE_STRAND_COLLAPSE_TOL_FRAC = 0.04;
  * @param {Float32Array} localFrames
  * @param {number} nSpine
  * @param {number} nCs
+ * @param {number} [maxSnapFactor]   per-ring snap cap in bead-widths (default 1.0)
+ * @param {number} [largeSegFactor]  exempt rings whose shorter adjacent segment
+ *                                   is ≥ this many bead-widths (default 1.0; 0 = off)
  */
-function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs, maxSnapFactor) {
+function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames, nSpine, nCs, maxSnapFactor, largeSegFactor) {
     const minGap = TUBE_STRAND_COLLAPSE_MIN_GAP;
     const winMax = TUBE_STRAND_COLLAPSE_WIN;
     const stride = winMax - minGap + 1;
@@ -2634,11 +2645,15 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         if (widths[i] > maxDim) maxDim = widths[i];
         if (heights[i] > maxDim) maxDim = heights[i];
     }
-    for (let i = 0; i < nSpine - 1; i++) {
+    // Per-segment length, retained for the large-segment exemption (#119):
+    // segLen[k] = ‖spine[k+1] − spine[k]‖.
+    const segLen = new Float32Array(nSeg);
+    for (let i = 0; i < nSeg; i++) {
         const dx = spine[(i + 1) * 3]     - spine[i * 3];
         const dy = spine[(i + 1) * 3 + 1] - spine[i * 3 + 1];
         const dz = spine[(i + 1) * 3 + 2] - spine[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
+        segLen[i] = Math.sqrt(d2);
         if (d2 > maxSegLen2) maxSegLen2 = d2;
     }
     if (maxDim <= 0) return;
@@ -2698,6 +2713,22 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     const MAX_SNAP_FACTOR_DEFAULT = 1.0;
     const snapFactor = (typeof maxSnapFactor === 'number' && maxSnapFactor > 0)
         ? maxSnapFactor : MAX_SNAP_FACTOR_DEFAULT;
+
+    // Large-segment exemption (#119). strand_collapse exists for tight wipe
+    // loops — dense runs of SHORT segments where the bead is wider than the
+    // local turn radius and the swept tube must fold. A ring sitting on an
+    // open straight (both adjacent spine segments long relative to the bead)
+    // is never inside such a fold, yet the seg-seg fold detector can still
+    // fire there on degenerate tangents from nearby micro-segments/breaks
+    // (see #117) and yank the ring metres off the true path. Exempt any ring
+    // whose SHORTER adjacent segment is ≥ LARGE_SEG_FACTOR bead-widths: the
+    // snap pass then only acts within genuinely dense regions. A transition
+    // ring (one long + one short neighbour) keeps its shorter neighbour and
+    // stays eligible, so real fold entries/exits are unaffected.
+    // Factor 0 disables the exemption (A/B / legacy behaviour).
+    const LARGE_SEG_FACTOR_DEFAULT = 1.0;
+    const exemptSeg = (typeof largeSegFactor === 'number' && largeSegFactor >= 0)
+        ? largeSegFactor : LARGE_SEG_FACTOR_DEFAULT;
 
     // Minimum peak per-vertex turn (radians) inside the fold range for a
     // candidate to be considered a real corner fold. Below this, the
@@ -3143,6 +3174,15 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         if (dxC * dxC + dyC * dyC + dzC * dzC > clusterCapSq) continue;
         for (const strand of c.strands) {
             for (let r = sLo; r <= sHi; r++) {
+                // Large-segment exemption (#119): skip rings on open straights.
+                // Ring r's adjacent segments are segLen[r-1] and segLen[r]
+                // (both valid here since 1 ≤ sLo ≤ r ≤ sHi ≤ nSpine-2).
+                if (exemptSeg > 0) {
+                    const segA = segLen[r - 1];
+                    const segB = segLen[r];
+                    const shorter = segA < segB ? segA : segB;
+                    if (shorter >= exemptSeg * Math.max(widths[r], heights[r])) continue;
+                }
                 const ip = r * ringStride + strand * 3;
                 const cap = snapFactor * Math.max(widths[r], heights[r]);
                 const capSq = cap * cap;
@@ -3675,9 +3715,10 @@ self.onmessage = function(e) {
     if (msg.type === 'collapseOnly') {
         const sc = msg.strandCollapse;
         const msf = (sc && typeof sc === 'object') ? sc.maxSnapFactor : undefined;
+        const lsf = (sc && typeof sc === 'object') ? sc.largeSegFactor : undefined;
         collapseTubeStrandFolds(
             msg.positions, msg.spine, msg.widths, msg.heights, msg.localFrames,
-            msg.nSpine, N_CS, msf,
+            msg.nSpine, N_CS, msf, lsf,
         );
         self.postMessage({
             type: 'collapseOnlyResult',
@@ -3811,7 +3852,8 @@ self.onmessage = function(e) {
         uncollapsedPositions = new Float32Array(geo.positions);
         const sc = tube.strandCollapse;
         const msf = (sc && typeof sc === 'object') ? sc.maxSnapFactor : undefined;
-        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS, msf);
+        const lsf = (sc && typeof sc === 'object') ? sc.largeSegFactor : undefined;
+        collapseTubeStrandFolds(geo.positions, redSpine, redWidths, redHeights, geo.localFrames, nRed, N_CS, msf, lsf);
     }
 
     // Transfer ownership of large buffers
@@ -11505,9 +11547,14 @@ class ThreeJSViewer {
                         } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
                             strandCollapse = true;
                             const msf = data.strandCollapse.maxSnapFactor;
-                            strandCollapseCfg = (typeof msf === 'number' && msf > 0)
-                                ? { maxSnapFactor: msf }
-                                : true;
+                            const lsf = data.strandCollapse.largeSegFactor;
+                            const cfg = {};
+                            if (typeof msf === 'number' && msf > 0) cfg.maxSnapFactor = msf;
+                            if (typeof lsf === 'number' && lsf >= 0) cfg.largeSegFactor = lsf;
+                            // Keep the object form whenever any tuned field survives so
+                            // largeSegFactor (incl. 0 = exemption off) reaches the
+                            // collapse pass; else fall back to defaults-enabled.
+                            strandCollapseCfg = Object.keys(cfg).length ? cfg : true;
                         }
                         const { geometry, ringPairs, indicesPerRingPair, localFrames, miters, tangents: builtTangents, capAngles, capIndicesPerCap, endCapBase, endCapPattern } = buildParametricTubeGeometry(
                             buildSpine, buildWidths, buildHeights,
@@ -12291,14 +12338,29 @@ class ThreeJSViewer {
             if (!obj.userData.isParametricTube || !obj.userData.tubeLOD) continue;
             const lod = obj.userData.tubeLOD;
 
-            // Skip if camera hasn't moved enough (5% of distance to tube center)
+            // Skip if camera hasn't moved enough — 5% of the camera's ACTUAL
+            // distance to the tube, not of the model size. The old
+            // boundingRadius-based threshold was absolute: close-in zooming
+            // moves the camera a few cm while the LOD epsilon (∝ camera
+            // distance) shrinks by an order of magnitude, so the rebuild
+            // never fired and a stale coarse tube rendered up close.
             if (lod.keptIndices) {
                 const dx = camX - lod.lastCameraPos.x;
                 const dy = camY - lod.lastCameraPos.y;
                 const dz = camZ - lod.lastCameraPos.z;
                 const deltaSq = dx * dx + dy * dy + dz * dz;
-                const centerDist = Math.max(1e-6, lod.boundingRadius * 2);
-                const threshold = centerDist * 0.05;
+                let refDist = lod.boundingRadius * 2;
+                const bs = obj.geometry && obj.geometry.boundingSphere;
+                if (bs) {
+                    const c = bs.center.clone().applyMatrix4(obj.matrixWorld);
+                    const cx = camX - c.x, cy = camY - c.y, cz = camZ - c.z;
+                    // Near the surface the center distance overstates how
+                    // close we are; the bounding-sphere SURFACE distance is
+                    // the honest zoom scale (floored to stay positive inside).
+                    const surf = Math.sqrt(cx * cx + cy * cy + cz * cz) - bs.radius;
+                    refDist = Math.min(refDist, Math.max(Math.abs(surf), lod.boundingRadius * 0.01));
+                }
+                const threshold = Math.max(1e-6, refDist) * 0.05;
                 if (deltaSq < threshold * threshold) continue;
             }
 

@@ -294,6 +294,47 @@ def test_add_parametric_tube_strand_collapse_dict_max_snap_factor_in_header():
     assert header["strandCollapse"] == {"maxSnapFactor": 1.5}
 
 
+def test_add_parametric_tube_strand_collapse_large_seg_factor_in_header():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t", spine, widths, heights,
+        strand_collapse={"max_snap_factor": 1.0, "large_seg_factor": 2.0},
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["strandCollapse"] == {"maxSnapFactor": 1.0, "largeSegFactor": 2.0}
+
+
+def test_add_parametric_tube_strand_collapse_large_seg_factor_zero_kept():
+    # 0 = "exemption off"; must survive serialization (not be dropped as falsy)
+    # so it reaches the collapse pass and disables the exemption explicitly.
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube(
+        "t", spine, widths, heights, strand_collapse={"large_seg_factor": 0}
+    )
+    header, _ = c._binary_messages[-1]
+    assert header["strandCollapse"] == {"largeSegFactor": 0.0}
+
+
+def test_add_parametric_tube_strand_collapse_large_seg_factor_negative_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="large_seg_factor"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, strand_collapse={"large_seg_factor": -0.5}
+        )
+
+
+def test_add_parametric_tube_strand_collapse_large_seg_factor_non_number_rejected():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="large_seg_factor"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, strand_collapse={"large_seg_factor": "big"}
+        )
+
+
 def test_add_parametric_tube_strand_collapse_max_snap_factor_negative_rejected():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
@@ -1761,3 +1802,4 @@ def test_add_toolpath_threads_bias_ramp_across_segments():
     assert seg1["id"] == "tp_seg_1"
     assert seg1["biasIndexOffset"] == 4
     assert seg1["biasIndexTotal"] == 7
+
