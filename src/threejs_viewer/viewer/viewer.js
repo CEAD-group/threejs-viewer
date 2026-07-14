@@ -3387,6 +3387,63 @@ function expandRingColors(packedColors, nSpine, nCs, out) {
     return out;
 }
 
+// Per-draw WebGL index-count ceiling for a single parametric tube. A tube
+// whose index buffer exceeds the context's `webgl.max-vert-ids-per-draw`
+// limit (30,000,000 on Firefox/ANGLE; driver-dependent) is silently
+// truncated — `drawElementsInstanced` draws only the first N indices and the
+// tail of the tube vanishes with just a console warning (issues #113/#114).
+// The limit is not reliably queryable (MAX_ELEMENTS_INDICES is a hint, not the
+// hard cap), so we use a conservative constant comfortably under 30M. A
+// ~833k-ring-pair tube (30M/36) is the largest single draw; beyond that the
+// geometry is split into groups (see applyTubeDrawCap).
+const MAX_TUBE_INDICES_PER_DRAW = 24000000;
+
+// Split a tube whose index buffer exceeds MAX_TUBE_INDICES_PER_DRAW into
+// geometry groups + a 1-element material array, so three.js issues one
+// drawElements call per group (each under the cap) instead of a single
+// oversized draw the driver truncates. Under the cap: a single material and no
+// groups — byte-identical to the un-chunked tube. Idempotent; re-run after any
+// geometry (re)assignment (e.g. an LOD rebuild that grows/shrinks the buffer).
+//
+// Groups partition the WHOLE index range [0, count) positionally (aligned to
+// whole triangles), and the r183 renderer intersects `geometry.drawRange` with
+// each group's [start, start+count). So the existing single `setDrawRange(0,
+// N)` reveal (and the endCap relocation that rewrites indices in place) keeps
+// working verbatim: groups fully within the range draw whole, the group
+// straddling N draws partially, groups past N draw nothing — the reveal simply
+// spans chunks. This also subsumes #114: an LOD tube that refines past the cap
+// up close is chunked too, so it never truncates regardless of camera distance.
+/**
+ * @param {THREE.Mesh} mesh
+ * @param {THREE.Material} baseMaterial  the tube's single material (retained across rebuilds)
+ */
+function applyTubeDrawCap(mesh, baseMaterial) {
+    const geo = mesh.geometry;
+    const idx = geo.getIndex();
+    const total = idx ? idx.count : 0;
+    // Test seam: a browser test can lower the cap via window.__tubeDrawCapOverride
+    // to exercise chunking without building a genuinely 24M-index tube. Ignored
+    // (undefined) in production.
+    const capOverride = typeof window !== 'undefined'
+        ? /** @type {any} */ (window).__tubeDrawCapOverride : 0;
+    const cap = capOverride > 0 ? capOverride : MAX_TUBE_INDICES_PER_DRAW;
+    geo.clearGroups();
+    if (total <= cap) {
+        // Restore the single-material form if a previous (larger) geometry had
+        // chunked it — a plain material draws the whole index in one call.
+        if (Array.isArray(mesh.material)) mesh.material = baseMaterial;
+        return;
+    }
+    // Largest whole-triangle-aligned chunk ≤ the cap.
+    const chunk = Math.floor(cap / 3) * 3;
+    for (let start = 0; start < total; start += chunk) {
+        geo.addGroup(start, Math.min(chunk, total - start), 0);
+    }
+    // three.js only iterates groups (⇒ multiple draw calls) when the mesh's
+    // material is an array; every group uses materialIndex 0 = the one material.
+    mesh.material = [baseMaterial];
+}
+
 // ParametricTube — namespaces the operations that read / mutate a tube mesh
 // built by `buildParametricTubeGeometry`. State continues to live on
 // `mesh.userData.tube*` so stream-mode code, tests, and the LOD worker can
@@ -3414,6 +3471,13 @@ class ParametricTube {
 
         mesh.geometry.dispose();
         mesh.geometry = geometry;
+        // Re-chunk for the per-draw index cap on the new (reduced) buffer: a
+        // close-in zoom refines LOD toward full resolution and can push the
+        // index count back over the cap, so the LOD tube must chunk too or it
+        // truncates again up close (#114). Under the cap this reverts to the
+        // single-material form.
+        applyTubeDrawCap(mesh, mesh.userData.tubeBaseMaterial
+            || (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material));
         if (mesh.userData.wireframeOverlay) {
             mesh.userData.wireframeOverlay.geometry = geometry;
         }
@@ -4217,7 +4281,12 @@ class ShadingDebugController {
         if (obj.userData.originalMaterial === undefined) {
             obj.userData.originalMaterial = obj.material;
         }
-        obj.material = debugMat;
+        // A tube split into geometry groups for the per-draw index cap
+        // (#113) only renders every group when its material is an array;
+        // wrap the debug material to match so a >cap tube doesn't truncate
+        // in normals/UV debug view.
+        const grouped = obj.geometry && obj.geometry.groups && obj.geometry.groups.length > 1;
+        obj.material = grouped ? [debugMat] : debugMat;
     }
 
     /** @param {any} obj */
@@ -10445,6 +10514,14 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
+                        // Retained single material so applyTubeDrawCap can flip
+                        // between plain / [material] as the geometry crosses the
+                        // per-draw index cap across LOD rebuilds (#113/#114).
+                        mesh.userData.tubeBaseMaterial = material;
+                        // Chunk the draw into ≤cap groups if the full geometry
+                        // exceeds the per-draw WebGL index limit (#113). No-op
+                        // (single material, no groups) for tubes under the cap.
+                        applyTubeDrawCap(mesh, material);
                         mesh.userData.parametricTube = new ParametricTube(mesh);
                         mesh.userData.tubeNumSpinePoints = buildN;
                         mesh.userData.tubeNCs = nCs;
