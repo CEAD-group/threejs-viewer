@@ -6755,10 +6755,11 @@ export class ThreeJSViewer {
         this._initThreeJS();
 
         // Dev-debug convenience (ribweaver#495): last-constructed viewer's
-        // scene/camera/renderer, for console lighting/material tweaks
-        // alongside window.THREE. Not a public API — internals may change.
+        // THREE/scene/camera/renderer, for console lighting/material tweaks.
+        // Not a public API — internals may change.
         if (typeof window !== 'undefined') {
-            /** @type {any} */ (window).__threeJSViewerDebug = {
+            /** @type {any} */ (window).tjsv = {
+                THREE,
                 viewer: this,
                 scene: this._scene,
                 camera: this._camera,
