@@ -123,6 +123,20 @@ class ViewerControls extends THREE.EventDispatcher {
         return this._state !== STATE.NONE;
     }
 
+    /**
+     * Drop any pending damped rotation/pan inertia (the tail of a just-
+     * finished drag). Programmatic camera moves (setView) call this so
+     * residual deltas — which update() keeps bleeding into the camera every
+     * frame — don't drag the camera off the pose being set (pan inertia
+     * even moves `target`).
+     */
+    cancelInertia() {
+        this._rotDeltaTheta = 0;
+        this._rotDeltaPhi = 0;
+        this._panDeltaX = 0;
+        this._panDeltaY = 0;
+    }
+
     setMode(mode) {
         if (mode !== 'turntable' && mode !== 'free') return;
         this.mode = mode;

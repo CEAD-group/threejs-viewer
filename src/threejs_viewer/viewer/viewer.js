@@ -11469,12 +11469,21 @@ export class ThreeJSViewer {
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
      */
     setView(name, opts) {
-        if (name === 'home') { this._viewTween = null; this.resetView(); return; }
+        if (name === 'home') {
+            this._viewTween = null;
+            this._controls.cancelInertia();
+            this.resetView();
+            return;
+        }
         const preset = VIEW_PRESETS[name];
         if (!preset) {
             console.warn(`[viewer] setView: unknown view '${name}' (expected ${Object.keys(VIEW_PRESETS).join('/')}/home)`);
             return;
         }
+        // Residual damped drag inertia would keep nudging the camera (and,
+        // for pan, the orbit target) every controls.update() during/after
+        // the snap, drifting it off the preset — drop it first.
+        this._controls.cancelInertia();
         const endDir = new THREE.Vector3().fromArray(preset.dir).normalize();
         const endUp = new THREE.Vector3().fromArray(preset.up);
         const target = this._controls.target.clone();

@@ -3161,6 +3161,40 @@ def test_set_view_top_reorients_camera(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_set_view_cancels_drag_inertia(viewer_client, viewer_page):
+    """Residual damped drag inertia (pending ViewerControls rot/pan deltas
+    from a just-finished orbit) must not drift the camera off the preset:
+    _animate() bleeds those deltas into the camera every frame, and pan
+    inertia even moves the orbit target. setView() cancels them. Deltas are
+    injected and setView called in one evaluate so the check is
+    deterministic (no damping decay between the two)."""
+    viewer_client.add_box("b")
+    time.sleep(0.2)
+    viewer_client.set_camera(position=[6.0, -6.0, 3.0], target=[1.0, 2.0, 0.5])
+    time.sleep(0.3)
+    dist = math.sqrt(5.0**2 + 8.0**2 + 2.5**2)
+
+    viewer_page.evaluate(
+        "() => {"
+        " const c = window.threejsViewer._controls;"
+        " c._rotDeltaTheta = 0.8; c._rotDeltaPhi = 0.4;"
+        " c._panDeltaX = 3.0; c._panDeltaY = 2.0;"
+        " window.threejsViewer.setView('top', { animate: false });"
+        "}"
+    )
+    time.sleep(0.4)  # several frames of controls.update() — would drain inertia
+    state = viewer_page.evaluate(_VIEW_STATE_JS)
+    assert state["target"] == pytest.approx([1.0, 2.0, 0.5], abs=1e-6)
+    assert state["pos"] == pytest.approx([1.0, 2.0, 0.5 + dist], abs=1e-4)
+    assert state["up"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+    deltas = viewer_page.evaluate(
+        "() => { const c = window.threejsViewer._controls;"
+        " return [c._rotDeltaTheta, c._rotDeltaPhi, c._panDeltaX, c._panDeltaY]; }"
+    )
+    assert deltas == [0, 0, 0, 0]
+
+
+@pytest.mark.browser
 def test_edl_auto_enables_on_points_and_pin_wins(viewer_client, viewer_page):
     """EDL switches on automatically when the first point cloud is added,
     but an explicit set_edl choice (including OFF) pins the state so the
