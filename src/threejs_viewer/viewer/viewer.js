@@ -4138,6 +4138,9 @@ class CameraController {
         const excludedBox = new THREE.Box3();
         for (const obj of v._objects.values()) {
             if (obj.userData.excludeFromBounds) {
+                // A hidden grid draws nothing — don't let it stretch the
+                // near/far fit and cost depth-buffer precision.
+                if (!obj.visible) continue;
                 obj.updateWorldMatrix(true, true);
                 excludedBox.expandByObject(obj);
                 continue;

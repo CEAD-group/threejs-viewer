@@ -22,7 +22,7 @@ v = viewer()
 v.clear()
 v.unload_animation()
 
-# The main floor: 1 m cells over a 400 m plane, brighter axis lines,
+# The main floor: 1 m cells over a 40 m plane, brighter axis lines,
 # a faint dark fill between the lines.
 v.add_grid(
     "floor",
@@ -36,7 +36,8 @@ v.add_grid(
     fade_start=0.35,
 )
 
-# A second, coarser grid slightly above: 10 m "major" lines only.
+# A second, much larger 10 m "major" grid, nudged slightly below the
+# fine one so the two transparent planes never z-fight.
 v.add_grid(
     "floor_major",
     cell_size=10.0,
