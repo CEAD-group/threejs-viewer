@@ -29,6 +29,29 @@ def test_add_box_appears_in_scene(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page):
+    """add_grid creates a tracked mesh that never inflates scene bounds."""
+    viewer_client.add_box("ref")
+    viewer_client.add_grid("floor", cell_size=10.0, extent=10000.0)
+    time.sleep(0.2)
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["floor"]["type"] == "Mesh"
+    spheres = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v._camController.updateSceneBounds();"
+        " return { content: v._sceneSphere.radius,"
+        "          nearFar: v._nearFarSphere.radius }; }"
+    )
+    # 10000-unit grid plane must not count toward framing bounds...
+    assert spheres["content"] < 100
+    # ...but the near/far fit must still reach it (no far-plane clip).
+    assert spheres["nearFar"] > 4000
+    viewer_client.delete("floor")
+    time.sleep(0.1)
+    assert "floor" not in viewer_client.query_scene()["objects"]
+
+
+@pytest.mark.browser
 def test_grouping(viewer_client, viewer_page):
     """Parent-child hierarchy works end-to-end."""
     viewer_client.add_group("arm")
