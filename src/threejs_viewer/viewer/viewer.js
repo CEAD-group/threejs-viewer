@@ -6848,6 +6848,19 @@ export class ThreeJSViewer {
         // Init Three.js
         this._initThreeJS();
 
+        // Dev-debug convenience (ribweaver#495): last-constructed viewer's
+        // THREE/scene/camera/renderer, for console lighting/material tweaks.
+        // Not a public API — internals may change.
+        if (typeof window !== 'undefined') {
+            /** @type {any} */ (window).tjsv = {
+                THREE,
+                viewer: this,
+                scene: this._scene,
+                camera: this._camera,
+                renderer: this._renderer,
+            };
+        }
+
         // Init clipping
         this._initClipping();
 
@@ -12115,6 +12128,12 @@ export class ThreeJSViewer {
 
     destroy() {
         this._destroyed = true;
+        // Drop the dev-debug handle if it still points at this instance, so
+        // destroy() doesn't leave window.tjsv pinning a disposed viewer's
+        // scene/renderer past GC.
+        if (typeof window !== 'undefined' && /** @type {any} */ (window).tjsv?.viewer === this) {
+            /** @type {any} */ (window).tjsv = undefined;
+        }
         cancelAnimationFrame(this._animationFrameId);
         if (this._ws) {
             this._ws.onclose = null;
