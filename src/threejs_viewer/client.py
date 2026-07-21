@@ -1904,6 +1904,15 @@ class ViewerClient:
         ``set_draw_range(id, frac)`` on the group distributes the fraction
         to the child segments automatically.
 
+        Extrusion runs of a **single point** (travel in, one deposit,
+        travel out) have no drawable bead — a parametric tube needs at
+        least 2 spine points — and are skipped rather than raising; with
+        ``travel="line"`` the skipped point remains covered by the travel
+        line (both edges flanking it are travel edges).  A toolpath whose
+        extrusion runs are *all* single points degrades gracefully: with
+        ``travel="line"`` it renders a travel-only group (no beads),
+        otherwise the call is a no-op.
+
         Args:
             id: Unique object identifier.
             toolpath: A :class:`Toolpath` instance.
@@ -1964,14 +1973,27 @@ class ViewerClient:
         if in_seg:
             segments.append((seg_start, len(extruding)))
 
-        if not segments:
-            return
-
         # Travel edges: every spine edge NOT interior to an extrusion run —
         # each hop spans from the last extruded point through the zero-width
         # points to the next extruded point, so the line meets the bead ends.
         travel_edge_idx = np.flatnonzero(~(extruding[:-1] & extruding[1:]))
-        use_group = len(segments) > 1 or (want_travel and len(travel_edge_idx) > 0)
+
+        # Single-point runs (travel in → one extruding point → travel out,
+        # issue #103) have no drawable bead — a parametric tube needs >= 2
+        # spine points — so skip them instead of crashing. Both edges
+        # flanking an isolated extruding point are travel edges (a run needs
+        # two consecutive extruding points to own an interior edge), so with
+        # travel="line" the skipped point stays covered by the travel line.
+        # segmentRanges keep global spine indices, so the remaining
+        # fractions stay monotonic and in lockstep with travelEndFracs.
+        segments = [(s, e) for (s, e) in segments if e - s >= 2]
+
+        if not segments and not (want_travel and len(travel_edge_idx) > 0):
+            # Nothing drawable (no extrusion runs, or every run is a single
+            # point) and no travel line requested — clear no-op.
+            return
+
+        use_group = len(segments) != 1 or (want_travel and len(travel_edge_idx) > 0)
 
         if not use_group:
             s, e = segments[0]
