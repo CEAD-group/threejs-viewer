@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.0.45
+
+### Shader floor grid: `add_grid` (#126)
+
+- **New first-class grid primitive** — `add_grid(id, cell_size=1.0, extent=100.0, line_width=1.5, color=..., center_color=..., background_color=..., background_opacity=0.0, fade_start=0.5)` renders an anti-aliased, distance-faded floor grid as a single `PlaneGeometry` + `ShaderMaterial` (the look of ribweaver's `geometry-loader.js` prototype, upgraded where it was fixed-function). Line distances are measured in screen pixels via `fwidth`, so `line_width` (px) is screen-space stable at any zoom and grazing angle with a 1 px smoothstep AA edge; where a cell shrinks below ~4 px the grid thins out instead of collapsing into a solid sheet; the two axis lines through the local origin draw in a distinct `center_color`; a radial alpha fade from `fade_start`×half-extent dissolves the plane edge so the finite plane reads as an infinite floor; optional translucent fill between the lines. Unlike `show_grid` (the fixed `THREE.GridHelper` toggle, unchanged), grids are tracked objects: id, `delete`, `set_visibility`, transform, `parent`, dropped by `clear`, multiple grids coexist.
+- Grids are **excluded from framing bounds** (double-click/F ignores the floor) while the auto-fitted **near/far planes still reach them** — `updateSceneBounds` keeps a second near/far sphere = content ∪ bounds-excluded furniture, so a grid larger than the content no longer hard-clips at the content-fitted far plane; hidden grids are skipped so toggling one off restores full depth-buffer precision. Grids are never raycast (picks pass through to geometry behind) and are skipped by the `M`/`N` debug material cycles. New demo `examples/29_floor_grid.py`.
+
+### View gimbal: pre-defined views + `set_view` (#116, #102)
+
+- **The corner gimbal's axis bubbles now snap to the six orthogonal views CAD-viewcube style, plus a new round ISO corner button.** Clicks no longer route through the stock `ViewHelper.handleClick`, whose tween targets hardcoded Y-up quaternions (in this Z-up scene, top/bottom landed with unpredictable roll) and re-framed around `ViewHelper.center` — they map to the new `viewer.setView(name)` (`top`/`bottom`/`front`/`back`/`left`/`right`/`iso`, or `home` = full reset). `setView` **keeps the current orbit target and distance** (reorient only, no framing): a 450 ms smoothstep-eased slerp of the target→camera direction plus a lerped, axis-appropriate up vector (top/bottom get `+Y` up so floor plans don't roll — the ribweaver#281 ask). Works under both perspective and ortho cameras; any orbit/wheel input cancels the tween, and `setView` cancels residual drag inertia (`ViewerControls.cancelInertia()`) so a snap right after a flick-drag can't drift off the preset.
+- Python: **`set_view(name, animate=True)`** (validated eagerly; `animate=False` jumps instantly) → new `set_view` WS message. Transient like `set_camera` (not replayed on reconnect).
+
+### draw_range on loaded models (#104)
+
+- **`set_draw_range` and the `draw_ranges` animation channel now work on models loaded via `add_model`/`add_model_binary`** (previously a silent no-op — only `add_mesh_binary` stamped the required metadata). After any model load, every descendant mesh is stamped with `isMesh`/`totalIndexCount`; a non-mesh root (the GLTF/GLB group wrapper) is marked `isModelGroup` and both draw-range dispatchers apply the fraction per child mesh — intended for assets authored with primitives ordered along the reveal axis (the ribweaver rail-bellows/drag-chain dress-up case, ribweaver#347). STL/PLY roots are meshes and route through the existing branch unchanged; `query_scene` reports the group's fraction from its first stamped child; `unload_animation` restores all children. The absolute start/count window form from the issue is deferred.
+
+### Resize coalescing (#128)
+
+- **Fast splitter/window drags no longer flood the GPU with framebuffer reallocs** (640% GPU-process CPU and multi-minute SwiftShader hangs in embedders). The container `ResizeObserver` is rAF-coalesced — a burst of resize events records only the latest size and applies at most one `resize()` per animation frame, with the final size always landing — and `resize()` itself no-ops when width/height equal the last applied size, which also guards embedders that call `viewer.resize()` directly on every mousemove (ribweaver panel/boat). Zero-size (hidden container) rects still early-return without recording a last-applied size. Fixes the viewer side of ribweaver#510.
+
+### `add_toolpath`: single-point extrusion runs (#103)
+
+- **A single-point extrusion run (travel in → one deposit → travel out) no longer raises `ValueError`** — such runs have no drawable bead (a parametric tube needs ≥ 2 spine points) and are skipped during segmentation. Both edges flanking an isolated extruding point are already travel edges, so with `travel="line"` the skipped point stays covered by the travel line, and `segmentRanges`/`travelEndFracs`/the deposition-bias ramp keep global spine indices so reveals stay monotonic. A toolpath whose runs are *all* single points degrades gracefully: a travel-only group with `travel="line"`, otherwise a clean no-op.
+
+### Dev-debug window handle (#124)
+
+- **`window.tjsv`** — the last-constructed viewer exposes `{THREE, viewer, scene, camera, renderer}` for console lighting/material experiments (ribweaver#495). Not a public API; `destroy()` clears the handle if it still points at that instance so it can't pin a disposed scene past GC.
+
 ## 0.0.44
 
 ### Parametric tube: frame tangents, LOD zoom gate, strand-collapse over-reach (#117, #118, #119)
