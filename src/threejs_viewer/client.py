@@ -39,6 +39,9 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
+_ALLOWED_VIEWS = frozenset(
+    {"top", "bottom", "front", "back", "left", "right", "iso", "home"}
+)
 
 
 def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
@@ -2220,6 +2223,34 @@ class ViewerClient:
         """Fit the camera to an object's bounding box (the programmatic
         equivalent of double-clicking it in the viewer)."""
         self._send({"type": "frame_object", "id": id})
+
+    def set_view(self, name: str, animate: bool = True) -> None:
+        """Snap the camera to a pre-defined view.
+
+        Args:
+            name: One of ``"top"``, ``"bottom"``, ``"front"``, ``"back"``,
+                ``"left"``, ``"right"``, ``"iso"``, or ``"home"``. The scene
+                is Z-up: ``top`` looks straight down -Z (floor-plan view),
+                ``front`` looks along +Y, ``iso`` is the classic (1,-1,1)
+                direction. ``home`` is the full reset (isometric direction
+                *and* re-framed to fit the scene, like the F key); all other
+                views keep the current orbit target and distance and only
+                reorient the camera, with an axis-appropriate up vector.
+            animate: Tween the reorientation smoothly (default). ``False``
+                jumps to the view immediately.
+
+        The same views are clickable in the browser: the corner gimbal's axis
+        bubbles snap to the six orthogonal views, the ISO corner button to the
+        isometric one. Works with both perspective and ortho cameras.
+        """
+        if name not in _ALLOWED_VIEWS:
+            raise ValueError(
+                f"view must be one of {sorted(_ALLOWED_VIEWS)} (got {name!r})"
+            )
+        msg: dict = {"type": "set_view", "name": name}
+        if not animate:
+            msg["animate"] = False
+        self._send(msg)
 
     def set_points_time(self, id: str, time: float) -> None:
         """Set the time-window scrub time for a point cloud.

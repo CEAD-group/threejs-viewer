@@ -1,5 +1,6 @@
 """Integration tests using Playwright — verify browser-side behavior end-to-end."""
 
+import math
 import socket
 import threading
 import time
@@ -3115,6 +3116,48 @@ def test_camera_set_get_roundtrip_and_orientation(viewer_client, viewer_page):
         "}"
     )
     assert dot > 0.999, f"camera not oriented at target (dot={dot})"
+
+
+_VIEW_STATE_JS = (
+    "() => {"
+    " const v = window.threejsViewer;"
+    " const p = v._camera.position, t = v._controls.target, u = v._camera.up;"
+    " return { pos: [p.x, p.y, p.z], target: [t.x, t.y, t.z],"
+    "          up: [u.x, u.y, u.z], tweening: !!v._viewTween };"
+    "}"
+)
+
+
+@pytest.mark.browser
+def test_set_view_top_reorients_camera(viewer_client, viewer_page):
+    """set_view('top') puts the camera straight above the orbit target (+Z)
+    with a +Y up vector, preserving the target and the orbit distance —
+    reorient only, no framing. 'front' (animate=False) lands on -Y with
+    +Z up immediately."""
+    viewer_client.add_box("b")
+    time.sleep(0.2)
+    # Pin a known oblique pose first so distance preservation is checkable.
+    viewer_client.set_camera(position=[6.0, -6.0, 3.0], target=[1.0, 2.0, 0.5])
+    time.sleep(0.3)
+    dist = math.sqrt(5.0**2 + 8.0**2 + 2.5**2)
+
+    viewer_client.set_view("top")
+    state = None
+    for _ in range(80):  # WS delivery + ~450 ms tween
+        time.sleep(0.05)
+        state = viewer_page.evaluate(_VIEW_STATE_JS)
+        if not state["tweening"] and abs(state["up"][1] - 1.0) < 1e-6:
+            break
+    assert state is not None and not state["tweening"], "view tween never finished"
+    assert state["target"] == pytest.approx([1.0, 2.0, 0.5], abs=1e-6)
+    assert state["pos"] == pytest.approx([1.0, 2.0, 0.5 + dist], abs=1e-4)
+    assert state["up"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+
+    viewer_client.set_view("front", animate=False)
+    time.sleep(0.3)
+    state = viewer_page.evaluate(_VIEW_STATE_JS)
+    assert state["pos"] == pytest.approx([1.0, 2.0 - dist, 0.5], abs=1e-4)
+    assert state["up"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
 
 
 @pytest.mark.browser

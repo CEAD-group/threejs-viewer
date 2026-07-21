@@ -42,6 +42,34 @@ const SPEED_STEPS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300,
 // minutes × speed.
 const PLAYBACK_MAX_FRAME_DELTA = 0.25;
 
+// Pre-defined camera views (Z-up scene). `dir` is the unit direction from the
+// orbit target toward the camera; `up` is the camera up vector for that view
+// (axis-appropriate for top/bottom so the view doesn't roll unpredictably).
+// Front looks along +Y (camera on the -Y side), matching the ViewHelper's
+// axis bubbles; iso is the classic (1,-1,1) home direction of resetView().
+const VIEW_PRESETS = {
+    top:    { dir: [0, 0, 1],  up: [0, 1, 0] },
+    bottom: { dir: [0, 0, -1], up: [0, 1, 0] },
+    front:  { dir: [0, -1, 0], up: [0, 0, 1] },
+    back:   { dir: [0, 1, 0],  up: [0, 0, 1] },
+    right:  { dir: [1, 0, 0],  up: [0, 0, 1] },
+    left:   { dir: [-1, 0, 0], up: [0, 0, 1] },
+    iso:    { dir: [1, -1, 1], up: [0, 0, 1] },
+};
+// ViewHelper axis-bubble sprite type -> predefined view name. Clicking a
+// bubble puts the camera ON that axis side (posX bubble -> camera at +X).
+const GIZMO_SPRITE_VIEWS = {
+    posX: 'right', negX: 'left',
+    posY: 'back',  negY: 'front',
+    posZ: 'top',   negZ: 'bottom',
+};
+// Duration of the eased setView() snap tween (matches the feel of the stock
+// ViewHelper animation it replaces).
+const VIEW_TWEEN_MS = 450;
+const _viewTweenQuat = new THREE.Quaternion();
+const _viewTweenDir = new THREE.Vector3();
+const _viewTweenUp = new THREE.Vector3();
+
 const CLIP_AXIS_NORMALS = {
     'x+': new THREE.Vector3(1, 0, 0),
     'x-': new THREE.Vector3(-1, 0, 0),
@@ -6833,6 +6861,7 @@ export class ThreeJSViewer {
         });
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
+        this._viewIsoBtn = q('.tjsv-view-iso');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
         this._currentTimeEl = q('.tjsv-current-time');
@@ -7043,21 +7072,29 @@ export class ThreeJSViewer {
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
         this._gizmoHoverOrthoCam.updateMatrixWorld();
         this._gizmoHovered = null;
+        /** @type {{target: THREE.Vector3, dist: number, startDir: THREE.Vector3, rot: THREE.Quaternion, startUp: THREE.Vector3, endUp: THREE.Vector3, start: number} | null} */
+        this._viewTween = null;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
         this._configureViewHelper(this._viewHelper);
 
         // Suppress click-to-pivot when the pointer is inside the gizmo rect.
         // Runs at capture so it fires before ViewerControls' pointerdown listener.
+        // A pointerdown outside the gizmo rect (an orbit/pan) or a wheel zoom
+        // cancels any in-flight setView() snap tween so the user wins.
         this._renderer.domElement.addEventListener('pointerdown', (e) => {
             if (this._gizmoHitTest(e).insideRect) {
                 e.stopImmediatePropagation();
+            } else {
+                this._viewTween = null;
             }
         }, true);
+        this._renderer.domElement.addEventListener('wheel', () => {
+            this._viewTween = null;
+        }, { passive: true, capture: true });
 
         // Hover feedback: highlight the sprite under the cursor + pointer cursor.
         this._renderer.domElement.addEventListener('pointermove', (e) => {
-            if (this._viewHelper.animating) return;
             const { hit } = this._gizmoHitTest(e);
             this._setGizmoHoverSprite(hit);
             this._renderer.domElement.style.cursor = hit ? 'pointer' : '';
@@ -7067,15 +7104,16 @@ export class ThreeJSViewer {
             this._renderer.domElement.style.cursor = '';
         });
 
+        // Click an axis bubble -> snap to the matching pre-defined view. This
+        // replaces ViewHelper.handleClick: the stock animation targets Y-up
+        // quaternions (the scene is Z-up, so top/bottom views landed with an
+        // unpredictable roll) and re-frames around ViewHelper.center; setView
+        // keeps the current orbit target + distance and only reorients.
         this._renderer.domElement.addEventListener('click', (e) => {
-            if (this._viewHelper.animating) return;
-            // ViewHelper.handleClick assumes the gizmo sits at bottom:0, but we
-            // lift it above the animation toolbar when visible — shim clientY
-            // so handleClick's raycast maps to the rendered location.
-            const liftCss = this._gizmoLiftCss();
-            const shim = { clientX: e.clientX, clientY: e.clientY + liftCss };
-            if (this._viewHelper.handleClick(/** @type {any} */ (shim))) {
-                this._controls.target.copy(this._viewHelper.center);
+            const { hit } = this._gizmoHitTest(e);
+            const view = hit && GIZMO_SPRITE_VIEWS[hit.userData.type];
+            if (view) {
+                this.setView(view);
                 this._setGizmoHoverSprite(null);
             }
         });
@@ -9206,6 +9244,14 @@ export class ThreeJSViewer {
                 this._viewHomeBtn.blur();
             });
         }
+        // ISO button: corner of the ViewHelper area; snaps to the isometric
+        // view (the axis bubbles cover the six orthogonal views).
+        if (this._viewIsoBtn) {
+            this._viewIsoBtn.addEventListener('click', () => {
+                this.setView('iso');
+                this._viewIsoBtn.blur();
+            });
+        }
 
         // Timeline scrubbing
         this._timelineContainer.addEventListener('mousedown', /** @param {MouseEvent} e */ (e) => {
@@ -11001,6 +11047,9 @@ export class ThreeJSViewer {
             case 'set_camera':
                 this.setCameraPose(data);
                 break;
+            case 'set_view':
+                this.setView(data.name, { animate: data.animate !== false });
+                break;
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
@@ -11241,7 +11290,8 @@ export class ThreeJSViewer {
             restyleGizmoHelper(this._clipMoveGizmoHelper, this._clipMoveSizedPlanes);
         }
 
-        if (this._viewHelper.animating) this._viewHelper.update(frameDelta);
+        // setView() snap tween (replaces ViewHelper's own Y-up animation).
+        this._updateViewTween(frameNow);
         if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
@@ -11404,6 +11454,75 @@ export class ThreeJSViewer {
             sprites.push(child);
         }
         helper.userData.interactiveSprites = sprites;
+    }
+
+    /**
+     * Snap the camera to a pre-defined view: 'top' / 'bottom' / 'front' /
+     * 'back' / 'left' / 'right' / 'iso' (or 'home' = resetView()). Keeps the
+     * current orbit target and distance — this only reorients the camera (no
+     * framing) — with a short eased tween, and sets an axis-appropriate up
+     * vector (top/bottom get +Y up so the view doesn't roll unpredictably).
+     * Works with both the perspective and the orthographic camera. Also the
+     * implementation behind gimbal axis-bubble clicks, the ISO corner button,
+     * and the `set_view` WS message.
+     * @param {string} name
+     * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
+     */
+    setView(name, opts) {
+        if (name === 'home') { this._viewTween = null; this.resetView(); return; }
+        const preset = VIEW_PRESETS[name];
+        if (!preset) {
+            console.warn(`[viewer] setView: unknown view '${name}' (expected ${Object.keys(VIEW_PRESETS).join('/')}/home)`);
+            return;
+        }
+        const endDir = new THREE.Vector3().fromArray(preset.dir).normalize();
+        const endUp = new THREE.Vector3().fromArray(preset.up);
+        const target = this._controls.target.clone();
+        const offset = this._camera.position.clone().sub(target);
+        const dist = offset.length() > 1e-9 ? offset.length() : 10;
+        const startDir = offset.length() > 1e-9 ? offset.normalize() : endDir.clone();
+        if (opts && opts.animate === false) {
+            this._viewTween = null;
+            this._camera.up.copy(endUp);
+            this._camera.position.copy(target).addScaledVector(endDir, dist);
+            this._camera.lookAt(target);
+            this._controls.update();
+            return;
+        }
+        this._viewTween = {
+            target,
+            dist,
+            startDir,
+            // Slerped from identity each frame; setFromUnitVectors picks an
+            // arbitrary (but valid) axis for the antiparallel 180° case.
+            rot: new THREE.Quaternion().setFromUnitVectors(startDir, endDir),
+            startUp: this._camera.up.clone().normalize(),
+            endUp,
+            start: performance.now(),
+        };
+    }
+
+    /**
+     * Advance the setView() snap tween: eased (smoothstep) slerp of the
+     * target->camera direction plus a lerped up vector, at constant orbit
+     * distance. Called once per rendered frame; no-op when idle.
+     * @param {number} now performance.now() timestamp of this frame
+     */
+    _updateViewTween(now) {
+        const tw = this._viewTween;
+        if (!tw) return;
+        const raw = Math.min(Math.max((now - tw.start) / VIEW_TWEEN_MS, 0), 1);
+        const e = raw * raw * (3 - 2 * raw);
+        const q = _viewTweenQuat.identity().slerp(tw.rot, e);
+        const dir = _viewTweenDir.copy(tw.startDir).applyQuaternion(q);
+        const up = _viewTweenUp.copy(tw.startUp).lerp(tw.endUp, e);
+        this._camera.up.copy(up.lengthSq() > 1e-9 ? up.normalize() : tw.endUp);
+        this._camera.position.copy(tw.target).addScaledVector(dir, tw.dist);
+        this._camera.lookAt(tw.target);
+        if (raw >= 1) {
+            this._camera.up.copy(tw.endUp);
+            this._viewTween = null;
+        }
     }
 
     /**

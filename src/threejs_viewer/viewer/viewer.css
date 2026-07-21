@@ -520,6 +520,50 @@
     outline-offset: 2px;
 }
 
+/* ISO button — top-left corner of the 128×128 ViewHelper area (the six axis
+   bubbles cover the orthogonal views; this covers the isometric one). Shares
+   the Home button look and the --tjsv-anim-lift shift. */
+.threejs-viewer .tjsv-view-iso {
+    position: absolute;
+    right: 100px;
+    bottom: calc(100px + var(--tjsv-anim-lift, 0px));
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 50%;
+    background: rgba(30, 30, 30, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #ddd;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    opacity: 0.75;
+    transition: background 0.15s, color 0.15s, opacity 0.15s, transform 0.15s;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    z-index: 2;
+}
+.threejs-viewer .tjsv-view-iso:hover {
+    background: rgba(60, 60, 60, 0.95);
+    color: white;
+    opacity: 1;
+    transform: scale(1.06);
+}
+.threejs-viewer .tjsv-view-iso:active {
+    transform: scale(0.96);
+}
+.threejs-viewer .tjsv-view-iso:focus {
+    outline: none;
+}
+.threejs-viewer .tjsv-view-iso:focus-visible {
+    outline: 2px solid #66b3ff;
+    outline-offset: 2px;
+}
+
 /* Transient label shown when the D-key depth-cue mode changes */
 .threejs-viewer .tjsv-depthcue-toast {
     position: absolute;
