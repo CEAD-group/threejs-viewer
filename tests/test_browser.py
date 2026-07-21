@@ -3982,3 +3982,33 @@ def test_group_frontier_tracks_true_point_index(viewer_client, viewer_page):
     # with the /n skew this recovered index ~9.4 -> clamped/wrong position
     x = frontier_x(8.5 / (n - 1))
     assert x == pytest.approx(300.5, abs=0.05), f"late frontier at {x}"
+
+
+@pytest.mark.browser
+def test_resize_noop_guard(viewer_client, viewer_page):
+    """resize() skips the GL realloc when the size is unchanged (issue #128):
+    embedders call viewer.resize() on every mousemove, and the ResizeObserver
+    fires per-event during splitter drags. A genuinely new size still applies,
+    including the very first explicit resize."""
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " let calls = 0;"
+        " const orig = v._renderer.setSize.bind(v._renderer);"
+        " v._renderer.setSize = (w, h) => { calls++; return orig(w, h); };"
+        " v.resize(300, 200);"
+        " const afterFirst = calls;"
+        " for (let i = 0; i < 50; i++) v.resize(300, 200);"
+        " const afterSame = calls;"
+        " v.resize(320, 200);"
+        " const afterNew = calls;"
+        " v.resize(0, 0);"
+        " const afterZero = calls;"
+        " v._renderer.setSize = orig;"
+        " return { afterFirst, afterSame, afterNew, afterZero };"
+        "}"
+    )
+    assert result["afterFirst"] == 1, "first new size must apply"
+    assert result["afterSame"] == 1, "repeated same-size resize must be a no-op"
+    assert result["afterNew"] == 2, "a genuinely new size must apply"
+    assert result["afterZero"] == 2, "zero-size rects stay guarded"

@@ -7141,10 +7141,24 @@ export class ThreeJSViewer {
         this._sceneBoundsDirty = true;
         this._boundsFrameCounter = 0;
 
-        // ResizeObserver
+        // ResizeObserver — rAF-coalesced (issue #128): a fast splitter/window
+        // drag fires a burst of resize events, and each synchronous resize()
+        // does a full GL realloc (renderer framebuffer + EDL render targets).
+        // The observer only records the latest size and applies at most one
+        // resize() per animation frame; the last recorded size always lands.
+        /** @type {{width: number, height: number} | null} */
+        this._pendingResize = null;
+        this._pendingResizeRaf = 0;
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
-            this.resize(width, height);
+            this._pendingResize = { width, height };
+            if (this._pendingResizeRaf) return;
+            this._pendingResizeRaf = requestAnimationFrame(() => {
+                this._pendingResizeRaf = 0;
+                const pending = this._pendingResize;
+                this._pendingResize = null;
+                if (pending) this.resize(pending.width, pending.height);
+            });
         });
         this._resizeObserver.observe(this.container);
     }
@@ -11357,6 +11371,11 @@ export class ThreeJSViewer {
         width = width ?? this.container.clientWidth;
         height = height ?? this.container.clientHeight;
         if (width === 0 || height === 0) return;
+        // No-op guard (issue #128): embedders call viewer.resize() directly on
+        // every mousemove — skip the GL realloc when the size didn't change.
+        if (width === this._lastResizeWidth && height === this._lastResizeHeight) return;
+        this._lastResizeWidth = width;
+        this._lastResizeHeight = height;
         const aspect = width / height;
         this._perspCamera.aspect = aspect;
         this._perspCamera.updateProjectionMatrix();
@@ -12030,6 +12049,7 @@ export class ThreeJSViewer {
             this._lodWorker = null;
         }
         clearTimeout(this._reconnectTimeout);
+        cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
