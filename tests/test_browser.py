@@ -592,6 +592,60 @@ def test_set_draw_range_on_glb_model(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_binary_draw_ranges_channel_on_glb_model(viewer_client, viewer_page):
+    """The binary `draw_ranges` animation channel (set_draw_range_data) drives
+    the draw range of a GLB model group — a DIFFERENT code path
+    (makeChannelApply.draw_ranges) from the `set_draw_range` message
+    (_setDrawRange), both wired for isModelGroup in issue #104."""
+    viewer_client.add_model_binary("bellows", _two_triangle_glb(), format="glb")
+    objects = {}
+    for _ in range(60):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "bellows" in objects:
+            break
+    assert "bellows" in objects, "GLB model did not load"
+
+    n_frames = 11
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.linspace(0, 1.0, n_frames, dtype=np.float32))
+    # Values ramp 0 -> 1 so t=0.5 -> 0.5.
+    ramp = np.linspace(0, 1, n_frames, dtype=np.float32).reshape(n_frames, 1)
+    anim.set_draw_range_data(["bellows"], ramp)
+    viewer_client.load_animation(anim, autoplay=False)
+    loaded = False
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._animation != null"):
+            loaded = True
+            break
+    assert loaded, "animation never loaded"
+
+    # Seek to mid-animation; the channel applier must halve the child mesh's
+    # 6-index buffer.
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    count = None
+    for _ in range(40):
+        time.sleep(0.05)
+        count = viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('bellows')"
+            ".userData.drawRangeMeshes[0].geometry.drawRange.count"
+        )
+        if count == 3:
+            break
+    assert count == 3, f"expected child drawRange.count 3 at t=0.5, got {count!r}"
+
+    # unload restores the full buffer on the stamped child.
+    viewer_client.unload_animation()
+    time.sleep(0.2)
+    count = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('bellows')"
+        ".userData.drawRangeMeshes[0].geometry.drawRange.count"
+    )
+    assert count == 6
+
+
+@pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
     viewer_client.add_box("a")
