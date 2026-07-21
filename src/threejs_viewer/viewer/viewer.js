@@ -7149,6 +7149,12 @@ export class ThreeJSViewer {
         /** @type {{width: number, height: number} | null} */
         this._pendingResize = null;
         this._pendingResizeRaf = 0;
+        // Last size applied by resize() — its no-op guard compares against
+        // these; null until the first successful resize.
+        /** @type {number | null} */
+        this._lastResizeWidth = null;
+        /** @type {number | null} */
+        this._lastResizeHeight = null;
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
             this._pendingResize = { width, height };
