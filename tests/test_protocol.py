@@ -129,6 +129,82 @@ def test_add_box_default_payload(client):
     }
 
 
+# === add_grid ===
+
+
+def test_add_grid_default_payload(client):
+    """Regression guard: verify complete default payload for add_grid."""
+    client.add_grid("floor")
+    msg = client._messages[0]
+    assert msg == {
+        "type": "add_grid",
+        "id": "floor",
+        "cellSize": 1.0,
+        "extent": 100.0,
+        "lineWidth": 1.5,
+        "color": 0x555555,
+        "backgroundOpacity": 0.0,
+        "fadeStart": 0.5,
+    }
+
+
+def test_add_grid_full_payload(client):
+    client.add_grid(
+        "floor",
+        cell_size=250.0,
+        extent=8000.0,
+        line_width=2.0,
+        color=0x336699,
+        center_color=0xFFFFFF,
+        background_color=0x111111,
+        background_opacity=0.25,
+        fade_start=0.6,
+        position=[1, 2, 3],
+        rotation=[0.5, 0, 0],
+        parent="cell",
+    )
+    msg = client._messages[0]
+    assert msg["type"] == "add_grid"
+    assert msg["cellSize"] == 250.0
+    assert msg["extent"] == 8000.0
+    assert msg["lineWidth"] == 2.0
+    assert msg["color"] == 0x336699
+    assert msg["centerColor"] == 0xFFFFFF
+    assert msg["backgroundColor"] == 0x111111
+    assert msg["backgroundOpacity"] == 0.25
+    assert msg["fadeStart"] == 0.6
+    assert msg["transform"] == {"position": [1, 2, 3], "rotation": [0.5, 0, 0]}
+    assert msg["parent"] == "cell"
+
+
+def test_add_grid_optional_colors_omitted(client):
+    client.add_grid("floor")
+    msg = client._messages[0]
+    assert "centerColor" not in msg
+    assert "backgroundColor" not in msg
+    assert "transform" not in msg
+    assert "parent" not in msg
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cell_size": 0},
+        {"cell_size": -1},
+        {"extent": 0},
+        {"line_width": 0},
+        {"background_opacity": -0.1},
+        {"background_opacity": 1.1},
+        {"fade_start": -0.1},
+        {"fade_start": 1.5},
+    ],
+)
+def test_add_grid_validation(client, kwargs):
+    with pytest.raises(ValueError):
+        client.add_grid("floor", **kwargs)
+    assert client._messages == []
+
+
 # === add_model ===
 
 

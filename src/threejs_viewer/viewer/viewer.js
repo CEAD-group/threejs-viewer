@@ -880,6 +880,104 @@ const PRIMITIVES = {
     )
 };
 
+const GRID_VERTEX_SHADER = /* glsl */ `
+varying vec2 vPos;
+void main() {
+    vPos = position.xy;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+// Anti-aliased shader floor grid (issue #126). Line distances are measured
+// in screen pixels via fwidth, so line width is screen-space stable at
+// grazing angles and any zoom; a cell-density attenuation thins the grid
+// out where cells shrink below a few pixels instead of letting it collapse
+// into a solid sheet; a radial alpha fade dissolves the plane edge so a
+// finite plane reads as an infinite floor.
+const GRID_FRAGMENT_SHADER = /* glsl */ `
+varying vec2 vPos;
+uniform float uCellSize;
+uniform float uHalfExtent;
+uniform float uLineWidth;
+uniform vec3 uColor;
+uniform vec3 uCenterColor;
+uniform vec3 uBackgroundColor;
+uniform float uBackgroundOpacity;
+uniform float uFadeStart;
+
+void main() {
+    vec2 coord = vPos / uCellSize;
+    vec2 fw = max(fwidth(coord), vec2(1e-6));
+    // Pixel distance to the nearest grid line on each axis.
+    vec2 dist = abs(fract(coord + 0.5) - 0.5) / fw;
+    float halfW = 0.5 * uLineWidth;
+    float lineA = 1.0 - smoothstep(halfW - 0.5, halfW + 0.5, min(dist.x, dist.y));
+
+    // Thin the grid out where a cell spans under ~4 px.
+    float cellPx = 1.0 / max(fw.x, fw.y);
+    lineA *= smoothstep(2.0, 4.0, cellPx);
+
+    // Axis lines through the local origin: distinct colour, slightly wider.
+    vec2 axisDist = abs(coord) / fw;
+    float centerA = 1.0 - smoothstep(halfW + 0.5, halfW + 1.5, min(axisDist.x, axisDist.y));
+
+    vec3 lineColor = mix(uColor, uCenterColor, centerA);
+    float alpha = max(lineA, centerA);
+
+    float r = length(vPos) / uHalfExtent;
+    float fade = 1.0 - smoothstep(uFadeStart, 1.0, r);
+    alpha *= fade;
+
+    // Composite the lines over the optional translucent background fill.
+    float bgA = uBackgroundOpacity * fade;
+    float outA = alpha + bgA * (1.0 - alpha);
+    if (outA < 0.003) discard;
+    vec3 outColor = mix(uBackgroundColor, lineColor, alpha / outA);
+    gl_FragColor = vec4(outColor, outA);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+}
+`;
+
+/**
+ * Build the shader floor-grid mesh for an `add_grid` message.
+ *
+ * The mesh is viewer furniture in object clothing: tracked in `_objects`
+ * (delete / visibility / transform / parent all work), but excluded from
+ * scene bounds (`userData.excludeFromBounds` — a floor plane must not
+ * inflate framing or near/far) and never raycast (picking through the
+ * floor would otherwise hit the plane instead of geometry behind it).
+ *
+ * @param {any} data
+ * @returns {THREE.Mesh}
+ */
+function buildFloorGridMesh(data) {
+    const extent = data.extent > 0 ? data.extent : 100;
+    const cellSize = data.cellSize > 0 ? data.cellSize : 1;
+    const material = new THREE.ShaderMaterial({
+        vertexShader: GRID_VERTEX_SHADER,
+        fragmentShader: GRID_FRAGMENT_SHADER,
+        uniforms: {
+            uCellSize: { value: cellSize },
+            uHalfExtent: { value: extent / 2 },
+            uLineWidth: { value: data.lineWidth > 0 ? data.lineWidth : 1.5 },
+            uColor: { value: new THREE.Color(data.color ?? 0x555555) },
+            uCenterColor: { value: new THREE.Color(data.centerColor ?? data.color ?? 0x555555) },
+            uBackgroundColor: { value: new THREE.Color(data.backgroundColor ?? 0x000000) },
+            uBackgroundOpacity: { value: Math.min(Math.max(data.backgroundOpacity ?? 0, 0), 1) },
+            uFadeStart: { value: Math.min(Math.max(data.fadeStart ?? 0.5, 0), 1) },
+        },
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(extent, extent), material);
+    mesh.userData.isGrid = true;
+    mesh.userData.excludeFromBounds = true;
+    mesh.raycast = () => {};
+    return mesh;
+}
+
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
 // min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
 // When w > h: flat top & bottom, pointed left & right (hexagon).
@@ -4031,6 +4129,9 @@ class CameraController {
         const v = this.v;
         const box = new THREE.Box3();
         for (const obj of v._objects.values()) {
+            // Floor grids opt out: a large ground plane must not inflate
+            // framing or the near/far fit around the actual content.
+            if (obj.userData.excludeFromBounds) continue;
             obj.updateWorldMatrix(true, true);
             box.expandByObject(obj);
             // A LOD point cloud knows its full extent from the hierarchy
@@ -4167,6 +4268,7 @@ class ShadingDebugController {
         this.v._scene.traverse(/** @param {any} obj */ (obj) => {
             if (!obj.isMesh) return;
             if (obj.userData.isWireOverlay) return;
+            if (obj.userData.isGrid) return;
             if (!obj.material) return;
             const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
             for (const m of mats) {
@@ -4328,6 +4430,7 @@ class ShadingDebugController {
                 if (!obj.isMesh) return;
                 if (obj.userData.isWireOverlay) return;
                 if (obj.userData.isDebugHelper) return;
+                if (obj.userData.isGrid) return;
                 cb(obj);
             });
         }
@@ -11122,6 +11225,18 @@ export class ThreeJSViewer {
             case 'clear_gizmos':
                 this._transformGizmo.clearGizmos();
                 break;
+            case 'add_grid': {
+                const grid = buildFloorGridMesh(data);
+                grid.name = data.id;
+                grid.userData.id = data.id;
+                if (data.transform) this._applyTransform(grid, data.transform);
+                if (data.visible === false) grid.visible = false;
+                this._deleteObject(data.id);
+                this._addToParentOrScene(grid, data.parent);
+                this._objects.set(data.id, grid);
+                this._objGeneration++;
+                break;
+            }
             case 'show_grid':
                 this._gridHelper.visible = !!data.visible;
                 if (data.size != null && data.divisions != null) {
