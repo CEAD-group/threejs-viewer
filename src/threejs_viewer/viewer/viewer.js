@@ -12022,6 +12022,12 @@ export class ThreeJSViewer {
 
     destroy() {
         this._destroyed = true;
+        // Drop the dev-debug handle if it still points at this instance, so
+        // destroy() doesn't leave window.tjsv pinning a disposed viewer's
+        // scene/renderer past GC.
+        if (typeof window !== 'undefined' && /** @type {any} */ (window).tjsv?.viewer === this) {
+            /** @type {any} */ (window).tjsv = undefined;
+        }
         cancelAnimationFrame(this._animationFrameId);
         if (this._ws) {
             this._ws.onclose = null;
