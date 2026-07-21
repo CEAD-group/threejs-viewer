@@ -832,6 +832,42 @@ def test_set_camera_validation(client):
     assert client._messages == []
 
 
+# === set_view ===
+
+
+def test_set_view_message(client):
+    client.set_view("top")
+    assert client._messages == [{"type": "set_view", "name": "top"}]
+
+
+def test_set_view_no_animate(client):
+    client.set_view("iso", animate=False)
+    assert client._messages == [{"type": "set_view", "name": "iso", "animate": False}]
+
+
+def test_set_view_accepts_all_predefined_names(client):
+    for name in ["top", "bottom", "front", "back", "left", "right", "iso", "home"]:
+        client.set_view(name)
+    assert [m["name"] for m in client._messages] == [
+        "top",
+        "bottom",
+        "front",
+        "back",
+        "left",
+        "right",
+        "iso",
+        "home",
+    ]
+
+
+def test_set_view_rejects_unknown_name(client):
+    with pytest.raises(ValueError, match="view must be one of"):
+        client.set_view("sideways")
+    with pytest.raises(ValueError, match="view must be one of"):
+        client.set_view("TOP")  # case-sensitive on purpose
+    assert client._messages == []
+
+
 # === follow path ===
 
 
