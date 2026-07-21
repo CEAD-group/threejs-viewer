@@ -129,6 +129,82 @@ def test_add_box_default_payload(client):
     }
 
 
+# === add_grid ===
+
+
+def test_add_grid_default_payload(client):
+    """Regression guard: verify complete default payload for add_grid."""
+    client.add_grid("floor")
+    msg = client._messages[0]
+    assert msg == {
+        "type": "add_grid",
+        "id": "floor",
+        "cellSize": 1.0,
+        "extent": 100.0,
+        "lineWidth": 1.5,
+        "color": 0x555555,
+        "backgroundOpacity": 0.0,
+        "fadeStart": 0.5,
+    }
+
+
+def test_add_grid_full_payload(client):
+    client.add_grid(
+        "floor",
+        cell_size=250.0,
+        extent=8000.0,
+        line_width=2.0,
+        color=0x336699,
+        center_color=0xFFFFFF,
+        background_color=0x111111,
+        background_opacity=0.25,
+        fade_start=0.6,
+        position=[1, 2, 3],
+        rotation=[0.5, 0, 0],
+        parent="cell",
+    )
+    msg = client._messages[0]
+    assert msg["type"] == "add_grid"
+    assert msg["cellSize"] == 250.0
+    assert msg["extent"] == 8000.0
+    assert msg["lineWidth"] == 2.0
+    assert msg["color"] == 0x336699
+    assert msg["centerColor"] == 0xFFFFFF
+    assert msg["backgroundColor"] == 0x111111
+    assert msg["backgroundOpacity"] == 0.25
+    assert msg["fadeStart"] == 0.6
+    assert msg["transform"] == {"position": [1, 2, 3], "rotation": [0.5, 0, 0]}
+    assert msg["parent"] == "cell"
+
+
+def test_add_grid_optional_colors_omitted(client):
+    client.add_grid("floor")
+    msg = client._messages[0]
+    assert "centerColor" not in msg
+    assert "backgroundColor" not in msg
+    assert "transform" not in msg
+    assert "parent" not in msg
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cell_size": 0},
+        {"cell_size": -1},
+        {"extent": 0},
+        {"line_width": 0},
+        {"background_opacity": -0.1},
+        {"background_opacity": 1.1},
+        {"fade_start": -0.1},
+        {"fade_start": 1.5},
+    ],
+)
+def test_add_grid_validation(client, kwargs):
+    with pytest.raises(ValueError):
+        client.add_grid("floor", **kwargs)
+    assert client._messages == []
+
+
 # === add_model ===
 
 
@@ -983,6 +1059,119 @@ def test_add_toolpath_group_transform_covers_travel_line(client):
     for header, _ in client._binary_messages:
         assert "position" not in header and "rotation" not in header
         assert "matrix" not in header
+
+
+# === add_toolpath single-point extrusion runs (issue #103) ===
+
+
+def _issue_103_toolpath():
+    """Exact minimal repro from issue #103: travel, one isolated extruding
+    point, travel, then a normal 2-point extrusion run."""
+    data = np.array(
+        [
+            # t   x    y  z  w  h
+            [0.0, 0.0, 0, 0, 0, 0],
+            [1.0, 10.0, 0, 0, 4, 2],  # isolated extruding point -> 1-point run
+            [2.0, 20.0, 0, 0, 0, 0],
+            [3.0, 30.0, 0, 0, 4, 2],
+            [4.0, 40.0, 0, 0, 4, 2],
+        ],
+        dtype=np.float32,
+    )
+    return Toolpath(data)
+
+
+def test_add_toolpath_single_point_run_skipped(client):
+    """Issue #103 repro must not raise: the 1-point run is skipped and only
+    the 2-point run renders (single-tube fast path, global bias kept)."""
+    tp = _issue_103_toolpath()
+    client.add_toolpath("tp", tp)  # raised ValueError before the fix
+    assert client._messages == []  # single remaining run -> no group
+    assert len(client._binary_messages) == 1
+    header, _ = client._binary_messages[0]
+    assert header["type"] == "add_parametric_tube_binary"
+    assert header["id"] == "tp"
+    assert header["numSpinePoints"] == 2
+    # bias ramp stays global (spine indices 3..4 of 5)
+    assert header["biasIndexOffset"] == 3
+    assert header["biasIndexTotal"] == 5
+
+
+def test_add_toolpath_single_point_run_travel_covers_skipped_point(client):
+    """With travel="line" the skipped isolated point stays covered by the
+    travel line: both edges flanking it are travel edges, and
+    travelEndFracs stay ascending / consistent with segmentRanges."""
+    tp = _issue_103_toolpath()
+    client.add_toolpath("tp", tp, travel="line")
+
+    assert client._messages[0] == {"type": "add_group", "id": "tp"}
+    reg = client._messages[-1]
+    assert reg["type"] == "register_toolpath_group"
+    assert reg["segmentIds"] == ["tp_seg_0"]
+    # only the 2-point run (spine indices 3..4), global-index fractions
+    assert len(reg["segmentRanges"]) == 1
+    assert reg["segmentRanges"][0] == pytest.approx([3 / 4, 4 / 4])
+    assert reg["travelId"] == "tp_travel"
+    # travel edges (0,1) (1,2) (2,3): through the isolated point at index 1
+    assert reg["travelEndFracs"] == pytest.approx([1 / 4, 2 / 4, 3 / 4])
+    assert reg["travelEndFracs"] == sorted(reg["travelEndFracs"])
+
+    tubes = [
+        h
+        for h, _ in client._binary_messages
+        if h["type"] == "add_parametric_tube_binary"
+    ]
+    assert len(tubes) == 1
+    assert tubes[0]["numSpinePoints"] == 2
+    travel_headers = [
+        h for h, _ in client._binary_messages if h["type"] == "add_polyline_binary"
+    ]
+    assert len(travel_headers) == 1
+    assert travel_headers[0]["numPoints"] == 6  # 3 edges x 2 endpoints
+
+
+def test_add_toolpath_all_single_point_runs_noop(client):
+    """Every extrusion run a single point and no travel line requested:
+    nothing drawable -> clean no-op, no messages, no crash."""
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(5, dtype=np.float32)
+    widths = np.array([0.0, 0.2, 0.0, 0.2, 0.0], dtype=np.float32)
+    heights = np.where(widths > 0, 0.1, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_toolpath("tp", tp)
+    assert client._messages == []
+    assert client._binary_messages == []
+
+
+def test_add_toolpath_all_single_point_runs_travel_only(client):
+    """Every extrusion run a single point + travel="line": degrade to a
+    travel-only group (no bead tubes, all edges are travel edges)."""
+    pts = np.zeros((5, 3), dtype=np.float32)
+    pts[:, 0] = np.arange(5, dtype=np.float32)
+    widths = np.array([0.0, 0.2, 0.0, 0.2, 0.0], dtype=np.float32)
+    heights = np.where(widths > 0, 0.1, 0.0).astype(np.float32)
+    tp = Toolpath.from_points(pts, bead_width=widths, bead_height=heights)
+    client.add_toolpath("tp", tp, travel="line")
+
+    assert client._messages[0] == {"type": "add_group", "id": "tp"}
+    reg = client._messages[-1]
+    assert reg["type"] == "register_toolpath_group"
+    assert reg["segmentIds"] == []
+    assert reg["segmentRanges"] == []
+    assert reg["travelId"] == "tp_travel"
+    assert reg["travelEndFracs"] == pytest.approx([1 / 4, 2 / 4, 3 / 4, 4 / 4])
+
+    tubes = [
+        h
+        for h, _ in client._binary_messages
+        if h["type"] == "add_parametric_tube_binary"
+    ]
+    assert tubes == []
+    travel_headers = [
+        h for h, _ in client._binary_messages if h["type"] == "add_polyline_binary"
+    ]
+    assert len(travel_headers) == 1
+    assert travel_headers[0]["numPoints"] == 8  # 4 edges x 2 endpoints
 
 
 # === polyline picking ===

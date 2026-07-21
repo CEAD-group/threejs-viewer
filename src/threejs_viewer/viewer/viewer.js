@@ -386,6 +386,8 @@ function makeChannelApply(viewer) {
                     applyParametricTubeDrawRange(obj, value);
                 } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+                } else if (obj.userData.isModelGroup) {
+                    applyModelGroupDrawRange(obj, value);
                 } else if (obj.userData.isPoints) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 }
@@ -907,6 +909,106 @@ const PRIMITIVES = {
         params.capSegments || 8, params.radialSegments || 16
     )
 };
+
+const GRID_VERTEX_SHADER = /* glsl */ `
+varying vec2 vPos;
+void main() {
+    vPos = position.xy;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+// Anti-aliased shader floor grid (issue #126). Line distances are measured
+// in screen pixels via fwidth, so line width is screen-space stable at
+// grazing angles and any zoom; a cell-density attenuation thins the grid
+// out where cells shrink below a few pixels instead of letting it collapse
+// into a solid sheet; a radial alpha fade dissolves the plane edge so a
+// finite plane reads as an infinite floor.
+const GRID_FRAGMENT_SHADER = /* glsl */ `
+varying vec2 vPos;
+uniform float uCellSize;
+uniform float uHalfExtent;
+uniform float uLineWidth;
+uniform vec3 uColor;
+uniform vec3 uCenterColor;
+uniform vec3 uBackgroundColor;
+uniform float uBackgroundOpacity;
+uniform float uFadeStart;
+
+void main() {
+    vec2 coord = vPos / uCellSize;
+    vec2 fw = max(fwidth(coord), vec2(1e-6));
+    // Pixel distance to the nearest grid line on each axis.
+    vec2 dist = abs(fract(coord + 0.5) - 0.5) / fw;
+    float halfW = 0.5 * uLineWidth;
+    float lineA = 1.0 - smoothstep(halfW - 0.5, halfW + 0.5, min(dist.x, dist.y));
+
+    // Thin the grid out where a cell spans under ~4 px.
+    float cellPx = 1.0 / max(fw.x, fw.y);
+    lineA *= smoothstep(2.0, 4.0, cellPx);
+
+    // Axis lines through the local origin: distinct colour, slightly wider.
+    vec2 axisDist = abs(coord) / fw;
+    float centerA = 1.0 - smoothstep(halfW + 0.5, halfW + 1.5, min(axisDist.x, axisDist.y));
+
+    vec3 lineColor = mix(uColor, uCenterColor, centerA);
+    float alpha = max(lineA, centerA);
+
+    float r = length(vPos) / uHalfExtent;
+    float fade = 1.0 - smoothstep(uFadeStart, 1.0, r);
+    alpha *= fade;
+
+    // Composite the lines over the optional translucent background fill.
+    float bgA = uBackgroundOpacity * fade;
+    float outA = alpha + bgA * (1.0 - alpha);
+    if (outA < 0.003) discard;
+    vec3 outColor = mix(uBackgroundColor, lineColor, alpha / outA);
+    gl_FragColor = vec4(outColor, outA);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+}
+`;
+
+/**
+ * Build the shader floor-grid mesh for an `add_grid` message.
+ *
+ * The mesh is viewer furniture in object clothing: tracked in `_objects`
+ * (delete / visibility / transform / parent all work), but excluded from
+ * scene bounds (`userData.excludeFromBounds` — a floor plane must not
+ * inflate framing or near/far) and never raycast (picking through the
+ * floor would otherwise hit the plane instead of geometry behind it).
+ *
+ * @param {any} data
+ * @returns {THREE.Mesh}
+ */
+function buildFloorGridMesh(data) {
+    const extent = data.extent > 0 ? data.extent : 100;
+    const cellSize = data.cellSize > 0 ? data.cellSize : 1;
+    const material = new THREE.ShaderMaterial({
+        vertexShader: GRID_VERTEX_SHADER,
+        fragmentShader: GRID_FRAGMENT_SHADER,
+        uniforms: {
+            uCellSize: { value: cellSize },
+            uHalfExtent: { value: extent / 2 },
+            uLineWidth: { value: data.lineWidth > 0 ? data.lineWidth : 1.5 },
+            uColor: { value: new THREE.Color(data.color ?? 0x555555) },
+            uCenterColor: { value: new THREE.Color(data.centerColor ?? data.color ?? 0x555555) },
+            uBackgroundColor: { value: new THREE.Color(data.backgroundColor ?? 0x000000) },
+            uBackgroundOpacity: { value: Math.min(Math.max(data.backgroundOpacity ?? 0, 0), 1) },
+            // Cap below 1.0: smoothstep(edge0, edge1, x) is undefined when
+            // edge0 == edge1, and the shader computes smoothstep(uFadeStart, 1.0, r).
+            uFadeStart: { value: Math.min(Math.max(data.fadeStart ?? 0.5, 0), 0.999) },
+        },
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(extent, extent), material);
+    mesh.userData.isGrid = true;
+    mesh.userData.excludeFromBounds = true;
+    mesh.raycast = () => {};
+    return mesh;
+}
 
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
 // min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
@@ -4058,7 +4160,21 @@ class CameraController {
     updateSceneBounds() {
         const v = this.v;
         const box = new THREE.Box3();
+        // Bounds-excluded furniture (floor grids) must not inflate framing,
+        // but the near/far fit still has to *reach* it — otherwise a grid
+        // larger than the content hard-clips at the fitted far plane
+        // (or at near, hovering close to the floor far from the content).
+        // Track it in a second box unioned into a near/far-only sphere.
+        const excludedBox = new THREE.Box3();
         for (const obj of v._objects.values()) {
+            if (obj.userData.excludeFromBounds) {
+                // A hidden grid draws nothing — don't let it stretch the
+                // near/far fit and cost depth-buffer precision.
+                if (!obj.visible) continue;
+                obj.updateWorldMatrix(true, true);
+                excludedBox.expandByObject(obj);
+                continue;
+            }
             obj.updateWorldMatrix(true, true);
             box.expandByObject(obj);
             // A LOD point cloud knows its full extent from the hierarchy
@@ -4085,6 +4201,14 @@ class CameraController {
         } else {
             box.getBoundingSphere(v._sceneSphere);
         }
+        // Near/far sphere: content plus bounds-excluded furniture. Identical
+        // to _sceneSphere when nothing is excluded, so behavior only changes
+        // when a grid is present.
+        if (excludedBox.isEmpty()) {
+            v._nearFarSphere.copy(v._sceneSphere);
+        } else {
+            box.union(excludedBox).getBoundingSphere(v._nearFarSphere);
+        }
         v._sceneBoundsDirty = false;
     }
 
@@ -4099,9 +4223,9 @@ class CameraController {
             this.updateSceneBounds();
             v._boundsFrameCounter = 0;
         }
-        const radius = v._sceneSphere.radius;
+        const radius = v._nearFarSphere.radius;
         if (radius === 0) return;
-        const dist = v._perspCamera.position.distanceTo(v._sceneSphere.center);
+        const dist = v._perspCamera.position.distanceTo(v._nearFarSphere.center);
         // No geometry can sit closer than dist - radius (camera to sphere
         // surface); halving that leaves 2x clearance for bounds-recompute
         // lag. The previous fit subtracted 1.5*radius, which goes negative —
@@ -4195,6 +4319,7 @@ class ShadingDebugController {
         this.v._scene.traverse(/** @param {any} obj */ (obj) => {
             if (!obj.isMesh) return;
             if (obj.userData.isWireOverlay) return;
+            if (obj.userData.isGrid) return;
             if (!obj.material) return;
             const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
             for (const m of mats) {
@@ -4356,6 +4481,7 @@ class ShadingDebugController {
                 if (!obj.isMesh) return;
                 if (obj.userData.isWireOverlay) return;
                 if (obj.userData.isDebugHelper) return;
+                if (obj.userData.isGrid) return;
                 cb(obj);
             });
         }
@@ -4458,6 +4584,56 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
             }
             line.geometry.setDrawRange(0, 2 * lo);
         }
+    }
+}
+
+// ========== Loaded-model draw ranges (issue #104) ==========
+//
+// Models arrive through the format loaders (GLTF/GLB → a Group wrapper, STL/
+// PLY → a bare Mesh, OBJ/FBX/3DS/DAE → loader-shaped groups), so they never
+// carried the userData.isMesh/totalIndexCount stamp that add_mesh_binary
+// writes — set_draw_range and the draw_ranges channel silently no-oped on
+// them. stampModelDrawRangeMeshes mirrors that stamp onto every descendant
+// mesh right after load; a multi-mesh model additionally gets the root marked
+// isModelGroup with the stamped-mesh list retained, and the draw fraction is
+// applied per child mesh (fine for assets authored with primitives ordered
+// along the reveal axis — the ribweaver rail-bellows use case). A root that
+// *is* a mesh (STL/PLY) needs no group marker: the stamp alone routes it
+// through the existing isMesh branch of the dispatchers.
+
+/**
+ * Stamp draw-range metadata onto every descendant mesh of a loaded model and
+ * mark a non-mesh root as a model group so the draw-range dispatchers can
+ * traverse it.
+ * @param {THREE.Object3D} root
+ */
+function stampModelDrawRangeMeshes(root) {
+    /** @type {any[]} */
+    const meshes = [];
+    root.traverse(/** @param {any} child */ (child) => {
+        const geom = child.geometry;
+        if (child.isMesh && geom && (geom.index || geom.attributes.position)) {
+            child.userData.isMesh = true;
+            child.userData.totalIndexCount = geom.index ? geom.index.count : geom.attributes.position.count;
+            meshes.push(child);
+        }
+    });
+    if (meshes.length > 0 && !(/** @type {any} */ (root).isMesh)) {
+        root.userData.isModelGroup = true;
+        root.userData.drawRangeMeshes = meshes;
+    }
+}
+
+/**
+ * Apply a draw-range fraction to every stamped mesh of a loaded model group.
+ * @param {THREE.Object3D} obj
+ * @param {number} value
+ */
+function applyModelGroupDrawRange(obj, value) {
+    const meshes = obj.userData.drawRangeMeshes;
+    for (let i = 0; i < meshes.length; i++) {
+        const mesh = meshes[i];
+        mesh.geometry.setDrawRange(0, Math.round(value * mesh.userData.totalIndexCount));
     }
 }
 
@@ -7176,13 +7352,34 @@ export class ThreeJSViewer {
 
         // Scene bounds caching for dynamic near/far
         this._sceneSphere = new THREE.Sphere();
+        this._nearFarSphere = new THREE.Sphere();
         this._sceneBoundsDirty = true;
         this._boundsFrameCounter = 0;
 
-        // ResizeObserver
+        // ResizeObserver — rAF-coalesced (issue #128): a fast splitter/window
+        // drag fires a burst of resize events, and each synchronous resize()
+        // does a full GL realloc (renderer framebuffer + EDL render targets).
+        // The observer only records the latest size and applies at most one
+        // resize() per animation frame; the last recorded size always lands.
+        /** @type {{width: number, height: number} | null} */
+        this._pendingResize = null;
+        this._pendingResizeRaf = 0;
+        // Last size applied by resize() — its no-op guard compares against
+        // these; null until the first successful resize.
+        /** @type {number | null} */
+        this._lastResizeWidth = null;
+        /** @type {number | null} */
+        this._lastResizeHeight = null;
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
-            this.resize(width, height);
+            this._pendingResize = { width, height };
+            if (this._pendingResizeRaf) return;
+            this._pendingResizeRaf = requestAnimationFrame(() => {
+                this._pendingResizeRaf = 0;
+                const pending = this._pendingResize;
+                this._pendingResize = null;
+                if (pending) this.resize(pending.width, pending.height);
+            });
         });
         this._resizeObserver.observe(this.container);
     }
@@ -7973,6 +8170,11 @@ export class ThreeJSViewer {
                     } else {
                         obj = result;
                     }
+                    // Enable set_draw_range / draw_ranges on loaded models
+                    // (issue #104): stamp descendant meshes like
+                    // add_mesh_binary does, and mark a group root so the
+                    // dispatchers traverse it.
+                    stampModelDrawRangeMeshes(obj);
                     resolve({ obj, animations });
                 },
                 undefined,
@@ -8002,6 +8204,8 @@ export class ThreeJSViewer {
             applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+        } else if (obj.userData.isModelGroup) {
+            applyModelGroupDrawRange(obj, value);
         } else if (obj.userData.isPoints) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
         } else if (obj.userData.isPointsLOD && !obj.userData._warnedDrawRange) {
@@ -9627,6 +9831,16 @@ export class ThreeJSViewer {
                                 drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
                             }
                         }
+                    } else if (obj.userData.isModelGroup) {
+                        // A loaded-model group has no geometry of its own;
+                        // report from its first stamped child mesh (all
+                        // children get the same fraction from the dispatcher).
+                        const mesh = obj.userData.drawRangeMeshes[0];
+                        const total = mesh.userData.totalIndexCount;
+                        if (total > 0) {
+                            const cnt = mesh.geometry.drawRange.count;
+                            drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
+                        }
                     }
                     tree[id] = {
                         type: obj.type,
@@ -11184,6 +11398,18 @@ export class ThreeJSViewer {
             case 'clear_gizmos':
                 this._transformGizmo.clearGizmos();
                 break;
+            case 'add_grid': {
+                const grid = buildFloorGridMesh(data);
+                grid.name = data.id;
+                grid.userData.id = data.id;
+                if (data.transform) this._applyTransform(grid, data.transform);
+                if (data.visible === false) grid.visible = false;
+                this._deleteObject(data.id);
+                this._addToParentOrScene(grid, data.parent);
+                this._objects.set(data.id, grid);
+                this._objGeneration++;
+                break;
+            }
             case 'show_grid':
                 this._gridHelper.visible = !!data.visible;
                 if (data.size != null && data.divisions != null) {
@@ -11407,6 +11633,11 @@ export class ThreeJSViewer {
         width = width ?? this.container.clientWidth;
         height = height ?? this.container.clientHeight;
         if (width === 0 || height === 0) return;
+        // No-op guard (issue #128): embedders call viewer.resize() directly on
+        // every mousemove — skip the GL realloc when the size didn't change.
+        if (width === this._lastResizeWidth && height === this._lastResizeHeight) return;
+        this._lastResizeWidth = width;
+        this._lastResizeHeight = height;
         const aspect = width / height;
         this._perspCamera.aspect = aspect;
         this._perspCamera.updateProjectionMatrix();
@@ -12158,6 +12389,7 @@ export class ThreeJSViewer {
             this._lodWorker = null;
         }
         clearTimeout(this._reconnectTimeout);
+        cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);

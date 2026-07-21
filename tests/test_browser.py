@@ -1,7 +1,9 @@
 """Integration tests using Playwright — verify browser-side behavior end-to-end."""
 
+import json
 import math
 import socket
+import struct
 import threading
 import time
 from http.server import HTTPServer
@@ -27,6 +29,29 @@ def test_add_box_appears_in_scene(viewer_client, viewer_page):
     result = viewer_client.query_scene()
     assert "mybox" in result["objects"]
     assert result["objects"]["mybox"]["type"] == "Mesh"
+
+
+@pytest.mark.browser
+def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page):
+    """add_grid creates a tracked mesh that never inflates scene bounds."""
+    viewer_client.add_box("ref")
+    viewer_client.add_grid("floor", cell_size=10.0, extent=10000.0)
+    time.sleep(0.2)
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["floor"]["type"] == "Mesh"
+    spheres = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v._camController.updateSceneBounds();"
+        " return { content: v._sceneSphere.radius,"
+        "          nearFar: v._nearFarSphere.radius }; }"
+    )
+    # 10000-unit grid plane must not count toward framing bounds...
+    assert spheres["content"] < 100
+    # ...but the near/far fit must still reach it (no far-plane clip).
+    assert spheres["nearFar"] > 4000
+    viewer_client.delete("floor")
+    time.sleep(0.1)
+    assert "floor" not in viewer_client.query_scene()["objects"]
 
 
 @pytest.mark.browser
@@ -497,6 +522,151 @@ def test_set_draw_range_on_swept_tool(viewer_client, viewer_page):
     assert dr is not None and abs(dr - 0.5) < 0.05, (
         f"expected drawRange ~0.5, got {dr!r}"
     )
+
+
+def _two_triangle_glb() -> bytes:
+    """Build a minimal valid GLB in memory: one mesh, one primitive, 4 verts,
+    2 indexed triangles (6 indices). No external assets, no materials."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint16)
+    bin_chunk = positions.tobytes() + indices.tobytes()
+    bin_chunk += b"\x00" * (-len(bin_chunk) % 4)
+    gltf = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+        "buffers": [{"byteLength": len(bin_chunk)}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 48, "target": 34962},
+            {"buffer": 0, "byteOffset": 48, "byteLength": 12, "target": 34963},
+        ],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": 4,
+                "type": "VEC3",
+                "min": [0, 0, 0],
+                "max": [1, 1, 0],
+            },
+            {"bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR"},
+        ],
+    }
+    json_chunk = json.dumps(gltf, separators=(",", ":")).encode()
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    total = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
+    return (
+        struct.pack("<III", 0x46546C67, 2, total)
+        + struct.pack("<II", len(json_chunk), 0x4E4F534A)
+        + json_chunk
+        + struct.pack("<II", len(bin_chunk), 0x004E4942)
+        + bin_chunk
+    )
+
+
+@pytest.mark.browser
+def test_set_draw_range_on_glb_model(viewer_client, viewer_page):
+    """set_draw_range applies to GLB meshes loaded via add_model_binary: each
+    descendant mesh is stamped isMesh/totalIndexCount after load and the model
+    group dispatches the fraction per child (issue #104)."""
+    viewer_client.add_model_binary("bellows", _two_triangle_glb(), format="glb")
+    objects = {}
+    for _ in range(60):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "bellows" in objects:
+            break
+    assert "bellows" in objects, "GLB model did not load"
+
+    viewer_client.set_draw_range("bellows", 0.5)
+    time.sleep(0.2)
+    state = viewer_page.evaluate(
+        "() => {"
+        " const o = window.threejsViewer._objects.get('bellows');"
+        " const meshes = o.userData.drawRangeMeshes;"
+        " return {"
+        "  isModelGroup: o.userData.isModelGroup === true,"
+        "  nMeshes: meshes.length,"
+        "  total: meshes[0].userData.totalIndexCount,"
+        "  count: meshes[0].geometry.drawRange.count,"
+        " };"
+        "}"
+    )
+    assert state["isModelGroup"] is True
+    assert state["nMeshes"] == 1
+    assert state["total"] == 6
+    assert state["count"] == 3  # half of the 6-index buffer
+
+    # query_scene reports the fraction from the stamped children (a Group has
+    # no geometry of its own).
+    assert (
+        abs(viewer_client.query_scene()["objects"]["bellows"]["drawRange"] - 0.5) < 0.05
+    )
+
+    # Full reveal (the unload_animation reset path uses the same dispatcher).
+    viewer_client.set_draw_range("bellows", 1.0)
+    time.sleep(0.2)
+    count = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('bellows')"
+        ".userData.drawRangeMeshes[0].geometry.drawRange.count"
+    )
+    assert count == 6
+
+
+@pytest.mark.browser
+def test_binary_draw_ranges_channel_on_glb_model(viewer_client, viewer_page):
+    """The binary `draw_ranges` animation channel (set_draw_range_data) drives
+    the draw range of a GLB model group — a DIFFERENT code path
+    (makeChannelApply.draw_ranges) from the `set_draw_range` message
+    (_setDrawRange), both wired for isModelGroup in issue #104."""
+    viewer_client.add_model_binary("bellows", _two_triangle_glb(), format="glb")
+    objects = {}
+    for _ in range(60):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "bellows" in objects:
+            break
+    assert "bellows" in objects, "GLB model did not load"
+
+    n_frames = 11
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.linspace(0, 1.0, n_frames, dtype=np.float32))
+    # Values ramp 0 -> 1 so t=0.5 -> 0.5.
+    ramp = np.linspace(0, 1, n_frames, dtype=np.float32).reshape(n_frames, 1)
+    anim.set_draw_range_data(["bellows"], ramp)
+    viewer_client.load_animation(anim, autoplay=False)
+    loaded = False
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._animation != null"):
+            loaded = True
+            break
+    assert loaded, "animation never loaded"
+
+    # Seek to mid-animation; the channel applier must halve the child mesh's
+    # 6-index buffer.
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    count = None
+    for _ in range(40):
+        time.sleep(0.05)
+        count = viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('bellows')"
+            ".userData.drawRangeMeshes[0].geometry.drawRange.count"
+        )
+        if count == 3:
+            break
+    assert count == 3, f"expected child drawRange.count 3 at t=0.5, got {count!r}"
+
+    # unload restores the full buffer on the stamped child.
+    viewer_client.unload_animation()
+    time.sleep(0.2)
+    count = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('bellows')"
+        ".userData.drawRangeMeshes[0].geometry.drawRange.count"
+    )
+    assert count == 6
 
 
 @pytest.mark.browser
@@ -4059,3 +4229,33 @@ def test_group_frontier_tracks_true_point_index(viewer_client, viewer_page):
     # with the /n skew this recovered index ~9.4 -> clamped/wrong position
     x = frontier_x(8.5 / (n - 1))
     assert x == pytest.approx(300.5, abs=0.05), f"late frontier at {x}"
+
+
+@pytest.mark.browser
+def test_resize_noop_guard(viewer_client, viewer_page):
+    """resize() skips the GL realloc when the size is unchanged (issue #128):
+    embedders call viewer.resize() on every mousemove, and the ResizeObserver
+    fires per-event during splitter drags. A genuinely new size still applies,
+    including the very first explicit resize."""
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " let calls = 0;"
+        " const orig = v._renderer.setSize.bind(v._renderer);"
+        " v._renderer.setSize = (w, h) => { calls++; return orig(w, h); };"
+        " v.resize(300, 200);"
+        " const afterFirst = calls;"
+        " for (let i = 0; i < 50; i++) v.resize(300, 200);"
+        " const afterSame = calls;"
+        " v.resize(320, 200);"
+        " const afterNew = calls;"
+        " v.resize(0, 0);"
+        " const afterZero = calls;"
+        " v._renderer.setSize = orig;"
+        " return { afterFirst, afterSame, afterNew, afterZero };"
+        "}"
+    )
+    assert result["afterFirst"] == 1, "first new size must apply"
+    assert result["afterSame"] == 1, "repeated same-size resize must be a no-op"
+    assert result["afterNew"] == 2, "a genuinely new size must apply"
+    assert result["afterZero"] == 2, "zero-size rects stay guarded"

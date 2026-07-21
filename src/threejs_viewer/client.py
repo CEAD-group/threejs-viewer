@@ -783,6 +783,101 @@ class ViewerClient:
             params["metalness"] = metalness
         self._add_primitive(id, "capsule", params, position, rotation, scale, parent)
 
+    def add_grid(
+        self,
+        id: str,
+        cell_size: float = 1.0,
+        extent: float = 100.0,
+        line_width: float = 1.5,
+        color: int = 0x555555,
+        center_color: Optional[int] = None,
+        background_color: Optional[int] = None,
+        background_opacity: float = 0.0,
+        fade_start: float = 0.5,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
+    ) -> None:
+        """Add a shader floor grid: an anti-aliased, distance-faded grid plane.
+
+        Unlike :meth:`show_grid` (a fixed ``THREE.GridHelper`` toggle) this is
+        a first-class tracked object: it has an id, can be deleted, moved,
+        parented, and hidden, and multiple grids can coexist. The grid is
+        rendered as a single plane with a shader — crisp anti-aliased lines
+        whose width is screen-space stable (in pixels, not world units), a
+        distinct colour for the two axis lines through the local origin, and
+        a radial alpha fade toward the plane edge so the finite plane reads
+        as an infinite floor. Where cells shrink below a few pixels (grazing
+        angles, far distance) the grid thins out instead of collapsing into
+        a solid sheet.
+
+        The plane spans ``extent`` x ``extent`` in its local XY plane (Z-up
+        floor at z=0 by default); use ``position``/``rotation`` to place it.
+        The grid never counts toward camera framing / scene bounds and is
+        never a pick target.
+
+        Args:
+            id: Unique identifier for the object
+            cell_size: Grid cell spacing in world units.
+            extent: Side length of the grid plane in world units.
+            line_width: Grid line width in screen pixels.
+            color: Grid line colour (0xRRGGBB).
+            center_color: Colour of the two axis lines through the local
+                origin. ``None`` uses ``color``.
+            background_color: Fill colour of the plane between the lines.
+                Only visible with ``background_opacity > 0``.
+            background_opacity: Opacity of the plane fill in [0, 1].
+                Default 0 (fully transparent between lines).
+            fade_start: Fraction of the half-extent radius where the radial
+                fade-out begins, in [0, 1]. Lower fades earlier; 1.0 fades
+                only right at the edge.
+            position: Optional [x, y, z] position.
+            rotation: Optional [x, y, z] Euler rotation (radians).
+            scale: Optional [x, y, z] scale.
+            parent: Optional parent object id.
+        """
+        if not (cell_size > 0):
+            raise ValueError(f"cell_size must be > 0, got {cell_size}")
+        if not (extent > 0):
+            raise ValueError(f"extent must be > 0, got {extent}")
+        if not (line_width > 0):
+            raise ValueError(f"line_width must be > 0, got {line_width}")
+        if not (0.0 <= background_opacity <= 1.0):
+            raise ValueError(
+                f"background_opacity must be in [0, 1], got {background_opacity}"
+            )
+        if not (0.0 <= fade_start <= 1.0):
+            raise ValueError(f"fade_start must be in [0, 1], got {fade_start}")
+
+        transform = {}
+        if position:
+            transform["position"] = position
+        if rotation:
+            transform["rotation"] = rotation
+        if scale:
+            transform["scale"] = scale
+
+        msg: dict = {
+            "type": "add_grid",
+            "id": id,
+            "cellSize": float(cell_size),
+            "extent": float(extent),
+            "lineWidth": float(line_width),
+            "color": color,
+            "backgroundOpacity": float(background_opacity),
+            "fadeStart": float(fade_start),
+        }
+        if center_color is not None:
+            msg["centerColor"] = center_color
+        if background_color is not None:
+            msg["backgroundColor"] = background_color
+        if transform:
+            msg["transform"] = transform
+        if parent:
+            msg["parent"] = parent
+        self._send(msg)
+
     def add_model(
         self,
         id: str,
@@ -1907,6 +2002,15 @@ class ViewerClient:
         ``set_draw_range(id, frac)`` on the group distributes the fraction
         to the child segments automatically.
 
+        Extrusion runs of a **single point** (travel in, one deposit,
+        travel out) have no drawable bead — a parametric tube needs at
+        least 2 spine points — and are skipped rather than raising; with
+        ``travel="line"`` the skipped point remains covered by the travel
+        line (both edges flanking it are travel edges).  A toolpath whose
+        extrusion runs are *all* single points degrades gracefully: with
+        ``travel="line"`` it renders a travel-only group (no beads),
+        otherwise the call is a no-op.
+
         Args:
             id: Unique object identifier.
             toolpath: A :class:`Toolpath` instance.
@@ -1967,14 +2071,27 @@ class ViewerClient:
         if in_seg:
             segments.append((seg_start, len(extruding)))
 
-        if not segments:
-            return
-
         # Travel edges: every spine edge NOT interior to an extrusion run —
         # each hop spans from the last extruded point through the zero-width
         # points to the next extruded point, so the line meets the bead ends.
         travel_edge_idx = np.flatnonzero(~(extruding[:-1] & extruding[1:]))
-        use_group = len(segments) > 1 or (want_travel and len(travel_edge_idx) > 0)
+
+        # Single-point runs (travel in → one extruding point → travel out,
+        # issue #103) have no drawable bead — a parametric tube needs >= 2
+        # spine points — so skip them instead of crashing. Both edges
+        # flanking an isolated extruding point are travel edges (a run needs
+        # two consecutive extruding points to own an interior edge), so with
+        # travel="line" the skipped point stays covered by the travel line.
+        # segmentRanges keep global spine indices, so the remaining
+        # fractions stay monotonic and in lockstep with travelEndFracs.
+        segments = [(s, e) for (s, e) in segments if e - s >= 2]
+
+        if not segments and not (want_travel and len(travel_edge_idx) > 0):
+            # Nothing drawable (no extrusion runs, or every run is a single
+            # point) and no travel line requested — clear no-op.
+            return
+
+        use_group = len(segments) != 1 or (want_travel and len(travel_edge_idx) > 0)
 
         if not use_group:
             s, e = segments[0]
