@@ -19,15 +19,6 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-// Dev-debug convenience (ribweaver#495): expose the THREE namespace on
-// `window` so a developer can tweak lighting/materials from the browser
-// console (e.g. `new THREE.DirectionalLight(...)`) without a build step.
-// Matches the precedent of other debug-only globals in this file (see
-// `window.__tubeDrawCapOverride`).
-if (typeof window !== 'undefined') {
-    /** @type {any} */ (window).THREE = THREE;
-}
-
 const VIEWER_VERSION = '0.0.0-dev';
 
 const ORTHO_FRUSTUM = 10;
