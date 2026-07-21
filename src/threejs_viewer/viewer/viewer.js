@@ -965,7 +965,9 @@ function buildFloorGridMesh(data) {
             uCenterColor: { value: new THREE.Color(data.centerColor ?? data.color ?? 0x555555) },
             uBackgroundColor: { value: new THREE.Color(data.backgroundColor ?? 0x000000) },
             uBackgroundOpacity: { value: Math.min(Math.max(data.backgroundOpacity ?? 0, 0), 1) },
-            uFadeStart: { value: Math.min(Math.max(data.fadeStart ?? 0.5, 0), 1) },
+            // Cap below 1.0: smoothstep(edge0, edge1, x) is undefined when
+            // edge0 == edge1, and the shader computes smoothstep(uFadeStart, 1.0, r).
+            uFadeStart: { value: Math.min(Math.max(data.fadeStart ?? 0.5, 0), 0.999) },
         },
         transparent: true,
         depthWrite: false,
