@@ -1504,6 +1504,8 @@ function makeChannelApply(viewer) {
                     applyParametricTubeDrawRange(obj, value);
                 } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+                } else if (obj.userData.isModelGroup) {
+                    applyModelGroupDrawRange(obj, value);
                 } else if (obj.userData.isPoints) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 }
@@ -5703,6 +5705,56 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
     }
 }
 
+// ========== Loaded-model draw ranges (issue #104) ==========
+//
+// Models arrive through the format loaders (GLTF/GLB → a Group wrapper, STL/
+// PLY → a bare Mesh, OBJ/FBX/3DS/DAE → loader-shaped groups), so they never
+// carried the userData.isMesh/totalIndexCount stamp that add_mesh_binary
+// writes — set_draw_range and the draw_ranges channel silently no-oped on
+// them. stampModelDrawRangeMeshes mirrors that stamp onto every descendant
+// mesh right after load; a multi-mesh model additionally gets the root marked
+// isModelGroup with the stamped-mesh list retained, and the draw fraction is
+// applied per child mesh (fine for assets authored with primitives ordered
+// along the reveal axis — the ribweaver rail-bellows use case). A root that
+// *is* a mesh (STL/PLY) needs no group marker: the stamp alone routes it
+// through the existing isMesh branch of the dispatchers.
+
+/**
+ * Stamp draw-range metadata onto every descendant mesh of a loaded model and
+ * mark a non-mesh root as a model group so the draw-range dispatchers can
+ * traverse it.
+ * @param {THREE.Object3D} root
+ */
+function stampModelDrawRangeMeshes(root) {
+    /** @type {any[]} */
+    const meshes = [];
+    root.traverse(/** @param {any} child */ (child) => {
+        const geom = child.geometry;
+        if (child.isMesh && geom && (geom.index || geom.attributes.position)) {
+            child.userData.isMesh = true;
+            child.userData.totalIndexCount = geom.index ? geom.index.count : geom.attributes.position.count;
+            meshes.push(child);
+        }
+    });
+    if (meshes.length > 0 && !(/** @type {any} */ (root).isMesh)) {
+        root.userData.isModelGroup = true;
+        root.userData.drawRangeMeshes = meshes;
+    }
+}
+
+/**
+ * Apply a draw-range fraction to every stamped mesh of a loaded model group.
+ * @param {THREE.Object3D} obj
+ * @param {number} value
+ */
+function applyModelGroupDrawRange(obj, value) {
+    const meshes = obj.userData.drawRangeMeshes;
+    for (let i = 0; i < meshes.length; i++) {
+        const mesh = meshes[i];
+        mesh.geometry.setDrawRange(0, Math.round(value * mesh.userData.totalIndexCount));
+    }
+}
+
 // ========== Swept oriented tool body (5-axis shank/holder) ==========
 //
 // add_swept_tool decouples the extrusion axis from the path tangent: at each
@@ -9206,6 +9258,11 @@ class ThreeJSViewer {
                     } else {
                         obj = result;
                     }
+                    // Enable set_draw_range / draw_ranges on loaded models
+                    // (issue #104): stamp descendant meshes like
+                    // add_mesh_binary does, and mark a group root so the
+                    // dispatchers traverse it.
+                    stampModelDrawRangeMeshes(obj);
                     resolve({ obj, animations });
                 },
                 undefined,
@@ -9235,6 +9292,8 @@ class ThreeJSViewer {
             applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalIndexCount));
+        } else if (obj.userData.isModelGroup) {
+            applyModelGroupDrawRange(obj, value);
         } else if (obj.userData.isPoints) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
         } else if (obj.userData.isPointsLOD && !obj.userData._warnedDrawRange) {
@@ -10851,6 +10910,16 @@ class ThreeJSViewer {
                                 const cnt = geom.drawRange.count;
                                 drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
                             }
+                        }
+                    } else if (obj.userData.isModelGroup) {
+                        // A loaded-model group has no geometry of its own;
+                        // report from its first stamped child mesh (all
+                        // children get the same fraction from the dispatcher).
+                        const mesh = obj.userData.drawRangeMeshes[0];
+                        const total = mesh.userData.totalIndexCount;
+                        if (total > 0) {
+                            const cnt = mesh.geometry.drawRange.count;
+                            drawRange = Number.isFinite(cnt) ? Math.min(cnt / total, 1.0) : 1.0;
                         }
                     }
                     tree[id] = {
