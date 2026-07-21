@@ -36,12 +36,16 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
     time.sleep(0.2)
     objects = viewer_client.query_scene()["objects"]
     assert objects["floor"]["type"] == "Mesh"
-    radius = viewer_page.evaluate(
+    spheres = viewer_page.evaluate(
         "() => { const v = window.threejsViewer;"
         " v._camController.updateSceneBounds();"
-        " return v._sceneSphere.radius; }"
+        " return { content: v._sceneSphere.radius,"
+        "          nearFar: v._nearFarSphere.radius }; }"
     )
-    assert radius < 100  # 10000-unit grid plane must not count toward bounds
+    # 10000-unit grid plane must not count toward framing bounds...
+    assert spheres["content"] < 100
+    # ...but the near/far fit must still reach it (no far-plane clip).
+    assert spheres["nearFar"] > 4000
     viewer_client.delete("floor")
     time.sleep(0.1)
     assert "floor" not in viewer_client.query_scene()["objects"]

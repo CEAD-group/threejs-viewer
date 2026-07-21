@@ -27,7 +27,7 @@ v.unload_animation()
 v.add_grid(
     "floor",
     cell_size=1.0,
-    extent=400.0,
+    extent=40.0,
     line_width=1.5,
     color=0x555555,
     center_color=0x8899AA,
@@ -43,8 +43,9 @@ v.add_grid(
     extent=400.0,
     line_width=2.0,
     color=0x777777,
-    fade_start=0.35,
-    position=[0, 0, 0.001],
+    background_opacity=0,
+    fade_start=0.15,
+    position=[0, 0, -0.001],
 )
 
 # Some content to frame against — double-click / F frames these, not the grid.

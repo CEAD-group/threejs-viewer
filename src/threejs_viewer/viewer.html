@@ -5274,10 +5274,18 @@ class CameraController {
     updateSceneBounds() {
         const v = this.v;
         const box = new THREE.Box3();
+        // Bounds-excluded furniture (floor grids) must not inflate framing,
+        // but the near/far fit still has to *reach* it — otherwise a grid
+        // larger than the content hard-clips at the fitted far plane
+        // (or at near, hovering close to the floor far from the content).
+        // Track it in a second box unioned into a near/far-only sphere.
+        const excludedBox = new THREE.Box3();
         for (const obj of v._objects.values()) {
-            // Floor grids opt out: a large ground plane must not inflate
-            // framing or the near/far fit around the actual content.
-            if (obj.userData.excludeFromBounds) continue;
+            if (obj.userData.excludeFromBounds) {
+                obj.updateWorldMatrix(true, true);
+                excludedBox.expandByObject(obj);
+                continue;
+            }
             obj.updateWorldMatrix(true, true);
             box.expandByObject(obj);
             // A LOD point cloud knows its full extent from the hierarchy
@@ -5304,6 +5312,14 @@ class CameraController {
         } else {
             box.getBoundingSphere(v._sceneSphere);
         }
+        // Near/far sphere: content plus bounds-excluded furniture. Identical
+        // to _sceneSphere when nothing is excluded, so behavior only changes
+        // when a grid is present.
+        if (excludedBox.isEmpty()) {
+            v._nearFarSphere.copy(v._sceneSphere);
+        } else {
+            box.union(excludedBox).getBoundingSphere(v._nearFarSphere);
+        }
         v._sceneBoundsDirty = false;
     }
 
@@ -5318,9 +5334,9 @@ class CameraController {
             this.updateSceneBounds();
             v._boundsFrameCounter = 0;
         }
-        const radius = v._sceneSphere.radius;
+        const radius = v._nearFarSphere.radius;
         if (radius === 0) return;
-        const dist = v._perspCamera.position.distanceTo(v._sceneSphere.center);
+        const dist = v._perspCamera.position.distanceTo(v._nearFarSphere.center);
         // No geometry can sit closer than dist - radius (camera to sphere
         // surface); halving that leaves 2x clearance for bounds-recompute
         // lag. The previous fit subtracted 1.5*radius, which goes negative —
@@ -8387,6 +8403,7 @@ class ThreeJSViewer {
 
         // Scene bounds caching for dynamic near/far
         this._sceneSphere = new THREE.Sphere();
+        this._nearFarSphere = new THREE.Sphere();
         this._sceneBoundsDirty = true;
         this._boundsFrameCounter = 0;
 
