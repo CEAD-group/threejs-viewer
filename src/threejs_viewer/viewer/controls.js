@@ -47,10 +47,6 @@ const MAX_DISTANCE = 1e6;
 const MIN_ZOOM = 1e-4;
 const MAX_ZOOM = 1e6;
 const POLE_EPS = THREE.MathUtils.degToRad(5); // turntable pitch clamp
-// Reject floor-fallback pivots whose hit point is absurdly far from the camera
-// (happens when the click ray is nearly parallel to the floor — intersection
-// point shoots off to "infinity"). Keeps pivot relocation sensible.
-const FLOOR_PIVOT_MAX_DISTANCE = 1e4;
 const _changeEvent = { type: 'change' };
 
 class ViewerControls extends THREE.EventDispatcher {
@@ -82,6 +78,10 @@ class ViewerControls extends THREE.EventDispatcher {
 
         this._lastUpdateTime = -1;
         this._raycastObjectsGetter = null;
+        // On a click that hits no pickable component, the orbit pivot falls back
+        // to this getter's point (scene bounding-box center) instead of the old
+        // z=0 floor-plane intersection. () => THREE.Vector3 | null.
+        this._fallbackPivotGetter = null;
 
         // Reusable scratch
         this._raycaster = new THREE.Raycaster();
@@ -96,9 +96,6 @@ class ViewerControls extends THREE.EventDispatcher {
         this._tmpQ2 = new THREE.Quaternion();
         this._tmpQ3 = new THREE.Quaternion();
         this._worldZ = new THREE.Vector3(0, 0, 1);
-        // Cached for floor-fallback pivot picking (XY plane, normal +Z, d=0).
-        this._floorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-        this._floorHit = new THREE.Vector3();
 
         this._lastPointer = { x: 0, y: 0 };
 
@@ -144,6 +141,16 @@ class ViewerControls extends THREE.EventDispatcher {
 
     setRaycastObjects(getter) {
         this._raycastObjectsGetter = getter;
+    }
+
+    /**
+     * Register the fallback orbit-pivot source used when a click hits no
+     * pickable component. Getter returns a world-space THREE.Vector3 (the
+     * scene bounding-box center) or null to leave the pivot unchanged.
+     * @param {() => (THREE.Vector3 | null)} getter
+     */
+    setFallbackPivot(getter) {
+        this._fallbackPivotGetter = getter;
     }
 
     dispose() {
@@ -305,14 +312,14 @@ class ViewerControls extends THREE.EventDispatcher {
             }
         }
 
-        // Floor fallback: intersect the click ray with the world XY plane (z=0).
-        // intersectPlane returns null when the ray is parallel or aimed away.
-        const floorPt = this._raycaster.ray.intersectPlane(this._floorPlane, this._floorHit);
-        if (!floorPt) return;
-        // Reject "at infinity" hits when the camera is nearly parallel to the floor.
-        if (this._tmpV1.copy(floorPt).sub(this.camera.position).length() > FLOOR_PIVOT_MAX_DISTANCE) return;
-        this.target.copy(floorPt);
-        this.dispatchEvent({ type: 'pivot', point: floorPt.clone(), hit: false });
+        // No component hit: fall back to the scene bounding-box center (never
+        // the old z=0 floor-plane intersection, which put the pivot at an
+        // arbitrary point far off the model on a near-parallel click). If no
+        // bounds are available, leave the pivot where it is.
+        const fallback = this._fallbackPivotGetter && this._fallbackPivotGetter();
+        if (!fallback) return;
+        this.target.copy(fallback);
+        this.dispatchEvent({ type: 'pivot', point: fallback.clone(), hit: false });
         this.dispatchEvent(_changeEvent);
     }
 

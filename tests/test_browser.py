@@ -4259,3 +4259,73 @@ def test_resize_noop_guard(viewer_client, viewer_page):
     assert result["afterSame"] == 1, "repeated same-size resize must be a no-op"
     assert result["afterNew"] == 2, "a genuinely new size must apply"
     assert result["afterZero"] == 2, "zero-size rects stay guarded"
+
+
+@pytest.mark.browser
+def test_gizmo_axis_click_snaps_ortho_and_flips(viewer_client, viewer_page):
+    """Gizmo axis-bubble click snaps to an ortho view down that axis (#514);
+    re-clicking the same axis flips to the opposite side, a different axis does
+    not."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._gizmoAxisClick('front');"
+        " const afterFront = { ortho: v._isOrtho, axis: v._gizmoAxisView,"
+        "   zoom: v._orthoCamera.zoom };"
+        " v._gizmoAxisClick('front');"          # same axis -> flip
+        " const afterReclick = v._gizmoAxisView;"
+        " v._gizmoAxisClick('top');"            # different axis -> no flip
+        " const afterTop = v._gizmoAxisView;"
+        " return { afterFront, afterReclick, afterTop };"
+        "}"
+    )
+    assert result["afterFront"]["ortho"] is True, "axis click must switch to ortho"
+    assert result["afterFront"]["axis"] == "front"
+    assert result["afterFront"]["zoom"] > 0, "ortho frustum must be fit to bounds"
+    assert result["afterReclick"] == "back", "re-clicking the same axis flips it"
+    assert result["afterTop"] == "top", "a different axis snaps without flipping"
+
+
+@pytest.mark.browser
+def test_gizmo_leaving_ortho_clears_axis_snap(viewer_client, viewer_page):
+    """Switching back to perspective clears the gizmo axis snap so the next
+    bubble click is treated as a fresh snap, not a flip (#514)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    axis = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._gizmoAxisClick('front');"
+        " v._switchCamera(false);"             # back to perspective
+        " const cleared = v._gizmoAxisView;"
+        " v._gizmoAxisClick('front');"         # fresh snap, must not flip
+        " return { cleared, after: v._gizmoAxisView };"
+        "}"
+    )
+    assert axis["cleared"] is None, "leaving ortho clears the axis snap"
+    assert axis["after"] == "front", "a fresh click after re-entering ortho does not flip"
+
+
+@pytest.mark.browser
+def test_orbit_pivot_falls_back_to_bounds_center(viewer_client, viewer_page):
+    """A click that hits no component pivots on the scene bounding-box center,
+    not the old z=0 floor-plane intersection; the grid is excluded (#520)."""
+    # Box centered at (10, 20, 30); a large grid that must not sway the center.
+    viewer_client.add_box("b", position=[10.0, 20.0, 30.0])
+    viewer_client.add_grid("floor", cell_size=10.0, extent=10000.0)
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const c = v._controls;"
+        " c.target.set(999, 999, 999);"        # somewhere off-model
+        " const fb = c._fallbackPivotGetter();" # what a component-miss triggers
+        " return fb ? { x: fb.x, y: fb.y, z: fb.z } : null;"
+        "}"
+    )
+    assert result is not None, "fallback pivot must resolve when the scene has bounds"
+    assert abs(result["x"] - 10.0) < 1.0
+    assert abs(result["y"] - 20.0) < 1.0
+    assert abs(result["z"] - 30.0) < 1.0

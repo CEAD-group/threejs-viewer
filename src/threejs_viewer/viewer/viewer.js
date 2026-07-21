@@ -63,6 +63,13 @@ const GIZMO_SPRITE_VIEWS = {
     posY: 'back',  negY: 'front',
     posZ: 'top',   negZ: 'bottom',
 };
+// Re-clicking the gizmo bubble for the axis view you're already snapped to
+// flips to the opposite side (issue #514: click same axis again to flip).
+const OPPOSITE_VIEW = {
+    top: 'bottom', bottom: 'top',
+    front: 'back', back: 'front',
+    left: 'right', right: 'left',
+};
 // Duration of the eased setView() snap tween (matches the feel of the stock
 // ViewHelper animation it replaces).
 const VIEW_TWEEN_MS = 450;
@@ -4143,6 +4150,9 @@ class CameraController {
         }
 
         v._isOrtho = toOrtho;
+        // Leaving ortho ends any gizmo axis snap (issue #514) so a later bubble
+        // click starts fresh instead of treating the first click as a flip.
+        if (!toOrtho) v._gizmoAxisView = null;
         // ViewerControls is camera-agnostic — just reassign and re-update.
         v._controls.camera = v._camera;
         v._controls.target.copy(tgt);
@@ -7107,6 +7117,18 @@ export class ThreeJSViewer {
             for (const o of this._objects.values()) if (o && o.visible) arr.push(o);
             return arr;
         });
+        // Orbit-pivot fallback (issue #520): when a click hits no visible
+        // component, pivot on the scene content center rather than a z=0
+        // floor-plane intersection. The content sphere (updateSceneBounds)
+        // excludes both grid kinds — the THREE.GridHelper is not in _objects,
+        // and add_grid's shader floor carries excludeFromBounds — so a large
+        // grid never drags the pivot off the model. Returns null (pivot left
+        // unchanged) when there is no content yet.
+        this._controls.setFallbackPivot(() => {
+            this._camController.updateSceneBounds();
+            if (this._sceneSphere.radius <= 0) return null;
+            return this._sceneSphere.center.clone();
+        });
         this._controls.addEventListener('change', () => { this._lodDirty = true; });
 
         // Pivot marker: small screen-space-sized yellow sphere + ring shown
@@ -7248,6 +7270,11 @@ export class ThreeJSViewer {
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
         this._gizmoHoverOrthoCam.updateMatrixWorld();
         this._gizmoHovered = null;
+        // The axis view the gizmo is currently snapped to (issue #514). Set when
+        // an axis bubble click switches to that ortho view; cleared when the
+        // user orbits or leaves ortho. Re-clicking the same bubble flips it.
+        /** @type {string | null} */
+        this._gizmoAxisView = null;
         /** @type {{target: THREE.Vector3, dist: number, startDir: THREE.Vector3, rot: THREE.Quaternion, startUp: THREE.Vector3, endUp: THREE.Vector3, start: number} | null} */
         this._viewTween = null;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
@@ -7263,6 +7290,9 @@ export class ThreeJSViewer {
                 e.stopImmediatePropagation();
             } else {
                 this._viewTween = null;
+                // Any orbit/pan drag breaks the clean axis snap, so a later
+                // re-click of a bubble starts fresh (no accidental flip).
+                this._gizmoAxisView = null;
             }
         }, true);
         this._renderer.domElement.addEventListener('wheel', () => {
@@ -7280,16 +7310,18 @@ export class ThreeJSViewer {
             this._renderer.domElement.style.cursor = '';
         });
 
-        // Click an axis bubble -> snap to the matching pre-defined view. This
-        // replaces ViewHelper.handleClick: the stock animation targets Y-up
-        // quaternions (the scene is Z-up, so top/bottom views landed with an
-        // unpredictable roll) and re-frames around ViewHelper.center; setView
-        // keeps the current orbit target + distance and only reorients.
+        // Click an axis bubble -> snap to an orthographic view down that axis
+        // (issue #514). Re-clicking the bubble for the axis you're already on
+        // flips to the opposite side. Replaces ViewHelper.handleClick, whose
+        // stock animation targets Y-up quaternions (the scene is Z-up, so
+        // top/bottom landed with unpredictable roll) and re-frames around
+        // ViewHelper.center. _snapOrthoAxisView keeps the orbit target and
+        // only reorients + fits the ortho frustum.
         this._renderer.domElement.addEventListener('click', (e) => {
             const { hit } = this._gizmoHitTest(e);
             const view = hit && GIZMO_SPRITE_VIEWS[hit.userData.type];
             if (view) {
-                this.setView(view);
+                this._gizmoAxisClick(view);
                 this._setGizmoHoverSprite(null);
             }
         });
@@ -11763,6 +11795,65 @@ export class ThreeJSViewer {
             this._camera.up.copy(tw.endUp);
             this._viewTween = null;
         }
+    }
+
+    /**
+     * Handle a gizmo axis-bubble click (issue #514): snap to the ortho view
+     * down that axis, or — if already snapped to that same axis — flip to the
+     * opposite side. The behind-the-scenes entry point for the bubble click
+     * listener; also called directly by tests.
+     * @param {string} view one of GIZMO_SPRITE_VIEWS' target views
+     */
+    _gizmoAxisClick(view) {
+        if (!VIEW_PRESETS[view]) return;
+        const effective = (this._isOrtho && this._gizmoAxisView === view)
+            ? OPPOSITE_VIEW[view]
+            : view;
+        this._snapOrthoAxisView(effective);
+    }
+
+    /**
+     * Snap the camera to an orthographic view straight down a principal axis
+     * (issue #514). Switches persp -> ortho if needed, reorients along the
+     * preset direction with the usual eased tween (keeping the current orbit
+     * target + distance), then fits the ortho frustum to the visible scene
+     * bounds so the whole model is framed. Records the snapped axis so a
+     * re-click of the same bubble can flip it.
+     * @param {string} view one of VIEW_PRESETS' axis keys (top/bottom/front/...)
+     */
+    _snapOrthoAxisView(view) {
+        if (!VIEW_PRESETS[view]) return;
+        if (!this._isOrtho) this._switchCamera(true);
+        this.setView(view);
+        this._fitOrthoZoomToBounds(view);
+        this._gizmoAxisView = view;
+    }
+
+    /**
+     * Set the orthographic camera zoom so the visible scene bounds fill the
+     * frame for the given axis view. No-op in perspective or when there is
+     * nothing to frame; the existing zoom (matched to the perspective framing
+     * by the camera switch) is left untouched in that case.
+     * @param {string} view
+     */
+    _fitOrthoZoomToBounds(view) {
+        const preset = VIEW_PRESETS[view];
+        if (!preset || !this._isOrtho) return;
+        const bbox = this._collectFrameableBounds();
+        if (bbox.isEmpty()) return;
+        const size = bbox.getSize(new THREE.Vector3());
+        const dir = new THREE.Vector3().fromArray(preset.dir).normalize();
+        const up = new THREE.Vector3().fromArray(preset.up).normalize();
+        const right = new THREE.Vector3().crossVectors(dir, up).normalize();
+        // Half-extents of the AABB projected onto the screen right/up axes.
+        const halfW = 0.5 * (Math.abs(right.x) * size.x + Math.abs(right.y) * size.y + Math.abs(right.z) * size.z);
+        const halfH = 0.5 * (Math.abs(up.x) * size.x + Math.abs(up.y) * size.y + Math.abs(up.z) * size.z);
+        const w = this.container.clientWidth;
+        const h = this.container.clientHeight;
+        const aspect = (w > 0 && h > 0) ? (w / h) : 1;
+        const fitHalf = Math.max(halfH * 1.1, (halfW / aspect) * 1.1, 1e-6);
+        this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
+        this._orthoCamera.updateProjectionMatrix();
     }
 
     /**
