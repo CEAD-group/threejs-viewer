@@ -2297,6 +2297,21 @@ class ViewerClient:
         """Seek embedded GLTF/GLB animation clips to a specific time (seconds)."""
         self._send({"type": "set_clip_time", "id": id, "time": time})
 
+    def set_clip_progress(self, id: str, t: float):
+        """Seek embedded GLTF/GLB animation clips by normalized progress.
+
+        ``t`` is clamped to [0, 1] on the viewer side and maps to
+        ``t * duration`` per clip (each clip uses its own duration), so a
+        caller can drive a baked clip straight from an axis fraction without
+        knowing the clip length in seconds. No-op (with a one-time console
+        warning) on objects without animation clips. The model holds its
+        authored bind pose until the first clip-drive message arrives.
+        """
+        t = float(t)
+        if not math.isfinite(t):
+            raise ValueError(f"t must be a finite number (got {t!r})")
+        self._send({"type": "set_clip_progress", "id": id, "t": t})
+
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
         path — per render tick the viewer computes the pose from the REAL
