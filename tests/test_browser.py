@@ -4283,7 +4283,7 @@ def test_gizmo_axis_click_snaps_ortho_and_flips(viewer_client, viewer_page):
     )
     assert result["afterFront"]["ortho"] is True, "axis click must switch to ortho"
     assert result["afterFront"]["axis"] == "front"
-    assert result["afterFront"]["zoom"] > 0, "ortho frustum must be fit to bounds"
+    assert result["afterFront"]["zoom"] > 0
     assert result["afterReclick"] == "back", "re-clicking the same axis flips it"
     assert result["afterTop"] == "top", "a different axis snaps without flipping"
 
@@ -4311,35 +4311,27 @@ def test_gizmo_leaving_ortho_clears_axis_snap(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_ortho_fit_accounts_for_off_center_pivot(viewer_client, viewer_page):
-    """_fitOrthoZoomToBounds frames the model around the current orbit target,
-    not the bounds center: an off-center pivot (from a prior click-to-pivot)
-    widens the ortho frustum (smaller zoom) so the far side is not clipped."""
+def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
+    """A bubble click reorients only — the user's ortho zoom is preserved
+    across snaps and flips (a click must not reset the viewing distance)."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
         "() => {"
         " const v = window.threejsViewer;"
-        " v._switchCamera(true);"  # ortho
-        " const bbox = v._collectFrameableBounds();"
-        " const cx=(bbox.min.x+bbox.max.x)/2, cy=(bbox.min.y+bbox.max.y)/2,"
-        "   cz=(bbox.min.z+bbox.max.z)/2;"
-        " const c = v._controls;"
-        " c.target.set(cx, cy, cz);"  # target at bounds center
-        " v._fitOrthoZoomToBounds('front');"
-        " const zoomCentered = v._orthoCamera.zoom;"
-        # 'front' screen-right is world X; shift the pivot along it by one span.
-        " const spanX = bbox.max.x - bbox.min.x;"
-        " c.target.set(cx + spanX, cy, cz);"
-        " v._fitOrthoZoomToBounds('front');"
-        " const zoomOffset = v._orthoCamera.zoom;"
-        " return { zoomCentered, zoomOffset };"
+        " v._switchCamera(true);"  # ortho, zoom matched to persp framing
+        " v._orthoCamera.zoom *= 3.7;"  # user zooms in
+        " v._orthoCamera.updateProjectionMatrix();"
+        " const before = v._orthoCamera.zoom;"
+        " v._gizmoAxisClick('front');"
+        " const afterSnap = v._orthoCamera.zoom;"
+        " v._gizmoAxisClick('front');"  # flip
+        " const afterFlip = v._orthoCamera.zoom;"
+        " return { before, afterSnap, afterFlip };"
         "}"
     )
-    assert result["zoomCentered"] > 0
-    assert result["zoomOffset"] < result["zoomCentered"], (
-        "an off-center pivot must widen the frustum (smaller zoom), not clip"
-    )
+    assert result["afterSnap"] == pytest.approx(result["before"])
+    assert result["afterFlip"] == pytest.approx(result["before"])
 
 
 @pytest.mark.browser

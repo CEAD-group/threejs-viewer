@@ -11818,55 +11818,21 @@ export class ThreeJSViewer {
 
     /**
      * Snap the camera to an orthographic view straight down a principal axis
-     * (issue #514). Switches persp -> ortho if needed, reorients along the
-     * preset direction with the usual eased tween (keeping the current orbit
-     * target + distance), then fits the ortho frustum to the visible scene
-     * bounds so the whole model is framed. Records the snapped axis so a
-     * re-click of the same bubble can flip it.
+     * (issue #514). Switches persp -> ortho if needed and reorients along the
+     * preset direction with the usual eased tween — keeping the current orbit
+     * target, distance, AND zoom (a bubble click must not reset the viewing
+     * distance; the persp->ortho switch already matches scale). Records the
+     * snapped axis so a re-click of the same bubble can flip it.
      * @param {string} view one of VIEW_PRESETS' axis keys (top/bottom/front/...)
      */
     _snapOrthoAxisView(view) {
         if (!VIEW_PRESETS[view]) return;
         if (!this._isOrtho) this._switchCamera(true);
+        // Reorient only — the user's zoom is kept (Thijs: a bubble click must
+        // not reset the viewing distance; the persp→ortho switch already
+        // matches scale, and re-fitting on every click yanked the camera out).
         this.setView(view);
-        this._fitOrthoZoomToBounds(view);
         this._gizmoAxisView = view;
-    }
-
-    /**
-     * Set the orthographic camera zoom so the visible scene bounds fill the
-     * frame for the given axis view. No-op in perspective or when there is
-     * nothing to frame; the existing zoom (matched to the perspective framing
-     * by the camera switch) is left untouched in that case.
-     * @param {string} view
-     */
-    _fitOrthoZoomToBounds(view) {
-        const preset = VIEW_PRESETS[view];
-        if (!preset || !this._isOrtho) return;
-        const bbox = this._collectFrameableBounds();
-        if (bbox.isEmpty()) return;
-        const size = bbox.getSize(new THREE.Vector3());
-        const dir = new THREE.Vector3().fromArray(preset.dir).normalize();
-        const up = new THREE.Vector3().fromArray(preset.up).normalize();
-        const right = new THREE.Vector3().crossVectors(dir, up).normalize();
-        // Half-extents of the AABB projected onto the screen right/up axes.
-        let halfW = 0.5 * (Math.abs(right.x) * size.x + Math.abs(right.y) * size.y + Math.abs(right.z) * size.z);
-        let halfH = 0.5 * (Math.abs(up.x) * size.x + Math.abs(up.y) * size.y + Math.abs(up.z) * size.z);
-        // setView() keeps the current orbit target, so the ortho view is
-        // centered on the target — not the bounds center. If a prior
-        // click-to-pivot moved the target off-center, the half-extents above
-        // (measured from the bounds center) under-frame on the far side and
-        // clip the model. Grow each half by the target->center offset projected
-        // onto that screen axis so the whole AABB stays inside the frustum.
-        const offset = bbox.getCenter(new THREE.Vector3()).sub(this._controls.target);
-        halfW += Math.abs(offset.dot(right));
-        halfH += Math.abs(offset.dot(up));
-        const w = this.container.clientWidth;
-        const h = this.container.clientHeight;
-        const aspect = (w > 0 && h > 0) ? (w / h) : 1;
-        const fitHalf = Math.max(halfH * 1.1, (halfW / aspect) * 1.1, 1e-6);
-        this._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
-        this._orthoCamera.updateProjectionMatrix();
     }
 
     /**
