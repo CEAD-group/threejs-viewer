@@ -4274,9 +4274,9 @@ def test_gizmo_axis_click_snaps_ortho_and_flips(viewer_client, viewer_page):
         " v._gizmoAxisClick('front');"
         " const afterFront = { ortho: v._isOrtho, axis: v._gizmoAxisView,"
         "   zoom: v._orthoCamera.zoom };"
-        " v._gizmoAxisClick('front');"          # same axis -> flip
+        " v._gizmoAxisClick('front');"  # same axis -> flip
         " const afterReclick = v._gizmoAxisView;"
-        " v._gizmoAxisClick('top');"            # different axis -> no flip
+        " v._gizmoAxisClick('top');"  # different axis -> no flip
         " const afterTop = v._gizmoAxisView;"
         " return { afterFront, afterReclick, afterTop };"
         "}"
@@ -4298,14 +4298,16 @@ def test_gizmo_leaving_ortho_clears_axis_snap(viewer_client, viewer_page):
         "() => {"
         " const v = window.threejsViewer;"
         " v._gizmoAxisClick('front');"
-        " v._switchCamera(false);"             # back to perspective
+        " v._switchCamera(false);"  # back to perspective
         " const cleared = v._gizmoAxisView;"
-        " v._gizmoAxisClick('front');"         # fresh snap, must not flip
+        " v._gizmoAxisClick('front');"  # fresh snap, must not flip
         " return { cleared, after: v._gizmoAxisView };"
         "}"
     )
     assert axis["cleared"] is None, "leaving ortho clears the axis snap"
-    assert axis["after"] == "front", "a fresh click after re-entering ortho does not flip"
+    assert axis["after"] == "front", (
+        "a fresh click after re-entering ortho does not flip"
+    )
 
 
 @pytest.mark.browser
@@ -4320,8 +4322,8 @@ def test_orbit_pivot_falls_back_to_bounds_center(viewer_client, viewer_page):
         "() => {"
         " const v = window.threejsViewer;"
         " const c = v._controls;"
-        " c.target.set(999, 999, 999);"        # somewhere off-model
-        " const fb = c._fallbackPivotGetter();" # what a component-miss triggers
+        " c.target.set(999, 999, 999);"  # somewhere off-model
+        " const fb = c._fallbackPivotGetter();"  # what a component-miss triggers
         " return fb ? { x: fb.x, y: fb.y, z: fb.z } : null;"
         "}"
     )
