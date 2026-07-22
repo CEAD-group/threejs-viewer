@@ -4268,3 +4268,227 @@ def test_resize_noop_guard(viewer_client, viewer_page):
     assert result["afterSame"] == 1, "repeated same-size resize must be a no-op"
     assert result["afterNew"] == 2, "a genuinely new size must apply"
     assert result["afterZero"] == 2, "zero-size rects stay guarded"
+
+
+@pytest.mark.browser
+def test_gizmo_axis_click_snaps_ortho_and_flips(viewer_client, viewer_page):
+    """Gizmo axis-bubble click snaps to an ortho view down that axis (#514);
+    re-clicking the same axis flips to the opposite side, a different axis does
+    not."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._gizmoAxisClick('front');"
+        " const afterFront = { ortho: v._isOrtho, axis: v._gizmoAxisView,"
+        "   zoom: v._orthoCamera.zoom };"
+        " v._gizmoAxisClick('front');"  # same axis -> flip
+        " const afterReclick = v._gizmoAxisView;"
+        " v._gizmoAxisClick('top');"  # different axis -> no flip
+        " const afterTop = v._gizmoAxisView;"
+        " return { afterFront, afterReclick, afterTop };"
+        "}"
+    )
+    assert result["afterFront"]["ortho"] is True, "axis click must switch to ortho"
+    assert result["afterFront"]["axis"] == "front"
+    assert result["afterFront"]["zoom"] > 0
+    assert result["afterReclick"] == "back", "re-clicking the same axis flips it"
+    assert result["afterTop"] == "top", "a different axis snaps without flipping"
+
+
+@pytest.mark.browser
+def test_gizmo_leaving_ortho_clears_axis_snap(viewer_client, viewer_page):
+    """Switching back to perspective clears the gizmo axis snap so the next
+    bubble click is treated as a fresh snap, not a flip (#514)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    axis = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._gizmoAxisClick('front');"
+        " v._switchCamera(false);"  # back to perspective
+        " const cleared = v._gizmoAxisView;"
+        " v._gizmoAxisClick('front');"  # fresh snap, must not flip
+        " return { cleared, after: v._gizmoAxisView };"
+        "}"
+    )
+    assert axis["cleared"] is None, "leaving ortho clears the axis snap"
+    assert axis["after"] == "front", (
+        "a fresh click after re-entering ortho does not flip"
+    )
+
+
+@pytest.mark.browser
+def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
+    """A bubble click reorients only — the user's ortho zoom is preserved
+    across snaps and flips (a click must not reset the viewing distance)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._switchCamera(true);"  # ortho, zoom matched to persp framing
+        " v._orthoCamera.zoom *= 3.7;"  # user zooms in
+        " v._orthoCamera.updateProjectionMatrix();"
+        " const before = v._orthoCamera.zoom;"
+        " v._gizmoAxisClick('front');"
+        " const afterSnap = v._orthoCamera.zoom;"
+        " v._gizmoAxisClick('front');"  # flip
+        " const afterFlip = v._orthoCamera.zoom;"
+        " return { before, afterSnap, afterFlip };"
+        "}"
+    )
+    assert result["afterSnap"] == pytest.approx(result["before"])
+    assert result["afterFlip"] == pytest.approx(result["before"])
+
+
+@pytest.mark.browser
+def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
+    """The ISO corner button is a true isometric: orthographic projection down
+    the (1,-1,1) direction, snapped under the same auto-projection rule as the
+    axis bubbles (orbiting away returns to perspective). The old ortho toolbar
+    toggle stays removed."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._viewIsoBtn.click();"
+        " const afterIso = { ortho: v._isOrtho, snap: v._gizmoAxisView };"
+        " const orig = v._controls.isDragging;"
+        " v._controls.isDragging = () => true;"
+        " v._controls.dispatchEvent({ type: 'change' });"
+        " v._controls.isDragging = orig;"
+        " const orthoAfterOrbit = v._isOrtho;"
+        " const toolbarOrtho = !!document.querySelector('.tjsv-btn-ortho');"
+        " return { afterIso, orthoAfterOrbit, toolbarOrtho };"
+        "}"
+    )
+    assert result["afterIso"] == {"ortho": True, "snap": "iso"}, (
+        "ISO must snap into an orthographic isometric"
+    )
+    assert result["orthoAfterOrbit"] is False, "orbiting away returns to perspective"
+    assert result["toolbarOrtho"] is False, "ortho toolbar toggle removed"
+
+
+@pytest.mark.browser
+def test_auto_projection_orbit_returns_to_perspective(viewer_client, viewer_page):
+    """Auto-projection: ortho entered BY a bubble snap auto-exits back to
+    perspective when the user orbits away; a manual `O` ortho never does."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const fakeDrag = () => {"
+        "   const orig = v._controls.isDragging;"
+        "   v._controls.isDragging = () => true;"
+        "   v._controls.dispatchEvent({ type: 'change' });"
+        "   v._controls.isDragging = orig;"
+        " };"
+        " v._gizmoAxisClick('top');"  # auto-enters ortho
+        " const orthoSnapped = v._isOrtho;"
+        " fakeDrag();"  # orbit away -> should return to perspective
+        " const orthoAfterOrbit = v._isOrtho;"
+        " v._switchCamera(true);"  # manual ortho (O key path)
+        " v._gizmoAxisClick('top');"  # snap within manual ortho
+        " fakeDrag();"  # orbit away -> manual ortho is respected
+        " const manualOrthoKept = v._isOrtho;"
+        " return { orthoSnapped, orthoAfterOrbit, manualOrthoKept };"
+        "}"
+    )
+    assert result["orthoSnapped"] is True
+    assert result["orthoAfterOrbit"] is False, "auto-entered ortho exits on orbit"
+    assert result["manualOrthoKept"] is True, "manual O ortho is never auto-exited"
+
+
+@pytest.mark.browser
+def test_projection_button_indicates_and_toggles(viewer_client, viewer_page):
+    """The gimbal-corner P/O button shows the CURRENT projection (P/O label +
+    .ortho accent), toggles it on click, and tracks auto-projection switches."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const btn = v._viewProjBtn;"
+        " const state = () => ({ label: btn.textContent,"
+        "   accent: btn.classList.contains('ortho'), ortho: v._isOrtho });"
+        " const initial = state();"
+        " btn.click();"  # manual toggle -> ortho
+        " const manualOrtho = state();"
+        " btn.click();"  # manual toggle back -> perspective
+        " const manualPersp = state();"
+        " v._gizmoAxisClick('top');"  # auto-projection also updates the button
+        " const autoOrtho = state();"
+        " return { initial, manualOrtho, manualPersp, autoOrtho };"
+        "}"
+    )
+    assert result["initial"] == {"label": "P", "accent": False, "ortho": False}
+    assert result["manualOrtho"] == {"label": "O", "accent": True, "ortho": True}
+    assert result["manualPersp"] == {"label": "P", "accent": False, "ortho": False}
+    assert result["autoOrtho"] == {"label": "O", "accent": True, "ortho": True}
+
+
+@pytest.mark.browser
+def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page):
+    """The gizmo axis snap is preserved through a plain click-to-pivot (a
+    controls 'change' fired while not dragging) so a re-click still flips, but
+    an actual orbit/pan drag ('change' while dragging) clears it (#514)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const c = v._controls;"
+        " v._gizmoAxisClick('front');"
+        " const snapped = v._gizmoAxisView;"
+        # click-to-pivot: controls emit 'change' while NOT dragging.
+        " c._state = 0;"
+        " c.dispatchEvent({ type: 'change' });"
+        " const afterPivot = v._gizmoAxisView;"
+        " v._gizmoAxisClick('front');"  # snap preserved -> flip
+        " const afterReclick = v._gizmoAxisView;"
+        " v._gizmoAxisClick('front');"  # from 'back' -> 'front'
+        # orbit drag: controls emit 'change' while dragging (state != NONE).
+        " c._state = 1;"
+        " c.dispatchEvent({ type: 'change' });"
+        " const afterOrbit = v._gizmoAxisView;"
+        " c._state = 0;"
+        " v._gizmoAxisClick('front');"  # snap cleared -> fresh, no flip
+        " const afterFreshClick = v._gizmoAxisView;"
+        " return { snapped, afterPivot, afterReclick, afterOrbit,"
+        "   afterFreshClick };"
+        "}"
+    )
+    assert result["snapped"] == "front"
+    assert result["afterPivot"] == "front", "click-to-pivot preserves the snap"
+    assert result["afterReclick"] == "back", "re-click flips while snap preserved"
+    assert result["afterOrbit"] is None, "an orbit drag clears the snap"
+    assert result["afterFreshClick"] == "front", (
+        "a fresh click after an orbit does not flip"
+    )
+
+
+@pytest.mark.browser
+def test_orbit_pivot_falls_back_to_bounds_center(viewer_client, viewer_page):
+    """A click that hits no component pivots on the scene bounding-box center,
+    not the old z=0 floor-plane intersection; the grid is excluded (#520)."""
+    # Box centered at (10, 20, 30); a large grid that must not sway the center.
+    viewer_client.add_box("b", position=[10.0, 20.0, 30.0])
+    viewer_client.add_grid("floor", cell_size=10.0, extent=10000.0)
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const c = v._controls;"
+        " c.target.set(999, 999, 999);"  # somewhere off-model
+        " const fb = c._fallbackPivotGetter();"  # what a component-miss triggers
+        " return fb ? { x: fb.x, y: fb.y, z: fb.z } : null;"
+        "}"
+    )
+    assert result is not None, "fallback pivot must resolve when the scene has bounds"
+    assert abs(result["x"] - 10.0) < 1.0
+    assert abs(result["y"] - 20.0) < 1.0
+    assert abs(result["z"] - 30.0) < 1.0
