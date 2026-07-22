@@ -6852,6 +6852,17 @@ export class ThreeJSViewer {
         // onto it via _withObject().
         /** @type {Map<string, {promise: Promise<void>, resolve: () => void, reject: (err: any) => void}>} */
         this._inflightLoads = new Map();
+        // Deferred re-parenting (issue #138): children added with a parent=
+        // id that isn't registered yet (parent model load in flight, or
+        // messages out of order) land at the scene root and record the
+        // desired parent here (parentId -> Set of waiting child ids, plus
+        // userData.__pendingParent on the child). _registerObject checks
+        // this map whenever any id lands in _objects and re-parents the
+        // waiters. Entries survive a parent delete on purpose — a later
+        // re-add with the same id is the same logical object — but stale
+        // child entries are pruned in _deleteObject.
+        /** @type {Map<string, Set<string>>} */
+        this._pendingReparent = new Map();
         this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
@@ -8020,7 +8031,16 @@ export class ThreeJSViewer {
             if (parent) {
                 parent.add(obj);
             } else {
-                console.warn(`Parent '${parentId}' not found, adding to scene`);
+                // Parent not registered yet (its model load may still be in
+                // flight, or the messages arrived out of order). Add to the
+                // scene root so the object renders rather than vanishing,
+                // and record the desired parent — _registerObject re-parents
+                // the moment an object with that id lands in _objects.
+                console.warn(`Parent '${parentId}' not found, adding to scene (re-parenting deferred until it arrives)`);
+                obj.userData.__pendingParent = parentId;
+                let waiting = this._pendingReparent.get(parentId);
+                if (!waiting) { waiting = new Set(); this._pendingReparent.set(parentId, waiting); }
+                waiting.add(obj.userData.id);
                 this._scene.add(obj);
             }
         } else {
@@ -8028,6 +8048,45 @@ export class ThreeJSViewer {
         }
         this._sceneBoundsDirty = true;
         if (this._shading.wireframeMode !== 0) this._shading.applyWireframe();
+    }
+
+    /**
+     * Single choke point for registering a loaded object under its id:
+     * inserts into `_objects`, bumps `_objGeneration`, and re-parents any
+     * children that were added with `parent=id` before this object existed
+     * (issue #138 — deferred re-parenting).
+     *
+     * Re-parenting uses plain `parent.add(child)`, NOT `parent.attach(child)`:
+     * the child's transform was authored parent-local (`_applyTransform` set
+     * `position`/`matrix` at add time assuming the named parent's frame), so
+     * `add`, which reinterprets the child's local transform under the new
+     * parent, reproduces exactly what would have happened had the parent
+     * existed at add time. `attach` would instead preserve the child's
+     * (wrong) interim world pose at the scene root, permanently baking the
+     * race into the hierarchy.
+     * @param {string} id @param {THREE.Object3D} obj
+     */
+    _registerObject(id, obj) {
+        this._objects.set(id, obj);
+        this._objGeneration++;
+        const waiting = this._pendingReparent.get(id);
+        if (waiting) {
+            this._pendingReparent.delete(id);
+            for (const childId of waiting) {
+                const child = this._objects.get(childId);
+                // The child may have been deleted-and-re-added under a
+                // different parent while waiting; only claim it if it still
+                // points at us.
+                if (!child || child.userData.__pendingParent !== id) continue;
+                delete child.userData.__pendingParent;
+                obj.add(child); // removes from scene root; local transform kept
+                console.log(`Re-parented '${childId}' under late-arriving parent '${id}'`);
+            }
+            // The moved subtree changes cached bounds; make framing/near-far
+            // and generation-watchers notice.
+            this._objGeneration++;
+            this._sceneBoundsDirty = true;
+        }
     }
 
     /** @param {any} obj @param {any} transform */
@@ -8124,8 +8183,7 @@ export class ThreeJSViewer {
         if (baseline !== undefined) obj.visible = baseline;
         this._deleteObject(id, deleteOpts);
         this._addToParentOrScene(obj, parentId);
-        this._objects.set(id, obj);
-        this._objGeneration++;
+        this._registerObject(id, obj);
         if (this._clipEnabled) this._applyClipToObject(obj);
         return obj;
     }
@@ -8632,6 +8690,19 @@ export class ThreeJSViewer {
         this._followPaths.delete(id);
         const obj = this._objects.get(id);
         if (obj) {
+            // Prune a stale deferred-re-parent entry: if this object was
+            // waiting for a parent that never arrived, a later unrelated
+            // object reusing this id must not get yanked under it. (Deleting
+            // a WOULD-BE parent id deliberately leaves its waiters in place —
+            // a re-added parent with the same id is the same logical object.)
+            const pendingParent = obj.userData.__pendingParent;
+            if (pendingParent) {
+                const waiting = this._pendingReparent.get(pendingParent);
+                if (waiting) {
+                    waiting.delete(id);
+                    if (waiting.size === 0) this._pendingReparent.delete(pendingParent);
+                }
+            }
             /** @type {string[]} */
             const childIds = [];
             obj.traverse(/** @param {any} child */ (child) => {
@@ -8701,6 +8772,7 @@ export class ThreeJSViewer {
             this._deleteObject(id);
         }
         this._followPaths.clear();
+        this._pendingReparent.clear();
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
@@ -9762,8 +9834,7 @@ export class ThreeJSViewer {
                 if (data.transform) this._applyTransform(group, data.transform);
                 if (data.visible === false) group.visible = false;
                 this._addToParentOrScene(group, data.parent);
-                this._objects.set(data.id, group);
-                this._objGeneration++;
+                this._registerObject(data.id, group);
                 break;
             }
             case 'add_object':
@@ -10155,8 +10226,7 @@ export class ThreeJSViewer {
                         }
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
-                        this._objects.set(data.id, line);
-                        this._objGeneration++;
+                        this._registerObject(data.id, line);
                         deferred.resolve();
                     } catch (e) {
                         console.error(`Error creating polyline via HTTP:`, e);
@@ -10286,8 +10356,7 @@ export class ThreeJSViewer {
 
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(points, data.parent);
-                        this._objects.set(data.id, points);
-                        this._objGeneration++;
+                        this._registerObject(data.id, points);
                         // Unlit point quads read flat without a depth cue —
                         // switch EDL on the first time a cloud appears (unless
                         // the user pinned it).
@@ -10379,8 +10448,7 @@ export class ThreeJSViewer {
                             `${nodes.count} nodes, maxLevel ${data.maxLevel}`);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(group, data.parent);
-                        this._objects.set(data.id, group);
-                        this._objGeneration++;
+                        this._registerObject(data.id, group);
                         // Sculpt the streaming octree nodes with EDL from the
                         // first frame (unless the user pinned the EDL state).
                         this._depthCue.maybeAutoEnableEdl();
@@ -10541,8 +10609,7 @@ export class ThreeJSViewer {
                         mesh.userData.totalIndexCount = ni;
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
-                        this._objects.set(data.id, mesh);
-                        this._objGeneration++;
+                        this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
                         console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                         deferred.resolve();
@@ -10845,8 +10912,7 @@ export class ThreeJSViewer {
                         // new tube's worker state (same tubeId).
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
-                        this._objects.set(data.id, mesh);
-                        this._objGeneration++;
+                        this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
                         deferred.resolve();
                         if (tubeLOD) {
@@ -10995,8 +11061,7 @@ export class ThreeJSViewer {
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
-                        this._objects.set(data.id, mesh);
-                        this._objGeneration++;
+                        this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
                         deferred.resolve();
                         console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
@@ -11406,8 +11471,7 @@ export class ThreeJSViewer {
                 if (data.visible === false) grid.visible = false;
                 this._deleteObject(data.id);
                 this._addToParentOrScene(grid, data.parent);
-                this._objects.set(data.id, grid);
-                this._objGeneration++;
+                this._registerObject(data.id, grid);
                 break;
             }
             case 'show_grid':
