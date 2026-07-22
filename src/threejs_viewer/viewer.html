@@ -1495,6 +1495,63 @@ function sanitizeInterpolation(value, fallback) {
     return fallback;
 }
 
+// ========== Embedded-clip (GLTF/GLB) mixer helpers ==========
+// A freshly-loaded model's AnimationMixer must NOT deform the model
+// (issue #135): the old eager `action.play()` + `mixer.setTime(0)`
+// statically bound every node to its t=0 keyframe (e.g. a track bellows
+// compressed to scale 0.059) with nothing driving the clip. Instead the
+// actions are created but not played, so the authored bind pose (the node
+// transforms as exported) holds until the first clip-drive message —
+// set_clip_time, set_clip_progress, or a clip_times animation channel —
+// activates them. After that first drive, behavior is identical to before.
+
+/**
+ * @param {any} mixer THREE.AnimationMixer for a freshly-loaded model
+ * @param {any[]} clips THREE.AnimationClip[]
+ */
+function prepareModelMixer(mixer, clips) {
+    mixer.__tjsvActions = clips.map((/** @type {any} */ clip) => mixer.clipAction(clip));
+    mixer.__tjsvDriven = false;
+}
+
+/** Start the deferred actions on the first drive (no-op afterwards). @param {any} mixer */
+function activateMixerActions(mixer) {
+    if (mixer.__tjsvDriven || !mixer.__tjsvActions) return;
+    for (const action of mixer.__tjsvActions) action.play();
+    mixer.__tjsvDriven = true;
+}
+
+/** Seek all of a model's clips to an absolute time in seconds.
+ * @param {any} mixer @param {number} time */
+function driveMixerTime(mixer, time) {
+    activateMixerActions(mixer);
+    mixer.setTime(time);
+}
+
+/** Seek all of a model's clips by normalized progress: `t` clamped to [0,1]
+ * maps to `t * duration` PER CLIP (each clip uses its own duration).
+ * @param {any} mixer @param {number} t */
+function driveMixerProgress(mixer, t) {
+    activateMixerActions(mixer);
+    const f = Math.min(1, Math.max(0, t));
+    for (const action of mixer.__tjsvActions || []) {
+        const dur = action.getClip().duration;
+        // Actions loop (LoopRepeat), and setting time to exactly `duration`
+        // wraps back to the t=0 pose — back off a hair so progress 1.0
+        // lands on the end pose.
+        action.time = f < 1 ? f * dur : Math.max(0, dur - dur * 1e-6);
+    }
+    mixer.update(0);
+}
+
+/** Clip durations (seconds) for a model's mixer, for scene queries.
+ * @param {any} mixer @returns {number[]} */
+function mixerClipDurations(mixer) {
+    return (mixer.__tjsvActions || []).map(
+        (/** @type {any} */ action) => action.getClip().duration
+    );
+}
+
 // Channel apply functions — keyed by channel name. Signature is
 // (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
 // is null or t <= 0, all channels take the step path (current keyframe only).
@@ -1682,7 +1739,7 @@ function makeChannelApply(viewer) {
                 if (interp) {
                     val = val * (1 - t) + ch.data[baseNext + i] * t;
                 }
-                mixer.setTime(val);
+                driveMixerTime(mixer, val);
             }
         },
 
@@ -8080,6 +8137,9 @@ class ThreeJSViewer {
         // State
         this._objects = new Map();
         this._mixers = new Map();
+        // Ids already warned about a set_clip_progress with no mixer.
+        /** @type {Set<string>} */
+        this._clipProgressWarned = new Set();
         this._objGeneration = 0;
         this._mixerGeneration = 0;
         this._pendingFetches = 0;
@@ -9442,11 +9502,9 @@ class ThreeJSViewer {
                 if (result.animations.length > 0) {
                     const mixerRoot = obj.userData.gltfScene || obj;
                     const mixer = new THREE.AnimationMixer(mixerRoot);
-                    for (const clip of result.animations) {
-                        const action = mixer.clipAction(clip);
-                        action.play();
-                    }
-                    mixer.setTime(0);
+                    // Deferred bind: hold the authored bind pose until the
+                    // first clip-drive message (issue #135).
+                    prepareModelMixer(mixer, result.animations);
                     this._mixers.set(id, mixer);
                     this._mixerGeneration++;
                     console.log(`Model ${id}: ${result.animations.length} animation clip(s) available`);
@@ -9531,7 +9589,21 @@ class ThreeJSViewer {
     _setClipTime(id, time) {
         const mixer = this._mixers.get(id);
         if (!mixer) return;
-        mixer.setTime(time);
+        driveMixerTime(mixer, time);
+    }
+
+    /** Normalized clip seek: `t` in [0,1] maps to `t * duration` per clip.
+     * @param {string} id @param {number} t */
+    _setClipProgress(id, t) {
+        const mixer = this._mixers.get(id);
+        if (!mixer) {
+            if (!this._clipProgressWarned.has(id)) {
+                this._clipProgressWarned.add(id);
+                console.warn(`set_clip_progress: '${id}' has no animation clips`);
+            }
+            return;
+        }
+        driveMixerProgress(mixer, t);
     }
 
     /** @param {string} id @param {number} value */
@@ -11219,6 +11291,11 @@ class ThreeJSViewer {
                         visible: obj.visible,
                         drawRange: drawRange,
                     };
+                    // Additive: models with embedded animation clips report
+                    // their per-clip durations (seconds) so consumers can
+                    // discover animated ids for set_clip_time/progress.
+                    const mixer = this._mixers.get(id);
+                    if (mixer) tree[id].clipDurations = mixerClipDurations(mixer);
                 }
                 return this._reply({
                     type: 'query_scene_response',
@@ -12573,6 +12650,9 @@ class ThreeJSViewer {
                 break;
             case 'set_clip_time':
                 this._withObject(data.id, 'set_clip_time', () => this._setClipTime(data.id, data.time));
+                break;
+            case 'set_clip_progress':
+                this._withObject(data.id, 'set_clip_progress', () => this._setClipProgress(data.id, data.t));
                 break;
             case 'set_follow_path': {
                 this._onFetchStart();
