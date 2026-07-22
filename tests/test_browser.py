@@ -4335,25 +4335,31 @@ def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_iso_button_returns_to_perspective(viewer_client, viewer_page):
-    """The ISO corner button is the way back to 3D: after a bubble click puts
-    the viewer in an ortho plan view, clicking ISO switches to a perspective
-    isometric (and there is no separate ortho toolbar toggle anymore)."""
+def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
+    """The ISO corner button is a true isometric: orthographic projection down
+    the (1,-1,1) direction, snapped under the same auto-projection rule as the
+    axis bubbles (orbiting away returns to perspective). The old ortho toolbar
+    toggle stays removed."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
         "() => {"
         " const v = window.threejsViewer;"
-        " v._gizmoAxisClick('top');"
-        " const orthoAfterBubble = v._isOrtho;"
         " v._viewIsoBtn.click();"
-        " const orthoAfterIso = v._isOrtho;"
+        " const afterIso = { ortho: v._isOrtho, snap: v._gizmoAxisView };"
+        " const orig = v._controls.isDragging;"
+        " v._controls.isDragging = () => true;"
+        " v._controls.dispatchEvent({ type: 'change' });"
+        " v._controls.isDragging = orig;"
+        " const orthoAfterOrbit = v._isOrtho;"
         " const toolbarOrtho = !!document.querySelector('.tjsv-btn-ortho');"
-        " return { orthoAfterBubble, orthoAfterIso, toolbarOrtho };"
+        " return { afterIso, orthoAfterOrbit, toolbarOrtho };"
         "}"
     )
-    assert result["orthoAfterBubble"] is True
-    assert result["orthoAfterIso"] is False, "ISO must return to perspective"
+    assert result["afterIso"] == {"ortho": True, "snap": "iso"}, (
+        "ISO must snap into an orthographic isometric"
+    )
+    assert result["orthoAfterOrbit"] is False, "orbiting away returns to perspective"
     assert result["toolbarOrtho"] is False, "ortho toolbar toggle removed"
 
 
@@ -4386,6 +4392,34 @@ def test_auto_projection_orbit_returns_to_perspective(viewer_client, viewer_page
     assert result["orthoSnapped"] is True
     assert result["orthoAfterOrbit"] is False, "auto-entered ortho exits on orbit"
     assert result["manualOrthoKept"] is True, "manual O ortho is never auto-exited"
+
+
+@pytest.mark.browser
+def test_projection_button_indicates_and_toggles(viewer_client, viewer_page):
+    """The gimbal-corner P/O button shows the CURRENT projection (P/O label +
+    .ortho accent), toggles it on click, and tracks auto-projection switches."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const btn = v._viewProjBtn;"
+        " const state = () => ({ label: btn.textContent,"
+        "   accent: btn.classList.contains('ortho'), ortho: v._isOrtho });"
+        " const initial = state();"
+        " btn.click();"  # manual toggle -> ortho
+        " const manualOrtho = state();"
+        " btn.click();"  # manual toggle back -> perspective
+        " const manualPersp = state();"
+        " v._gizmoAxisClick('top');"  # auto-projection also updates the button
+        " const autoOrtho = state();"
+        " return { initial, manualOrtho, manualPersp, autoOrtho };"
+        "}"
+    )
+    assert result["initial"] == {"label": "P", "accent": False, "ortho": False}
+    assert result["manualOrtho"] == {"label": "O", "accent": True, "ortho": True}
+    assert result["manualPersp"] == {"label": "P", "accent": False, "ortho": False}
+    assert result["autoOrtho"] == {"label": "O", "accent": True, "ortho": True}
 
 
 @pytest.mark.browser

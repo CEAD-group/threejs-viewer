@@ -523,10 +523,14 @@
 /* ISO button — top-left corner of the 128×128 ViewHelper area (the six axis
    bubbles cover the orthogonal views; this covers the isometric one). Shares
    the Home button look and the --tjsv-anim-lift shift. */
-.threejs-viewer .tjsv-view-iso {
+/* ISO + P/O live in a vertical stack just LEFT of the gimbal bubbles,
+   ~15px off the cluster (Thijs) — close enough to read as one control
+   group, outside the bubbles' orbit so they never collide. */
+.threejs-viewer .tjsv-view-iso,
+.threejs-viewer .tjsv-view-proj {
     position: absolute;
-    right: 100px;
-    bottom: calc(100px + var(--tjsv-anim-lift, 0px));
+    right: 115px;
+    bottom: calc(72px + var(--tjsv-anim-lift, 0px));
     width: 28px;
     height: 28px;
     padding: 0;
@@ -547,19 +551,23 @@
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
     z-index: 2;
 }
-.threejs-viewer .tjsv-view-iso:hover {
+.threejs-viewer .tjsv-view-iso:hover,
+.threejs-viewer .tjsv-view-proj:hover {
     background: rgba(60, 60, 60, 0.95);
     color: white;
     opacity: 1;
     transform: scale(1.06);
 }
-.threejs-viewer .tjsv-view-iso:active {
+.threejs-viewer .tjsv-view-iso:active,
+.threejs-viewer .tjsv-view-proj:active {
     transform: scale(0.96);
 }
-.threejs-viewer .tjsv-view-iso:focus {
+.threejs-viewer .tjsv-view-iso:focus,
+.threejs-viewer .tjsv-view-proj:focus {
     outline: none;
 }
-.threejs-viewer .tjsv-view-iso:focus-visible {
+.threejs-viewer .tjsv-view-iso:focus-visible,
+.threejs-viewer .tjsv-view-proj:focus-visible {
     outline: 2px solid #66b3ff;
     outline-offset: 2px;
 }
@@ -598,4 +606,18 @@
     white-space: nowrap;
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     z-index: 11;
+}
+
+/* Projection indicator/toggle — top-right corner of the gimbal area. Shows
+   the CURRENT projection (P = perspective, O = orthographic); click toggles.
+   A manual toggle is a deliberate choice: auto-projection never overrides it
+   (only bubble-snap-entered ortho auto-exits on orbit). */
+.threejs-viewer .tjsv-view-proj {
+    bottom: calc(38px + var(--tjsv-anim-lift, 0px));
+    font-size: 11px;
+}
+.threejs-viewer .tjsv-view-proj.ortho {
+    background: rgba(70, 110, 160, 0.85);
+    color: white;
+    opacity: 1;
 }

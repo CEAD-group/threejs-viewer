@@ -4164,6 +4164,7 @@ class CameraController {
         v._viewHelper = new ViewHelper(v._camera, v._renderer.domElement);
         v._viewHelper.center = v._controls.target;
         v._configureViewHelper(v._viewHelper);
+        v._updateProjButton();
     }
 
     updateSceneBounds() {
@@ -7046,6 +7047,7 @@ export class ThreeJSViewer {
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
         this._viewIsoBtn = q('.tjsv-view-iso');
+        this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
         this._currentTimeEl = q('.tjsv-current-time');
@@ -9498,13 +9500,23 @@ export class ThreeJSViewer {
         // view (the axis bubbles cover the six orthogonal views).
         if (this._viewIsoBtn) {
             this._viewIsoBtn.addEventListener('click', () => {
-                // ISO is a direction preset; projection follows the auto rule:
-                // auto-entered ortho (bubble snap) returns to perspective, a
-                // manual `O` ortho is respected and stays ortho.
-                if (this._isOrtho && this._orthoAutoEntered) this._switchCamera(false);
-                this.setView('iso');
+                // A true isometric is orthographic by definition — ISO is a
+                // seventh snap under the auto-projection rule: it auto-enters
+                // ortho like the axis bubbles, and orbiting away returns to
+                // perspective (Thijs).
+                this._snapOrthoAxisView('iso');
                 this._viewIsoBtn.blur();
             });
+        }
+        // Projection indicator/toggle (P = perspective, O = ortho). A click is
+        // a MANUAL projection choice — _switchCamera leaves _orthoAutoEntered
+        // false, so auto-projection never overrides it.
+        if (this._viewProjBtn) {
+            this._viewProjBtn.addEventListener('click', () => {
+                this._switchCamera(!this._isOrtho);
+                this._viewProjBtn.blur();
+            });
+            this._updateProjButton();
         }
 
         // Timeline scrubbing
@@ -11820,6 +11832,22 @@ export class ThreeJSViewer {
     }
 
     /**
+     * Sync the projection indicator/toggle button (gimbal corner) with the
+     * active camera: label P/O, an `.ortho` accent while orthographic, and a
+     * tooltip naming the current state + what a click does. Called on every
+     * persp<->ortho switch (auto or manual) and once at bind time.
+     */
+    _updateProjButton() {
+        const btn = this._viewProjBtn;
+        if (!btn) return;
+        btn.textContent = this._isOrtho ? 'O' : 'P';
+        btn.classList.toggle('ortho', this._isOrtho);
+        btn.title = this._isOrtho
+            ? 'Projection: orthographic — click for perspective (O)'
+            : 'Projection: perspective — click for orthographic (O)';
+    }
+
+    /**
      * Hover-help text for a gizmo axis bubble: what a click will do right
      * now (snap to the ortho plan view, or flip to the opposite side when
      * already snapped to this axis). Empty string when not over a bubble.
@@ -11845,7 +11873,7 @@ export class ThreeJSViewer {
      */
     _gizmoAxisClick(view) {
         if (!VIEW_PRESETS[view]) return;
-        const effective = (this._isOrtho && this._gizmoAxisView === view)
+        const effective = (this._isOrtho && this._gizmoAxisView === view && OPPOSITE_VIEW[view])
             ? OPPOSITE_VIEW[view]
             : view;
         this._snapOrthoAxisView(effective);
