@@ -4358,6 +4358,37 @@ def test_iso_button_returns_to_perspective(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_auto_projection_orbit_returns_to_perspective(viewer_client, viewer_page):
+    """Auto-projection: ortho entered BY a bubble snap auto-exits back to
+    perspective when the user orbits away; a manual `O` ortho never does."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const fakeDrag = () => {"
+        "   const orig = v._controls.isDragging;"
+        "   v._controls.isDragging = () => true;"
+        "   v._controls.dispatchEvent({ type: 'change' });"
+        "   v._controls.isDragging = orig;"
+        " };"
+        " v._gizmoAxisClick('top');"  # auto-enters ortho
+        " const orthoSnapped = v._isOrtho;"
+        " fakeDrag();"  # orbit away -> should return to perspective
+        " const orthoAfterOrbit = v._isOrtho;"
+        " v._switchCamera(true);"  # manual ortho (O key path)
+        " v._gizmoAxisClick('top');"  # snap within manual ortho
+        " fakeDrag();"  # orbit away -> manual ortho is respected
+        " const manualOrthoKept = v._isOrtho;"
+        " return { orthoSnapped, orthoAfterOrbit, manualOrthoKept };"
+        "}"
+    )
+    assert result["orthoSnapped"] is True
+    assert result["orthoAfterOrbit"] is False, "auto-entered ortho exits on orbit"
+    assert result["manualOrthoKept"] is True, "manual O ortho is never auto-exited"
+
+
+@pytest.mark.browser
 def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page):
     """The gizmo axis snap is preserved through a plain click-to-pivot (a
     controls 'change' fired while not dragging) so a re-click still flips, but

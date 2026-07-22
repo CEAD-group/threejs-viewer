@@ -4151,8 +4151,9 @@ class CameraController {
 
         v._isOrtho = toOrtho;
         // Leaving ortho ends any gizmo axis snap (issue #514) so a later bubble
-        // click starts fresh instead of treating the first click as a flip.
-        if (!toOrtho) v._gizmoAxisView = null;
+        // click starts fresh instead of treating the first click as a flip,
+        // and resets the auto-projection marker.
+        if (!toOrtho) { v._gizmoAxisView = null; v._orthoAutoEntered = false; }
         // ViewerControls is camera-agnostic — just reassign and re-update.
         v._controls.camera = v._camera;
         v._controls.target.copy(tgt);
@@ -7132,7 +7133,14 @@ export class ThreeJSViewer {
             // of a bubble starts fresh (no accidental flip). Gate on isDragging()
             // so a plain click-to-pivot — which fires 'change' but keeps the
             // camera looking straight down the snapped axis — preserves the snap.
-            if (this._controls.isDragging()) this._gizmoAxisView = null;
+            // Auto-projection: if the snap had auto-entered ortho, orbiting away
+            // is exactly the moment ortho stops being what you want — return to
+            // perspective (Blender's "auto perspective"). A manual `O` ortho
+            // (_orthoAutoEntered false) is never auto-exited.
+            if (this._controls.isDragging() && this._gizmoAxisView) {
+                this._gizmoAxisView = null;
+                if (this._orthoAutoEntered) this._switchCamera(false);
+            }
         });
 
         // Pivot marker: small screen-space-sized yellow sphere + ring shown
@@ -7279,6 +7287,10 @@ export class ThreeJSViewer {
         // user orbits or leaves ortho. Re-clicking the same bubble flips it.
         /** @type {string | null} */
         this._gizmoAxisView = null;
+        // True while the current ortho projection was entered BY a bubble
+        // snap (auto-projection) — orbiting away then auto-returns to
+        // perspective. False for a manual `O` ortho, which is never auto-exited.
+        this._orthoAutoEntered = false;
         /** @type {{target: THREE.Vector3, dist: number, startDir: THREE.Vector3, rot: THREE.Quaternion, startUp: THREE.Vector3, endUp: THREE.Vector3, start: number} | null} */
         this._viewTween = null;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
@@ -7300,15 +7312,19 @@ export class ThreeJSViewer {
             this._viewTween = null;
         }, { passive: true, capture: true });
 
-        // Hover feedback: highlight the sprite under the cursor + pointer cursor.
+        // Hover feedback: highlight the sprite under the cursor + pointer
+        // cursor + a native tooltip explaining what a click will do (the
+        // bubbles are canvas sprites, so `title` on the canvas is the help).
         this._renderer.domElement.addEventListener('pointermove', (e) => {
             const { hit } = this._gizmoHitTest(e);
             this._setGizmoHoverSprite(hit);
             this._renderer.domElement.style.cursor = hit ? 'pointer' : '';
+            this._renderer.domElement.title = this._gizmoSpriteTitle(hit);
         });
         this._renderer.domElement.addEventListener('pointerleave', () => {
             this._setGizmoHoverSprite(null);
             this._renderer.domElement.style.cursor = '';
+            this._renderer.domElement.title = '';
         });
 
         // Click an axis bubble -> snap to an orthographic view down that axis
@@ -9482,9 +9498,10 @@ export class ThreeJSViewer {
         // view (the axis bubbles cover the six orthogonal views).
         if (this._viewIsoBtn) {
             this._viewIsoBtn.addEventListener('click', () => {
-                // ISO is the way back to 3D: bubbles snap into ortho plan
-                // views, ISO returns to a perspective isometric (Thijs).
-                if (this._isOrtho) this._switchCamera(false);
+                // ISO is a direction preset; projection follows the auto rule:
+                // auto-entered ortho (bubble snap) returns to perspective, a
+                // manual `O` ortho is respected and stays ortho.
+                if (this._isOrtho && this._orthoAutoEntered) this._switchCamera(false);
                 this.setView('iso');
                 this._viewIsoBtn.blur();
             });
@@ -11733,6 +11750,10 @@ export class ThreeJSViewer {
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
      */
     setView(name, opts) {
+        // Any direct view change invalidates a gizmo axis snap (a later
+        // bubble re-click must snap fresh, not flip). _snapOrthoAxisView
+        // re-records the snap right after its setView call.
+        this._gizmoAxisView = null;
         if (name === 'home') {
             this._viewTween = null;
             this._controls.cancelInertia();
@@ -11799,6 +11820,23 @@ export class ThreeJSViewer {
     }
 
     /**
+     * Hover-help text for a gizmo axis bubble: what a click will do right
+     * now (snap to the ortho plan view, or flip to the opposite side when
+     * already snapped to this axis). Empty string when not over a bubble.
+     * @param {any} hit hovered gizmo sprite or null
+     * @returns {string}
+     */
+    _gizmoSpriteTitle(hit) {
+        const view = hit && GIZMO_SPRITE_VIEWS[hit.userData.type];
+        if (!view) return '';
+        if (this._isOrtho && this._gizmoAxisView === view) {
+            const flipped = OPPOSITE_VIEW[view];
+            return `${flipped[0].toUpperCase()}${flipped.slice(1)} view — click again to flip (orthographic)`;
+        }
+        return `${view[0].toUpperCase()}${view.slice(1)} view (orthographic) — orbit to return to perspective`;
+    }
+
+    /**
      * Handle a gizmo axis-bubble click (issue #514): snap to the ortho view
      * down that axis, or — if already snapped to that same axis — flip to the
      * opposite side. The behind-the-scenes entry point for the bubble click
@@ -11824,7 +11862,14 @@ export class ThreeJSViewer {
      */
     _snapOrthoAxisView(view) {
         if (!VIEW_PRESETS[view]) return;
-        if (!this._isOrtho) this._switchCamera(true);
+        if (!this._isOrtho) {
+            this._switchCamera(true);
+            // Auto-projection (Blender-style "auto perspective"): remember
+            // that ortho was entered BY the snap, so orbiting away returns
+            // to perspective automatically. A manual `O` ortho is never
+            // auto-exited.
+            this._orthoAutoEntered = true;
+        }
         // Reorient only — the user's zoom is kept (Thijs: a bubble click must
         // not reset the viewing distance; the persp→ortho switch already
         // matches scale, and re-fitting on every click yanked the camera out).
