@@ -4335,6 +4335,29 @@ def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_iso_button_returns_to_perspective(viewer_client, viewer_page):
+    """The ISO corner button is the way back to 3D: after a bubble click puts
+    the viewer in an ortho plan view, clicking ISO switches to a perspective
+    isometric (and there is no separate ortho toolbar toggle anymore)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._gizmoAxisClick('top');"
+        " const orthoAfterBubble = v._isOrtho;"
+        " v._viewIsoBtn.click();"
+        " const orthoAfterIso = v._isOrtho;"
+        " const toolbarOrtho = !!document.querySelector('.tjsv-btn-ortho');"
+        " return { orthoAfterBubble, orthoAfterIso, toolbarOrtho };"
+        "}"
+    )
+    assert result["orthoAfterBubble"] is True
+    assert result["orthoAfterIso"] is False, "ISO must return to perspective"
+    assert result["toolbarOrtho"] is False, "ortho toolbar toggle removed"
+
+
+@pytest.mark.browser
 def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page):
     """The gizmo axis snap is preserved through a plain click-to-pivot (a
     controls 'change' fired while not dragging) so a re-click still flips, but

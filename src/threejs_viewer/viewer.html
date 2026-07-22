@@ -638,7 +638,6 @@ const HTML_TEMPLATE = `<div class="tjsv-toolbar">
     <div class="toolbar-sep"></div>
     <button class="toolbar-btn tjsv-btn-clip" title="Clipping Plane">&#x2702; C</button>
     <button class="toolbar-btn tjsv-btn-lighting" title="Lighting / exposure (E)">&#x263C; E</button>
-    <button class="toolbar-btn tjsv-btn-ortho" title="Orthographic / Perspective (O)">&#x2B1A; O</button>
     <button class="toolbar-btn tjsv-btn-orbit-mode" title="Orbit mode (R)">&#x27F3; R</button>
     <button class="toolbar-btn tjsv-btn-track" title="Camera tracking" style="display:none">&#x229A; T</button>
 </div>
@@ -765,7 +764,7 @@ const HTML_TEMPLATE = `<div class="tjsv-toolbar">
     <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
 </div>
 
-<button class="tjsv-view-iso" title="Isometric view" aria-label="Isometric view">ISO</button>
+<button class="tjsv-view-iso" title="Isometric perspective view" aria-label="Isometric perspective view">ISO</button>
 
 <button class="tjsv-view-home" title="Reset view (F)" aria-label="Reset view">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
@@ -5376,8 +5375,6 @@ class CameraController {
         v._viewHelper = new ViewHelper(v._camera, v._renderer.domElement);
         v._viewHelper.center = v._controls.target;
         v._configureViewHelper(v._viewHelper);
-        v._btnOrtho.textContent = '\u2B1A O';
-        v._btnOrtho.classList.toggle('active', v._isOrtho);
     }
 
     updateSceneBounds() {
@@ -8215,7 +8212,6 @@ class ThreeJSViewer {
         const q = (sel) => this.el.querySelector(sel);
         this._statusDot = q('.tjsv-status-dot');
         this._statusText = q('.tjsv-status-text');
-        this._btnOrtho = q('.tjsv-btn-ortho');
         this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
         this._btnClip = q('.tjsv-btn-clip');
         this._btnLighting = q('.tjsv-btn-lighting');
@@ -10602,9 +10598,6 @@ class ThreeJSViewer {
     // ========== Events ==========
 
     _bindEvents() {
-        // Ortho button
-        this._btnOrtho.addEventListener('click', () => this._switchCamera(!this._isOrtho));
-
         // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
         this._btnOrbitMode.addEventListener('click', () => {
@@ -10701,6 +10694,9 @@ class ThreeJSViewer {
         // view (the axis bubbles cover the six orthogonal views).
         if (this._viewIsoBtn) {
             this._viewIsoBtn.addEventListener('click', () => {
+                // ISO is the way back to 3D: bubbles snap into ortho plan
+                // views, ISO returns to a perspective isometric (Thijs).
+                if (this._isOrtho) this._switchCamera(false);
                 this.setView('iso');
                 this._viewIsoBtn.blur();
             });
