@@ -531,6 +531,32 @@ def test_set_points_time_rejects_non_finite(client):
         client.set_points_time("pc", float("inf"))
 
 
+def test_set_clip_time(client):
+    client.set_clip_time("model", 1.25)
+    assert client._messages == [{"type": "set_clip_time", "id": "model", "time": 1.25}]
+
+
+def test_set_clip_progress(client):
+    client.set_clip_progress("model", 0.5)
+    assert client._messages == [{"type": "set_clip_progress", "id": "model", "t": 0.5}]
+
+
+def test_set_clip_progress_coerces_to_float(client):
+    client.set_clip_progress("model", 1)
+    assert client._messages == [{"type": "set_clip_progress", "id": "model", "t": 1.0}]
+    assert isinstance(client._messages[0]["t"], float)
+
+
+def test_set_clip_progress_rejects_non_finite(client):
+    with pytest.raises(ValueError, match="finite"):
+        client.set_clip_progress("model", float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        client.set_clip_progress("model", float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        client.set_clip_progress("model", float("-inf"))
+    assert client._messages == []
+
+
 def test_add_points_with_parent(client):
     pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
     client.add_points("pc", pts, parent="g")
