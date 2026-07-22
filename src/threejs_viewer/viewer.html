@@ -13059,8 +13059,17 @@ class ThreeJSViewer {
         const up = new THREE.Vector3().fromArray(preset.up).normalize();
         const right = new THREE.Vector3().crossVectors(dir, up).normalize();
         // Half-extents of the AABB projected onto the screen right/up axes.
-        const halfW = 0.5 * (Math.abs(right.x) * size.x + Math.abs(right.y) * size.y + Math.abs(right.z) * size.z);
-        const halfH = 0.5 * (Math.abs(up.x) * size.x + Math.abs(up.y) * size.y + Math.abs(up.z) * size.z);
+        let halfW = 0.5 * (Math.abs(right.x) * size.x + Math.abs(right.y) * size.y + Math.abs(right.z) * size.z);
+        let halfH = 0.5 * (Math.abs(up.x) * size.x + Math.abs(up.y) * size.y + Math.abs(up.z) * size.z);
+        // setView() keeps the current orbit target, so the ortho view is
+        // centered on the target — not the bounds center. If a prior
+        // click-to-pivot moved the target off-center, the half-extents above
+        // (measured from the bounds center) under-frame on the far side and
+        // clip the model. Grow each half by the target->center offset projected
+        // onto that screen axis so the whole AABB stays inside the frustum.
+        const offset = bbox.getCenter(new THREE.Vector3()).sub(this._controls.target);
+        halfW += Math.abs(offset.dot(right));
+        halfH += Math.abs(offset.dot(up));
         const w = this.container.clientWidth;
         const h = this.container.clientHeight;
         const aspect = (w > 0 && h > 0) ? (w / h) : 1;
