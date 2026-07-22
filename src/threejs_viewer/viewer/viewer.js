@@ -12144,6 +12144,10 @@ export class ThreeJSViewer {
             // Embedder overlays are excluded from framing unless opted in.
             if (child.userData && child.userData.__overlay &&
                 !child.userData.__overlay.includeInBounds) return;
+            // Bounds-excluded furniture (add_grid floors): framing must
+            // ignore them just like updateSceneBounds does — otherwise F/
+            // Home framing over-zooms to fit a huge ground plane.
+            if (child.userData && child.userData.excludeFromBounds) return;
             if (child.geometry &&
                 child !== this._gridHelper &&
                 !this._isClipHelper(child) &&

@@ -49,6 +49,15 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
     assert spheres["content"] < 100
     # ...but the near/far fit must still reach it (no far-plane clip).
     assert spheres["nearFar"] > 4000
+    # F/Home framing uses _collectFrameableBounds (an AABB, distinct from
+    # the sphere above) — the grid must be excluded there too, or framing
+    # over-zooms to fit the whole floor plane.
+    frame_extent = viewer_page.evaluate(
+        "() => { const b = window.threejsViewer._collectFrameableBounds();"
+        " const s = new window.tjsv.THREE.Vector3(); b.getSize(s);"
+        " return Math.max(s.x, s.y, s.z); }"
+    )
+    assert frame_extent < 100
     viewer_client.delete("floor")
     time.sleep(0.1)
     assert "floor" not in viewer_client.query_scene()["objects"]
