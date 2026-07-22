@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.0.46
+
+### View gimbal: ortho plan-view snaps with auto-projection (#137, ribweaver#514/#520)
+
+- **The gimbal's axis bubbles now snap into orthographic plan views** straight down the clicked axis, CAD-viewcube style — the user's orbit target, distance, **and zoom are all kept** (a bubble click never resets the viewing distance; the persp→ortho switch matches scale and there is deliberately no frustum re-fit). **Re-clicking the same bubble flips** to the opposite side (top↔bottom, front↔back, left↔right).
+- **Auto-projection** (Blender-style "auto perspective"): view *direction* is the only control users think about, projection follows. Ortho entered by a snap is marked auto-entered; orbiting/panning away from the snapped view automatically returns to perspective — the confusing ortho-free-orbit state can't be entered by accident. A **manual ortho (P/O button or `O` key) is never auto-exited**.
+- **ISO is a true isometric** — orthographic by definition — implemented as a seventh snap through the same path (no flip), so ISO auto-enters ortho and orbiting away returns to perspective exactly like the bubbles.
+- **New P/O projection indicator-toggle** stacked with ISO just left of the gimbal (~15px off the bubble cluster): always shows the current projection (`P`, or an accented `O` under ortho, synced on every switch, auto or manual); clicking it is a manual projection choice. The `⬚ O` toolbar chip is **removed** (the `O` keyboard shortcut remains). **Hover help**: hovering a bubble shows a tooltip saying what a click does right now (snap, or flip when already snapped).
+- **Orbit-pivot fallback** (ribweaver#520): a click that hits no visible component pivots on the **scene content center** (grid-excluded) instead of the old z=0 floor-plane intersection, which shot the pivot far off-model on near-parallel clicks; with no content the pivot is left unchanged.
+
+### Animated GLBs: hold bind pose until driven; `set_clip_progress` (#135)
+
+- **A freshly-loaded animated model no longer deforms to its t=0 keyframe.** The old eager `play()` + `setTime(0)` statically pinned every node to the first keyframe (a track-bellows clip's t=0 is maximally compressed, so undriven dress-up GLBs looked "scaled"); the mixer's actions are now created but not played, holding the authored bind pose until the first clip-drive message. All drive paths (`set_clip_time`, the binary `clip_times` channel, JSON `Frame.clip_times`, and the new message) funnel through shared activate-once helpers — behavior after the first drive is identical to before.
+- **`set_clip_progress(id, t)`** — normalized `t` clamped to [0, 1], mapped to `t × duration` **per clip**, so a caller drives a baked 0..1 clip straight from an axis fraction without knowing seconds (ribweaver#521). Seeking to exactly `duration` would loop-wrap to the t=0 pose, so progress 1.0 backs off by an epsilon to land on the end pose. One-time console warn on objects without clips.
+- Discovery: `query_scene` entries additively carry `clipDurations` (seconds, per clip) for objects with a mixer.
+
+### Deferred re-parenting for out-of-order loads (#138)
+
+- **A child added with a `parent=` id that doesn't exist yet is no longer stranded at the scene root forever.** It still mounts at the root (renders rather than vanishes), records its intended parent, and the moment any object registers under that id it is adopted — via a new single `_registerObject` choke point used by every add path (groups, primitives, models, polylines, points, tubes, toolpath groups, grids). Re-parenting uses `add` (not `attach`): the child's transform was authored parent-local, so `add` reproduces the intended pose. Deleting a waiting child prunes its pending entry (a later id reuse can't be mis-parented); a re-added parent id still adopts its waiters; `clear` drops all pending state; scene bounds are refreshed on adoption.
+
+### Framing excludes shader floor grids (#140)
+
+- `_collectFrameableBounds` (F/Home whole-scene framing) now skips `excludeFromBounds` objects — previously an `add_grid` floor inflated the framing AABB so F/Home over-zoomed to fit the whole plane (v0.0.45's exclusion only covered the scene-sphere path).
+
 ## 0.0.45
 
 ### Shader floor grid: `add_grid` (#126)
