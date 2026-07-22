@@ -7129,7 +7129,14 @@ export class ThreeJSViewer {
             if (this._sceneSphere.radius <= 0) return null;
             return this._sceneSphere.center.clone();
         });
-        this._controls.addEventListener('change', () => { this._lodDirty = true; });
+        this._controls.addEventListener('change', () => {
+            this._lodDirty = true;
+            // An orbit/pan drag breaks the clean axis snap, so a later re-click
+            // of a bubble starts fresh (no accidental flip). Gate on isDragging()
+            // so a plain click-to-pivot — which fires 'change' but keeps the
+            // camera looking straight down the snapped axis — preserves the snap.
+            if (this._controls.isDragging()) this._gizmoAxisView = null;
+        });
 
         // Pivot marker: small screen-space-sized yellow sphere + ring shown
         // briefly when a click sets a new orbit pivot. Lives in the scene only
@@ -7290,9 +7297,6 @@ export class ThreeJSViewer {
                 e.stopImmediatePropagation();
             } else {
                 this._viewTween = null;
-                // Any orbit/pan drag breaks the clean axis snap, so a later
-                // re-click of a bubble starts fresh (no accidental flip).
-                this._gizmoAxisView = null;
             }
         }, true);
         this._renderer.domElement.addEventListener('wheel', () => {

@@ -4343,6 +4343,46 @@ def test_ortho_fit_accounts_for_off_center_pivot(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page):
+    """The gizmo axis snap is preserved through a plain click-to-pivot (a
+    controls 'change' fired while not dragging) so a re-click still flips, but
+    an actual orbit/pan drag ('change' while dragging) clears it (#514)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const c = v._controls;"
+        " v._gizmoAxisClick('front');"
+        " const snapped = v._gizmoAxisView;"
+        # click-to-pivot: controls emit 'change' while NOT dragging.
+        " c._state = 0;"
+        " c.dispatchEvent({ type: 'change' });"
+        " const afterPivot = v._gizmoAxisView;"
+        " v._gizmoAxisClick('front');"  # snap preserved -> flip
+        " const afterReclick = v._gizmoAxisView;"
+        " v._gizmoAxisClick('front');"  # from 'back' -> 'front'
+        # orbit drag: controls emit 'change' while dragging (state != NONE).
+        " c._state = 1;"
+        " c.dispatchEvent({ type: 'change' });"
+        " const afterOrbit = v._gizmoAxisView;"
+        " c._state = 0;"
+        " v._gizmoAxisClick('front');"  # snap cleared -> fresh, no flip
+        " const afterFreshClick = v._gizmoAxisView;"
+        " return { snapped, afterPivot, afterReclick, afterOrbit,"
+        "   afterFreshClick };"
+        "}"
+    )
+    assert result["snapped"] == "front"
+    assert result["afterPivot"] == "front", "click-to-pivot preserves the snap"
+    assert result["afterReclick"] == "back", "re-click flips while snap preserved"
+    assert result["afterOrbit"] is None, "an orbit drag clears the snap"
+    assert result["afterFreshClick"] == "front", (
+        "a fresh click after an orbit does not flip"
+    )
+
+
+@pytest.mark.browser
 def test_orbit_pivot_falls_back_to_bounds_center(viewer_client, viewer_page):
     """A click that hits no component pivots on the scene bounding-box center,
     not the old z=0 floor-plane intersection; the grid is excluded (#520)."""
