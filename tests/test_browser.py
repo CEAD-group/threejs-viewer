@@ -75,6 +75,72 @@ def test_grouping(viewer_client, viewer_page):
     assert objects["joint"]["parent"] == "arm"
 
 
+def _world_position(page, obj_id):
+    """World position of a tracked object by id, or None."""
+    return page.evaluate(
+        "(id) => {"
+        " const o = window.threejsViewer._objects.get(id);"
+        " if (!o) return null;"
+        " o.updateWorldMatrix(true, false);"
+        " const e = o.matrixWorld.elements;"
+        " return [e[12], e[13], e[14]]; }",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_deferred_reparent_child_before_parent(viewer_client, viewer_page):
+    """A child added with parent="P" BEFORE P exists renders at the scene root,
+    then re-parents under P when P arrives (issue #138)."""
+    viewer_client.add_box("orphan", parent="P", position=[1.0, 0.0, 0.0])
+    time.sleep(0.2)
+    # Renders immediately at the scene root (not dropped).
+    objects = viewer_client.query_scene()["objects"]
+    assert "orphan" in objects
+    assert objects["orphan"]["parent"] is None
+    assert _world_position(viewer_page, "orphan") == pytest.approx([1.0, 0.0, 0.0])
+    # Parent arrives late with its own transform.
+    viewer_client.add_group("P", position=[5.0, 0.0, 0.0])
+    time.sleep(0.2)
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["orphan"]["parent"] == "P"
+    assert "orphan" in objects["P"]["children"]
+    # Local transform was authored parent-local, so world = parent + local.
+    assert _world_position(viewer_page, "orphan") == pytest.approx([6.0, 0.0, 0.0])
+
+
+@pytest.mark.browser
+def test_deferred_reparent_follows_parent_transforms(viewer_client, viewer_page):
+    """After a deferred re-parent, transform updates to the parent move the child."""
+    viewer_client.add_box("child", parent="P", position=[1.0, 0.0, 0.0])
+    time.sleep(0.1)
+    viewer_client.add_group("P", position=[5.0, 0.0, 0.0])
+    time.sleep(0.2)
+    viewer_client.batch_update({"P": {"position": [0.0, 10.0, 0.0]}})
+    time.sleep(0.2)
+    assert _world_position(viewer_page, "child") == pytest.approx([1.0, 10.0, 0.0])
+
+
+@pytest.mark.browser
+def test_deferred_reparent_pruned_on_child_delete(viewer_client, viewer_page):
+    """Deleting a waiting child before its parent arrives prunes the pending
+    entry, so a later add of the parent doesn't touch anything — and an
+    unrelated object reusing the child's id is not mis-parented."""
+    viewer_client.add_box("ephemeral", parent="P", position=[1.0, 0.0, 0.0])
+    time.sleep(0.1)
+    viewer_client.delete("ephemeral")
+    time.sleep(0.1)
+    # Reuse the id with NO parent — must stay at the scene root.
+    viewer_client.add_box("ephemeral", position=[2.0, 0.0, 0.0])
+    time.sleep(0.1)
+    viewer_client.add_group("P", position=[5.0, 0.0, 0.0])
+    time.sleep(0.2)
+    objects = viewer_client.query_scene()["objects"]
+    assert objects["ephemeral"]["parent"] is None
+    assert "ephemeral" not in objects["P"]["children"]
+    assert _world_position(viewer_page, "ephemeral") == pytest.approx([2.0, 0.0, 0.0])
+
+
 @pytest.mark.browser
 def test_delete_object(viewer_client, viewer_page):
     """Deleting an object removes it from the scene."""
