@@ -669,6 +669,172 @@ def test_binary_draw_ranges_channel_on_glb_model(viewer_client, viewer_page):
     assert count == 6
 
 
+def _scale_animated_glb() -> bytes:
+    """The `_two_triangle_glb` mesh plus one embedded animation clip: a
+    2-second LINEAR scale track on the (named) mesh node, keyframes
+    scale=0.059 at t=0 and scale=0.857 at t=2 (mirroring the compressed ->
+    extended bellows clips from issue #135). The node itself carries NO
+    scale property, so its authored bind pose is scale 1.0 — distinct from
+    every keyframe, which lets tests tell "bind pose held" apart from
+    "bound to t=0"."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint16)
+    times = np.array([0.0, 2.0], dtype=np.float32)
+    scales = np.array([[0.059] * 3, [0.857] * 3], dtype=np.float32)
+    bin_chunk = positions.tobytes() + indices.tobytes()
+    bin_chunk += b"\x00" * (-len(bin_chunk) % 4)  # 4-align the float views
+    times_off = len(bin_chunk)
+    bin_chunk += times.tobytes()
+    scales_off = len(bin_chunk)
+    bin_chunk += scales.tobytes()
+    bin_chunk += b"\x00" * (-len(bin_chunk) % 4)
+    gltf = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "name": "anode"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+        "animations": [
+            {
+                "samplers": [{"input": 2, "output": 3, "interpolation": "LINEAR"}],
+                "channels": [{"sampler": 0, "target": {"node": 0, "path": "scale"}}],
+            }
+        ],
+        "buffers": [{"byteLength": len(bin_chunk)}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 48, "target": 34962},
+            {"buffer": 0, "byteOffset": 48, "byteLength": 12, "target": 34963},
+            {"buffer": 0, "byteOffset": times_off, "byteLength": 8},
+            {"buffer": 0, "byteOffset": scales_off, "byteLength": 24},
+        ],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": 4,
+                "type": "VEC3",
+                "min": [0, 0, 0],
+                "max": [1, 1, 0],
+            },
+            {"bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR"},
+            {
+                "bufferView": 2,
+                "componentType": 5126,
+                "count": 2,
+                "type": "SCALAR",
+                "min": [0.0],
+                "max": [2.0],
+            },
+            {"bufferView": 3, "componentType": 5126, "count": 2, "type": "VEC3"},
+        ],
+    }
+    json_chunk = json.dumps(gltf, separators=(",", ":")).encode()
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    total = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
+    return (
+        struct.pack("<III", 0x46546C67, 2, total)
+        + struct.pack("<II", len(json_chunk), 0x4E4F534A)
+        + json_chunk
+        + struct.pack("<II", len(bin_chunk), 0x004E4942)
+        + bin_chunk
+    )
+
+
+def _load_animated_glb(viewer_client, obj_id="anim"):
+    viewer_client.add_model_binary(obj_id, _scale_animated_glb(), format="glb")
+    objects = {}
+    for _ in range(60):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if obj_id in objects:
+            return objects
+    raise AssertionError("animated GLB did not load")
+
+
+def _node_scale(viewer_page, obj_id="anim"):
+    return viewer_page.evaluate(
+        f"() => window.threejsViewer._objects.get('{obj_id}')"
+        ".getObjectByName('anode').scale.x"
+    )
+
+
+def _wait_for_scale(viewer_page, expected, obj_id="anim", tol=1e-3):
+    scale = None
+    for _ in range(40):
+        time.sleep(0.05)
+        scale = _node_scale(viewer_page, obj_id)
+        if abs(scale - expected) < tol:
+            return scale
+    raise AssertionError(f"expected node scale ~{expected}, got {scale!r}")
+
+
+@pytest.mark.browser
+def test_animated_glb_holds_bind_pose_until_driven(viewer_client, viewer_page):
+    """An animated GLB must NOT deform on load (issue #135): the mixer's
+    actions are created but not played, so the authored bind pose (scale 1.0,
+    no keyframe has that value) holds until the first clip-drive message.
+    set_clip_progress then maps 0.0 -> the t=0 keyframe and 1.0 -> the end
+    keyframe (not wrapped back to 0 by LoopRepeat)."""
+    objects = _load_animated_glb(viewer_client)
+
+    # Bind pose held: 1.0, NOT the t=0 keyframe (0.059) the old eager
+    # play()+setTime(0) statically bound.
+    assert abs(_node_scale(viewer_page) - 1.0) < 1e-6
+
+    # query_scene reports the clip durations for discovery (additive field).
+    assert objects["anim"].get("clipDurations") == [2.0]
+
+    viewer_client.set_clip_progress("anim", 0.0)
+    _wait_for_scale(viewer_page, 0.059)
+    viewer_client.set_clip_progress("anim", 1.0)
+    _wait_for_scale(viewer_page, 0.857)
+    # Out-of-range input clamps to [0, 1].
+    viewer_client.set_clip_progress("anim", -3.0)
+    _wait_for_scale(viewer_page, 0.059)
+
+
+@pytest.mark.browser
+def test_set_clip_progress_maps_to_clip_duration(viewer_client, viewer_page):
+    """set_clip_progress(0.5) seeks to 0.5 * the clip's own duration (2 s ->
+    t=1 s -> mid pose), i.e. the same pose as set_clip_time(id, 1.0) — and a
+    driven model behaves exactly like the pre-#135 eager bind thereafter."""
+    _load_animated_glb(viewer_client)
+
+    viewer_client.set_clip_progress("anim", 0.5)
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)  # t=1.0 of a 2 s clip
+
+    # Absolute-seconds seek still works identically once driven.
+    viewer_client.set_clip_time("anim", 0.0)
+    _wait_for_scale(viewer_page, 0.059)
+    viewer_client.set_clip_time("anim", 1.0)
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)
+
+
+@pytest.mark.browser
+def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_page):
+    """The binary clip_times animation channel is a first drive too: applying
+    it to a freshly-loaded (bind-pose-held) model activates the deferred
+    actions and seeks the clip, exactly as before issue #135."""
+    _load_animated_glb(viewer_client)
+    assert abs(_node_scale(viewer_page) - 1.0) < 1e-6  # still bind pose
+
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 2.0], dtype=np.float32))
+    # Clip time ramps 0 -> 2 s with the playhead.
+    anim.set_clip_time_data(["anim"], np.array([[0.0], [2.0]]))
+    viewer_client.load_animation(anim, autoplay=False)
+    loaded = False
+    for _ in range(40):
+        time.sleep(0.05)
+        if viewer_page.evaluate("() => window.threejsViewer._animation != null"):
+            loaded = True
+            break
+    assert loaded, "animation never loaded"
+
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(1.0)")
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)  # clip time 1.0 of 2 s
+
+
 @pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
