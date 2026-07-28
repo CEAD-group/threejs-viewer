@@ -1964,6 +1964,27 @@ function vec3Tuple(v) {
     return null;
 }
 
+/**
+ * Fetch a binary payload with an HTTP status guard (issue #142). Without the
+ * guard a 404/500 error body (HTML/text) would be handed straight to a binary
+ * parser or model loader, which fails deep inside with an opaque
+ * `RangeError: Invalid typed array length` — and the object silently never
+ * renders. A non-2xx response throws a descriptive Error (context + status +
+ * url) instead, which each call site's existing catch turns into a clear
+ * console.error and a clean skip. Every sidecar/blob fetch in the message
+ * handler goes through this helper so the guard can't drift between cases.
+ * @param {string} url
+ * @param {string} what - context for the error message (message type + object id)
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function fetchArrayBuffer(url, what) {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+        throw new Error(`${what}: HTTP ${resp.status} ${resp.statusText} fetching ${url}`);
+    }
+    return resp.arrayBuffer();
+}
+
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
 const DEFAULT_TONE_MAPPING_EXPOSURE = 1.0;
 const DEFAULT_ENVIRONMENT_INTENSITY = 2.0;
@@ -9833,9 +9854,7 @@ class ThreeJSViewer {
         lod.loading.add(i);
         (async () => {
             try {
-                const resp = await fetch(lod.urlBase + i);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const buffer = await resp.arrayBuffer();
+                const buffer = await fetchArrayBuffer(lod.urlBase + i, `points LOD node ${i}`);
                 // Stale guards: cloud replaced, deleted, or scene cleared.
                 if (this._objects.get(group.userData.id) !== group) return;
                 if (lod.objects[i]) return;
@@ -11323,8 +11342,7 @@ class ThreeJSViewer {
                 (async () => {
                     try {
                         const t0 = performance.now();
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(data.blob_url, 'load_animation_http');
                         if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
                             console.log('Discarding stale animation fetch');
                             return;
@@ -11442,8 +11460,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const meshBytes = await resp.arrayBuffer();
+                        const meshBytes = await fetchArrayBuffer(
+                            data.blob_url, `add_model_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale model fetch');
                             deferred.reject(new Error('stale'));
@@ -11491,8 +11509,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_polyline_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale polyline fetch');
                             deferred.reject(new Error('stale'));
@@ -11623,8 +11641,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_points_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale points fetch');
                             deferred.reject(new Error('stale'));
@@ -11760,9 +11778,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.hierarchy_url);
-                        if (!resp.ok) throw new Error(`hierarchy HTTP ${resp.status}`);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.hierarchy_url, `add_points_lod '${data.id}' hierarchy`);
                         if (this._sceneGeneration !== capturedScene ||
                             !this._isLoadTokenCurrent(data.id, loadToken)) {
                             console.log(`Discarding stale LOD points fetch for '${data.id}'`);
@@ -11849,8 +11866,8 @@ class ThreeJSViewer {
                     const capturedScene = this._sceneGeneration;
                     (async () => {
                         try {
-                            const resp = await fetch(data.blob_url);
-                            const buffer = await resp.arrayBuffer();
+                            const buffer = await fetchArrayBuffer(
+                                data.blob_url, `update_polyline_colors '${data.id}'`);
                             if (this._sceneGeneration !== capturedScene) {
                                 console.log('Discarding stale polyline color fetch');
                                 return;
@@ -11918,8 +11935,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_mesh_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale mesh fetch');
                             deferred.reject(new Error('stale'));
@@ -12008,8 +12025,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_parametric_tube_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale parametric tube fetch');
                             deferred.reject(new Error('stale'));
@@ -12377,8 +12394,8 @@ class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_swept_tool_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale swept-tool fetch');
                             deferred.reject(new Error('stale'));
@@ -12461,8 +12478,8 @@ class ThreeJSViewer {
                     const capturedScene = this._sceneGeneration;
                     (async () => {
                         try {
-                            const resp = await fetch(data.blob_url);
-                            const buffer = await resp.arrayBuffer();
+                            const buffer = await fetchArrayBuffer(
+                                data.blob_url, `update_parametric_tube_colors '${data.id}'`);
                             if (this._sceneGeneration !== capturedScene) {
                                 console.log('Discarding stale parametric tube color fetch');
                                 return;
@@ -12658,8 +12675,8 @@ class ThreeJSViewer {
                 this._onFetchStart();
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `set_follow_path '${data.id}'`);
                         // Layout: (K,) f64 times, then (K, 6) f32
                         // [px, py, pz, ax, ay, az] — see client.set_follow_path.
                         const K = data.count;
