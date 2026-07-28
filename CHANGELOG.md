@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.0.47
+
+### Selection highlight: `set_highlight` (#147)
+
+- **New wire verb + Python sender for a persistent selection outline** — `set_highlight(id, enabled=True, color=None)` / `{type:'set_highlight', id, enabled, color?}` toggles an always-on-top edge outline on an object, including **every descendant mesh of a GLB/model group** (the CSD robot-link case: selection finally has a uniform 3-D mark for placeable and non-placeable components alike). `color` is a hex int or CSS string; omitted → selection orange.
+- **Fully reversible by construction**: the outline is a separate `EdgesGeometry` + `LineSegments` child per mesh — the mesh's own materials are never touched, and off disposes the outline geometry/material and clears the guard flags, restoring the original appearance exactly. Idempotent (a re-enable re-tints in place, never stacks). Outlines ride their parent mesh, so FK re-posing carries them for free; they are excluded from `viewer.pick`/gizmo click-select raycasts (no-op `raycast`), skipped by the `M`/`N` debug cycles, and `set_color`/`set_opacity` leave them alone (the verbs compose). Transient like `set_color` (not replayed on reconnect).
+
+### Binary fetches guard HTTP status; load errors carry context (#142, #146)
+
+- **A 404/expired sidecar blob no longer feeds an error body into a binary parser or model loader.** Every viewer-owned blob fetch (12 sites: models, meshes, polylines, points, points-LOD, tubes, swept tools, color updates, animations, follow-path) routes through a shared `fetchArrayBuffer(url, what)` that throws a descriptive error on non-2xx — one clear `console.error` naming the message type, object id, HTTP status, and URL, then a clean skip. Previously `add_model_binary` died deep in the GLTF loader with an uncaught `RangeError: Invalid typed array length` and a silently missing mesh (#142), and `add_mesh_binary` either logged an opaque `Error creating mesh` (#146 — the same defect, caught) or **silently built a garbage mesh from the HTML error body**. The Python sidecar's 404 now carries the CORS header so `file://` viewer pages see the real status instead of an opaque failure.
+- **Load-path catches are diagnosable** (#146): the `add_mesh_binary` catch reports the object id plus how many bytes were actually served (distinguishing a short-but-200 blob from a fetch-stage failure), and the sibling binary-load catches all name the failing object id. The upstream trigger (ribweaver's blob-store LRU evicting live cell meshes) is fixed ribweaver-side; this is the defense-in-depth half.
+
+### Clip seeks clamp at the clip end instead of wrapping (#143)
+
+- **`set_clip_time(duration)` lands on the end pose instead of flipping to t=0.** `LoopRepeat` actions wrap time modulo the clip duration, so a 0..1 dress-up clip driven to exactly 100% snapped back to its start pose (ribweaver#522). All clip drive paths (`set_clip_time`, the binary `clip_times` channel, `set_clip_progress`) now funnel through one per-action clamp to `[0, duration·(1−1e-6)]` — per action, because clips in one model can have different durations and each wraps independently. Past-the-end seeks saturate at the end pose; negative seeks hold the start pose; a `clip_times` channel that wants looping emits modulo-D times. (`LoopOnce`+`clampWhenFinished` was rejected: a finished action pins `paused=true` and backward scrubs would stick.) ribweaver can drop its `min(t01, 1−1e-4)` workaround.
+
+### frameAll excludes attached move-gizmo helpers (#144)
+
+- **Fit/`frameAll()` with a gizmo attached no longer flies the camera hundreds of km out.** The `TransformControls` helper subtree contains a ~±50k drag plane (visible object, invisible material), which the whole-scene framing traversal unioned into the frame box — measured ~250 km camera distance in a real cell scene (ribweaver#550). Every gizmo helper (the primary and each pinned `add_gizmo` extra) is now tagged `isGizmoHelper` at construction and skipped by `_collectFrameableBounds` alongside the grid/clip/pivot exclusions. Clip gizmos were already excluded; near/far fitting only walks tracked objects and never had the gap. ribweaver can drop its hide-gizmo-around-frameAll workaround.
+
+### `viewer.onUnknownMessage` hook (#145)
+
+- **Embedders can claim application-defined message types on the viewer's WebSocket** — `viewer.onUnknownMessage(cb)` fires from `handleMessage`'s default branch with the parsed message (both the WS transport and direct `handleMessage()` calls), returns an unsubscribe function, and suppresses the `Unknown message type` console warning while at least one callback is registered. Known viewer types never fire it. Replaces ribweaver `/sim`'s `_ws.onmessage` monkey-patch (ribweaver#408), which was brittle against reconnects and missed the direct-dispatch path.
+
+### Move/rotate gizmo at half size (#155)
+
+- The transform gizmo's screen-size factor is halved (`GIZMO_SIZE = 0.5`, applied to the primary and every pinned gizmo) — the stock size obscured small objects. Purely visual; drag/rotate/snap behavior unchanged. Clip gizmos keep stock size.
+
 ## 0.0.46
 
 ### View gimbal: ortho plan-view snaps with auto-projection (#137, ribweaver#514/#520)
