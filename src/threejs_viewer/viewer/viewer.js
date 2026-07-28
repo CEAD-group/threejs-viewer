@@ -6375,6 +6375,13 @@ class Gizmo {
         this.control = ctrl;
         this.helper = ctrl.getHelper();
         this.helper.visible = false;
+        // Framing must never union this subtree: the TransformControlsPlane
+        // drag plane is a ~±50k mesh (visible object, invisible *material*)
+        // and pickers carry huge axis lines — frameAll()/Home would fly the
+        // camera hundreds of km out (issue #144). Checked by
+        // _collectFrameableBounds; updateSceneBounds only walks _objects,
+        // which never contains gizmo helpers.
+        this.helper.userData.isGizmoHelper = true;
         v._scene.add(this.helper);
 
         // Orbit off while dragging a handle; spawn/clear the ghost and flush the
@@ -12212,6 +12219,15 @@ export class ThreeJSViewer {
             // ignore them just like updateSceneBounds does — otherwise F/
             // Home framing over-zooms to fit a huge ground plane.
             if (child.userData && child.userData.excludeFromBounds) return;
+            // Move-gizmo TransformControls helpers (primary + pinned
+            // add_gizmo extras): their drag plane is a ~±50k mesh whose
+            // *material* is invisible but whose object is visible, so the
+            // geometry check below would union it and fly the camera ~250 km
+            // out (issue #144). The clip gizmos are caught by _isClipHelper;
+            // the transient drag ghost (__gizmoGhost) is deliberately NOT
+            // skipped — it sits at the dragged object's own grab-time pose,
+            // so it never inflates bounds beyond real content.
+            if (child.userData && child.userData.isGizmoHelper) return;
             if (child.geometry &&
                 child !== this._gridHelper &&
                 !this._isClipHelper(child) &&
