@@ -7053,6 +7053,16 @@ export class ThreeJSViewer {
         /** @type {Array<(state: any) => void>} */
         this._animTimeHooks = [];
 
+        // Embedder unknown-message hooks (onUnknownMessage): fired from
+        // handleMessage's default branch with the parsed message, so an
+        // embedder can layer application-defined message types on the same
+        // WS/handleMessage transport without monkey-patching ws.onmessage
+        // (issue #145). While at least one hook is registered the
+        // "Unknown message type" console.warn is suppressed — the app has
+        // claimed the type.
+        /** @type {Array<(data: any) => void>} */
+        this._unknownMessageHooks = [];
+
 
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
@@ -11679,7 +11689,16 @@ export class ThreeJSViewer {
                 this._maybeNotifyAssetsLoaded();
                 break;
             default:
-                console.warn(`Unknown message type: '${data.type}'`);
+                // Sanctioned hook for application-defined message types
+                // (issue #145): any registered onUnknownMessage callback
+                // claims the type and suppresses the warn.
+                if (this._unknownMessageHooks.length) {
+                    for (const cb of this._unknownMessageHooks.slice()) {
+                        try { cb(data); } catch (err) { console.error('onUnknownMessage hook error', err); }
+                    }
+                } else {
+                    console.warn(`Unknown message type: '${data.type}'`);
+                }
         }
         return null;
     }
@@ -12464,6 +12483,26 @@ export class ThreeJSViewer {
         return () => {
             const i = this._animTimeHooks.indexOf(cb);
             if (i >= 0) this._animTimeHooks.splice(i, 1);
+        };
+    }
+
+    /**
+     * Register a hook fired with the parsed message whenever `handleMessage`
+     * receives a type the viewer does not recognise — the sanctioned way for
+     * an embedder to layer application-defined message types on the viewer's
+     * WS (or direct `handleMessage()`) transport, instead of monkey-patching
+     * `ws.onmessage`. While at least one hook is registered the default
+     * branch's "Unknown message type" console.warn is suppressed (the app
+     * has claimed the type); with none registered the warn behaves as
+     * before. Known viewer message types never fire this.
+     * @param {(data: any) => void} cb receives the parsed message object.
+     * @returns {() => void} unsubscribe
+     */
+    onUnknownMessage(cb) {
+        this._unknownMessageHooks.push(cb);
+        return () => {
+            const i = this._unknownMessageHooks.indexOf(cb);
+            if (i >= 0) this._unknownMessageHooks.splice(i, 1);
         };
     }
 
