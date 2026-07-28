@@ -1460,6 +1460,52 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
     assert abs(target["z"]) < 1e-3, target
 
 
+# --- Framing excludes TransformControls gizmo helpers (issue #144) ---
+
+
+@pytest.mark.browser
+def test_frame_all_excludes_move_gizmo(viewer_client, viewer_page):
+    """An attached move gizmo must not inflate frameAll bounds.
+
+    The TransformControls helper carries a ~±50k drag plane whose *material*
+    is invisible but whose object is visible, so the frameable-bounds
+    traversal used to union it and fly the camera hundreds of km out.
+    Covers both the primary interactive gizmo and a pinned add_gizmo extra
+    (both tag their helper root with userData.isGizmoHelper).
+    """
+    viewer_client.add_box("box", width=1, height=1, depth=1, position=[0, 0, 0])
+    viewer_client.enable_move_gizmo("box")
+    viewer_client.add_gizmo("box")  # pinned extra gizmo leaks the same way
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.enabled && g.objectId === 'box' && g._extra.length === 1; }",
+    )
+    state = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.frameAll();
+            const bbox = v._collectFrameableBounds();
+            const size = bbox.max.clone().sub(bbox.min);
+            return {
+                dist: v._camera.position.distanceTo(v._controls.target),
+                size: { x: size.x, y: size.y, z: size.z },
+                helperVisible: v._transformGizmo.helper.visible,
+                primaryTagged: v._transformGizmo.helper.userData.isGizmoHelper === true,
+                extraTagged: v._transformGizmo._extra[0].helper.userData.isGizmoHelper === true,
+            };
+        }"""
+    )
+    assert state["helperVisible"] is True, state
+    assert state["primaryTagged"] is True, state
+    assert state["extraTagged"] is True, state
+    # The frameable bbox must span the 1-unit box, not the ~±50k gizmo plane.
+    for axis in ("x", "y", "z"):
+        assert 0.5 < state["size"][axis] < 2, state
+    # Camera stays a few units out, not ~250 km.
+    assert state["dist"] < 20, state
+
+
 # --- update_polyline_colors round-trip ---
 
 
