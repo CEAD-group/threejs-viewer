@@ -10236,7 +10236,7 @@ export class ThreeJSViewer {
                             deferred.reject(new Error('stale'));
                         }
                     } catch (e) {
-                        console.error(`Error loading model via HTTP:`, e);
+                        console.error(`Error loading model '${data.id}' via HTTP:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10368,7 +10368,7 @@ export class ThreeJSViewer {
                         this._registerObject(data.id, line);
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating polyline via HTTP:`, e);
+                        console.error(`Error creating polyline '${data.id}' via HTTP:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10502,7 +10502,7 @@ export class ThreeJSViewer {
                         this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating point cloud via HTTP:`, e);
+                        console.error(`Error creating point cloud '${data.id}' via HTTP:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10593,7 +10593,7 @@ export class ThreeJSViewer {
                         this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating LOD point cloud:`, e);
+                        console.error(`Error creating LOD point cloud '${data.id}':`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10682,9 +10682,16 @@ export class ThreeJSViewer {
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
+                    // Fetch context for the catch below (issue #146): status 0
+                    // = fetch itself rejected (network-level failure), byte
+                    // length -1 = body never read.
+                    let respStatus = 0;
+                    let byteLength = -1;
                     try {
                         const resp = await fetch(data.blob_url);
+                        respStatus = resp.status;
                         const buffer = await resp.arrayBuffer();
+                        byteLength = buffer.byteLength;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale mesh fetch');
                             deferred.reject(new Error('stale'));
@@ -10753,7 +10760,15 @@ export class ThreeJSViewer {
                         console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating mesh:`, e);
+                        // Attribute the failure (issue #146): the id names the
+                        // dropped object; HTTP status + byte count distinguish
+                        // a served-but-short blob (e.g. a 404/error body whose
+                        // typed-array views throw RangeError) from a
+                        // network-level fetch failure.
+                        console.error(
+                            `Error creating mesh '${data.id}' ` +
+                            `(HTTP ${respStatus || 'fetch failed'}, ${byteLength} bytes ` +
+                            `from ${data.blob_url}):`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -11122,7 +11137,7 @@ export class ThreeJSViewer {
                         }
                         console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                     } catch (e) {
-                        console.error(`Error creating parametric_tube:`, e);
+                        console.error(`Error creating parametric_tube '${data.id}':`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -11205,7 +11220,7 @@ export class ThreeJSViewer {
                         deferred.resolve();
                         console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
                     } catch (e) {
-                        console.error(`Error creating swept_tool:`, e);
+                        console.error(`Error creating swept_tool '${data.id}':`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
