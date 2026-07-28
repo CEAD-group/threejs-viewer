@@ -286,27 +286,39 @@ function activateMixerActions(mixer) {
     mixer.__tjsvDriven = true;
 }
 
-/** Seek all of a model's clips to an absolute time in seconds.
+/** Seek every action to a per-clip time, CLAMPED to `[0, duration)` (issue
+ * #143): actions loop (`LoopRepeat`), where a time of exactly `duration`
+ * wraps modulo the clip back to the t=0 pose — a 0..1 drag-chain clip driven
+ * to its end would snap fully-open → fully-compressed. Backing the clamp off
+ * by a relative hair (`duration * 1e-6`) lands end-of-range seeks on the end
+ * pose. Clamping is per action because one model's clips may have different
+ * durations (a single `mixer.setTime` would wrap each independently).
+ * @param {any} mixer @param {(dur: number) => number} timeForClip maps a
+ *   clip's duration to the desired seek time for that clip */
+function seekMixerActionsClamped(mixer, timeForClip) {
+    activateMixerActions(mixer);
+    for (const action of mixer.__tjsvActions || []) {
+        const dur = action.getClip().duration;
+        const end = Math.max(0, dur - dur * 1e-6);
+        action.time = Math.min(end, Math.max(0, timeForClip(dur)));
+    }
+    mixer.update(0);
+}
+
+/** Seek all of a model's clips to an absolute time in seconds, clamped to
+ * each clip's `[0, duration)` — `time >= duration` holds the end pose
+ * instead of wrapping, `time < 0` holds the start pose.
  * @param {any} mixer @param {number} time */
 function driveMixerTime(mixer, time) {
-    activateMixerActions(mixer);
-    mixer.setTime(time);
+    seekMixerActionsClamped(mixer, () => time);
 }
 
 /** Seek all of a model's clips by normalized progress: `t` clamped to [0,1]
  * maps to `t * duration` PER CLIP (each clip uses its own duration).
  * @param {any} mixer @param {number} t */
 function driveMixerProgress(mixer, t) {
-    activateMixerActions(mixer);
     const f = Math.min(1, Math.max(0, t));
-    for (const action of mixer.__tjsvActions || []) {
-        const dur = action.getClip().duration;
-        // Actions loop (LoopRepeat), and setting time to exactly `duration`
-        // wraps back to the t=0 pose — back off a hair so progress 1.0
-        // lands on the end pose.
-        action.time = f < 1 ? f * dur : Math.max(0, dur - dur * 1e-6);
-    }
-    mixer.update(0);
+    seekMixerActionsClamped(mixer, (dur) => f * dur);
 }
 
 /** Clip durations (seconds) for a model's mixer, for scene queries.
@@ -727,6 +739,27 @@ function vec3Tuple(v) {
         return [v.x, v.y, v.z];
     }
     return null;
+}
+
+/**
+ * Fetch a binary payload with an HTTP status guard (issue #142). Without the
+ * guard a 404/500 error body (HTML/text) would be handed straight to a binary
+ * parser or model loader, which fails deep inside with an opaque
+ * `RangeError: Invalid typed array length` — and the object silently never
+ * renders. A non-2xx response throws a descriptive Error (context + status +
+ * url) instead, which each call site's existing catch turns into a clear
+ * console.error and a clean skip. Every sidecar/blob fetch in the message
+ * handler goes through this helper so the guard can't drift between cases.
+ * @param {string} url
+ * @param {string} what - context for the error message (message type + object id)
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function fetchArrayBuffer(url, what) {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+        throw new Error(`${what}: HTTP ${resp.status} ${resp.statusText} fetching ${url}`);
+    }
+    return resp.arrayBuffer();
 }
 
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
@@ -7027,6 +7060,16 @@ export class ThreeJSViewer {
         /** @type {Array<(state: any) => void>} */
         this._animTimeHooks = [];
 
+        // Embedder unknown-message hooks (onUnknownMessage): fired from
+        // handleMessage's default branch with the parsed message, so an
+        // embedder can layer application-defined message types on the same
+        // WS/handleMessage transport without monkey-patching ws.onmessage
+        // (issue #145). While at least one hook is registered the
+        // "Unknown message type" console.warn is suppressed — the app has
+        // claimed the type.
+        /** @type {Array<(data: any) => void>} */
+        this._unknownMessageHooks = [];
+
 
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
@@ -8605,9 +8648,7 @@ export class ThreeJSViewer {
         lod.loading.add(i);
         (async () => {
             try {
-                const resp = await fetch(lod.urlBase + i);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const buffer = await resp.arrayBuffer();
+                const buffer = await fetchArrayBuffer(lod.urlBase + i, `points LOD node ${i}`);
                 // Stale guards: cloud replaced, deleted, or scene cleared.
                 if (this._objects.get(group.userData.id) !== group) return;
                 if (lod.objects[i]) return;
@@ -10095,8 +10136,7 @@ export class ThreeJSViewer {
                 (async () => {
                     try {
                         const t0 = performance.now();
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(data.blob_url, 'load_animation_http');
                         if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
                             console.log('Discarding stale animation fetch');
                             return;
@@ -10214,8 +10254,8 @@ export class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const meshBytes = await resp.arrayBuffer();
+                        const meshBytes = await fetchArrayBuffer(
+                            data.blob_url, `add_model_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale model fetch');
                             deferred.reject(new Error('stale'));
@@ -10243,7 +10283,7 @@ export class ThreeJSViewer {
                             deferred.reject(new Error('stale'));
                         }
                     } catch (e) {
-                        console.error(`Error loading model via HTTP:`, e);
+                        console.error(`Error loading model '${data.id}' via HTTP:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10263,8 +10303,8 @@ export class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_polyline_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale polyline fetch');
                             deferred.reject(new Error('stale'));
@@ -10375,7 +10415,7 @@ export class ThreeJSViewer {
                         this._registerObject(data.id, line);
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating polyline via HTTP:`, e);
+                        console.error(`Error creating polyline '${data.id}' via HTTP:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10395,8 +10435,8 @@ export class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_points_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale points fetch');
                             deferred.reject(new Error('stale'));
@@ -10509,7 +10549,7 @@ export class ThreeJSViewer {
                         this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating point cloud via HTTP:`, e);
+                        console.error(`Error creating point cloud '${data.id}' via HTTP:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10532,9 +10572,8 @@ export class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.hierarchy_url);
-                        if (!resp.ok) throw new Error(`hierarchy HTTP ${resp.status}`);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.hierarchy_url, `add_points_lod '${data.id}' hierarchy`);
                         if (this._sceneGeneration !== capturedScene ||
                             !this._isLoadTokenCurrent(data.id, loadToken)) {
                             console.log(`Discarding stale LOD points fetch for '${data.id}'`);
@@ -10600,7 +10639,7 @@ export class ThreeJSViewer {
                         this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating LOD point cloud:`, e);
+                        console.error(`Error creating LOD point cloud '${data.id}':`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10621,8 +10660,8 @@ export class ThreeJSViewer {
                     const capturedScene = this._sceneGeneration;
                     (async () => {
                         try {
-                            const resp = await fetch(data.blob_url);
-                            const buffer = await resp.arrayBuffer();
+                            const buffer = await fetchArrayBuffer(
+                                data.blob_url, `update_polyline_colors '${data.id}'`);
                             if (this._sceneGeneration !== capturedScene) {
                                 console.log('Discarding stale polyline color fetch');
                                 return;
@@ -10689,9 +10728,16 @@ export class ThreeJSViewer {
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
+                    // Fetch context for the catch below (issue #146): byte
+                    // length -1 = the fetch stage itself failed (non-2xx or
+                    // network error — fetchArrayBuffer's error carries the
+                    // HTTP status), >= 0 = body was served but parsing threw
+                    // (e.g. a short blob whose typed-array views RangeError).
+                    let byteLength = -1;
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_mesh_binary '${data.id}'`);
+                        byteLength = buffer.byteLength;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale mesh fetch');
                             deferred.reject(new Error('stale'));
@@ -10760,7 +10806,16 @@ export class ThreeJSViewer {
                         console.log(`Created mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris`);
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating mesh:`, e);
+                        // Attribute the failure (issue #146): the id names the
+                        // dropped object; the byte count distinguishes a
+                        // served-but-short blob (typed-array views throw
+                        // RangeError) from a fetch-stage failure, whose error
+                        // already carries the HTTP status.
+                        const got = byteLength >= 0
+                            ? ` after ${byteLength} bytes from ${data.blob_url}`
+                            : '';
+                        console.error(
+                            `Error creating mesh '${data.id}'${got}:`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -10780,8 +10835,8 @@ export class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_parametric_tube_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale parametric tube fetch');
                             deferred.reject(new Error('stale'));
@@ -11129,7 +11184,7 @@ export class ThreeJSViewer {
                         }
                         console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                     } catch (e) {
-                        console.error(`Error creating parametric_tube:`, e);
+                        console.error(`Error creating parametric_tube '${data.id}':`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -11149,8 +11204,8 @@ export class ThreeJSViewer {
                 this._inflightLoads.set(data.id, deferred);
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `add_swept_tool_binary '${data.id}'`);
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale swept-tool fetch');
                             deferred.reject(new Error('stale'));
@@ -11212,7 +11267,7 @@ export class ThreeJSViewer {
                         deferred.resolve();
                         console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
                     } catch (e) {
-                        console.error(`Error creating swept_tool:`, e);
+                        console.error(`Error creating swept_tool '${data.id}':`, e);
                         deferred.reject(e);
                     } finally {
                         if (this._inflightLoads.get(data.id) === deferred) {
@@ -11233,8 +11288,8 @@ export class ThreeJSViewer {
                     const capturedScene = this._sceneGeneration;
                     (async () => {
                         try {
-                            const resp = await fetch(data.blob_url);
-                            const buffer = await resp.arrayBuffer();
+                            const buffer = await fetchArrayBuffer(
+                                data.blob_url, `update_parametric_tube_colors '${data.id}'`);
                             if (this._sceneGeneration !== capturedScene) {
                                 console.log('Discarding stale parametric tube color fetch');
                                 return;
@@ -11430,8 +11485,8 @@ export class ThreeJSViewer {
                 this._onFetchStart();
                 (async () => {
                     try {
-                        const resp = await fetch(data.blob_url);
-                        const buffer = await resp.arrayBuffer();
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, `set_follow_path '${data.id}'`);
                         // Layout: (K,) f64 times, then (K, 6) f32
                         // [px, py, pz, ax, ay, az] — see client.set_follow_path.
                         const K = data.count;
@@ -11641,7 +11696,16 @@ export class ThreeJSViewer {
                 this._maybeNotifyAssetsLoaded();
                 break;
             default:
-                console.warn(`Unknown message type: '${data.type}'`);
+                // Sanctioned hook for application-defined message types
+                // (issue #145): any registered onUnknownMessage callback
+                // claims the type and suppresses the warn.
+                if (this._unknownMessageHooks.length) {
+                    for (const cb of this._unknownMessageHooks.slice()) {
+                        try { cb(data); } catch (err) { console.error('onUnknownMessage hook error', err); }
+                    }
+                } else {
+                    console.warn(`Unknown message type: '${data.type}'`);
+                }
         }
         return null;
     }
@@ -12435,6 +12499,26 @@ export class ThreeJSViewer {
         return () => {
             const i = this._animTimeHooks.indexOf(cb);
             if (i >= 0) this._animTimeHooks.splice(i, 1);
+        };
+    }
+
+    /**
+     * Register a hook fired with the parsed message whenever `handleMessage`
+     * receives a type the viewer does not recognise — the sanctioned way for
+     * an embedder to layer application-defined message types on the viewer's
+     * WS (or direct `handleMessage()`) transport, instead of monkey-patching
+     * `ws.onmessage`. While at least one hook is registered the default
+     * branch's "Unknown message type" console.warn is suppressed (the app
+     * has claimed the type); with none registered the warn behaves as
+     * before. Known viewer message types never fire this.
+     * @param {(data: any) => void} cb receives the parsed message object.
+     * @returns {() => void} unsubscribe
+     */
+    onUnknownMessage(cb) {
+        this._unknownMessageHooks.push(cb);
+        return () => {
+            const i = this._unknownMessageHooks.indexOf(cb);
+            if (i >= 0) this._unknownMessageHooks.splice(i, 1);
         };
     }
 
