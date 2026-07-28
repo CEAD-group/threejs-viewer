@@ -239,6 +239,11 @@ class _BlobHandler(BaseHTTPRequestHandler):
             self.wfile.write(blob)
         else:
             self.send_response(404)
+            # CORS header on the error path too: without it a file:// viewer
+            # page sees an opaque CORS failure instead of the 404 status, so
+            # the browser-side fetch guard (issue #142) couldn't report the
+            # real status code.
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
     def log_message(self, format, *args):

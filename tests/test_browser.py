@@ -286,6 +286,43 @@ def test_two_queued_set_colors_apply_in_order(viewer_client, viewer_page):
     assert color == 0x0000FF, f"expected 0x0000ff (blue), got {color!r}"
 
 
+@pytest.mark.browser
+def test_binary_fetch_404_logs_and_skips(viewer_client, viewer_page):
+    """Issue #142: a 404 blob fetch (missing/expired blob) must log a clear
+    console.error with the message type, id, and HTTP status, and skip
+    cleanly — not hand the error body to the model loader, which threw an
+    uncaught `RangeError: Invalid typed array length`."""
+    console_msgs = []
+    page_errors = []
+    viewer_page.on("console", lambda msg: console_msgs.append((msg.type, msg.text)))
+    viewer_page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    url = f"http://{viewer_client.host}:{viewer_client._http_port}/no_such_blob"
+    viewer_page.evaluate(
+        "(url) => window.threejsViewer.handleMessage({"
+        " type: 'add_model_binary', id: 'missing_model',"
+        " format: 'glb', blob_url: url })",
+        url,
+    )
+
+    def _found():
+        return any(
+            t == "error" and "add_model_binary 'missing_model'" in m and "HTTP 404" in m
+            for t, m in console_msgs
+        )
+
+    # Poll with wait_for_timeout, not time.sleep: the sync Playwright API only
+    # dispatches queued page events (console/pageerror) while the main thread
+    # is inside a Playwright call.
+    for _ in range(100):
+        viewer_page.wait_for_timeout(100)
+        if _found():
+            break
+    assert _found(), f"expected a clear 404 console.error, got: {console_msgs!r}"
+    assert "missing_model" not in viewer_client.query_scene()["objects"]
+    assert page_errors == [], f"uncaught page errors: {page_errors!r}"
+
+
 def _get_material_opacity(page, obj_id):
     """Read the first material opacity for an object by id, or None."""
     return page.evaluate(
