@@ -376,6 +376,43 @@ def test_two_queued_set_colors_apply_in_order(viewer_client, viewer_page):
     assert color == 0x0000FF, f"expected 0x0000ff (blue), got {color!r}"
 
 
+@pytest.mark.browser
+def test_binary_fetch_404_logs_and_skips(viewer_client, viewer_page):
+    """Issue #142: a 404 blob fetch (missing/expired blob) must log a clear
+    console.error with the message type, id, and HTTP status, and skip
+    cleanly — not hand the error body to the model loader, which threw an
+    uncaught `RangeError: Invalid typed array length`."""
+    console_msgs = []
+    page_errors = []
+    viewer_page.on("console", lambda msg: console_msgs.append((msg.type, msg.text)))
+    viewer_page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    url = f"http://{viewer_client.host}:{viewer_client._http_port}/no_such_blob"
+    viewer_page.evaluate(
+        "(url) => window.threejsViewer.handleMessage({"
+        " type: 'add_model_binary', id: 'missing_model',"
+        " format: 'glb', blob_url: url })",
+        url,
+    )
+
+    def _found():
+        return any(
+            t == "error" and "add_model_binary 'missing_model'" in m and "HTTP 404" in m
+            for t, m in console_msgs
+        )
+
+    # Poll with wait_for_timeout, not time.sleep: the sync Playwright API only
+    # dispatches queued page events (console/pageerror) while the main thread
+    # is inside a Playwright call.
+    for _ in range(100):
+        viewer_page.wait_for_timeout(100)
+        if _found():
+            break
+    assert _found(), f"expected a clear 404 console.error, got: {console_msgs!r}"
+    assert "missing_model" not in viewer_client.query_scene()["objects"]
+    assert page_errors == [], f"uncaught page errors: {page_errors!r}"
+
+
 def _get_material_opacity(page, obj_id):
     """Read the first material opacity for an object by id, or None."""
     return page.evaluate(
@@ -976,6 +1013,23 @@ def test_set_clip_progress_maps_to_clip_duration(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_set_clip_time_clamps_at_clip_end(viewer_client, viewer_page):
+    """set_clip_time(duration) lands on the END pose (issue #143): the
+    LoopRepeat actions used to wrap `time == duration` modulo the clip back
+    to the t=0 pose, snapping a fully-driven drag chain to fully-compressed.
+    Absolute seeks now clamp per clip to [0, duration): past-the-end holds
+    the end pose, negative holds the start pose."""
+    _load_animated_glb(viewer_client)
+
+    viewer_client.set_clip_time("anim", 2.0)  # exactly the clip duration
+    _wait_for_scale(viewer_page, 0.857)  # end pose, NOT wrapped to 0.059
+    viewer_client.set_clip_time("anim", 5.0)  # past the end: still end pose
+    _wait_for_scale(viewer_page, 0.857)
+    viewer_client.set_clip_time("anim", -1.0)  # before the start: start pose
+    _wait_for_scale(viewer_page, 0.059)
+
+
+@pytest.mark.browser
 def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_page):
     """The binary clip_times animation channel is a first drive too: applying
     it to a freshly-loaded (bind-pose-held) model activates the deferred
@@ -998,6 +1052,11 @@ def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_p
 
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(1.0)")
     _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)  # clip time 1.0 of 2 s
+
+    # Sweeping the channel to exactly the clip duration lands on the end
+    # pose instead of wrapping to t=0 (issue #143).
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(2.0)")
+    _wait_for_scale(viewer_page, 0.857)
 
 
 @pytest.mark.browser
@@ -1310,6 +1369,50 @@ def test_handle_message_dispatches_without_websocket(viewer_client, viewer_page)
 
 
 @pytest.mark.browser
+def test_on_unknown_message_hook(viewer_client, viewer_page):
+    """`viewer.onUnknownMessage(cb)` (issue #145) is the sanctioned hook for
+    application-defined message types: it fires from handleMessage's default
+    branch with the parsed message (so it also covers the direct
+    `handleMessage()` embedder path), suppresses the "Unknown message type"
+    console.warn while registered, returns an unsubscribe function, and never
+    fires for known message types."""
+    result = viewer_page.evaluate(
+        """async () => {
+            const v = window.threejsViewer;
+            const seen = [];
+            const warns = [];
+            const origWarn = console.warn;
+            console.warn = (...args) => { warns.push(args.join(' ')); };
+            try {
+                const off = v.onUnknownMessage((data) => seen.push(data));
+                // Unknown type: hook fires with the parsed payload, warn suppressed.
+                await v.handleMessage({ type: 'totally_custom', payload: 42 });
+                // Known type: must NOT fire the hook.
+                await v.handleMessage({ type: 'add_group', id: 'unk_group' });
+                const seenAfterKnown = seen.length;
+                // Unsubscribe: hook stops firing, warn comes back.
+                off();
+                await v.handleMessage({ type: 'totally_custom_2' });
+                return {
+                    seen,
+                    seenAfterKnown,
+                    finalSeen: seen.length,
+                    warns: warns.filter((w) => w.includes('Unknown message type')),
+                };
+            } finally {
+                console.warn = origWarn;
+                await v.handleMessage({ type: 'delete_object', id: 'unk_group' });
+            }
+        }"""
+    )
+    assert result["seen"] == [{"type": "totally_custom", "payload": 42}]
+    assert result["seenAfterKnown"] == 1  # known types never fire the hook
+    assert result["finalSeen"] == 1  # unsubscribe stops delivery
+    # Warn suppressed while registered; restored after unsubscribe.
+    assert result["warns"] == ["Unknown message type: 'totally_custom_2'"]
+
+
+@pytest.mark.browser
 def test_show_grid(viewer_client, viewer_page):
     """show_grid() toggles grid visibility."""
     time.sleep(0.1)
@@ -1548,6 +1651,52 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
     assert abs(target["x"]) < 1e-3, target
     assert abs(target["y"]) < 1e-3, target
     assert abs(target["z"]) < 1e-3, target
+
+
+# --- Framing excludes TransformControls gizmo helpers (issue #144) ---
+
+
+@pytest.mark.browser
+def test_frame_all_excludes_move_gizmo(viewer_client, viewer_page):
+    """An attached move gizmo must not inflate frameAll bounds.
+
+    The TransformControls helper carries a ~±50k drag plane whose *material*
+    is invisible but whose object is visible, so the frameable-bounds
+    traversal used to union it and fly the camera hundreds of km out.
+    Covers both the primary interactive gizmo and a pinned add_gizmo extra
+    (both tag their helper root with userData.isGizmoHelper).
+    """
+    viewer_client.add_box("box", width=1, height=1, depth=1, position=[0, 0, 0])
+    viewer_client.enable_move_gizmo("box")
+    viewer_client.add_gizmo("box")  # pinned extra gizmo leaks the same way
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.enabled && g.objectId === 'box' && g._extra.length === 1; }",
+    )
+    state = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v.frameAll();
+            const bbox = v._collectFrameableBounds();
+            const size = bbox.max.clone().sub(bbox.min);
+            return {
+                dist: v._camera.position.distanceTo(v._controls.target),
+                size: { x: size.x, y: size.y, z: size.z },
+                helperVisible: v._transformGizmo.helper.visible,
+                primaryTagged: v._transformGizmo.helper.userData.isGizmoHelper === true,
+                extraTagged: v._transformGizmo._extra[0].helper.userData.isGizmoHelper === true,
+            };
+        }"""
+    )
+    assert state["helperVisible"] is True, state
+    assert state["primaryTagged"] is True, state
+    assert state["extraTagged"] is True, state
+    # The frameable bbox must span the 1-unit box, not the ~±50k gizmo plane.
+    for axis in ("x", "y", "z"):
+        assert 0.5 < state["size"][axis] < 2, state
+    # Camera stays a few units out, not ~250 km.
+    assert state["dist"] < 20, state
 
 
 # --- update_polyline_colors round-trip ---
