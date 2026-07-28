@@ -923,6 +923,23 @@ def test_set_clip_progress_maps_to_clip_duration(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_set_clip_time_clamps_at_clip_end(viewer_client, viewer_page):
+    """set_clip_time(duration) lands on the END pose (issue #143): the
+    LoopRepeat actions used to wrap `time == duration` modulo the clip back
+    to the t=0 pose, snapping a fully-driven drag chain to fully-compressed.
+    Absolute seeks now clamp per clip to [0, duration): past-the-end holds
+    the end pose, negative holds the start pose."""
+    _load_animated_glb(viewer_client)
+
+    viewer_client.set_clip_time("anim", 2.0)  # exactly the clip duration
+    _wait_for_scale(viewer_page, 0.857)  # end pose, NOT wrapped to 0.059
+    viewer_client.set_clip_time("anim", 5.0)  # past the end: still end pose
+    _wait_for_scale(viewer_page, 0.857)
+    viewer_client.set_clip_time("anim", -1.0)  # before the start: start pose
+    _wait_for_scale(viewer_page, 0.059)
+
+
+@pytest.mark.browser
 def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_page):
     """The binary clip_times animation channel is a first drive too: applying
     it to a freshly-loaded (bind-pose-held) model activates the deferred
@@ -945,6 +962,11 @@ def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_p
 
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(1.0)")
     _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)  # clip time 1.0 of 2 s
+
+    # Sweeping the channel to exactly the clip duration lands on the end
+    # pose instead of wrapping to t=0 (issue #143).
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(2.0)")
+    _wait_for_scale(viewer_page, 0.857)
 
 
 @pytest.mark.browser
