@@ -1521,27 +1521,39 @@ function activateMixerActions(mixer) {
     mixer.__tjsvDriven = true;
 }
 
-/** Seek all of a model's clips to an absolute time in seconds.
+/** Seek every action to a per-clip time, CLAMPED to `[0, duration)` (issue
+ * #143): actions loop (`LoopRepeat`), where a time of exactly `duration`
+ * wraps modulo the clip back to the t=0 pose — a 0..1 drag-chain clip driven
+ * to its end would snap fully-open → fully-compressed. Backing the clamp off
+ * by a relative hair (`duration * 1e-6`) lands end-of-range seeks on the end
+ * pose. Clamping is per action because one model's clips may have different
+ * durations (a single `mixer.setTime` would wrap each independently).
+ * @param {any} mixer @param {(dur: number) => number} timeForClip maps a
+ *   clip's duration to the desired seek time for that clip */
+function seekMixerActionsClamped(mixer, timeForClip) {
+    activateMixerActions(mixer);
+    for (const action of mixer.__tjsvActions || []) {
+        const dur = action.getClip().duration;
+        const end = Math.max(0, dur - dur * 1e-6);
+        action.time = Math.min(end, Math.max(0, timeForClip(dur)));
+    }
+    mixer.update(0);
+}
+
+/** Seek all of a model's clips to an absolute time in seconds, clamped to
+ * each clip's `[0, duration)` — `time >= duration` holds the end pose
+ * instead of wrapping, `time < 0` holds the start pose.
  * @param {any} mixer @param {number} time */
 function driveMixerTime(mixer, time) {
-    activateMixerActions(mixer);
-    mixer.setTime(time);
+    seekMixerActionsClamped(mixer, () => time);
 }
 
 /** Seek all of a model's clips by normalized progress: `t` clamped to [0,1]
  * maps to `t * duration` PER CLIP (each clip uses its own duration).
  * @param {any} mixer @param {number} t */
 function driveMixerProgress(mixer, t) {
-    activateMixerActions(mixer);
     const f = Math.min(1, Math.max(0, t));
-    for (const action of mixer.__tjsvActions || []) {
-        const dur = action.getClip().duration;
-        // Actions loop (LoopRepeat), and setting time to exactly `duration`
-        // wraps back to the t=0 pose — back off a hair so progress 1.0
-        // lands on the end pose.
-        action.time = f < 1 ? f * dur : Math.max(0, dur - dur * 1e-6);
-    }
-    mixer.update(0);
+    seekMixerActionsClamped(mixer, (dur) => f * dur);
 }
 
 /** Clip durations (seconds) for a model's mixer, for scene queries.
