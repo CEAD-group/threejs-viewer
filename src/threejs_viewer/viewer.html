@@ -2169,6 +2169,9 @@ function resolveLightingDefaults(options, urlParams) {
 function applyOpacity(obj, opacity) {
     obj.traverse(/** @param {any} child */ child => {
         if (!child.material) return;
+        // Highlight outlines keep their own styling — set_opacity addresses
+        // the object's appearance, not the selection indicator riding on it.
+        if (child.userData.__highlightOutline) return;
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
             const wasTransparent = mat.transparent;
@@ -2176,6 +2179,69 @@ function applyOpacity(obj, opacity) {
             mat.opacity = opacity;
             mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
+        }
+    });
+}
+
+// Default selection-outline colour for `set_highlight` (issue #147).
+const HIGHLIGHT_DEFAULT_COLOR = 0xffaa00;
+
+/**
+ * Toggle a persistent selection outline on `obj` and its mesh descendants
+ * (issue #147). Follows the gizmo outline recipe (EdgesGeometry +
+ * LineSegments, depthTest/depthWrite off, renderOrder 1000) but — unlike
+ * `restyleGizmoHelper` — never mutates the mesh's own materials, so
+ * toggling off restores the original appearance exactly: the outline is a
+ * separate child object that is removed and disposed (EdgesGeometry +
+ * LineBasicMaterial) on disable. Idempotent: enabling twice re-uses the
+ * existing outline (re-tinting it if a new colour is given) instead of
+ * stacking a second one. The outline is parented to the mesh itself so it
+ * follows any re-posing (FK groups, animation transforms) automatically,
+ * never raycasts (no-op `raycast` like the floor grid, so `viewer.pick`,
+ * gizmo click-select, and double-click framing pass through it), and is
+ * skipped by the M/N debug cycles (it is a LineSegments, not a Mesh) and by
+ * `set_color`/`applyOpacity` (guarded on `userData.__highlightOutline`).
+ * Deleting the object disposes the outline with every other child.
+ * @param {THREE.Object3D} obj
+ * @param {boolean} enabled
+ * @param {number|string} [color]  hex number or CSS colour string
+ */
+function applyHighlight(obj, enabled, color) {
+    obj.traverse(/** @param {any} child */ (child) => {
+        if (!child.isMesh || !child.geometry) return;
+        // Never outline viewer-internal mesh children: the shader floor grid
+        // (an outline would draw its plane border), combined-mode wireframe
+        // overlays (share the parent's geometry — a duplicate outline), and
+        // existing highlight outlines themselves.
+        if (child.userData.isGrid || child.userData.isWireOverlay
+            || child.userData.__highlightOutline) return;
+        const existing = child.userData.__highlightEdge;
+        if (enabled) {
+            const col = new THREE.Color(color != null ? color : HIGHLIGHT_DEFAULT_COLOR);
+            if (existing) {                     // idempotent: re-tint, never stack
+                existing.material.color.copy(col);
+                return;
+            }
+            const edge = new THREE.LineSegments(
+                new THREE.EdgesGeometry(child.geometry),
+                new THREE.LineBasicMaterial({
+                    color: col,
+                    transparent: true, opacity: 0.95,
+                    depthTest: false, depthWrite: false,
+                    toneMapped: false,
+                })
+            );
+            edge.renderOrder = 1000;
+            edge.userData.__highlightOutline = true;
+            edge.raycast = () => {};
+            edge.name = (child.name || 'mesh') + '_highlight';
+            child.userData.__highlightEdge = edge;
+            child.add(edge);
+        } else if (existing) {
+            child.remove(existing);
+            existing.geometry.dispose();
+            existing.material.dispose();
+            delete child.userData.__highlightEdge;
         }
     });
 }
@@ -11233,7 +11299,9 @@ class ThreeJSViewer {
             case 'set_color': {
                 this._withObject(data.id, 'set_color', (colorObj) => {
                     colorObj.traverse(/** @param {any} child */ (child) => {
-                        if (!child.material) return;
+                        // Composes with set_highlight: the outline child keeps
+                        // its own selection colour.
+                        if (!child.material || child.userData.__highlightOutline) return;
                         const mats = Array.isArray(child.material) ? child.material : [child.material];
                         for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
                     });
@@ -11243,6 +11311,12 @@ class ThreeJSViewer {
             }
             case 'set_opacity':
                 this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
+                break;
+            case 'set_highlight':
+                // Toggle a persistent selection outline (issue #147). Transient
+                // like set_color/set_opacity — not replayed on reconnect.
+                this._withObject(data.id, 'set_highlight', (obj) =>
+                    applyHighlight(obj, data.enabled !== false, data.color));
                 break;
             case 'list_objects':
                 return this._reply({
