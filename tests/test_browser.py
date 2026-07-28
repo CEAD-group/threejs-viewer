@@ -193,6 +193,96 @@ def test_baseline_visibility_pruned_on_delete(viewer_client, viewer_page):
     assert objects["m1"]["visible"] is True
 
 
+def _highlight_state(page, obj_id):
+    """Outline-child count + material identity snapshot for an object's meshes."""
+    return page.evaluate(
+        "(id) => {"
+        " const o = window.threejsViewer._objects.get(id);"
+        " if (!o) return null;"
+        " const out = { outlines: 0, outlineColors: [], meshes: [] };"
+        " o.traverse((child) => {"
+        "  if (child.userData.__highlightOutline) {"
+        "   out.outlines++;"
+        "   out.outlineColors.push(child.material.color.getHex());"
+        "   return;"
+        "  }"
+        "  if (!child.isMesh) return;"
+        "  const m = Array.isArray(child.material) ? child.material[0] : child.material;"
+        "  out.meshes.push({"
+        "   uuid: m.uuid, color: m.color ? m.color.getHex() : null,"
+        "   opacity: m.opacity, transparent: m.transparent,"
+        "   hasEdgeRef: child.userData.__highlightEdge !== undefined,"
+        "  });"
+        " });"
+        " return out;"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_set_highlight_toggle_is_reversible(viewer_client, viewer_page):
+    """set_highlight on adds one outline per mesh (traversing group children),
+    is idempotent (no stacking on a second enable), and off removes the
+    outlines leaving the meshes' own materials byte-identical (issue #147)."""
+    viewer_client.add_group("cell")
+    viewer_client.add_box("link1", parent="cell", color=0x4488CC)
+    viewer_client.add_box("link2", parent="cell", color=0xCC8844)
+    time.sleep(0.1)
+    before = _highlight_state(viewer_page, "cell")
+    assert before["outlines"] == 0
+    assert len(before["meshes"]) == 2
+
+    viewer_client.set_highlight("cell")
+    time.sleep(0.1)
+    on = _highlight_state(viewer_page, "cell")
+    assert on["outlines"] == 2  # one per descendant mesh
+    assert all(m["hasEdgeRef"] for m in on["meshes"])
+
+    # Idempotent: a second enable re-uses the outlines, never stacks.
+    viewer_client.set_highlight("cell", color=0xFF00FF)
+    time.sleep(0.1)
+    again = _highlight_state(viewer_page, "cell")
+    assert again["outlines"] == 2
+    assert again["outlineColors"] == [0xFF00FF, 0xFF00FF]  # re-tinted in place
+
+    viewer_client.set_highlight("cell", enabled=False)
+    time.sleep(0.1)
+    after = _highlight_state(viewer_page, "cell")
+    assert after["outlines"] == 0
+    assert not any(m["hasEdgeRef"] for m in after["meshes"])
+    # Original appearance restored exactly: same material instances, same state.
+    assert after["meshes"] == before["meshes"]
+
+
+@pytest.mark.browser
+def test_set_highlight_composes_with_set_color_and_opacity(viewer_client, viewer_page):
+    """set_color/set_opacity restyle the mesh but leave the outline's own
+    selection colour and opacity alone (guarded on __highlightOutline)."""
+    viewer_client.add_box("hbox", color=0x4488CC)
+    time.sleep(0.1)
+    viewer_client.set_highlight("hbox", color=0xFF00FF)
+    time.sleep(0.1)
+    viewer_client.set_color("hbox", 0x00FF00)
+    viewer_client.set_opacity("hbox", 0.5)
+    time.sleep(0.1)
+    state = _highlight_state(viewer_page, "hbox")
+    assert state["outlines"] == 1
+    assert state["outlineColors"] == [0xFF00FF]  # not recoloured by set_color
+    assert state["meshes"][0]["color"] == 0x00FF00
+    assert state["meshes"][0]["opacity"] == 0.5
+    outline_opacity = viewer_page.evaluate(
+        "() => {"
+        " let op = null;"
+        " window.threejsViewer._objects.get('hbox').traverse((c) => {"
+        "  if (c.userData.__highlightOutline) op = c.material.opacity;"
+        " });"
+        " return op;"
+        "}"
+    )
+    assert outline_opacity == 0.95  # not dimmed by set_opacity
+
+
 def _get_material_color(page, obj_id):
     """Read the first material color (hex) for an object by id, or None."""
     return page.evaluate(

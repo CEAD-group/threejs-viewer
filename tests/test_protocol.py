@@ -531,6 +531,32 @@ def test_set_points_time_rejects_non_finite(client):
         client.set_points_time("pc", float("inf"))
 
 
+def test_set_highlight_default(client):
+    client.set_highlight("box")
+    assert client._messages == [{"type": "set_highlight", "id": "box", "enabled": True}]
+
+
+def test_set_highlight_off(client):
+    client.set_highlight("box", enabled=False)
+    assert client._messages == [
+        {"type": "set_highlight", "id": "box", "enabled": False}
+    ]
+
+
+def test_set_highlight_with_color(client):
+    client.set_highlight("box", color=0xFF00FF)
+    assert client._messages == [
+        {"type": "set_highlight", "id": "box", "enabled": True, "color": 0xFF00FF}
+    ]
+
+
+def test_set_highlight_css_color_string(client):
+    client.set_highlight("box", color="hotpink")
+    assert client._messages == [
+        {"type": "set_highlight", "id": "box", "enabled": True, "color": "hotpink"}
+    ]
+
+
 def test_set_clip_time(client):
     client.set_clip_time("model", 1.25)
     assert client._messages == [{"type": "set_clip_time", "id": "model", "time": 1.25}]

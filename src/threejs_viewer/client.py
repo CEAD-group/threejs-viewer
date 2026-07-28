@@ -2298,6 +2298,26 @@ class ViewerClient:
         """Set object material opacity (0.0 = invisible, 1.0 = fully opaque)."""
         self._send({"type": "set_opacity", "id": id, "opacity": float(opacity)})
 
+    def set_highlight(
+        self, id: str, enabled: bool = True, color: Optional[Union[int, str]] = None
+    ):
+        """Toggle a persistent selection outline on an object.
+
+        Draws an edge outline (always on top) around every mesh in the
+        object — including all descendants of a GLB/model group — without
+        touching the object's own materials, so turning it off restores the
+        original appearance exactly. Idempotent: enabling twice never stacks
+        a second outline (a new ``color`` re-tints the existing one).
+
+        ``color`` is a hex int (e.g. ``0xFFAA00``) or CSS colour string;
+        omit it for the default selection orange. Transient viewer state
+        like :meth:`set_color` (not replayed on reconnect).
+        """
+        msg = {"type": "set_highlight", "id": id, "enabled": bool(enabled)}
+        if color is not None:
+            msg["color"] = color
+        self._send(msg)
+
     def set_clip_time(self, id: str, time: float):
         """Seek embedded GLTF/GLB animation clips to a specific time (seconds)."""
         self._send({"type": "set_clip_time", "id": id, "time": time})
