@@ -1220,6 +1220,50 @@ def test_handle_message_dispatches_without_websocket(viewer_client, viewer_page)
 
 
 @pytest.mark.browser
+def test_on_unknown_message_hook(viewer_client, viewer_page):
+    """`viewer.onUnknownMessage(cb)` (issue #145) is the sanctioned hook for
+    application-defined message types: it fires from handleMessage's default
+    branch with the parsed message (so it also covers the direct
+    `handleMessage()` embedder path), suppresses the "Unknown message type"
+    console.warn while registered, returns an unsubscribe function, and never
+    fires for known message types."""
+    result = viewer_page.evaluate(
+        """async () => {
+            const v = window.threejsViewer;
+            const seen = [];
+            const warns = [];
+            const origWarn = console.warn;
+            console.warn = (...args) => { warns.push(args.join(' ')); };
+            try {
+                const off = v.onUnknownMessage((data) => seen.push(data));
+                // Unknown type: hook fires with the parsed payload, warn suppressed.
+                await v.handleMessage({ type: 'totally_custom', payload: 42 });
+                // Known type: must NOT fire the hook.
+                await v.handleMessage({ type: 'add_group', id: 'unk_group' });
+                const seenAfterKnown = seen.length;
+                // Unsubscribe: hook stops firing, warn comes back.
+                off();
+                await v.handleMessage({ type: 'totally_custom_2' });
+                return {
+                    seen,
+                    seenAfterKnown,
+                    finalSeen: seen.length,
+                    warns: warns.filter((w) => w.includes('Unknown message type')),
+                };
+            } finally {
+                console.warn = origWarn;
+                await v.handleMessage({ type: 'delete_object', id: 'unk_group' });
+            }
+        }"""
+    )
+    assert result["seen"] == [{"type": "totally_custom", "payload": 42}]
+    assert result["seenAfterKnown"] == 1  # known types never fire the hook
+    assert result["finalSeen"] == 1  # unsubscribe stops delivery
+    # Warn suppressed while registered; restored after unsubscribe.
+    assert result["warns"] == ["Unknown message type: 'totally_custom_2'"]
+
+
+@pytest.mark.browser
 def test_show_grid(viewer_client, viewer_page):
     """show_grid() toggles grid visibility."""
     time.sleep(0.1)
