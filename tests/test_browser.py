@@ -220,6 +220,18 @@ def _highlight_state(page, obj_id):
     )
 
 
+def _wait_highlight_state(page, obj_id, predicate):
+    """Poll _highlight_state until predicate(state) holds (fixed sleeps flake
+    under machine load — messages apply asynchronously); returns last state."""
+    state = None
+    for _ in range(80):
+        state = _highlight_state(page, obj_id)
+        if state and predicate(state):
+            break
+        time.sleep(0.05)
+    return state
+
+
 @pytest.mark.browser
 def test_set_highlight_toggle_is_reversible(viewer_client, viewer_page):
     """set_highlight on adds one outline per mesh (traversing group children),
@@ -228,27 +240,25 @@ def test_set_highlight_toggle_is_reversible(viewer_client, viewer_page):
     viewer_client.add_group("cell")
     viewer_client.add_box("link1", parent="cell", color=0x4488CC)
     viewer_client.add_box("link2", parent="cell", color=0xCC8844)
-    time.sleep(0.1)
-    before = _highlight_state(viewer_page, "cell")
+    before = _wait_highlight_state(viewer_page, "cell", lambda s: len(s["meshes"]) == 2)
     assert before["outlines"] == 0
     assert len(before["meshes"]) == 2
 
     viewer_client.set_highlight("cell")
-    time.sleep(0.1)
-    on = _highlight_state(viewer_page, "cell")
+    on = _wait_highlight_state(viewer_page, "cell", lambda s: s["outlines"] == 2)
     assert on["outlines"] == 2  # one per descendant mesh
     assert all(m["hasEdgeRef"] for m in on["meshes"])
 
     # Idempotent: a second enable re-uses the outlines, never stacks.
     viewer_client.set_highlight("cell", color=0xFF00FF)
-    time.sleep(0.1)
-    again = _highlight_state(viewer_page, "cell")
+    again = _wait_highlight_state(
+        viewer_page, "cell", lambda s: s["outlineColors"] == [0xFF00FF, 0xFF00FF]
+    )
     assert again["outlines"] == 2
     assert again["outlineColors"] == [0xFF00FF, 0xFF00FF]  # re-tinted in place
 
     viewer_client.set_highlight("cell", enabled=False)
-    time.sleep(0.1)
-    after = _highlight_state(viewer_page, "cell")
+    after = _wait_highlight_state(viewer_page, "cell", lambda s: s["outlines"] == 0)
     assert after["outlines"] == 0
     assert not any(m["hasEdgeRef"] for m in after["meshes"])
     # Original appearance restored exactly: same material instances, same state.
@@ -260,13 +270,18 @@ def test_set_highlight_composes_with_set_color_and_opacity(viewer_client, viewer
     """set_color/set_opacity restyle the mesh but leave the outline's own
     selection colour and opacity alone (guarded on __highlightOutline)."""
     viewer_client.add_box("hbox", color=0x4488CC)
-    time.sleep(0.1)
+    _wait_highlight_state(viewer_page, "hbox", lambda s: len(s["meshes"]) == 1)
     viewer_client.set_highlight("hbox", color=0xFF00FF)
-    time.sleep(0.1)
+    _wait_highlight_state(viewer_page, "hbox", lambda s: s["outlines"] == 1)
     viewer_client.set_color("hbox", 0x00FF00)
     viewer_client.set_opacity("hbox", 0.5)
-    time.sleep(0.1)
-    state = _highlight_state(viewer_page, "hbox")
+    state = _wait_highlight_state(
+        viewer_page,
+        "hbox",
+        lambda s: (
+            s["meshes"][0]["color"] == 0x00FF00 and s["meshes"][0]["opacity"] == 0.5
+        ),
+    )
     assert state["outlines"] == 1
     assert state["outlineColors"] == [0xFF00FF]  # not recoloured by set_color
     assert state["meshes"][0]["color"] == 0x00FF00
