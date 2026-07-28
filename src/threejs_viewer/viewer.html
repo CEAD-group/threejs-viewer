@@ -7474,6 +7474,7 @@ class PolylinePickController {
 const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
 const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
 const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
+const GIZMO_SIZE = 0.5;            // TransformControls screen-size factor (1 = stock; half keeps handles out of the way)
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
 
@@ -7672,6 +7673,7 @@ class Gizmo {
         const ctrl = /** @type {any} */ (new TransformControls(v._camera, v._renderer.domElement));
         ctrl.setMode('translate');
         ctrl.setSpace('world');
+        ctrl.setSize(GIZMO_SIZE);
         ctrl.enabled = false;
         this.control = ctrl;
         this.helper = ctrl.getHelper();
