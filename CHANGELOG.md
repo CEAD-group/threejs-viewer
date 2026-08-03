@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.48
+
+### Gizmo plane chips win their own hover area (#160)
+
+- **Hovering a translate plane chip no longer grabs an axis arrow instead.** Hover resolves closest-intersection-wins across all pickers, and the stock arrow pickers are fat cone volumes hugging each axis (radius 0.2, vs 0.04 for the visible cone) — from any 3/4 view they bulged in front of the flat plane chips and stole roughly half of each chip's visible parallelogram, so careful mousing on the blue XY chip attached an X-arrow drag. The one-time `refineGizmoHandles` pass (shared with the clip gizmos) now slims each arrow picker's two radial dims by `GIZMO_ARROW_PICKER_SLIM` (0.4 → radius 0.08, still ~2× the visible cone's hit slop) and the centre free-move `XYZ` octahedron by `GIZMO_CENTER_PICKER_SCALE` (0.6). Chip pickers stay enlarged (`GIZMO_PLANE_SCALE`); arrows remain hittable along their shafts and tips. Regression-tested with a pointermove grid scan asserting the chip wins its own footprint.
+
 ## 0.0.47
 
 ### Selection highlight: `set_highlight` (#147)
