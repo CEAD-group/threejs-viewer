@@ -6239,6 +6239,8 @@ class PolylinePickController {
 const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
 const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
 const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
+const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
+const GIZMO_CENTER_PICKER_SCALE = 0.6; // shrink of the stock centre (XYZ free-move) picker octahedron
 const GIZMO_SIZE = 0.5;            // TransformControls screen-size factor (1 = stock; half keeps handles out of the way)
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
@@ -6289,6 +6291,17 @@ function ghostGizmoMaterial(src) {
 //      environment sculpt the cone. The lib's per-frame re-theme + highlight
 //      only touch `.color`/`.opacity` (which Standard supports), so they keep
 //      working; `restyleGizmoHelper` re-applies our `_color` each frame regardless.
+//   3. Slim the translate pickers: hover resolves closest-intersection-wins
+//      across all pickers, and the stock arrow pickers are fat cone volumes
+//      hugging each axis (radius 0.2 at the tip, vs 0.04 for the visible
+//      cone) — from any 3/4 view they bulge in front of the flat plane chips
+//      and steal most of a chip's screen area, so the chip's own picker
+//      (deliberately larger than its visual) was unreachable over roughly
+//      half the visible parallelogram. Scale each arrow picker's two radial
+//      (non-axis) dims down and the centre free-move octahedron uniformly;
+//      the handle's axis passes through the radial origin of its baked
+//      geometry, so a plain geometry scale keeps it centred on the axis.
+//      Arrows keep ~2× their visible cone radius of invisible hit slop.
 /** @param {any} control  a THREE TransformControls */
 function refineGizmoHandles(control) {
     const gm = control._gizmo;
@@ -6328,6 +6341,23 @@ function refineGizmoHandles(control) {
             lit._color = col.clone();
             lit._opacity = 0.95;
             o.material = lit;
+        }
+    }
+    const pickers = gm.picker && gm.picker.translate;
+    if (pickers) {
+        for (const o of pickers.children) {
+            if (!o.geometry || o.userData.__slimPicker) continue;
+            const s = GIZMO_ARROW_PICKER_SLIM;
+            if (o.name === 'X') o.geometry.scale(1, s, s);
+            else if (o.name === 'Y') o.geometry.scale(s, 1, s);
+            else if (o.name === 'Z') o.geometry.scale(s, s, 1);
+            else if (o.name === 'XYZ') {
+                const c = GIZMO_CENTER_PICKER_SCALE;
+                o.geometry.scale(c, c, c);
+            } else continue;
+            o.userData.__slimPicker = true;
+            o.geometry.computeBoundingBox();
+            o.geometry.computeBoundingSphere();
         }
     }
 }

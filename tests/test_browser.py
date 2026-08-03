@@ -3423,6 +3423,122 @@ def test_gizmo_plane_drag_both_directions(viewer_client, viewer_page):
     )
 
 
+# A 3/4 view (the pose where the stock fat arrow pickers bulged in front of the
+# flat XY chip and stole its hover — a top-down view faces the chip head-on and
+# would not exhibit the shadowing).
+_GIZMO_THREEQUARTER = """() => {
+  const v = window.threejsViewer;
+  v._camera.position.set(2.6, -2.6, 1.9); v._camera.up.set(0, 0, 1);
+  v._controls.target.set(0, 0, 0); v._camera.lookAt(0, 0, 0);
+  v._controls.update(); v._camera.updateMatrixWorld(true);
+}"""
+
+# Project the visible XY chip's bbox to screen pixels, dispatch a pointermove
+# grid over it, and tally which handle wins each cell (control.axis).
+_GIZMO_CHIP_SCAN = """() => {
+  const v = window.threejsViewer;
+  const g = v._transformGizmo._primary;
+  const control = g.control;
+  g.helper.updateMatrixWorld(true);
+  const canvas = v._renderer.domElement;
+  const rect = canvas.getBoundingClientRect();
+  const V = v._camera.position.constructor;
+  let box = null;
+  control._gizmo.gizmo.translate.traverse(o => {
+    if (o.name !== 'XY' || !o.geometry || !o.material || box) return;
+    o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox;
+    let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+    for (const x of [bb.min.x, bb.max.x])
+      for (const y of [bb.min.y, bb.max.y])
+        for (const z of [bb.min.z, bb.max.z]) {
+          const p = new V(x, y, z).applyMatrix4(o.matrixWorld).project(v._camera);
+          const sx = rect.left + (p.x * 0.5 + 0.5) * rect.width;
+          const sy = rect.top + (-p.y * 0.5 + 0.5) * rect.height;
+          minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
+          minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
+        }
+    box = {minX, minY, maxX, maxY};
+  });
+  if (!box) return null;
+  const counts = {};
+  let total = 0;
+  for (let y = box.minY; y <= box.maxY; y += 3) {
+    for (let x = box.minX; x <= box.maxX; x += 3) {
+      canvas.dispatchEvent(new PointerEvent('pointermove',
+        {clientX: x, clientY: y, pointerType: 'mouse', bubbles: true}));
+      total++;
+      const a = control.axis || 'none';
+      counts[a] = (counts[a] || 0) + 1;
+    }
+  }
+  return {counts, total};
+}"""
+
+# Probe every visible mesh of one arrow (shaft + end cones): dispatch a
+# pointermove at each mesh's projected centre and collect what hover resolves.
+_GIZMO_ARROW_PROBE = """(name) => {
+  const v = window.threejsViewer;
+  const g = v._transformGizmo._primary;
+  const control = g.control;
+  g.helper.updateMatrixWorld(true);
+  const canvas = v._renderer.domElement;
+  const rect = canvas.getBoundingClientRect();
+  const V = v._camera.position.constructor;
+  const hits = [];
+  control._gizmo.gizmo.translate.traverse(o => {
+    if (o.name !== name || !o.geometry) return;
+    o.geometry.computeBoundingBox();
+    const c = o.geometry.boundingBox.getCenter(new V());
+    c.applyMatrix4(o.matrixWorld).project(v._camera);
+    const sx = rect.left + (c.x * 0.5 + 0.5) * rect.width;
+    const sy = rect.top + (-c.y * 0.5 + 0.5) * rect.height;
+    canvas.dispatchEvent(new PointerEvent('pointermove',
+      {clientX: sx, clientY: sy, pointerType: 'mouse', bubbles: true}));
+    hits.push(control.axis || 'none');
+  });
+  return hits;
+}"""
+
+
+@pytest.mark.browser
+def test_gizmo_plane_chip_hover_beats_arrow_pickers(viewer_client, viewer_page):
+    """Regression for the stock fat arrow pickers shadowing the plane chips:
+    hover resolves closest-intersection-wins, and the unslimmed arrow pickers
+    (radius 0.2 cones hugging each axis) sat in front of the flat XY chip from
+    any 3/4 view, so most of the chip's visible parallelogram grabbed the X
+    arrow instead of the chip. With the pickers slimmed
+    (GIZMO_ARROW_PICKER_SLIM / GIZMO_CENTER_PICKER_SCALE) the chip must win the
+    bulk of its own footprint while every arrow stays hittable."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_client.enable_move_gizmo(id="box", click_select=False)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo._primary;"
+        " return g && g.object && g.helper.visible; }",
+    )
+    viewer_page.evaluate(_GIZMO_THREEQUARTER)
+
+    res = viewer_page.evaluate(_GIZMO_CHIP_SCAN)
+    assert res is not None, "XY chip handle not found"
+    counts, total = res["counts"], res["total"]
+    xy = counts.get("XY", 0)
+    arrows = counts.get("X", 0) + counts.get("Y", 0) + counts.get("Z", 0)
+    # Pre-fix this pose gave the chip and the X arrow roughly equal shares of
+    # the chip's bbox; post-fix the chip dominates by an order of magnitude.
+    assert xy > 3 * max(1, arrows), (
+        f"arrow pickers shadow the XY chip inside its own footprint: {counts}"
+    )
+    assert xy >= 0.3 * total, f"chip hover coverage too low: {counts} of {total}"
+
+    # Slimming must not make the arrows unhittable: each axis still resolves at
+    # (at least one of) its shaft/cone centres.
+    for name in ("X", "Y", "Z"):
+        hits = viewer_page.evaluate(_GIZMO_ARROW_PROBE, name)
+        assert name in hits, f"arrow {name} no longer hittable anywhere: {hits}"
+
+
 @pytest.mark.browser
 def test_gizmo_drag_ghost_present_until_release(viewer_client, viewer_page):
     """A translucent ghost is dropped at the grab-time pose while dragging and
