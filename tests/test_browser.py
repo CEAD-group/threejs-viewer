@@ -527,6 +527,82 @@ def test_add_points_appears_in_scene(viewer_client, viewer_page):
     assert obj["type"] == "Points"
 
 
+_POINTS_STATE_JS = """
+(id) => {
+    const o = window.threejsViewer._objects.get(id);
+    if (!o) return null;
+    const p = o.geometry.getAttribute('position');
+    const n = o.userData.totalPointCount;
+    return {
+        count: n,
+        capacity: p.count,
+        drawn: o.geometry.drawRange.count,
+        colorCapacity: o.geometry.getAttribute('color')?.count ?? 0,
+        last: Array.from(p.array.slice((n - 1) * 3, n * 3)),
+        radius: o.geometry.boundingSphere ? o.geometry.boundingSphere.radius : null,
+    };
+}
+"""
+
+
+@pytest.mark.browser
+def test_append_points_grows_the_cloud_in_place(viewer_client, viewer_page):
+    """append_points grows an existing THREE.Points without re-uploading it:
+    the logical count grows, the buffer keeps its geometric spare capacity,
+    the full-cloud draw range follows, and the last chunk lands at the tail."""
+    rng = np.random.default_rng(2)
+    pts = rng.random((100, 3)).astype(np.float32)
+    viewer_client.add_points("cloud", pts, colors=pts[:, 2], colormap="turbo")
+    for _ in range(40):
+        time.sleep(0.05)
+        if "cloud" in viewer_client.query_scene()["objects"]:
+            break
+    chunk = None
+    for _ in range(3):
+        chunk = rng.random((50, 3)).astype(np.float32)
+        viewer_client.append_points("cloud", chunk, colors=chunk[:, 2])
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(_POINTS_STATE_JS, "cloud")
+        if state and state["count"] == 250:
+            break
+    assert state is not None and state["count"] == 250, f"got {state!r}"
+    # One geometric growth to the 1024 floor covered all three appends —
+    # the existing points were copied once, not per append.
+    assert state["capacity"] == 1024
+    assert state["colorCapacity"] == 1024
+    assert state["drawn"] == 250
+    # Buffer order is send order: the last append sits at the tail.
+    assert state["last"] == pytest.approx(chunk[-1].tolist(), abs=1e-6)
+    # Bounds were expanded (not left stale) so culling/framing see the growth.
+    assert state["radius"] is not None and state["radius"] > 0
+
+
+@pytest.mark.browser
+def test_append_points_to_unknown_id_warns(viewer_client, viewer_page):
+    """An append whose target the viewer does not have warns loudly instead
+    of silently dropping stream data (the Python client raises before this
+    for ids it never created, so drive handleMessage directly)."""
+    warnings = []
+    viewer_page.on(
+        "console",
+        lambda msg: warnings.append(msg.text) if msg.type == "warning" else None,
+    )
+    viewer_page.evaluate(
+        "() => window.threejsViewer.handleMessage("
+        "{type: 'append_points_binary', id: 'ghost', numPoints: 1,"
+        " hasVertexColors: false, blob_url: 'http://127.0.0.1:1/nope'})"
+    )
+    for _ in range(40):
+        time.sleep(0.05)
+        if any("append_points: 'ghost'" in w for w in warnings):
+            break
+    assert any("append_points: 'ghost'" in w for w in warnings), warnings
+    assert "ghost" not in viewer_client.query_scene()["objects"]
+
+
 @pytest.mark.browser
 def test_set_draw_range_on_points(viewer_client, viewer_page):
     """set_draw_range reveals a leading fraction of a point cloud."""
