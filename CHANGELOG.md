@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Live point streaming: `append_points`
+
+- **`append_points(id, positions, colors=None)` grows a flat `add_points` cloud in place**, at O(new points) on both sides. Only the new points cross the binary channel, and the viewer writes them into spare capacity at the tail of the existing GPU buffers (`addUpdateRange` → a `bufferSubData` of the appended slice), doubling capacity into a fresh geometry when it runs out (the old one disposed, so no GL buffer leaks). This is what a live producer needs — a laser tracker at 1 kHz flushed a few times a second and grown toward ~10M points over an hours-long run — where re-sending the whole cloud with `add_points` is quadratic in the total and stalls the browser around 1e5 points.
+- **Buffer order is preserved**: appends are serialized per id in `handleMessage` (their blob fetches otherwise complete out of order), so `set_draw_range`'s prefix reveal keeps meaning "the points sent first". A partial reveal is left where it is; a fully-revealed cloud grows its draw range with the append.
+- **Bounds are expanded, not recomputed** — `computeBoundingSphere` would be O(total) per append. The box is exact, the sphere is its circumsphere (a safe over-estimate for culling and framing).
+- **The colormap range is fixed at `add_points` time.** Scalar `colors` on an append map through the `colormap`/`cmin`/`cmax` the cloud was created with and clamp at the ramp ends; rescaling would mean re-colouring — and re-uploading — every point already in the cloud, which is the cost this method exists to avoid. Pass explicit `cmin`/`cmax` when the range is known up front.
+- **Unknown ids raise, they never vanish**: the client tracks flat clouds per id (dropped on `delete`/`clear`/replace-by-LOD), so appending to an id it never created — or to an octree-LOD cloud, or to one with `birth_times`/`removal_times` — raises `ValueError` rather than dropping stream data. The viewer warns per append for a cloud it does not have, which is also the browser-reload-mid-stream case: point clouds are not replayed on reconnect, so re-seed with `add_points`.
+- Old append blobs are evicted after 256 chunks — one blob per update forever would otherwise retain every point an hours-long stream ever sent.
+
 ## 0.0.48
 
 ### Gizmo plane chips win their own hover area (#160)

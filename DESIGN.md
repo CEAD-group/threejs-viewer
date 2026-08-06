@@ -271,6 +271,25 @@ optional per-point `float32` birth/removal time blocks appended to the blob):
 {"type": "set_points_time", "id": "pc", "time": 3.0}
 ```
 
+A flat cloud can also be **grown incrementally** — the transport for a live
+producer (a laser tracker streaming for hours), where re-sending the cloud on
+every update is O(total) per update:
+
+```json
+{"type": "append_points_binary", "id": "pc", "blob_url": "...", "numPoints": 2500,
+ "hasVertexColors": true}
+```
+
+The blob carries only the new points (positions, then optional `uint8` RGB, the
+same layout as `add_points_binary` minus the time blocks). The viewer writes
+them into spare capacity at the tail of the existing buffers and flags just
+that slice (`addUpdateRange`), doubling capacity into a fresh geometry when it
+runs out — so both the wire payload and the GPU upload are O(new points).
+Appends apply strictly in send order per id (buffer order is the `draw_range`
+contract). The colormap range stays the one fixed at `add_points` time;
+rescaling it would mean re-colouring the whole cloud. Not defined for
+octree-LOD clouds or clouds with a time window.
+
 The vertex shader shows a point while `birth_time <= t < removal_time` against
 a per-cloud scrub-time uniform (also drivable from the `point_times` animation
 channel, stride 1 float32 like `clip_times`).
