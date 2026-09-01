@@ -2081,14 +2081,40 @@ function vec3Tuple(v) {
  * handler goes through this helper so the guard can't drift between cases.
  * @param {string} url
  * @param {string} what - context for the error message (message type + object id)
+ * @param {AbortSignal} [signal] - cancels the fetch when the object is
+ *   deleted or superseded, so a re-push never requests a dropped blob (#157)
  * @returns {Promise<ArrayBuffer>}
  */
-async function fetchArrayBuffer(url, what) {
-    const resp = await fetch(url);
+async function fetchArrayBuffer(url, what, signal) {
+    const resp = await fetch(url, signal ? { signal } : undefined);
     if (!resp.ok) {
         throw new Error(`${what}: HTTP ${resp.status} ${resp.statusText} fetching ${url}`);
     }
     return resp.arrayBuffer();
+}
+
+// A blob fetch that fails because its object was deleted or re-pushed is
+// expected fallout, not a defect (issue #157). The viewer aborts such fetches
+// on delete/supersede, but the failure and the WebSocket message that explains
+// it travel on different transports, so a 404 can beat its own explanation
+// here. A fetch-stage failure on a load that still looks live is therefore
+// re-checked after this grace before it is reported loudly.
+const SUPERSEDED_FETCH_GRACE_MS = 500;
+
+// Abort-tracking key for the (id-less) animation blob fetch. A Symbol rather
+// than a reserved string: _loadAborts is a Map, which takes any key type, and
+// a Symbol is not equal to any string an object id could ever be — so this
+// cannot collide with a real id no matter what a producer sends, and needs no
+// validation on the id path to stay that way.
+const ANIMATION_FETCH_KEY = Symbol('animation-blob-fetch');
+
+/** Grace window in ms, with a test seam (`window.__supersededFetchGraceMs`). */
+function supersededFetchGraceMs() {
+    const override = typeof window !== 'undefined'
+        ? /** @type {any} */ (window).__supersededFetchGraceMs
+        : undefined;
+    return typeof override === 'number' && override >= 0
+        ? override : SUPERSEDED_FETCH_GRACE_MS;
 }
 
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
@@ -8461,6 +8487,13 @@ class ThreeJSViewer {
         // onto it via _withObject().
         /** @type {Map<string, {promise: Promise<void>, resolve: () => void, reject: (err: any) => void}>} */
         this._inflightLoads = new Map();
+        // Per-id AbortControllers for in-flight blob fetches (issue #157).
+        // A delete or a re-push of the same id cancels them, so the viewer
+        // never requests a blob its producer has already dropped.
+        // Keyed by object id, plus ANIMATION_FETCH_KEY (a Symbol) for the
+        // id-less animation blob — a Symbol can never equal a real id.
+        /** @type {Map<string|symbol, Set<AbortController>>} */
+        this._loadAborts = new Map();
         // Deferred re-parenting (issue #138): children added with a parent=
         // id that isn't registered yet (parent model load in flight, or
         // messages out of order) land at the scene root and record the
@@ -10163,10 +10196,15 @@ class ThreeJSViewer {
      */
     _fetchPointsLodNode(group, i) {
         const lod = group.userData.pointsLOD;
+        const cloudId = group.userData.id;
         lod.loading.add(i);
+        // Node payloads live in the same per-cloud blob store Python drops on
+        // delete/clear, so these stream fetches cancel with the cloud (#157).
+        const abortCtl = this._trackFetch(cloudId);
         (async () => {
             try {
-                const buffer = await fetchArrayBuffer(lod.urlBase + i, `points LOD node ${i}`);
+                const buffer = await fetchArrayBuffer(
+                    lod.urlBase + i, `points LOD node ${i}`, abortCtl.signal);
                 // Stale guards: cloud replaced, deleted, or scene cleared.
                 if (this._objects.get(group.userData.id) !== group) return;
                 if (lod.objects[i]) return;
@@ -10236,8 +10274,15 @@ class ThreeJSViewer {
                 lod.loadedPoints += count;
                 this._sceneBoundsDirty = true;
             } catch (e) {
-                console.warn(`points LOD node ${i} fetch failed:`, e);
+                // The cloud going away mid-stream is expected, not a fault.
+                if ((e && e.name === 'AbortError')
+                    || this._objects.get(cloudId) !== group) {
+                    console.log(`Discarding superseded LOD node ${i} fetch for '${cloudId}'`);
+                } else {
+                    console.warn(`points LOD node ${i} fetch failed:`, e);
+                }
             } finally {
+                this._untrackFetch(cloudId, abortCtl);
                 lod.loading.delete(i);
             }
         })();
@@ -10291,6 +10336,94 @@ class ThreeJSViewer {
     /** @param {string} id @param {number} token */
     _isLoadTokenCurrent(id, token) {
         return this._loadTokens.get(id) === token;
+    }
+
+    /** Current load token for `id`, 0 when the id was never loaded. @param {string} id */
+    _loadTokenOf(id) {
+        return this._loadTokens.get(id) || 0;
+    }
+
+    /**
+     * Register a cancellable blob fetch for `id` and return its
+     * AbortController (issue #157). Pass `supersede: true` from a binary
+     * *add* case: the newer add owns the id, so any fetch still running for
+     * it is dead weight — and its blob may already have been dropped by the
+     * producer, which is exactly the 404 this cancels. Read-side fetches
+     * (colour updates, follow paths) register without superseding so they
+     * can't cancel a concurrent add for the same id.
+     * @param {string|symbol} id  the animation blob uses a Symbol key
+     * @param {{ supersede?: boolean }} [opts]
+     */
+    _trackFetch(id, opts) {
+        if (opts && opts.supersede) this._abortFetches(id);
+        const controller = new AbortController();
+        let set = this._loadAborts.get(id);
+        if (!set) { set = new Set(); this._loadAborts.set(id, set); }
+        set.add(controller);
+        return controller;
+    }
+
+    /** @param {string|symbol} id @param {AbortController} controller */
+    _untrackFetch(id, controller) {
+        const set = this._loadAborts.get(id);
+        if (!set) return;
+        set.delete(controller);
+        if (set.size === 0) this._loadAborts.delete(id);
+    }
+
+    /**
+     * Cancel every in-flight blob fetch for `id`. Called on delete/clear and
+     * on a re-push, so the request is gone before the producer's blob is.
+     * @param {string|symbol} id
+     */
+    _abortFetches(id) {
+        const set = this._loadAborts.get(id);
+        if (!set) return;
+        this._loadAborts.delete(id);
+        for (const controller of set) controller.abort();
+    }
+
+    /**
+     * True when a failed binary load is the expected fallout of the object
+     * being deleted, cleared, or re-pushed rather than a genuine blob miss.
+     * `token` is compared only for the fetch stage (installing an object
+     * bumps its own token via _deleteObject, so a post-fetch failure must
+     * not be excused by it).
+     * @param {any} err
+     * @param {{id?: string|null, token?: number, scene?: number, anim?: number}} ctx
+     */
+    _isLoadSuperseded(err, ctx) {
+        if (err && err.name === 'AbortError') return true;
+        if (ctx.scene !== undefined && this._sceneGeneration !== ctx.scene) return true;
+        if (ctx.anim !== undefined && this._animGeneration !== ctx.anim) return true;
+        if (ctx.id != null && ctx.token !== undefined
+            && this._loadTokenOf(ctx.id) !== ctx.token) return true;
+        return false;
+    }
+
+    /**
+     * Report a failed binary load (issue #157). A load that was deleted or
+     * superseded is expected noise and logs one quiet line; anything else
+     * runs `loud`, which keeps the fully-attributed console.error of issues
+     * #142/#146. Fetch-stage failures that still look live are re-checked
+     * after a grace window first, because the 404 (HTTP) can arrive before
+     * the delete/re-add that explains it (WebSocket).
+     * @param {any} err
+     * @param {string} what - subject for the quiet line, e.g. 'mesh'
+     * @param {() => void} loud - emits the full console.error
+     * @param {{id?: string|null, token?: number, scene?: number, anim?: number,
+     *          fetchStage?: boolean}} ctx
+     */
+    _reportLoadFailure(err, what, loud, ctx) {
+        const id = ctx.id;
+        const quiet = () => console.log(
+            `Discarding superseded ${what} fetch${id != null ? ` for '${id}'` : ''}`);
+        if (this._isLoadSuperseded(err, ctx)) { quiet(); return; }
+        if (ctx.fetchStage === false) { loud(); return; }
+        setTimeout(() => {
+            if (this._isLoadSuperseded(err, ctx)) quiet();
+            else loud();
+        }, supersededFetchGraceMs());
     }
 
     /**
@@ -10363,6 +10496,10 @@ class ThreeJSViewer {
         // the deferred so _withObject's fail-branch fires a single warn per
         // queued op rather than letting them silently disappear.
         if (!opts || !opts.preserveInflight) {
+            // Cancel the fetch itself, not just its bookkeeping: the producer
+            // typically drops the blob as it sends the delete, so letting the
+            // request run just buys a 404 (issue #157).
+            this._abortFetches(id);
             const pendingLoad = this._inflightLoads.get(id);
             if (pendingLoad) {
                 pendingLoad.reject(new Error('deleted'));
@@ -11658,10 +11795,16 @@ class ThreeJSViewer {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
                 const capturedAnim = ++this._animGeneration;
+                // Python drops the previous animation blob as it sends the new
+                // one, so a swap must cancel the old fetch (issue #157).
+                const abortCtl = this._trackFetch(ANIMATION_FETCH_KEY, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const t0 = performance.now();
-                        const buffer = await fetchArrayBuffer(data.blob_url, 'load_animation_http');
+                        const buffer = await fetchArrayBuffer(
+                            data.blob_url, 'load_animation_http', abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene || this._animGeneration !== capturedAnim) {
                             console.log('Discarding stale animation fetch');
                             return;
@@ -11760,8 +11903,11 @@ class ThreeJSViewer {
                         });
                         console.log(`  total: ${(performance.now() - t0).toFixed(0)}ms`);
                     } catch (e) {
-                        console.error('Error loading animation via HTTP:', e);
+                        this._reportLoadFailure(e, 'animation',
+                            () => console.error('Error loading animation via HTTP:', e),
+                            { scene: capturedScene, anim: capturedAnim, fetchStage: !fetched });
                     } finally {
+                        this._untrackFetch(ANIMATION_FETCH_KEY, abortCtl);
                         this._onFetchEnd();
                     }
                 })();
@@ -11777,10 +11923,14 @@ class ThreeJSViewer {
                 // surface their stale/deleted rejection.
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const loadToken = this._loadTokenOf(data.id);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const meshBytes = await fetchArrayBuffer(
-                            data.blob_url, `add_model_binary '${data.id}'`);
+                            data.blob_url, `add_model_binary '${data.id}'`, abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale model fetch');
                             deferred.reject(new Error('stale'));
@@ -11808,9 +11958,13 @@ class ThreeJSViewer {
                             deferred.reject(new Error('stale'));
                         }
                     } catch (e) {
-                        console.error(`Error loading model '${data.id}' via HTTP:`, e);
+                        this._reportLoadFailure(e, 'model',
+                            () => console.error(`Error loading model '${data.id}' via HTTP:`, e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -11826,10 +11980,13 @@ class ThreeJSViewer {
                 const deferred = this._makeDeferred();
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.blob_url, `add_polyline_binary '${data.id}'`);
+                            data.blob_url, `add_polyline_binary '${data.id}'`, abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale polyline fetch');
                             deferred.reject(new Error('stale'));
@@ -11940,9 +12097,13 @@ class ThreeJSViewer {
                         this._registerObject(data.id, line);
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating polyline '${data.id}' via HTTP:`, e);
+                        this._reportLoadFailure(e, 'polyline',
+                            () => console.error(`Error creating polyline '${data.id}' via HTTP:`, e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -11958,10 +12119,13 @@ class ThreeJSViewer {
                 const deferred = this._makeDeferred();
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.blob_url, `add_points_binary '${data.id}'`);
+                            data.blob_url, `add_points_binary '${data.id}'`, abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale points fetch');
                             deferred.reject(new Error('stale'));
@@ -12074,9 +12238,13 @@ class ThreeJSViewer {
                         this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating point cloud '${data.id}' via HTTP:`, e);
+                        this._reportLoadFailure(e, 'point cloud',
+                            () => console.error(`Error creating point cloud '${data.id}' via HTTP:`, e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -12095,10 +12263,14 @@ class ThreeJSViewer {
                 const deferred = this._makeDeferred();
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.hierarchy_url, `add_points_lod '${data.id}' hierarchy`);
+                            data.hierarchy_url, `add_points_lod '${data.id}' hierarchy`,
+                            abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene ||
                             !this._isLoadTokenCurrent(data.id, loadToken)) {
                             console.log(`Discarding stale LOD points fetch for '${data.id}'`);
@@ -12164,9 +12336,13 @@ class ThreeJSViewer {
                         this._depthCue.maybeAutoEnableEdl();
                         deferred.resolve();
                     } catch (e) {
-                        console.error(`Error creating LOD point cloud '${data.id}':`, e);
+                        this._reportLoadFailure(e, 'LOD point cloud',
+                            () => console.error(`Error creating LOD point cloud '${data.id}':`, e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -12183,10 +12359,15 @@ class ThreeJSViewer {
                     }
                     this._onFetchStart();
                     const capturedScene = this._sceneGeneration;
+                    const loadToken = this._loadTokenOf(data.id);
+                    const abortCtl = this._trackFetch(data.id);
                     (async () => {
+                        let fetched = false;
                         try {
                             const buffer = await fetchArrayBuffer(
-                                data.blob_url, `update_polyline_colors '${data.id}'`);
+                                data.blob_url, `update_polyline_colors '${data.id}'`,
+                                abortCtl.signal);
+                            fetched = true;
                             if (this._sceneGeneration !== capturedScene) {
                                 console.log('Discarding stale polyline color fetch');
                                 return;
@@ -12237,8 +12418,12 @@ class ThreeJSViewer {
                                 obj.material.needsUpdate = true;
                             }
                         } catch (e) {
-                            console.error(`Error updating polyline colors:`, e);
+                            this._reportLoadFailure(e, 'polyline color',
+                                () => console.error(`Error updating polyline colors:`, e),
+                                { id: data.id, token: fetched ? undefined : loadToken,
+                                  scene: capturedScene, fetchStage: !fetched });
                         } finally {
+                            this._untrackFetch(data.id, abortCtl);
                             this._onFetchEnd();
                         }
                     })();
@@ -12252,6 +12437,7 @@ class ThreeJSViewer {
                 const deferred = this._makeDeferred();
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
                     // Fetch context for the catch below (issue #146): byte
                     // length -1 = the fetch stage itself failed (non-2xx or
@@ -12261,7 +12447,7 @@ class ThreeJSViewer {
                     let byteLength = -1;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.blob_url, `add_mesh_binary '${data.id}'`);
+                            data.blob_url, `add_mesh_binary '${data.id}'`, abortCtl.signal);
                         byteLength = buffer.byteLength;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale mesh fetch');
@@ -12339,10 +12525,13 @@ class ThreeJSViewer {
                         const got = byteLength >= 0
                             ? ` after ${byteLength} bytes from ${data.blob_url}`
                             : '';
-                        console.error(
-                            `Error creating mesh '${data.id}'${got}:`, e);
+                        this._reportLoadFailure(e, 'mesh',
+                            () => console.error(`Error creating mesh '${data.id}'${got}:`, e),
+                            { id: data.id, token: byteLength >= 0 ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: byteLength < 0 });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -12358,10 +12547,13 @@ class ThreeJSViewer {
                 const deferred = this._makeDeferred();
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.blob_url, `add_parametric_tube_binary '${data.id}'`);
+                            data.blob_url, `add_parametric_tube_binary '${data.id}'`, abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale parametric tube fetch');
                             deferred.reject(new Error('stale'));
@@ -12709,9 +12901,13 @@ class ThreeJSViewer {
                         }
                         console.log(`Created parametric_tube ${data.id}: ${buildN} spine pts × ${nCs} cs verts, ${ringPairs} ring pairs${strandCollapse ? ' (collapse pending)' : ''}`);
                     } catch (e) {
-                        console.error(`Error creating parametric_tube '${data.id}':`, e);
+                        this._reportLoadFailure(e, 'parametric tube',
+                            () => console.error(`Error creating parametric_tube '${data.id}':`, e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -12727,10 +12923,13 @@ class ThreeJSViewer {
                 const deferred = this._makeDeferred();
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
+                const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
+                    let fetched = false;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.blob_url, `add_swept_tool_binary '${data.id}'`);
+                            data.blob_url, `add_swept_tool_binary '${data.id}'`, abortCtl.signal);
+                        fetched = true;
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale swept-tool fetch');
                             deferred.reject(new Error('stale'));
@@ -12792,9 +12991,13 @@ class ThreeJSViewer {
                         deferred.resolve();
                         console.log(`Created swept_tool ${data.id}: ${nStations} stations × ${nProfile} profile rows × ${sections} facets`);
                     } catch (e) {
-                        console.error(`Error creating swept_tool '${data.id}':`, e);
+                        this._reportLoadFailure(e, 'swept tool',
+                            () => console.error(`Error creating swept_tool '${data.id}':`, e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
                         }
@@ -12811,10 +13014,15 @@ class ThreeJSViewer {
                     }
                     this._onFetchStart();
                     const capturedScene = this._sceneGeneration;
+                    const loadToken = this._loadTokenOf(data.id);
+                    const abortCtl = this._trackFetch(data.id);
                     (async () => {
+                        let fetched = false;
                         try {
                             const buffer = await fetchArrayBuffer(
-                                data.blob_url, `update_parametric_tube_colors '${data.id}'`);
+                                data.blob_url, `update_parametric_tube_colors '${data.id}'`,
+                                abortCtl.signal);
+                            fetched = true;
                             if (this._sceneGeneration !== capturedScene) {
                                 console.log('Discarding stale parametric tube color fetch');
                                 return;
@@ -12957,8 +13165,12 @@ class ThreeJSViewer {
                                 if (md) md.ringColors = rc;
                             }
                         } catch (e) {
-                            console.error(`Error updating parametric_tube colors:`, e);
+                            this._reportLoadFailure(e, 'parametric tube color',
+                                () => console.error(`Error updating parametric_tube colors:`, e),
+                                { id: data.id, token: fetched ? undefined : loadToken,
+                                  scene: capturedScene, fetchStage: !fetched });
                         } finally {
+                            this._untrackFetch(data.id, abortCtl);
                             this._onFetchEnd();
                         }
                     })();
@@ -13008,10 +13220,15 @@ class ThreeJSViewer {
                 break;
             case 'set_follow_path': {
                 this._onFetchStart();
+                const capturedScene = this._sceneGeneration;
+                const loadToken = this._loadTokenOf(data.id);
+                const abortCtl = this._trackFetch(data.id);
                 (async () => {
+                    let fetched = false;
                     try {
                         const buffer = await fetchArrayBuffer(
-                            data.blob_url, `set_follow_path '${data.id}'`);
+                            data.blob_url, `set_follow_path '${data.id}'`, abortCtl.signal);
+                        fetched = true;
                         // Layout: (K,) f64 times, then (K, 6) f32
                         // [px, py, pz, ax, ay, az] — see client.set_follow_path.
                         const K = data.count;
@@ -13022,8 +13239,12 @@ class ThreeJSViewer {
                         this._applyFollowPaths();   // place it at the current time
                         this._updateTrackingUI();   // followed object = valid camera-track target
                     } catch (e) {
-                        console.error('set_follow_path failed:', e);
+                        this._reportLoadFailure(e, 'follow path',
+                            () => console.error('set_follow_path failed:', e),
+                            { id: data.id, token: fetched ? undefined : loadToken,
+                              scene: capturedScene, fetchStage: !fetched });
                     } finally {
+                        this._untrackFetch(data.id, abortCtl);
                         this._onFetchEnd();
                     }
                 })();

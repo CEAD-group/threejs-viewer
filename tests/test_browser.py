@@ -429,6 +429,84 @@ def test_binary_fetch_404_logs_and_skips(viewer_client, viewer_page):
     assert page_errors == [], f"uncaught page errors: {page_errors!r}"
 
 
+_RACE_SETUP_JS = """
+(badUrl) => {
+    // A valid add_mesh_binary payload for a single triangle: f32 xyz * 3,
+    // then u32 indices * 3 (no normals / no vertex colors).
+    const buf = new ArrayBuffer(3 * 3 * 4 + 3 * 4);
+    new Float32Array(buf, 0, 9).set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    new Uint32Array(buf, 36, 3).set([0, 1, 2]);
+    window.__raceGoodUrl = URL.createObjectURL(new Blob([buf]));
+    window.__raceBadUrl = badUrl;
+    window.__raceAdd = (id, url) => window.threejsViewer.handleMessage({
+        type: 'add_mesh_binary', id, blob_url: url,
+        numVertices: 3, numIndices: 3,
+    });
+}
+"""
+
+
+@pytest.mark.browser
+def test_repush_during_blob_fetch_is_quiet(viewer_client, viewer_page):
+    """Issue #157: deleting + re-adding an id while its blob fetch is still in
+    flight is expected traffic — the producer drops the old blob, so the fetch
+    404s. The re-added object must load and the superseded fetch must NOT log a
+    console.error (a 404 for a still-live object still does — issue #142, see
+    test_binary_fetch_404_logs_and_skips)."""
+    console_msgs = []
+    page_errors = []
+    viewer_page.on("console", lambda msg: console_msgs.append((msg.type, msg.text)))
+    viewer_page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    bad_url = f"http://{viewer_client.host}:{viewer_client._http_port}/no_such_blob"
+    viewer_page.evaluate(_RACE_SETUP_JS, bad_url)
+
+    def _errors(needle):
+        return [m for t, m in console_msgs if t == "error" and needle in m]
+
+    def _logged(needle):
+        return any(needle in m for _, m in console_msgs)
+
+    # --- Ordering A: the delete/re-push reaches the viewer while the fetch is
+    # still open. The fetch is aborted, so the dead blob is never even fetched
+    # to completion.
+    viewer_page.evaluate(
+        "() => { window.__raceAdd('race_a', window.__raceBadUrl);"
+        " window.threejsViewer.handleMessage({ type: 'delete_object', id: 'race_a' });"
+        " window.__raceAdd('race_a', window.__raceGoodUrl); }"
+    )
+    # --- Ordering B: the 404 wins the race and lands *before* the delete/
+    # re-push that explains it (HTTP and WebSocket are separate transports).
+    # The grace is stretched past production's 500ms so the delete is certain
+    # to land inside the window even on a loaded machine, without the test
+    # having to sit out a long fixed sleep (below).
+    viewer_page.evaluate("() => { window.__supersededFetchGraceMs = 1000; }")
+    viewer_page.evaluate("() => window.__raceAdd('race_b', window.__raceBadUrl)")
+    viewer_page.wait_for_timeout(500)  # let the 404 land first
+    viewer_page.evaluate(
+        "() => { window.threejsViewer.handleMessage({ type: 'delete_object', id: 'race_b' });"
+        " window.__raceAdd('race_b', window.__raceGoodUrl); }"
+    )
+    # The re-check after the grace window always says something — either the
+    # superseded discard or a loud error — so wait for whichever lands rather
+    # than sleeping out the window blind. Finishes as soon as the decision is
+    # made, and still fails correctly if it is the wrong one.
+    for _ in range(100):
+        if _logged("superseded mesh fetch for 'race_b'") or _errors("race_b"):
+            break
+        viewer_page.wait_for_timeout(50)
+
+    objects = viewer_client.query_scene()["objects"]
+    assert objects.get("race_a", {}).get("type") == "Mesh"
+    assert objects.get("race_b", {}).get("type") == "Mesh"
+    assert _errors("race_a") == [], f"superseded fetch shouted: {console_msgs!r}"
+    assert _errors("race_b") == [], f"superseded fetch shouted: {console_msgs!r}"
+    # ...and it was actually classified as superseded (not silently skipped).
+    assert _logged("Discarding superseded mesh fetch for 'race_a'"), console_msgs
+    assert _logged("Discarding superseded mesh fetch for 'race_b'"), console_msgs
+    assert page_errors == [], f"uncaught page errors: {page_errors!r}"
+
+
 def _get_material_opacity(page, obj_id):
     """Read the first material opacity for an object by id, or None."""
     return page.evaluate(
