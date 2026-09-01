@@ -1173,6 +1173,7 @@ function resolveLightingDefaults(options, urlParams) {
  * @param {number} opacity
  */
 function applyOpacity(obj, opacity) {
+    /** @type {any[]} */ const highlighted = [];
     obj.traverse(/** @param {any} child */ child => {
         if (!child.material) return;
         // Highlight outlines keep their own styling — set_opacity addresses
@@ -1186,70 +1187,271 @@ function applyOpacity(obj, opacity) {
             mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
         }
+        // transparent/depthWrite just changed, and a silhouette highlight is
+        // only legible on a depth-priming mesh (see resolveHighlightStyle) — so a highlight
+        // riding on this mesh may need to swap style. Collected and re-applied
+        // after the walk: re-applying rebuilds the outline child, and mutating
+        // the tree mid-traverse is how you skip a node.
+        if (child.userData.__highlightEdge && child.userData.__highlightOpts) highlighted.push(child);
     });
+    for (const child of highlighted) applyHighlight(child, true, child.userData.__highlightOpts);
 }
 
-// Default selection-outline colour for `set_highlight` (issue #147).
+// ---- Selection highlight (issues #147 / #158 / #165) ----
+
+// Default selection-outline colour.
 const HIGHLIGHT_DEFAULT_COLOR = 0xffaa00;
+// Default outline style. 'silhouette' draws a true contour around the mesh
+// (issue #165); 'edges' draws feature edges from EdgesGeometry (the original
+// #147 look), which is the useful one when the *interior* structure of the
+// selection matters and the mesh is prismatic.
+const HIGHLIGHT_DEFAULT_STYLE = 'silhouette';
+// Silhouette thickness in screen pixels — constant at any zoom/distance.
+const HIGHLIGHT_DEFAULT_WIDTH_PX = 3;
+// EdgesGeometry threshold angle in degrees for style 'edges' (issue #158): an
+// edge draws only where its two adjacent faces differ by more than this, so
+// tessellation edges drop out and sharp features stay. THREE's own default is
+// 1 degree, which on a dense CAD mesh (or any curved analytic surface) keeps
+// nearly every interior edge — the reported X-ray-wireframe defect.
+const HIGHLIGHT_DEFAULT_THRESHOLD_DEG = 30;
+
+/**
+ * Inverted-hull silhouette for the selection highlight (issue #165).
+ *
+ * A second draw of the *same* geometry with `side: BackSide` and each vertex
+ * pushed outward along its projected normal by a constant number of screen
+ * pixels. Backfaces sit behind the object's own front faces, so the depth test
+ * discards them everywhere the object covers and only the pushed-out rim
+ * survives — a real contour whatever the tessellation, where EdgesGeometry
+ * gives either an X-ray wireframe (low threshold) or nothing at all on a
+ * smooth body (high threshold).
+ *
+ * The extrusion happens in clip space, so the outline is `widthPx` wide on
+ * screen at any zoom and under both cameras, and the geometry is shared with
+ * the source mesh (no duplicate buffers, and it must therefore never be
+ * disposed here — only the material is ours).
+ *
+ * Trade-off vs the `edges` style: the hull must be depth-tested (a
+ * `depthTest: false` hull would paint its backfaces over the object body), so
+ * a silhouette highlight is hidden by objects in front of it, where the edge
+ * outline draws always-on-top.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {THREE.Color} color
+ * @param {number} widthPx
+ * @param {{value: THREE.Vector2}} resolution  shared drawing-buffer size uniform
+ * @returns {THREE.Mesh}
+ */
+function buildHighlightSilhouette(geometry, color, widthPx, resolution) {
+    const mat = new THREE.MeshBasicMaterial({
+        color, side: THREE.BackSide,
+        depthWrite: false, toneMapped: false, fog: false,
+    });
+    // Retained on the material so a later width change is a uniform write
+    // (the shader holds this very object) instead of a recompile.
+    const widthUniform = { value: widthPx };
+    mat.userData.__highlightWidth = widthUniform;
+    mat.onBeforeCompile = (shader) => {
+        shader.uniforms.uOutlinePx = widthUniform;
+        shader.uniforms.uOutlineRes = resolution;
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>',
+                '#include <common>\nuniform float uOutlinePx;\nuniform vec2 uOutlineRes;')
+            .replace('#include <project_vertex>', /* glsl */ `
+                #include <project_vertex>
+                // Push along the normal in clip space: normalize in NDC, then
+                // scale by w so the offset stays constant in pixels with
+                // perspective divide (and is simply constant under ortho).
+                vec3 outlineN = normalize(normalMatrix * normal);
+                vec2 outlineDir = (projectionMatrix * vec4(outlineN, 0.0)).xy;
+                if (length(outlineDir) > 1e-8) {
+                    gl_Position.xy += normalize(outlineDir)
+                        * (uOutlinePx * 2.0 / uOutlineRes) * gl_Position.w;
+                }
+            `);
+    };
+    // Distinct cache key: the stock MeshBasicMaterial program must not be
+    // reused for (or replaced by) this patched one.
+    mat.customProgramCacheKey = () => 'tjsv-highlight-silhouette';
+    const hull = new THREE.Mesh(geometry, mat);
+    hull.userData.__highlightSharedGeometry = true;
+    return hull;
+}
+
+/**
+ * Feature-edge outline for the selection highlight (the original #147 look,
+ * with the #158 threshold knob). Always-on-top (`depthTest: false`), so it
+ * shows through occluders.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {THREE.Color} color
+ * @param {number} thresholdDeg
+ * @returns {THREE.LineSegments}
+ */
+function buildHighlightEdges(geometry, color, thresholdDeg) {
+    return new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry, thresholdDeg),
+        new THREE.LineBasicMaterial({
+            color,
+            transparent: true, opacity: 0.95,
+            depthTest: false, depthWrite: false,
+            toneMapped: false,
+        })
+    );
+}
+
+/**
+ * Can this mesh prime the depth buffer for a silhouette hull drawn over it?
+ *
+ * The hull is drawn with `side: BackSide` and relies on the mesh's own front
+ * faces already sitting in the depth buffer: the backfaces then fail the depth
+ * test everywhere the object covers, and only the pushed-out rim survives. If
+ * nothing primed that depth, the entire hull draws and the "outline" reads as
+ * a solid shell of the selection colour over the object.
+ *
+ * Two ways a mesh fails to prime it, and **both** matter:
+ *  - `depthWrite === false` — `applyOpacity` clears it below opacity 1.
+ *  - `transparent === true` — the subtler one. three.js renders the opaque
+ *    pass in full before the transparent pass, and `renderOrder` only sorts
+ *    *within* a pass. The hull's material is opaque, so it always draws before
+ *    a transparent mesh no matter how high its renderOrder, and the depth
+ *    buffer is still empty when it does. A primitive added with `opacity < 1`
+ *    is exactly this case: `_createMaterial` sets `transparent` but leaves
+ *    `depthWrite` true, so testing depthWrite alone would miss it.
+ * @param {any} child
+ * @returns {boolean}
+ */
+function meshPrimesDepth(child) {
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    return mats.every(/** @param {any} m */ m => m && m.depthWrite !== false && !m.transparent);
+}
+
+/**
+ * Resolve the outline style actually usable on this mesh. `'silhouette'`
+ * degrades to `'edges'` when the hull could not represent the mesh honestly:
+ * a skinned mesh (the hull's basic material is un-skinned, so it would lag the
+ * skeleton), geometry with no `normal` attribute (nothing to extrude along, so
+ * the hull collapses onto the mesh), or a mesh that cannot prime the depth
+ * buffer the hull is culled against (the hull would paint a solid shell — see
+ * meshPrimesDepth).
+ * @param {any} child
+ * @param {string} wantStyle
+ * @returns {string}
+ */
+function resolveHighlightStyle(child, wantStyle) {
+    if (wantStyle !== 'silhouette') return 'edges';
+    if (child.isSkinnedMesh) return 'edges';
+    if (!child.geometry.attributes || !child.geometry.attributes.normal) return 'edges';
+    if (!meshPrimesDepth(child)) return 'edges';
+    return 'silhouette';
+}
 
 /**
  * Toggle a persistent selection outline on `obj` and its mesh descendants
- * (issue #147). Follows the gizmo outline recipe (EdgesGeometry +
- * LineSegments, depthTest/depthWrite off, renderOrder 1000) but — unlike
- * `restyleGizmoHelper` — never mutates the mesh's own materials, so
- * toggling off restores the original appearance exactly: the outline is a
- * separate child object that is removed and disposed (EdgesGeometry +
- * LineBasicMaterial) on disable. Idempotent: enabling twice re-uses the
- * existing outline (re-tinting it if a new colour is given) instead of
+ * (issue #147). Never mutates the mesh's own materials — the outline is a
+ * separate child object that is removed and disposed on disable, so toggling
+ * off restores the original appearance exactly. Idempotent: enabling twice
+ * re-uses the existing outline (re-tinting it, and rebuilding its geometry or
+ * material only when the style/threshold/width actually changed) instead of
  * stacking a second one. The outline is parented to the mesh itself so it
  * follows any re-posing (FK groups, animation transforms) automatically,
  * never raycasts (no-op `raycast` like the floor grid, so `viewer.pick`,
  * gizmo click-select, and double-click framing pass through it), and is
- * skipped by the M/N debug cycles (it is a LineSegments, not a Mesh) and by
- * `set_color`/`applyOpacity` (guarded on `userData.__highlightOutline`).
- * Deleting the object disposes the outline with every other child.
+ * skipped by the M/N debug cycles and by `set_color`/`applyOpacity` (all
+ * guarded on `userData.__highlightOutline`).
+ *
+ * Two styles (issue #165): `'silhouette'` (default) is an inverted-hull
+ * contour, legible on dense CAD meshes and smooth analytic surfaces alike;
+ * `'edges'` is the EdgesGeometry feature-edge outline, always-on-top, with a
+ * tunable threshold angle (issue #158).
+ *
+ * A skinned mesh, one whose geometry carries no `normal` attribute, or one
+ * that cannot prime the depth buffer falls back to `'edges'` (see
+ * resolveHighlightStyle): the hull is drawn with a plain (un-skinned) basic
+ * material, extrudes along the normal, and is culled by the object's own
+ * depth — so it would respectively lag the skeleton, collapse onto the mesh,
+ * or paint a solid shell. The depth case is the translucent object, and a
+ * later `set_opacity` on an already-highlighted mesh re-resolves the style
+ * from the retained opts so the order of the two calls does not matter.
  * @param {THREE.Object3D} obj
  * @param {boolean} enabled
- * @param {number|string} [color]  hex number or CSS colour string
+ * @param {{color?: number|string, style?: string, thresholdDeg?: number,
+ *          widthPx?: number, resolution?: {value: THREE.Vector2}}} [opts]
  */
-function applyHighlight(obj, enabled, color) {
+function applyHighlight(obj, enabled, opts = {}) {
+    const thr = Number.isFinite(opts.thresholdDeg)
+        ? /** @type {number} */ (opts.thresholdDeg) : HIGHLIGHT_DEFAULT_THRESHOLD_DEG;
+    const widthPx = Number.isFinite(opts.widthPx)
+        ? /** @type {number} */ (opts.widthPx) : HIGHLIGHT_DEFAULT_WIDTH_PX;
+    const wantStyle = opts.style === 'edges' || opts.style === 'silhouette'
+        ? opts.style : HIGHLIGHT_DEFAULT_STYLE;
+    const resolution = opts.resolution || { value: new THREE.Vector2(1, 1) };
     obj.traverse(/** @param {any} child */ (child) => {
         if (!child.isMesh || !child.geometry) return;
         // Never outline viewer-internal mesh children: the shader floor grid
         // (an outline would draw its plane border), combined-mode wireframe
         // overlays (share the parent's geometry — a duplicate outline), and
-        // existing highlight outlines themselves.
+        // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
             || child.userData.__highlightOutline) return;
+        const style = resolveHighlightStyle(child, wantStyle);
         const existing = child.userData.__highlightEdge;
         if (enabled) {
-            const col = new THREE.Color(color != null ? color : HIGHLIGHT_DEFAULT_COLOR);
-            if (existing) {                     // idempotent: re-tint, never stack
-                existing.material.color.copy(col);
+            const col = new THREE.Color(opts.color != null ? opts.color : HIGHLIGHT_DEFAULT_COLOR);
+            // Retained so a later set_opacity can re-resolve the style against
+            // the mesh's new depthWrite state without the caller re-sending.
+            child.userData.__highlightOpts = {
+                color: opts.color, style: wantStyle, thresholdDeg: thr,
+                widthPx, resolution,
+            };
+            if (existing && existing.userData.__highlightStyle === style) {
+                existing.material.color.copy(col);   // idempotent: re-tint in place
+                if (style === 'silhouette') {
+                    existing.material.userData.__highlightWidth.value = widthPx;
+                } else if (existing.userData.__highlightThreshold !== thr) {
+                    // A new threshold rebuilds the edge geometry in place — the
+                    // outline object (parenting, renderOrder, raycast) is reused,
+                    // so this stays one outline per mesh.
+                    existing.geometry.dispose();
+                    existing.geometry = new THREE.EdgesGeometry(child.geometry, thr);
+                    existing.userData.__highlightThreshold = thr;
+                }
                 return;
             }
-            const edge = new THREE.LineSegments(
-                new THREE.EdgesGeometry(child.geometry),
-                new THREE.LineBasicMaterial({
-                    color: col,
-                    transparent: true, opacity: 0.95,
-                    depthTest: false, depthWrite: false,
-                    toneMapped: false,
-                })
-            );
-            edge.renderOrder = 1000;
-            edge.userData.__highlightOutline = true;
-            edge.raycast = () => {};
-            edge.name = (child.name || 'mesh') + '_highlight';
-            child.userData.__highlightEdge = edge;
-            child.add(edge);
-        } else if (existing) {
-            child.remove(existing);
-            existing.geometry.dispose();
-            existing.material.dispose();
-            delete child.userData.__highlightEdge;
+            if (existing) disposeHighlightOutline(child, existing);  // style change
+            const outline = style === 'silhouette'
+                ? buildHighlightSilhouette(child.geometry, col, widthPx, resolution)
+                : buildHighlightEdges(child.geometry, col, thr);
+            // Draw after the object so the hull tests against a depth buffer
+            // that already holds it (an opaque object may otherwise sort after
+            // the hull and simply overdraw the rim).
+            outline.renderOrder = 1000;
+            outline.userData.__highlightOutline = true;
+            outline.userData.__highlightStyle = style;
+            outline.userData.__highlightThreshold = style === 'edges' ? thr : null;
+            outline.raycast = () => {};
+            outline.name = (child.name || 'mesh') + '_highlight';
+            child.userData.__highlightEdge = outline;
+            child.add(outline);
+        } else {
+            if (existing) disposeHighlightOutline(child, existing);
+            // Drop the retained opts too, so a later set_opacity on a
+            // no-longer-highlighted mesh has nothing to re-apply.
+            delete child.userData.__highlightOpts;
         }
     });
+}
+
+/**
+ * Detach and dispose one outline child. The silhouette hull *shares* the
+ * source mesh's geometry — disposing it would tear down the object's own GL
+ * buffers — so only its material is disposed.
+ * @param {any} child
+ * @param {any} outline
+ */
+function disposeHighlightOutline(child, outline) {
+    child.remove(outline);
+    if (!outline.userData.__highlightSharedGeometry) outline.geometry.dispose();
+    outline.material.dispose();
+    delete child.userData.__highlightEdge;
 }
 
 // Primitive creators
@@ -4694,6 +4896,9 @@ class ShadingDebugController {
             if (!obj.isMesh) return;
             if (obj.userData.isWireOverlay) return;
             if (obj.userData.isGrid) return;
+            // Selection-silhouette hulls are Meshes (issue #165) — wireframing
+            // one would draw the whole extruded shell as a wire cage.
+            if (obj.userData.__highlightOutline) return;
             if (!obj.material) return;
             const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
             for (const m of mats) {
@@ -4856,6 +5061,9 @@ class ShadingDebugController {
                 if (obj.userData.isWireOverlay) return;
                 if (obj.userData.isDebugHelper) return;
                 if (obj.userData.isGrid) return;
+                // Selection-silhouette hulls are Meshes (issue #165): a debug
+                // material swap would turn the outline into a solid shell.
+                if (obj.userData.__highlightOutline) return;
                 cb(obj);
             });
         }
@@ -7959,6 +8167,11 @@ export class ThreeJSViewer {
         this._lastResizeWidth = null;
         /** @type {number | null} */
         this._lastResizeHeight = null;
+        // Viewport size shared by reference into every selection-silhouette
+        // shader (issue #165) so the outline stays `widthPx` wide on screen;
+        // updated in resize(), which also runs once on construction.
+        this._highlightResolution = { value: new THREE.Vector2(
+            this.container.clientWidth || 1, this.container.clientHeight || 1) };
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
             this._pendingResize = { width, height };
@@ -10778,7 +10991,13 @@ export class ThreeJSViewer {
                 // Toggle a persistent selection outline (issue #147). Transient
                 // like set_color/set_opacity — not replayed on reconnect.
                 this._withObject(data.id, 'set_highlight', (obj) =>
-                    applyHighlight(obj, data.enabled !== false, data.color));
+                    applyHighlight(obj, data.enabled !== false, {
+                        color: data.color,
+                        style: data.style,
+                        thresholdDeg: data.threshold_deg,
+                        widthPx: data.width_px,
+                        resolution: this._highlightResolution,
+                    }));
                 break;
             case 'list_objects':
                 return this._reply({
@@ -12750,6 +12969,8 @@ export class ThreeJSViewer {
                 obj.material.resolution.set(width, height);
             }
         });
+        // Selection silhouettes read this by reference (issue #165).
+        this._highlightResolution.value.set(width, height);
         this._depthCue.onResize(width, height);
     }
 

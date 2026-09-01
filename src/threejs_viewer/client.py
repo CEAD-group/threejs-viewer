@@ -39,6 +39,7 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
+_ALLOWED_HIGHLIGHT_STYLES = frozenset({"silhouette", "edges"})
 _ALLOWED_VIEWS = frozenset(
     {"top", "bottom", "front", "back", "left", "right", "iso", "home"}
 )
@@ -2490,23 +2491,88 @@ class ViewerClient:
         self._send({"type": "set_opacity", "id": id, "opacity": float(opacity)})
 
     def set_highlight(
-        self, id: str, enabled: bool = True, color: Optional[Union[int, str]] = None
+        self,
+        id: str,
+        enabled: bool = True,
+        color: Optional[Union[int, str]] = None,
+        style: Optional[str] = None,
+        width_px: Optional[float] = None,
+        threshold_deg: Optional[float] = None,
     ):
         """Toggle a persistent selection outline on an object.
 
-        Draws an edge outline (always on top) around every mesh in the
-        object — including all descendants of a GLB/model group — without
-        touching the object's own materials, so turning it off restores the
-        original appearance exactly. Idempotent: enabling twice never stacks
-        a second outline (a new ``color`` re-tints the existing one).
+        Outlines every mesh in the object — including all descendants of a
+        GLB/model group — without touching the object's own materials, so
+        turning it off restores the original appearance exactly. Idempotent:
+        enabling twice never stacks a second outline (new options re-tint and
+        rebuild the existing one in place).
 
         ``color`` is a hex int (e.g. ``0xFFAA00``) or CSS colour string;
-        omit it for the default selection orange. Transient viewer state
-        like :meth:`set_color` (not replayed on reconnect).
+        omit it for the default selection orange.
+
+        ``style`` picks the outline kind:
+
+        - ``"silhouette"`` (default) — a true contour around the mesh, drawn
+          as an inverted hull extruded ``width_px`` screen pixels along the
+          normals. Legible on dense CAD meshes and on smooth analytic
+          surfaces alike, at any zoom. Depth-tested, so it is hidden by
+          objects in front of it.
+        - ``"edges"`` — feature edges (sharp creases), drawn always on top so
+          the selection shows through occluders. Use it when the interior
+          structure of the selection matters.
+
+        ``width_px`` is the silhouette thickness in screen pixels (default 3,
+        must be > 0); ``threshold_deg`` is the ``"edges"`` threshold angle
+        (default 30°, in [0, 180]) — an edge is drawn only where the two faces
+        meeting at it differ by more than this, so a higher value keeps only
+        the hardest creases and a lower one (e.g. 1°) draws every tessellation
+        edge. Each option applies to its own style and is ignored by the other.
+
+        **Translucent objects fall back to** ``"edges"``. The silhouette is a
+        back-face hull culled by the object's own depth, and a translucent
+        mesh cannot supply that depth: three.js draws the whole opaque pass
+        before the transparent one, so the hull would be drawn first, against
+        an empty depth buffer, and would cover the object in a solid shell of
+        the selection colour. Any mesh with ``transparent`` set or
+        ``depthWrite`` cleared — i.e. anything with ``opacity < 1``, whether
+        from :meth:`set_opacity` or an add-time ``opacity=`` — is outlined
+        with ``"edges"`` instead, whatever ``style`` asks for. The same
+        fallback covers skinned meshes and geometry with no vertex normals.
+
+        **Known limitation:** that leaves one combination with no visible
+        highlight — a *smooth* translucent body (a sphere, a fillet), where
+        the fallback draws feature edges but the surface has no crease above
+        ``threshold_deg`` to draw. Lower ``threshold_deg`` to pull out
+        tessellation edges if you need a marker there, or make the object
+        opaque while it is selected. Prismatic translucent parts are
+        unaffected — they have creases, and outline normally.
+
+        Transient viewer state like :meth:`set_color` (not replayed on
+        reconnect).
         """
         msg = {"type": "set_highlight", "id": id, "enabled": bool(enabled)}
         if color is not None:
             msg["color"] = color
+        if style is not None:
+            if style not in _ALLOWED_HIGHLIGHT_STYLES:
+                raise ValueError(
+                    f"style must be one of {sorted(_ALLOWED_HIGHLIGHT_STYLES)}, "
+                    f"got {style!r}"
+                )
+            msg["style"] = style
+        if width_px is not None:
+            width_px = float(width_px)
+            if not math.isfinite(width_px) or width_px <= 0:
+                raise ValueError(f"width_px must be finite and > 0, got {width_px}")
+            msg["width_px"] = width_px
+        if threshold_deg is not None:
+            threshold_deg = float(threshold_deg)
+            if not math.isfinite(threshold_deg) or not (0.0 <= threshold_deg <= 180.0):
+                raise ValueError(
+                    f"threshold_deg must be a finite angle in [0, 180], "
+                    f"got {threshold_deg}"
+                )
+            msg["threshold_deg"] = threshold_deg
         self._send(msg)
 
     def set_clip_time(self, id: str, time: float):
