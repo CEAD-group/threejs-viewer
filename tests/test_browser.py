@@ -1302,6 +1302,56 @@ def test_loop_override_false_holds_at_end(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_nonfinite_matrix_holds_last_good_pose(viewer_client, viewer_page):
+    """A NaN keyframe must not make the object vanish (issue #162).
+
+    A single non-finite element poisons matrixWorld for the whole subtree and
+    three.js drops the object outright. The guard skips the bad matrix, so the
+    object stays visible at its last good pose.
+    """
+    viewer_client.add_box("nanbox")
+    time.sleep(0.1)
+    eye = np.eye(4, dtype=np.float32).flatten(order="F")
+    data = np.tile(eye, (3, 1, 1)).astype(np.float32)  # (3 frames, 1 obj, 16)
+    data[1, 0, 12] = 5.0  # x = 5 at t=1 — the last good pose
+    data[2, 0, :] = np.nan  # poisoned keyframe at t=2
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0, 2.0]))
+    anim.set_transform_data(["nanbox"], data)
+    viewer_client.load_animation(anim, autoplay=False, initial_time=1.0)
+    _wait_for_animation_loaded(viewer_page)
+    time.sleep(0.3)
+    assert _world_position(viewer_page, "nanbox") == pytest.approx(
+        [5.0, 0.0, 0.0], abs=1e-4
+    ), "setup: object should sit at x=5 on the last good keyframe"
+
+    # Between the good and the NaN keyframe the lerp result is NaN...
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(1.5)")
+    time.sleep(0.2)
+    pos = _world_position(viewer_page, "nanbox")
+    assert all(math.isfinite(c) for c in pos), f"NaN leaked into matrixWorld: {pos}"
+    assert pos == pytest.approx([5.0, 0.0, 0.0], abs=1e-4)
+
+    # ...and landing exactly on the NaN keyframe holds it too.
+    viewer_page.evaluate("() => window.threejsViewer._seekToTime(2.0)")
+    time.sleep(0.2)
+    pos = _world_position(viewer_page, "nanbox")
+    assert all(math.isfinite(c) for c in pos), f"NaN leaked into matrixWorld: {pos}"
+    assert pos == pytest.approx([5.0, 0.0, 0.0], abs=1e-4)
+
+    # The object is still in the scene and visible (not dropped by three.js).
+    state = viewer_page.evaluate(
+        "() => { const o = window.threejsViewer._objects.get('nanbox');"
+        " return { visible: o.visible,"
+        "          finite: o.matrix.elements.every(Number.isFinite),"
+        "          warned: !!o.userData.__warnedNonFiniteMatrix }; }"
+    )
+    assert state["visible"] is True
+    assert state["finite"] is True
+    assert state["warned"] is True, "expected the one-time non-finite warning"
+
+
+@pytest.mark.browser
 def test_pause_and_resume_animation(viewer_client, viewer_page):
     """pause_animation() / resume_animation() toggle meta.animation.playing."""
     viewer_client.add_box("pbox")
