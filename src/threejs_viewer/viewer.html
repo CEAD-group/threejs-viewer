@@ -1441,6 +1441,96 @@ function lerpMatrixInto(srcA, baseA, srcB, baseB, t, outMat) {
     outMat.compose(_lerpPosA, _lerpQuatA, _lerpScaleA);
 }
 
+// ---- Non-finite matrix guard (issue #162) ----
+// A single NaN/Inf element anywhere in a 4x4 poisons `matrixWorld` for the
+// whole subtree, every vertex lands at NaN clip space and three.js drops the
+// object outright — mid-playback a link just vanishes, with no diagnostic.
+// Every matrix write coming off the wire (animation channels + streaming
+// transform updates) therefore goes through these helpers: a non-finite
+// matrix is dropped and the object simply holds its last good pose.
+//
+// Cost: 16 `Number.isFinite` calls per *applied* matrix (not per element of
+// every frame — only the one keyframe pair actually being applied this
+// frame). Measured at ~6.5 us/frame for the 520-object stress example
+// (examples/10_animation_stress_test.py), i.e. ~0.04% of a 16.7 ms frame
+// budget, and an order of magnitude under the decompose/slerp/compose the
+// linear path already runs per object.
+/**
+ * @param {ArrayLike<number>} src
+ * @param {number} base
+ */
+function matrixElementsFinite(src, base) {
+    for (let k = 0; k < 16; k++) {
+        if (!Number.isFinite(src[base + k])) return false;
+    }
+    return true;
+}
+
+/**
+ * Finite check for a loose transform component array (position/rotation/
+ * quaternion/scale). Non-numeric entries are ignored — `Euler.fromArray`
+ * takes an order string as its 4th element.
+ * @param {ArrayLike<any>} arr
+ */
+function arrayFinite(arr) {
+    for (let i = 0; i < arr.length; i++) {
+        const v = arr[i];
+        if (typeof v === 'number' && !Number.isFinite(v)) return false;
+    }
+    return true;
+}
+
+// One warning per object id — a bad keyframe is usually a whole bad channel,
+// and warning per frame would flood the console at 60fps.
+/**
+ * @param {any} obj
+ * @param {string} what
+ */
+function warnNonFiniteMatrix(obj, what) {
+    if (obj.userData.__warnedNonFiniteMatrix) return;
+    obj.userData.__warnedNonFiniteMatrix = true;
+    const id = obj.userData.id || obj.name || '(unnamed)';
+    console.warn(
+        `${what}: '${id}' received a non-finite (NaN/Inf) matrix — holding the ` +
+        `last good pose. Further non-finite matrices for this object are not reported.`);
+}
+
+/**
+ * Copy a flat 4x4 at `src[base..base+16)` into `obj.matrix`, unless it holds a
+ * non-finite element (then the previous pose is kept). Returns true if applied.
+ * @param {any} obj
+ * @param {ArrayLike<number>} src
+ * @param {number} base
+ * @param {string} what
+ */
+function setObjectMatrixChecked(obj, src, base, what) {
+    if (!matrixElementsFinite(src, base)) {
+        warnNonFiniteMatrix(obj, what);
+        return false;
+    }
+    obj.matrix.fromArray(src, base);
+    obj.matrixWorldNeedsUpdate = true;
+    return true;
+}
+
+/**
+ * Same, for an already-composed Matrix4 (the interpolated result). NaN/Inf in
+ * either endpoint propagates through lerp/slerp/compose, so checking the
+ * output alone catches a bad keyframe on either side.
+ * @param {any} obj
+ * @param {THREE.Matrix4} mat
+ * @param {string} what
+ */
+function setObjectMatrix4Checked(obj, mat, what) {
+    if (!matrixElementsFinite(mat.elements, 0)) {
+        warnNonFiniteMatrix(obj, what);
+        return false;
+    }
+    obj.matrix.copy(mat);
+    obj.matrixWorldNeedsUpdate = true;
+    return true;
+}
+
 // Returns true when a channel should interpolate linearly between `base` and
 // `baseNext`. Every channel carries its own explicit interpolation mode, set
 // Python-side per channel — this function just checks that mode plus the
@@ -1594,16 +1684,14 @@ function makeChannelApply(viewer) {
                     const obj = refs[i];
                     if (obj) {
                         lerpMatrixInto(ch.data, base + i * 16, ch.data, baseNext + i * 16, t, _lerpMatOut);
-                        obj.matrix.copy(_lerpMatOut);
-                        obj.matrixWorldNeedsUpdate = true;
+                        setObjectMatrix4Checked(obj, _lerpMatOut, 'transforms channel');
                     }
                 }
             } else {
                 for (let i = 0; i < nObj; i++) {
                     const obj = refs[i];
                     if (obj) {
-                        obj.matrix.fromArray(ch.data, base + i * 16);
-                        obj.matrixWorldNeedsUpdate = true;
+                        setObjectMatrixChecked(obj, ch.data, base + i * 16, 'transforms channel');
                     }
                 }
             }
@@ -9587,11 +9675,23 @@ class ThreeJSViewer {
     _applyTransform(obj, transform) {
         if (!transform) return;
         if (transform.matrix) {
-            const m = new THREE.Matrix4();
-            m.fromArray(transform.matrix);
-            obj.matrix.copy(m);
+            // Same guard as the animation path: a non-finite element would be
+            // decomposed into NaN position/quaternion/scale and the object
+            // would vanish for good. Hold the last good pose instead.
+            if (!matrixElementsFinite(transform.matrix, 0)) {
+                warnNonFiniteMatrix(obj, 'update_transform');
+                return;
+            }
+            obj.matrix.fromArray(transform.matrix);
             obj.matrix.decompose(obj.position, obj.quaternion, obj.scale);
         } else {
+            for (const key of ['position', 'rotation', 'quaternion', 'scale']) {
+                const v = transform[key];
+                if (v && !arrayFinite(v)) {
+                    warnNonFiniteMatrix(obj, `update_transform (${key})`);
+                    return;
+                }
+            }
             if (transform.position) obj.position.fromArray(transform.position);
             if (transform.rotation) obj.rotation.fromArray(transform.rotation);
             if (transform.quaternion) obj.quaternion.fromArray(transform.quaternion);
@@ -10536,11 +10636,10 @@ class ThreeJSViewer {
                 const nextMat = nextT ? nextT[id] : null;
                 if (nextMat) {
                     lerpMatrixInto(matrix, 0, nextMat, 0, t, _lerpMatOut);
-                    obj.matrix.copy(_lerpMatOut);
+                    setObjectMatrix4Checked(obj, _lerpMatOut, 'frame transforms');
                 } else {
-                    obj.matrix.fromArray(matrix);
+                    setObjectMatrixChecked(obj, matrix, 0, 'frame transforms');
                 }
-                obj.matrixWorldNeedsUpdate = true;
             }
         }
         if (frame.colors) {
