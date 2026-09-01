@@ -680,6 +680,99 @@ function applyPointsTimeWindow(material, timeUniform, hasBirth, hasRemoval) {
         `tjsvPointsTime|${hasBirth ? 'b' : ''}${hasRemoval ? 'r' : ''}`;
 }
 
+// ---- Incremental point-cloud growth (append_points) -------------------------
+// A live producer (a laser tracker at 1 kHz, a scanner) grows one cloud for
+// minutes to hours. Re-sending the cloud per update is O(total) per update;
+// these two helpers keep an append O(new points): capacity doubles when it
+// runs out (amortized O(1) per point) and bounds are expanded rather than
+// recomputed.
+
+/** Minimum capacity a grown point buffer is rounded up to — a producer that
+ * appends a handful of points per update would otherwise realloc every few
+ * updates while the cloud is still tiny. */
+const POINTS_APPEND_MIN_CAPACITY = 1024;
+
+/**
+ * Make room for `numNew` more points in a flat cloud's geometry, growing
+ * geometrically. Returns the geometry to write into — the same one when the
+ * spare capacity already suffices (the common case: no realloc, no
+ * re-upload of existing data), or a fresh doubled-capacity geometry that has
+ * taken over the object, with the old one disposed.
+ *
+ * A fresh geometry (rather than swapping attributes in place) is what frees
+ * the old GL buffers: three deletes them from its `onGeometryDispose` hook,
+ * and a replaced-but-not-disposed attribute would leak its buffer.
+ * @param {any} points THREE.Points created by add_points
+ * @param {number} count logical point count currently stored
+ * @param {number} numNew points about to be appended
+ * @returns {any} geometry with capacity >= count + numNew
+ */
+function ensurePointsCapacity(points, count, numNew) {
+    const geom = points.geometry;
+    const posAttr = geom.getAttribute('position');
+    const needed = count + numNew;
+    if (needed <= posAttr.count) return geom;
+
+    const capacity = Math.max(posAttr.count * 2, needed, POINTS_APPEND_MIN_CAPACITY);
+    const grown = new THREE.BufferGeometry();
+    const pos = new Float32Array(capacity * 3);
+    pos.set(posAttr.array.subarray(0, count * 3));
+    const newPosAttr = new THREE.BufferAttribute(pos, 3);
+    newPosAttr.setUsage(THREE.DynamicDrawUsage);
+    grown.setAttribute('position', newPosAttr);
+
+    const colAttr = geom.getAttribute('color');
+    if (colAttr) {
+        const col = new Float32Array(capacity * 3);
+        col.set(colAttr.array.subarray(0, count * 3));
+        const newColAttr = new THREE.BufferAttribute(col, 3);
+        newColAttr.setUsage(THREE.DynamicDrawUsage);
+        grown.setAttribute('color', newColAttr);
+    }
+    grown.setDrawRange(geom.drawRange.start, geom.drawRange.count);
+    // Carry the bounds across. expandPointsBounds() seeds its box with an
+    // O(count) scan whenever boundingBox is missing, so dropping them here
+    // would make every capacity doubling re-scan the whole cloud — a latency
+    // spike on exactly the multi-million-point stream this path is for
+    // (amortised it stays linear, but one 5M-point append should not stall).
+    if (geom.boundingBox) grown.boundingBox = geom.boundingBox.clone();
+    if (geom.boundingSphere) grown.boundingSphere = geom.boundingSphere.clone();
+    points.geometry = grown;
+    geom.dispose();
+    return grown;
+}
+
+/**
+ * Expand a cloud's bounding box by the freshly appended points and re-derive
+ * its bounding sphere from the box. O(new points): a `computeBoundingSphere`
+ * would be O(total) on every append. The box is exact; the sphere is the
+ * box's circumsphere, so it over-estimates by up to sqrt(3) — safe for
+ * frustum culling and framing, both of which only need a bound.
+ * @param {any} points THREE.Points
+ * @param {Float32Array} newPos xyz triples of the appended points
+ * @param {number} count logical point count *before* the append
+ */
+function expandPointsBounds(points, newPos, count) {
+    const geom = points.geometry;
+    if (!geom.boundingBox) {
+        // First append: seed the box from the points already stored (one
+        // O(count) pass over the cloud as it stood, then incremental).
+        const seed = new THREE.Box3();
+        const posArr = geom.getAttribute('position').array;
+        const v = new THREE.Vector3();
+        for (let i = 0; i < count; i++) {
+            seed.expandByPoint(v.fromArray(posArr, i * 3));
+        }
+        geom.boundingBox = seed;
+    }
+    const box = geom.boundingBox;
+    const v = new THREE.Vector3();
+    for (let i = 0, n = newPos.length / 3; i < n; i++) {
+        box.expandByPoint(v.fromArray(newPos, i * 3));
+    }
+    geom.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+}
+
 // ========== Points LOD (octree-streamed point clouds) ==========
 // Potree-style additive sampled octree built Python-side (see
 // plans/points-octree-lod.md): every node carries a time-stratified sample
@@ -7265,6 +7358,12 @@ export class ThreeJSViewer {
         // child entries are pruned in _deleteObject.
         /** @type {Map<string, Set<string>>} */
         this._pendingReparent = new Map();
+        // Per-id append chain for append_points_binary: each append links
+        // onto the previous one's promise so a burst of appends applies in
+        // send order (the blob fetches complete out of order otherwise, and
+        // a point cloud's buffer order is the contract for draw_range).
+        /** @type {Map<string, Promise<void>>} */
+        this._pointsAppendChain = new Map();
         this._animGeneration = 0;
         this._assetsComplete = false;
         this._ws = null;
@@ -8794,6 +8893,113 @@ export class ThreeJSViewer {
     }
 
     /**
+     * Append points to a flat cloud created by `add_points` (issue: live
+     * streaming producers). The whole point is that this costs O(new
+     * points), not O(total): the existing vertex data is never re-uploaded.
+     *
+     * Buffers are allocated with spare capacity and grown *geometrically*
+     * (doubling) — an append that fits writes into the tail of the existing
+     * typed array and flags only that slice via `addUpdateRange`, so the GL
+     * upload is `bufferSubData` over the new points alone. When capacity
+     * runs out a fresh geometry is built at double the size, the old data
+     * copied once and the old geometry disposed (amortized O(1) per point).
+     *
+     * Colours ride the same vertex-colour attribute `add_points` created;
+     * the scalar→RGB colormap mapping happens Python-side against the
+     * cmin/cmax fixed at `add_points` time (rescaling the ramp per append
+     * would mean re-colouring the whole cloud, which is exactly the O(total)
+     * cost this path exists to avoid).
+     *
+     * Appends are serialized per id by `handleMessage`'s chain, so buffer
+     * order matches send order (draw_range's prefix contract depends on it).
+     * @param {any} data
+     */
+    async _appendPointsBinary(data) {
+        const id = data.id;
+        const obj = await this._awaitObject(id);
+        if (!obj || !obj.userData.isPoints) {
+            console.warn(
+                `append_points: '${id}' is not a flat point cloud — ` +
+                `add_points must have created it first (LOD clouds are not appendable)`);
+            return;
+        }
+        const numNew = data.numPoints | 0;
+        if (numNew <= 0) return;
+        const hasColors = !!obj.geometry.getAttribute('color');
+        if (!!data.hasVertexColors !== hasColors) {
+            console.warn(
+                `append_points: '${id}' colour mismatch — the cloud ` +
+                `${hasColors ? 'has' : 'has no'} per-point colours but the append ` +
+                `${data.hasVertexColors ? 'carries' : 'carries none'}; dropping`);
+            return;
+        }
+        if (obj.geometry.getAttribute('birthTime') || obj.geometry.getAttribute('removalTime')) {
+            console.warn(
+                `append_points: '${id}' has a per-point time window — appending to a ` +
+                `time-windowed cloud is not supported; dropping`);
+            return;
+        }
+
+        this._onFetchStart();
+        let buffer;
+        try {
+            buffer = await fetchArrayBuffer(data.blob_url, `append_points_binary '${id}'`);
+        } finally {
+            this._onFetchEnd();
+        }
+        // The cloud may have been deleted, cleared or re-added while the
+        // blob was in flight — appending into a replaced object would
+        // corrupt the new one.
+        if (this._objects.get(id) !== obj) {
+            console.warn(`append_points: '${id}' was replaced or removed mid-fetch, dropping append`);
+            return;
+        }
+
+        const raw = new Uint8Array(buffer);
+        const posBytes = numNew * 12;
+        const expected = posBytes + (hasColors ? numNew * 3 : 0);
+        if (raw.length < expected) {
+            throw new Error(
+                `append_points payload too short: ${raw.length} bytes, expected ` +
+                `${expected} for ${numNew} points (colors=${hasColors})`);
+        }
+        // Copy into fresh buffers: the color block is 3 bytes/point, so
+        // neither block is guaranteed 4-byte aligned inside the payload.
+        const posBuf = new ArrayBuffer(posBytes);
+        new Uint8Array(posBuf).set(raw.subarray(0, posBytes));
+        const newPos = new Float32Array(posBuf);
+
+        const count = obj.userData.totalPointCount;
+        const total = count + numNew;
+        const geom = ensurePointsCapacity(obj, count, numNew);
+        const posAttr = geom.getAttribute('position');
+        posAttr.array.set(newPos, count * 3);
+        posAttr.addUpdateRange(count * 3, numNew * 3);
+        posAttr.needsUpdate = true;
+        if (hasColors) {
+            const colAttr = geom.getAttribute('color');
+            const colArr = colAttr.array;
+            for (let i = 0, n = numNew * 3; i < n; i++) {
+                colArr[count * 3 + i] = raw[posBytes + i] / 255;
+            }
+            colAttr.addUpdateRange(count * 3, numNew * 3);
+            colAttr.needsUpdate = true;
+        }
+
+        // Reveal the appended tail only when the cloud was fully revealed;
+        // a partial set_draw_range/animation reveal is left where it is.
+        const shown = geom.drawRange.count;
+        if (!Number.isFinite(shown) || shown >= count) geom.setDrawRange(0, total);
+        obj.userData.totalPointCount = total;
+
+        // Bounds incrementally: computing them over the whole buffer would
+        // be O(total) per append. The box is exact; the sphere is derived
+        // from it, so it is a (safe) over-estimate for culling and framing.
+        expandPointsBounds(obj, newPos, count);
+        this._sceneBoundsDirty = true;
+    }
+
+    /**
      * Runtime tuning of a streamed-LOD cloud's traversal knobs — no
      * re-upload or octree rebuild (issue #87). budget/refinePixels are
      * read fresh by every traversal frame (and the eviction limit derives
@@ -9255,6 +9461,24 @@ export class ThreeJSViewer {
                 console.warn(`${opName}: '${id}' load failed/cancelled, dropping op`, err);
             },
         );
+    }
+
+    /**
+     * Promise-flavoured `_withObject`: resolve to the object with this id,
+     * awaiting an in-flight binary load for it, or `null` when there is no
+     * such object (or its load failed / was cancelled). Used by the
+     * append_points chain, which must await the target rather than queue a
+     * callback onto it.
+     * @param {string} id
+     * @returns {Promise<any>}
+     */
+    async _awaitObject(id) {
+        const obj = this._objects.get(id);
+        if (obj) return obj;
+        const inflight = this._inflightLoads.get(id);
+        if (!inflight) return null;
+        try { await inflight.promise; } catch { return null; }
+        return this._objects.get(id) || null;
     }
 
     /**
@@ -11088,6 +11312,22 @@ export class ThreeJSViewer {
                         this._onFetchEnd();
                     }
                 })();
+                break;
+            }
+            case 'append_points_binary': {
+                // Serialize per id: the blob fetches race, and a point
+                // cloud's buffer order is its contract (draw_range reveals a
+                // prefix, and a producer's later points must land later).
+                const prev = this._pointsAppendChain.get(data.id) || Promise.resolve();
+                const next = prev.then(() => this._appendPointsBinary(data)).catch((e) => {
+                    console.error(`Error appending to point cloud '${data.id}':`, e);
+                });
+                this._pointsAppendChain.set(data.id, next);
+                next.then(() => {
+                    if (this._pointsAppendChain.get(data.id) === next) {
+                        this._pointsAppendChain.delete(data.id);
+                    }
+                });
                 break;
             }
             case 'add_points_lod': {

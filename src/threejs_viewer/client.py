@@ -17,7 +17,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
@@ -105,6 +105,12 @@ _POINTS_LOD_ALLOWED_KEYS = {
     "grid",
 }
 _POINTS_LOD_GRID_ALLOWED_KEYS = {"spacing", "origin", "codes", "order", "n_bits"}
+
+# How many append_points chunk blobs stay served. One add_* blob per object is
+# bounded; a live stream produces one blob per update indefinitely, so the
+# oldest are evicted. At a few updates per second this is minutes of grace for
+# the browser to fetch — far longer than a fetch ever takes.
+_APPEND_BLOB_HISTORY = 256
 
 
 def _serialize_lod(lod):
@@ -365,6 +371,19 @@ class ViewerClient:
         # per-node payload providers live under it). Released on replace,
         # delete(id), and clear().
         self._points_lod: Dict[str, str] = {}
+        # Flat point clouds: id -> the state append_points needs (point count,
+        # whether the cloud carries per-point colours, the colormap + the
+        # cmin/cmax fixed at add_points time, whether it has a time window).
+        # Dropped on replace-by-LOD, delete(id), and clear().
+        self._points_flat: Dict[str, dict] = {}
+        # Blob keys of appends already handed to the viewer, oldest first.
+        # Unlike an add_* blob (one per object) a stream produces one per
+        # update forever, so they are evicted after the browser has had ample
+        # time to fetch them — otherwise an hours-long stream keeps every
+        # point it ever sent alive in this process.
+        # (cloud id, blob key) in send order — id-tagged so delete()/clear()
+        # can evict a stream's blobs instead of waiting for the global cap.
+        self._append_blob_keys: List[Tuple[str, str]] = []
         # Polyline picking: callbacks invoked when the user clicks a point on a
         # polyline in the viewer, and the desired enable state (re-sent on
         # reconnect so picking survives a browser refresh).
@@ -935,12 +954,17 @@ class ViewerClient:
             msg["parent"] = parent
         self._send(msg)
 
-    def _send_binary(self, header_dict: dict, payload: bytes) -> None:
-        """Send binary data via HTTP blob + JSON notification over WebSocket."""
+    def _send_binary(self, header_dict: dict, payload: bytes) -> str:
+        """Send binary data via HTTP blob + JSON notification over WebSocket.
+
+        Returns the blob-store key, so callers that produce blobs
+        open-endedly (:meth:`append_points`) can evict their old ones.
+        """
         blob_key = f"/blob_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = payload
         header_dict["blob_url"] = f"http://{self.host}:{self._http_port}{blob_key}"
         self._send(header_dict)
+        return blob_key
 
     def add_model_binary(
         self,
@@ -1325,6 +1349,7 @@ class ViewerClient:
         # Explicit None/False check: `lod={}` is a legitimate "all defaults"
         # opt-in and must not fall through to the flat path via truthiness.
         if lod is not None and lod is not False:
+            self._points_flat.pop(id, None)
             self._add_points_lod(
                 id,
                 positions3,
@@ -1364,6 +1389,170 @@ class ViewerClient:
         if parent:
             header["parent"] = parent
         self._send_binary(header, raw_bytes)
+        # Remember what append_points needs to keep a later chunk consistent
+        # with this one (colour mode, and the colormap range frozen here).
+        self._points_flat[id] = {
+            "has_colors": colors_rgb_u8 is not None,
+            "colormap": colormap,
+            "cmin": cmin,
+            "cmax": cmax,
+            "has_times": birth_arr is not None or removal_arr is not None,
+        }
+
+    def append_points(
+        self,
+        id: str,
+        positions: np.ndarray,
+        colors: np.ndarray = None,
+    ) -> None:
+        """
+        Append points to a flat cloud created by :meth:`add_points`.
+
+        Both this call and the browser-side update cost **O(len(positions))**,
+        not O(total): only the new points travel over the binary channel, and
+        the viewer writes them into spare capacity at the tail of the existing
+        GPU buffers (`addUpdateRange` → a `bufferSubData` of the new points
+        alone), doubling capacity when it runs out. That makes this the way to
+        drive a *live* cloud — a tracker streaming at 1 kHz flushed a few times
+        a second, growing to millions of points over an hours-long run — where
+        re-sending the whole cloud with :meth:`add_points` is quadratic in the
+        total and stalls the browser well before a million points.
+
+        Args:
+            id: Id of a cloud previously created by :meth:`add_points`
+                (without ``lod=``).
+            positions: numpy array of shape (M, 3) — the new points, appended
+                after everything already in the cloud (so ``set_draw_range``
+                keeps revealing the buffer prefix in send order).
+            colors: Per-point colors for the new points: a scalar (M,) array
+                (mapped through the cloud's colormap, see below) or an (M, 3)
+                RGB float array. What is enforced is only whether the cloud
+                has per-point colours at all — required when it does, rejected
+                when it does not (one colour mode for the whole buffer).
+                Within that, the two forms are interchangeable per append: a
+                cloud seeded with scalars accepts an (M, 3) chunk and vice
+                versa, since both end up as the same RGB bytes on the wire.
+
+        **Colour range is fixed at add time.** Scalar ``colors`` map through
+        the ``colormap``/``cmin``/``cmax`` that :meth:`add_points` was called
+        with — including the auto-derived min/max of that first chunk. A later
+        chunk that runs past that range clamps at the ramp ends; it never
+        rescales, because re-scaling would mean re-colouring (and therefore
+        re-uploading) every point already in the cloud, which is exactly the
+        O(total) cost this method exists to avoid. Pass explicit ``cmin``/
+        ``cmax`` to :meth:`add_points` when the full range is known up front.
+
+        Raises:
+            ValueError: If ``id`` is not a flat point cloud created by
+                :meth:`add_points` in this session (an append has nothing to
+                append to, and a silent no-op would lose stream data), if the
+                colour mode does not match the cloud, or if the cloud was
+                created with ``birth_times``/``removal_times`` (appending to a
+                time-windowed cloud is not supported).
+
+        Note:
+            Like every other object message this is fire-and-forget state in
+            the browser: the client does not retain the cloud, so a **browser
+            reload/reconnect mid-stream does not replay it** — the cloud is
+            gone from the viewer, and subsequent appends land on nothing (the
+            viewer warns per append). Re-seed with :meth:`add_points` after a
+            reconnect if that matters.
+        """
+        state = self._points_flat.get(id)
+        if state is None:
+            if id in self._points_lod:
+                raise ValueError(
+                    f"append_points: '{id}' is an octree-LOD point cloud — "
+                    f"appending is only supported for flat clouds "
+                    f"(add_points without lod=)"
+                )
+            raise ValueError(
+                f"append_points: no point cloud '{id}' — create it with "
+                f"add_points() first (known clouds: "
+                f"{sorted(self._points_flat) or 'none'})"
+            )
+        if state["has_times"]:
+            raise ValueError(
+                f"append_points: '{id}' was created with birth_times/"
+                f"removal_times — appending to a time-windowed cloud is not "
+                f"supported"
+            )
+
+        positions3 = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3)
+        n_new = positions3.shape[0]
+
+        if colors is None and state["has_colors"]:
+            raise ValueError(
+                f"append_points: '{id}' has per-point colors — pass colors "
+                f"for the appended points too"
+            )
+        if colors is not None and not state["has_colors"]:
+            raise ValueError(
+                f"append_points: '{id}' was created without per-point colors "
+                f"(flat color) — appended points cannot introduce them"
+            )
+
+        colors_rgb_u8 = None
+        if colors is not None:
+            colors = np.asarray(colors)
+            if colors.ndim == 0 or colors.shape[0] != n_new:
+                raise ValueError(
+                    f"colors must have length {n_new} (one per appended point), "
+                    f"got shape {colors.shape}"
+                )
+            if colors.ndim == 1:
+                colors_rgb = self._apply_colormap(
+                    colors, state["colormap"], state["cmin"], state["cmax"]
+                )
+            elif colors.ndim == 2 and colors.shape[1] == 3:
+                colors_rgb = colors
+            else:
+                raise ValueError(
+                    f"colors must be (M,) scalar or (M, 3) RGB float, got shape {colors.shape}"
+                )
+            colors_rgb_u8 = (np.clip(colors_rgb, 0, 1) * 255).astype(np.uint8)
+
+        if n_new == 0:
+            return
+
+        raw_bytes = positions3.reshape(-1).tobytes()
+        if colors_rgb_u8 is not None:
+            raw_bytes += colors_rgb_u8.tobytes()
+
+        header = {
+            "type": "append_points_binary",
+            "id": id,
+            "numPoints": n_new,
+            "hasVertexColors": colors_rgb_u8 is not None,
+        }
+        blob_key = self._send_binary(header, raw_bytes)
+        if blob_key:
+            self._retain_append_blob(id, blob_key)
+
+    def _retain_append_blob(self, id: str, blob_key: str) -> None:
+        """Keep the last :data:`_APPEND_BLOB_HISTORY` append blobs alive and
+        drop older ones — a stream would otherwise accumulate every chunk it
+        ever sent in this process' memory. Well past the window the browser
+        needs to fetch one; if a fetch ever did arrive that late, the viewer's
+        HTTP-status guard logs a clean 404 and skips."""
+        self._append_blob_keys.append((id, blob_key))
+        while len(self._append_blob_keys) > _APPEND_BLOB_HISTORY:
+            self._blob_store.pop(self._append_blob_keys.pop(0)[1], None)
+
+    def _drop_append_blobs(self, id: Optional[str] = None) -> None:
+        """Evict retained append blobs for one cloud, or all of them when
+        ``id`` is None. The global :data:`_APPEND_BLOB_HISTORY` cap bounds a
+        *running* stream, but a cloud that is deleted (or a scene that is
+        cleared) will never be appended to again under that id, so its
+        remaining chunks would sit in ``_blob_store`` for the life of the
+        process — several MB for a stream that stopped under the cap."""
+        kept = []
+        for entry in self._append_blob_keys:
+            if id is None or entry[0] == id:
+                self._blob_store.pop(entry[1], None)
+            else:
+                kept.append(entry)
+        self._append_blob_keys = kept
 
     def _add_points_lod(
         self,
@@ -2277,6 +2466,8 @@ class ViewerClient:
     def delete(self, id: str) -> None:
         """Delete an object from the scene."""
         self._release_points_lod(id)
+        self._points_flat.pop(id, None)
+        self._drop_append_blobs(id)
         self._send({"type": "delete_object", "id": id})
 
     def set_visible(self, id: str, visible: bool = True):
@@ -3160,6 +3351,11 @@ class ViewerClient:
         self._gizmos = []
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
+        # Flat clouds are gone from the viewer too, so an append after a
+        # clear must raise rather than land on nothing — and their retained
+        # append blobs can never be fetched again, so drop them with the state.
+        self._points_flat.clear()
+        self._drop_append_blobs()
         self._send({"type": "clear_scene"})
 
     # === Animation ===

@@ -18,6 +18,7 @@ A Python client runs a WebSocket server that a browser-based Three.js viewer con
 - **Toolpath visualization**: Extruded bead tubes with per-point colors, draw_range animation, and automatic LOD — handles 1M+ point toolpaths at 60 fps with smooth camera-distance-adaptive simplification via Web Worker
 - **5-axis swept tool body**: `add_swept_tool` lofts an oriented shank/holder profile about the per-station tool axis (decoupled from the path tangent) into a swept surface — visualizes 5-axis reorientation rate and tool-body collisions, with per-station heatmap colours and draw_range reveal
 - **GPU point clouds**: `add_points` renders millions of unconnected points (voxel fields, metrology/deviation clouds, LiDAR scans) in a single `THREE.Points` draw call, with per-point colormap colours, distance size-attenuation, and draw_range reveal
+- **Live point streaming**: `append_points` grows an existing cloud in place — only the new points cross the wire and only they are uploaded to the GPU, so a producer streaming for hours (a laser tracker at 1 kHz) stays O(new points) per update instead of re-sending the whole cloud
 - **Per-point time windows**: give each point a `[birth, removal)` lifetime and scrub a global time — points appear/disappear **out of buffer order** in the vertex shader (material-removal animations that a prefix reveal can't express), driven live or from the animation slider
 - **Octree LOD streaming**: `add_points(lod=True)` builds a Potree-style sampled octree in Python and streams node payloads on demand — draw a ~1.5M-point budget of the biggest-on-screen nodes out of clouds far larger than one draw call, refining as you zoom; composes with the time windows at every LOD
 - **Auto-reconnect**: Browser reconnects automatically, animations persist
@@ -116,7 +117,23 @@ JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)
 (every hover move) — for a live readout with no Python round-trip. See
 [examples/22_polyline_picking.py](examples/22_polyline_picking.py).
 
-### Point clouds: time windows & octree LOD
+### Point clouds: live append, time windows & octree LOD
+
+```python
+# Live streaming: seed the cloud once, then append as data arrives. Both the
+# wire payload and the GPU upload cover the new points only, so this holds up
+# for hours at a few flushes per second (the browser grows the buffer with
+# spare capacity, doubling when it runs out).
+v.add_points("live", first_chunk, colors=first_values, colormap="turbo",
+             cmin=-0.5, cmax=0.5)      # fix the colour range up front...
+while streaming:
+    v.append_points("live", chunk, colors=values)   # ...appends clamp to it
+```
+
+Appending to an id that was never added (or was deleted, cleared, or created
+with `lod=` / `birth_times`) raises `ValueError` — a stream must not lose data
+silently. A cloud is not replayed when the browser reloads, so re-seed with
+`add_points` after a reconnect.
 
 ```python
 # Per-point lifetimes: a point is visible while birth_time <= t < removal_time.

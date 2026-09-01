@@ -606,6 +606,153 @@ def test_add_points_appears_in_scene(viewer_client, viewer_page):
     assert obj["type"] == "Points"
 
 
+_POINTS_STATE_JS = """
+(id) => {
+    const o = window.threejsViewer._objects.get(id);
+    if (!o) return null;
+    const p = o.geometry.getAttribute('position');
+    const n = o.userData.totalPointCount;
+    return {
+        count: n,
+        capacity: p.count,
+        drawn: o.geometry.drawRange.count,
+        colorCapacity: o.geometry.getAttribute('color')?.count ?? 0,
+        last: Array.from(p.array.slice((n - 1) * 3, n * 3)),
+        radius: o.geometry.boundingSphere ? o.geometry.boundingSphere.radius : null,
+    };
+}
+"""
+
+
+@pytest.mark.browser
+def test_append_points_grows_the_cloud_in_place(viewer_client, viewer_page):
+    """append_points grows an existing THREE.Points without re-uploading it:
+    the logical count grows, the buffer keeps its geometric spare capacity,
+    the full-cloud draw range follows, and the last chunk lands at the tail."""
+    rng = np.random.default_rng(2)
+    pts = rng.random((100, 3)).astype(np.float32)
+    viewer_client.add_points("cloud", pts, colors=pts[:, 2], colormap="turbo")
+    for _ in range(40):
+        time.sleep(0.05)
+        if "cloud" in viewer_client.query_scene()["objects"]:
+            break
+    chunk = None
+    for _ in range(3):
+        chunk = rng.random((50, 3)).astype(np.float32)
+        viewer_client.append_points("cloud", chunk, colors=chunk[:, 2])
+
+    state = None
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(_POINTS_STATE_JS, "cloud")
+        if state and state["count"] == 250:
+            break
+    assert state is not None and state["count"] == 250, f"got {state!r}"
+    # One geometric growth to the 1024 floor covered all three appends —
+    # the existing points were copied once, not per append.
+    assert state["capacity"] == 1024
+    assert state["colorCapacity"] == 1024
+    assert state["drawn"] == 250
+    # Buffer order is send order: the last append sits at the tail.
+    assert state["last"] == pytest.approx(chunk[-1].tolist(), abs=1e-6)
+    # Bounds were expanded (not left stale) so culling/framing see the growth.
+    assert state["radius"] is not None and state["radius"] > 0
+
+
+@pytest.mark.browser
+def test_append_points_bounds_stay_incremental_across_a_capacity_growth(
+    viewer_client, viewer_page
+):
+    """Growing capacity moves the data into a fresh BufferGeometry. If that
+    drops the bounds, the next expandPointsBounds() re-seeds its box with an
+    O(count) scan of the whole cloud — so the one append that happens to
+    trigger a doubling costs a full re-scan, a latency spike on exactly the
+    multi-million-point stream this path exists for.
+
+    Only observable by how much work it does, so count Box3.expandByPoint:
+    one call per *new* point when the bounds carried over, one per existing
+    point on top of that when they did not.
+    """
+    rng = np.random.default_rng(7)
+    pts = rng.random((100, 3)).astype(np.float32)
+    viewer_client.add_points("cloud", pts)
+    for _ in range(40):
+        time.sleep(0.05)
+        if "cloud" in viewer_client.query_scene()["objects"]:
+            break
+    # First append: grows 100 -> the 1024 floor, and legitimately seeds the
+    # box (there is no prior boundingBox to carry) — not what is measured.
+    viewer_client.append_points("cloud", rng.random((50, 3)).astype(np.float32))
+    for _ in range(40):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(_POINTS_STATE_JS, "cloud")
+        if state and state["count"] == 150:
+            break
+
+    # Count expandByPoint from here. Box3 is not exposed globally; reach its
+    # prototype through the box the viewer already built.
+    viewer_page.evaluate(
+        "() => {"
+        " const g = window.threejsViewer._objects.get('cloud').geometry;"
+        " const proto = Object.getPrototypeOf(g.boundingBox);"
+        " if (!proto.__origExpand) proto.__origExpand = proto.expandByPoint;"
+        " window.__expandCalls = 0;"
+        " proto.expandByPoint = function (p) {"
+        "  window.__expandCalls++; return proto.__origExpand.call(this, p);"
+        " };"
+        "}"
+    )
+    # 150 + 900 = 1050 > 1024, so this append triggers the second growth.
+    viewer_client.append_points("cloud", rng.random((900, 3)).astype(np.float32))
+    state = None
+    for _ in range(60):
+        time.sleep(0.05)
+        state = viewer_page.evaluate(_POINTS_STATE_JS, "cloud")
+        if state and state["count"] == 1050:
+            break
+    assert state is not None and state["count"] == 1050, f"got {state!r}"
+    assert state["capacity"] == 2048, "this append must have grown the buffer"
+
+    calls = viewer_page.evaluate(
+        "() => {"
+        " const g = window.threejsViewer._objects.get('cloud').geometry;"
+        " const proto = Object.getPrototypeOf(g.boundingBox);"
+        " if (proto.__origExpand) proto.expandByPoint = proto.__origExpand;"
+        " return window.__expandCalls;"
+        "}"
+    )
+    # 900 (plus a handful from scene-bounds bookkeeping, which expands by a
+    # box's 8 corners) with the bounds carried across; 150 + 900 without.
+    assert 900 <= calls < 1000, (
+        f"bounds were re-seeded across the growth: {calls} expandByPoint calls "
+        f"for a 900-point append onto a 150-point cloud"
+    )
+    assert state["radius"] is not None and state["radius"] > 0
+
+
+@pytest.mark.browser
+def test_append_points_to_unknown_id_warns(viewer_client, viewer_page):
+    """An append whose target the viewer does not have warns loudly instead
+    of silently dropping stream data (the Python client raises before this
+    for ids it never created, so drive handleMessage directly)."""
+    warnings = []
+    viewer_page.on(
+        "console",
+        lambda msg: warnings.append(msg.text) if msg.type == "warning" else None,
+    )
+    viewer_page.evaluate(
+        "() => window.threejsViewer.handleMessage("
+        "{type: 'append_points_binary', id: 'ghost', numPoints: 1,"
+        " hasVertexColors: false, blob_url: 'http://127.0.0.1:1/nope'})"
+    )
+    for _ in range(40):
+        time.sleep(0.05)
+        if any("append_points: 'ghost'" in w for w in warnings):
+            break
+    assert any("append_points: 'ghost'" in w for w in warnings), warnings
+    assert "ghost" not in viewer_client.query_scene()["objects"]
+
+
 @pytest.mark.browser
 def test_set_draw_range_on_points(viewer_client, viewer_page):
     """set_draw_range reveals a leading fraction of a point cloud."""

@@ -597,6 +597,160 @@ def test_add_points_no_parent(client):
     assert "parent" not in header
 
 
+# === append_points ===
+
+
+def test_append_points_message_shape(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points("pc", pts, color=0x00FF00)
+    client.append_points("pc", np.array([[2, 2, 2]], dtype=np.float32))
+    header, payload = client._binary_messages[1]
+    assert header["type"] == "append_points_binary"
+    assert header["id"] == "pc"
+    assert header["numPoints"] == 1
+    assert header["hasVertexColors"] is False
+    # Only the new point travels — O(new), not O(total).
+    assert len(payload) == 3 * 4
+    assert np.frombuffer(payload, dtype=np.float32).tolist() == [2.0, 2.0, 2.0]
+
+
+def test_append_points_with_rgb_colors(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    rgb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    client.add_points("pc", pts, colors=rgb)
+    client.append_points(
+        "pc",
+        np.array([[2, 2, 2]], dtype=np.float32),
+        colors=np.array([[0.0, 1.0, 0.0]], dtype=np.float32),
+    )
+    header, payload = client._binary_messages[1]
+    assert header["hasVertexColors"] is True
+    assert len(payload) == 12 + 3
+    assert payload[12:] == bytes([0, 255, 0])
+
+
+def test_append_points_scalar_colors_keep_the_add_time_range(client):
+    """The colormap range is frozen at add_points time: a later chunk clamps
+    at the ramp ends rather than rescaling (which would mean re-colouring —
+    and re-uploading — the whole cloud)."""
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points(
+        "pc", pts, colors=np.array([0.0, 1.0]), colormap="viridis", cmin=0.0, cmax=1.0
+    )
+    add_payload = client._binary_messages[0][1]
+    top_of_ramp = add_payload[24 + 3 :]
+    # 5.0 is far past cmax=1.0 — it must clamp to the same colour as 1.0.
+    client.append_points("pc", np.array([[2, 2, 2]], dtype=np.float32), colors=[5.0])
+    assert client._binary_messages[1][1][12:] == top_of_ramp
+
+
+def test_append_points_unknown_id_raises(client):
+    with pytest.raises(ValueError, match="no point cloud 'nope'"):
+        client.append_points("nope", np.zeros((1, 3), dtype=np.float32))
+    assert client._binary_messages == []
+
+
+def test_append_points_after_delete_or_clear_raises(client):
+    pts = np.zeros((2, 3), dtype=np.float32)
+    client.add_points("pc", pts)
+    client.delete("pc")
+    with pytest.raises(ValueError, match="no point cloud"):
+        client.append_points("pc", pts)
+    client.add_points("pc", pts)
+    client.clear()
+    with pytest.raises(ValueError, match="no point cloud"):
+        client.append_points("pc", pts)
+
+
+def test_append_points_rejects_lod_cloud(client):
+    pts = np.random.default_rng(0).random((300, 3)).astype(np.float32)
+    client.add_points("pc", pts, lod={"node_capacity": 100})
+    with pytest.raises(ValueError, match="octree-LOD"):
+        client.append_points("pc", pts[:1])
+
+
+def test_append_points_rejects_time_windowed_cloud(client):
+    pts = np.zeros((2, 3), dtype=np.float32)
+    client.add_points("pc", pts, birth_times=np.array([0.0, 1.0]))
+    with pytest.raises(ValueError, match="time-windowed"):
+        client.append_points("pc", pts[:1])
+
+
+def test_append_points_color_mode_must_match(client):
+    pts = np.zeros((2, 3), dtype=np.float32)
+    client.add_points("colored", pts, colors=np.array([0.0, 1.0]))
+    with pytest.raises(ValueError, match="per-point colors"):
+        client.append_points("colored", pts[:1])
+
+    client.add_points("flat", pts, color=0xFF0000)
+    with pytest.raises(ValueError, match="without per-point colors"):
+        client.append_points("flat", pts[:1], colors=np.array([0.5]))
+
+
+def test_append_points_rejects_color_length_mismatch(client):
+    pts = np.zeros((2, 3), dtype=np.float32)
+    client.add_points("pc", pts, colors=np.array([0.0, 1.0]))
+    with pytest.raises(ValueError, match="length 3"):
+        client.append_points(
+            "pc", np.zeros((3, 3), dtype=np.float32), colors=[0.0, 1.0]
+        )
+
+
+def test_append_points_rejects_bad_positions_shape(client):
+    client.add_points("pc", np.zeros((2, 3), dtype=np.float32))
+    with pytest.raises(ValueError):
+        client.append_points("pc", np.zeros(7, dtype=np.float32))
+
+
+def test_append_points_empty_is_a_no_op(client):
+    client.add_points("pc", np.zeros((2, 3), dtype=np.float32))
+    client.append_points("pc", np.zeros((0, 3), dtype=np.float32))
+    assert len(client._binary_messages) == 1
+
+
+def test_append_points_blob_history_is_bounded():
+    """A live stream produces one blob per update forever — old ones are
+    evicted so an hours-long run does not retain every point it sent."""
+    from threejs_viewer.client import _APPEND_BLOB_HISTORY
+
+    c = ViewerClient()
+    c._send = lambda data: None
+    c.add_points("pc", np.zeros((2, 3), dtype=np.float32))
+    for _ in range(_APPEND_BLOB_HISTORY + 20):
+        c.append_points("pc", np.zeros((1, 3), dtype=np.float32))
+    assert len(c._append_blob_keys) == _APPEND_BLOB_HISTORY
+    # The add_points blob is never evicted; only appends beyond the window are.
+    assert len(c._blob_store) == _APPEND_BLOB_HISTORY + 1
+    assert all(key in c._blob_store for _id, key in c._append_blob_keys)
+
+
+def test_append_blobs_are_dropped_on_delete_and_clear():
+    """The history cap bounds a *running* stream, but a deleted cloud will
+    never be appended to again — its retained chunks would otherwise sit in
+    the blob store for the life of the process."""
+    c = ViewerClient()
+    c._send = lambda data: None
+    c.add_points("a", np.zeros((2, 3), dtype=np.float32))
+    c.add_points("b", np.zeros((2, 3), dtype=np.float32))
+    for _ in range(5):
+        c.append_points("a", np.zeros((1, 3), dtype=np.float32))
+        c.append_points("b", np.zeros((1, 3), dtype=np.float32))
+    assert len(c._append_blob_keys) == 10
+
+    # delete() evicts only that cloud's blobs.
+    c.delete("a")
+    assert [cid for cid, _ in c._append_blob_keys] == ["b"] * 5
+    assert len(c._blob_store) == 2 + 5  # two add_points blobs + b's appends
+
+    # clear() evicts what is left. The two add_points blobs are not append
+    # blobs and are not tracked, so they stay — the point is that no append
+    # chunk outlives the cloud it belonged to.
+    before = set(c._blob_store)
+    c.clear()
+    assert c._append_blob_keys == []
+    assert len(c._blob_store) == len(before) - 5
+
+
 # === add_swept_tool ===
 
 
