@@ -1876,6 +1876,13 @@ function ensurePointsCapacity(points, count, numNew) {
         grown.setAttribute('color', newColAttr);
     }
     grown.setDrawRange(geom.drawRange.start, geom.drawRange.count);
+    // Carry the bounds across. expandPointsBounds() seeds its box with an
+    // O(count) scan whenever boundingBox is missing, so dropping them here
+    // would make every capacity doubling re-scan the whole cloud — a latency
+    // spike on exactly the multi-million-point stream this path is for
+    // (amortised it stays linear, but one 5M-point append should not stall).
+    if (geom.boundingBox) grown.boundingBox = geom.boundingBox.clone();
+    if (geom.boundingSphere) grown.boundingSphere = geom.boundingSphere.clone();
     points.geometry = grown;
     geom.dispose();
     return grown;

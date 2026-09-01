@@ -17,7 +17,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
@@ -381,7 +381,9 @@ class ViewerClient:
         # update forever, so they are evicted after the browser has had ample
         # time to fetch them — otherwise an hours-long stream keeps every
         # point it ever sent alive in this process.
-        self._append_blob_keys: List[str] = []
+        # (cloud id, blob key) in send order — id-tagged so delete()/clear()
+        # can evict a stream's blobs instead of waiting for the global cap.
+        self._append_blob_keys: List[Tuple[str, str]] = []
         # Polyline picking: callbacks invoked when the user clicks a point on a
         # polyline in the viewer, and the desired enable state (re-sent on
         # reconnect so picking survives a browser refresh).
@@ -1422,11 +1424,14 @@ class ViewerClient:
             positions: numpy array of shape (M, 3) — the new points, appended
                 after everything already in the cloud (so ``set_draw_range``
                 keeps revealing the buffer prefix in send order).
-            colors: Per-point colors for the new points, in the same form the
-                cloud was created with: a scalar (M,) array or an (M, 3) RGB
-                float array. Required when the cloud has per-point colours,
-                and rejected when it does not (the cloud has one colour mode
-                for its whole buffer).
+            colors: Per-point colors for the new points: a scalar (M,) array
+                (mapped through the cloud's colormap, see below) or an (M, 3)
+                RGB float array. What is enforced is only whether the cloud
+                has per-point colours at all — required when it does, rejected
+                when it does not (one colour mode for the whole buffer).
+                Within that, the two forms are interchangeable per append: a
+                cloud seeded with scalars accepts an (M, 3) chunk and vice
+                versa, since both end up as the same RGB bytes on the wire.
 
         **Colour range is fixed at add time.** Scalar ``colors`` map through
         the ``colormap``/``cmin``/``cmax`` that :meth:`add_points` was called
@@ -1522,17 +1527,32 @@ class ViewerClient:
         }
         blob_key = self._send_binary(header, raw_bytes)
         if blob_key:
-            self._retain_append_blob(blob_key)
+            self._retain_append_blob(id, blob_key)
 
-    def _retain_append_blob(self, blob_key: str) -> None:
+    def _retain_append_blob(self, id: str, blob_key: str) -> None:
         """Keep the last :data:`_APPEND_BLOB_HISTORY` append blobs alive and
         drop older ones — a stream would otherwise accumulate every chunk it
         ever sent in this process' memory. Well past the window the browser
         needs to fetch one; if a fetch ever did arrive that late, the viewer's
         HTTP-status guard logs a clean 404 and skips."""
-        self._append_blob_keys.append(blob_key)
+        self._append_blob_keys.append((id, blob_key))
         while len(self._append_blob_keys) > _APPEND_BLOB_HISTORY:
-            self._blob_store.pop(self._append_blob_keys.pop(0), None)
+            self._blob_store.pop(self._append_blob_keys.pop(0)[1], None)
+
+    def _drop_append_blobs(self, id: Optional[str] = None) -> None:
+        """Evict retained append blobs for one cloud, or all of them when
+        ``id`` is None. The global :data:`_APPEND_BLOB_HISTORY` cap bounds a
+        *running* stream, but a cloud that is deleted (or a scene that is
+        cleared) will never be appended to again under that id, so its
+        remaining chunks would sit in ``_blob_store`` for the life of the
+        process — several MB for a stream that stopped under the cap."""
+        kept = []
+        for entry in self._append_blob_keys:
+            if id is None or entry[0] == id:
+                self._blob_store.pop(entry[1], None)
+            else:
+                kept.append(entry)
+        self._append_blob_keys = kept
 
     def _add_points_lod(
         self,
@@ -2447,6 +2467,7 @@ class ViewerClient:
         """Delete an object from the scene."""
         self._release_points_lod(id)
         self._points_flat.pop(id, None)
+        self._drop_append_blobs(id)
         self._send({"type": "delete_object", "id": id})
 
     def set_visible(self, id: str, visible: bool = True):
@@ -3331,8 +3352,10 @@ class ViewerClient:
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a
-        # clear must raise rather than land on nothing.
+        # clear must raise rather than land on nothing — and their retained
+        # append blobs can never be fetched again, so drop them with the state.
         self._points_flat.clear()
+        self._drop_append_blobs()
         self._send({"type": "clear_scene"})
 
     # === Animation ===

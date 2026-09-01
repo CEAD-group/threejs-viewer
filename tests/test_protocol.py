@@ -721,7 +721,34 @@ def test_append_points_blob_history_is_bounded():
     assert len(c._append_blob_keys) == _APPEND_BLOB_HISTORY
     # The add_points blob is never evicted; only appends beyond the window are.
     assert len(c._blob_store) == _APPEND_BLOB_HISTORY + 1
-    assert all(k in c._blob_store for k in c._append_blob_keys)
+    assert all(key in c._blob_store for _id, key in c._append_blob_keys)
+
+
+def test_append_blobs_are_dropped_on_delete_and_clear():
+    """The history cap bounds a *running* stream, but a deleted cloud will
+    never be appended to again — its retained chunks would otherwise sit in
+    the blob store for the life of the process."""
+    c = ViewerClient()
+    c._send = lambda data: None
+    c.add_points("a", np.zeros((2, 3), dtype=np.float32))
+    c.add_points("b", np.zeros((2, 3), dtype=np.float32))
+    for _ in range(5):
+        c.append_points("a", np.zeros((1, 3), dtype=np.float32))
+        c.append_points("b", np.zeros((1, 3), dtype=np.float32))
+    assert len(c._append_blob_keys) == 10
+
+    # delete() evicts only that cloud's blobs.
+    c.delete("a")
+    assert [cid for cid, _ in c._append_blob_keys] == ["b"] * 5
+    assert len(c._blob_store) == 2 + 5  # two add_points blobs + b's appends
+
+    # clear() evicts what is left. The two add_points blobs are not append
+    # blobs and are not tracked, so they stay — the point is that no append
+    # chunk outlives the cloud it belonged to.
+    before = set(c._blob_store)
+    c.clear()
+    assert c._append_blob_keys == []
+    assert len(c._blob_store) == len(before) - 5
 
 
 # === add_swept_tool ===
