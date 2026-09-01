@@ -2007,9 +2007,12 @@ async function fetchArrayBuffer(url, what, signal) {
 // re-checked after this grace before it is reported loudly.
 const SUPERSEDED_FETCH_GRACE_MS = 500;
 
-// Abort-tracking key for the (id-less) animation blob fetch. Not a real
-// object id, so it can never collide with one in _loadAborts.
-const ANIMATION_FETCH_KEY = '\u0000animation';
+// Abort-tracking key for the (id-less) animation blob fetch. A Symbol rather
+// than a reserved string: _loadAborts is a Map, which takes any key type, and
+// a Symbol is not equal to any string an object id could ever be — so this
+// cannot collide with a real id no matter what a producer sends, and needs no
+// validation on the id path to stay that way.
+const ANIMATION_FETCH_KEY = Symbol('animation-blob-fetch');
 
 /** Grace window in ms, with a test seam (`window.__supersededFetchGraceMs`). */
 function supersededFetchGraceMs() {
@@ -8321,7 +8324,9 @@ class ThreeJSViewer {
         // Per-id AbortControllers for in-flight blob fetches (issue #157).
         // A delete or a re-push of the same id cancels them, so the viewer
         // never requests a blob its producer has already dropped.
-        /** @type {Map<string, Set<AbortController>>} */
+        // Keyed by object id, plus ANIMATION_FETCH_KEY (a Symbol) for the
+        // id-less animation blob — a Symbol can never equal a real id.
+        /** @type {Map<string|symbol, Set<AbortController>>} */
         this._loadAborts = new Map();
         // Deferred re-parenting (issue #138): children added with a parent=
         // id that isn't registered yet (parent model load in flight, or
@@ -10161,7 +10166,7 @@ class ThreeJSViewer {
      * producer, which is exactly the 404 this cancels. Read-side fetches
      * (colour updates, follow paths) register without superseding so they
      * can't cancel a concurrent add for the same id.
-     * @param {string} id
+     * @param {string|symbol} id  the animation blob uses a Symbol key
      * @param {{ supersede?: boolean }} [opts]
      */
     _trackFetch(id, opts) {
@@ -10173,7 +10178,7 @@ class ThreeJSViewer {
         return controller;
     }
 
-    /** @param {string} id @param {AbortController} controller */
+    /** @param {string|symbol} id @param {AbortController} controller */
     _untrackFetch(id, controller) {
         const set = this._loadAborts.get(id);
         if (!set) return;
@@ -10184,7 +10189,7 @@ class ThreeJSViewer {
     /**
      * Cancel every in-flight blob fetch for `id`. Called on delete/clear and
      * on a re-push, so the request is gone before the producer's blob is.
-     * @param {string} id
+     * @param {string|symbol} id
      */
     _abortFetches(id) {
         const set = this._loadAborts.get(id);

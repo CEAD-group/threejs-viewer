@@ -476,18 +476,24 @@ def test_repush_during_blob_fetch_is_quiet(viewer_client, viewer_page):
     )
     # --- Ordering B: the 404 wins the race and lands *before* the delete/
     # re-push that explains it (HTTP and WebSocket are separate transports).
-    # A generous grace makes the re-check deterministic instead of timing-luck.
-    viewer_page.evaluate("() => { window.__supersededFetchGraceMs = 3000; }")
+    # The grace is stretched past production's 500ms so the delete is certain
+    # to land inside the window even on a loaded machine, without the test
+    # having to sit out a long fixed sleep (below).
+    viewer_page.evaluate("() => { window.__supersededFetchGraceMs = 1000; }")
     viewer_page.evaluate("() => window.__raceAdd('race_b', window.__raceBadUrl)")
     viewer_page.wait_for_timeout(500)  # let the 404 land first
     viewer_page.evaluate(
         "() => { window.threejsViewer.handleMessage({ type: 'delete_object', id: 'race_b' });"
         " window.__raceAdd('race_b', window.__raceGoodUrl); }"
     )
-    # Wait out the full grace window plus margin, so a loud report would have
-    # fired by now if the fix were not classifying the failure as superseded.
-    for _ in range(45):
-        viewer_page.wait_for_timeout(100)
+    # The re-check after the grace window always says something — either the
+    # superseded discard or a loud error — so wait for whichever lands rather
+    # than sleeping out the window blind. Finishes as soon as the decision is
+    # made, and still fails correctly if it is the wrong one.
+    for _ in range(100):
+        if _logged("superseded mesh fetch for 'race_b'") or _errors("race_b"):
+            break
+        viewer_page.wait_for_timeout(50)
 
     objects = viewer_client.query_scene()["objects"]
     assert objects.get("race_a", {}).get("type") == "Mesh"
