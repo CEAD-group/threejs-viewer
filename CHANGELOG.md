@@ -1,15 +1,45 @@
 # Changelog
 
-## Unreleased
+## 0.0.49
+
+### Draco-compressed GLB, decoder bundled (#167)
+
+- **`KHR_draco_mesh_compression` glTF/GLB now loads through the normal `add_model` / `add_model_binary` path.** Both `GLTFLoader`s share one `DRACOLoader` (a single worker pool). Assets declaring the extension in `extensionsRequired` previously failed hard with no decoder attached.
+- **The decoder ships inside the bundle — there is no CDN fallback at any level.** `build.py` gzips the vendored `draco_decoder.wasm` + `draco_wasm_wrapper.js` (deterministically, `mtime=0`) and base64s them into a constructor option alongside the existing cubemap inlining, so a `file://` viewer page decodes with no network at all. `createDracoLoader` resolves in precedence order: inlined data → an embedder-served `dracoDecoderPath` → nothing.
+
+### Selection highlight: silhouette contour by default (#165, #158)
+
+- **`set_highlight` draws a true contour instead of an X-ray wireframe.** The #147 highlight used `EdgesGeometry` at THREE's own 1° threshold, which on a dense CAD mesh (ribweaver's robot links) or any curved analytic surface kept nearly every interior edge. The new default `style="silhouette"` redraws the same geometry `BackSide` with each vertex pushed out along its projected normal by `width_px` **screen pixels** in clip space — constant rim width at any zoom, under both cameras, and it *shares* the mesh's geometry so there are no duplicate buffers. A `width_px` change is a uniform write, not a shader recompile.
+- **`style="edges"` keeps the old always-on-top feature-edge outline**, now with a tunable `threshold_deg` (default **30°**, was THREE's 1°). Both styles are needed: a smooth sphere has no crease above 30° to draw at all, which is exactly why the hull is the default.
+- **Translucent objects fall back to `"edges"`.** The hull is culled by the object's own depth, and a translucent mesh cannot supply it — three.js draws the whole opaque pass before the transparent one, so the opaque hull is drawn first against an empty depth buffer and covers the object in a solid shell of the selection colour (measured 97% of the object's footprint). The fallback tests `transparent` **and** `depthWrite`: a primitive added with `opacity < 1` sets the former but leaves the latter true, so checking `depthWrite` alone missed the add-time case. The style is re-resolved when `set_opacity` flips those flags under an already-highlighted mesh, so `set_highlight` → `set_opacity` and the reverse order agree. Skinned meshes and geometry without normals fall back as before.
+- **Known limitation:** a *smooth translucent* body (a sphere, a fillet) therefore highlights as nothing at all — the fallback draws feature edges and the surface has no crease above `threshold_deg`. Nothing is more honest than a shell that hides the object; lower `threshold_deg` or make the object opaque while selected. Prismatic translucent parts are unaffected.
+- Idempotent and fully reversible as before: re-enabling rebuilds only what changed (threshold swaps the geometry, width writes the uniform, style disposes and rebuilds), and off restores the original appearance exactly.
 
 ### Live point streaming: `append_points`
 
-- **`append_points(id, positions, colors=None)` grows a flat `add_points` cloud in place**, at O(new points) on both sides. Only the new points cross the binary channel, and the viewer writes them into spare capacity at the tail of the existing GPU buffers (`addUpdateRange` → a `bufferSubData` of the appended slice), doubling capacity into a fresh geometry when it runs out (the old one disposed, so no GL buffer leaks). This is what a live producer needs — a laser tracker at 1 kHz flushed a few times a second and grown toward ~10M points over an hours-long run — where re-sending the whole cloud with `add_points` is quadratic in the total and stalls the browser around 1e5 points.
-- **Buffer order is preserved**: appends are serialized per id in `handleMessage` (their blob fetches otherwise complete out of order), so `set_draw_range`'s prefix reveal keeps meaning "the points sent first". A partial reveal is left where it is; a fully-revealed cloud grows its draw range with the append.
+- **`append_points(id, positions, colors=None)` grows a flat `add_points` cloud in place**, O(new points) on both sides. Only the new points cross the binary channel, and the viewer writes them into spare capacity at the tail of the existing GPU buffers (`addUpdateRange` → a `bufferSubData` of the appended slice), doubling capacity into a fresh geometry when it runs out (the old one disposed, so no GL buffer leaks; the bounding box/sphere are carried across, so growth never re-scans the cloud). This is what a live producer needs — a laser tracker at 1 kHz flushed a few times a second and grown toward ~10M points over an hours-long run — where re-sending the whole cloud with `add_points` is O(total) per update and stalls the browser around 1e5 points.
+- **Buffer order is preserved**: appends are serialized per id (their blob fetches otherwise complete out of order), so `set_draw_range`'s prefix reveal keeps meaning "the points sent first". A partial reveal is left where it is; a fully-revealed cloud grows its draw range with the append.
 - **Bounds are expanded, not recomputed** — `computeBoundingSphere` would be O(total) per append. The box is exact, the sphere is its circumsphere (a safe over-estimate for culling and framing).
 - **The colormap range is fixed at `add_points` time.** Scalar `colors` on an append map through the `colormap`/`cmin`/`cmax` the cloud was created with and clamp at the ramp ends; rescaling would mean re-colouring — and re-uploading — every point already in the cloud, which is the cost this method exists to avoid. Pass explicit `cmin`/`cmax` when the range is known up front.
-- **Unknown ids raise, they never vanish**: the client tracks flat clouds per id (dropped on `delete`/`clear`/replace-by-LOD), so appending to an id it never created — or to an octree-LOD cloud, or to one with `birth_times`/`removal_times` — raises `ValueError` rather than dropping stream data. The viewer warns per append for a cloud it does not have, which is also the browser-reload-mid-stream case: point clouds are not replayed on reconnect, so re-seed with `add_points`.
-- Old append blobs are evicted after 256 chunks — one blob per update forever would otherwise retain every point an hours-long stream ever sent.
+- **Unknown ids raise, they never vanish**: appending to an id the client never created — or to an octree-LOD cloud, or one with `birth_times`/`removal_times` — raises `ValueError` rather than dropping stream data. The viewer warns per append for a cloud it does not have, which is also the browser-reload-mid-stream case: point clouds are not replayed on reconnect, so re-seed with `add_points`.
+- Append blobs are evicted after 256 chunks, and a cloud's remaining chunks are dropped on `delete`/`clear` — the cap bounds a *running* stream, but a cloud that stopped under it would otherwise keep its chunks for the life of the process. New example: `examples/30_live_points_stream.py`.
+
+### Embedder load-progress hooks (#163)
+
+- **`viewer.getLoadState()` / `onLoadProgress(cb)` / `onAssetsLoaded(cb)`** replace polling the private `_pendingFetches` counter (which ribweaver's /calib lane did, with a deadline fallback for when the private name changed). Progress fires on every asset-fetch start and end with `{loaded, total, pending, assetsComplete}`; completion fires when the batch drains *and* the producer has sent `mark_assets_complete`. Both return an unsubscribe fn, per the house hook idiom.
+- **Completion now reaches no-WebSocket embedders.** `_maybeNotifyAssetsLoaded` was gated on an open socket, so a page feeding `handleMessage()` directly could never learn it was done. The hooks fire regardless; the WS `assets_loaded` message is still sent only when a socket is open, and is deliberately **not** deduplicated — it is a reply that `wait_for_assets()` blocks on, so suppressing a repeat would hang a script that stages its scene in two passes.
+
+### Non-finite matrices hold the last good pose (#162)
+
+- **A single NaN/Inf in a 4×4 no longer makes an object vanish for the rest of playback.** It poisons `matrixWorld` for the whole subtree, so every vertex lands at NaN clip space and three.js drops the object with no diagnostic. Every matrix write off the wire is now checked — the binary `transforms` channel (both the step and interpolated paths, checked on the composed result so a bad keyframe on either side is caught), the JSON `Frame.transforms` paths, and `update_transform`/`set_matrix`/`batch_update` including its loose `position`/`rotation`/`quaternion`/`scale` form. A rejected update holds the previous pose instead.
+
+### Orbit pivot ignores invisible objects (#166)
+
+- **A click that hits nothing pivots on the visible content**, not on hidden geometry far from the model. The fallback took the centre of the scene-bounds sphere, which deliberately does *not* filter on visibility (a hidden object may be shown later and must not fall outside the fitted near/far planes), so any hidden mesh dragged the orbit centre off-screen. It now reads the same frameable AABB that Home/F use, which skips invisible subtrees. Near/far fitting is untouched.
+
+### Blob delete-then-fetch race is quiet (#157)
+
+- **Re-pushing an object (`delete` + `add_*` of the same id) no longer logs a fully-attributed error for a 404 that was expected.** The producer drops the old blob as it sends the delete while the viewer still has a fetch open for it; the existing staleness checks all sat *after* the `await`, i.e. after a fetch had succeeded, so a failure on a superseded load reported exactly like a failure on a live one. In-flight fetches are now aborted on delete/re-push, and a fetch-stage failure on a load that still looks live is re-checked after a short grace before being reported loudly — covering the genuine cross-transport race where the 404 (HTTP) beats the `delete` (WebSocket) that explains it.
 
 ## 0.0.48
 
