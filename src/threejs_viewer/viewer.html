@@ -8739,15 +8739,19 @@ class ThreeJSViewer {
         });
         // Orbit-pivot fallback (issue #520): when a click hits no visible
         // component, pivot on the scene content center rather than a z=0
-        // floor-plane intersection. The content sphere (updateSceneBounds)
-        // excludes both grid kinds — the THREE.GridHelper is not in _objects,
-        // and add_grid's shader floor carries excludeFromBounds — so a large
-        // grid never drags the pivot off the model. Returns null (pivot left
-        // unchanged) when there is no content yet.
+        // floor-plane intersection. Uses the *framing* bounds, not the
+        // near/far content sphere (issue #166): `updateSceneBounds` never
+        // filters on visibility on purpose (a hidden object may be shown
+        // later and must not get clipped), so a hidden mesh far from the
+        // model would drag the pivot off-screen. `_collectFrameableBounds`
+        // bails on `.visible === false` subtrees and already skips the
+        // helpers (both grid kinds, clip gizmos, move-gizmo helpers, the
+        // pivot marker), so the pivot lands on what the user can see.
+        // Returns null (pivot left unchanged) when nothing is visible.
         this._controls.setFallbackPivot(() => {
-            this._camController.updateSceneBounds();
-            if (this._sceneSphere.radius <= 0) return null;
-            return this._sceneSphere.center.clone();
+            const bbox = this._collectFrameableBounds();
+            if (bbox.isEmpty()) return null;
+            return bbox.getCenter(new THREE.Vector3());
         });
         this._controls.addEventListener('change', () => {
             this._lodDirty = true;

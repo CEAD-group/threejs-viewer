@@ -5309,3 +5309,33 @@ def test_uncompressed_glb_still_loads_with_draco_wired(viewer_client, viewer_pag
     assert state["verts"] == 4
     assert state["indices"] == 6
     assert state["dracoWorkers"] == 0
+
+
+@pytest.mark.browser
+def test_orbit_pivot_ignores_invisible_objects(viewer_client, viewer_page):
+    """A hidden object must not drag the fallback orbit pivot (#166).
+
+    The near/far content sphere deliberately keeps invisible objects (they may
+    be shown later and must not get clipped), so the pivot reads the framing
+    bounds instead.
+    """
+    viewer_client.add_box("visible_box", position=[10.0, 0.0, 0.0])
+    viewer_client.add_box("hidden_box", position=[1000.0, 0.0, 0.0])
+    viewer_client.set_visible("hidden_box", False)
+    assert "hidden_box" in viewer_client.query_scene()["objects"]  # sync
+
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const fb = v._controls._fallbackPivotGetter();"
+        " v._camController.updateSceneBounds();"
+        " return { pivot: fb ? fb.x : null,"
+        "          nearFarRadius: v._nearFarSphere.radius };"
+        "}"
+    )
+    # Pivot sits on the visible box only...
+    assert result["pivot"] is not None
+    assert abs(result["pivot"] - 10.0) < 1.0
+    # ...while the near/far fit still reaches the hidden one, so making it
+    # visible later can't leave it clipped.
+    assert result["nearFarRadius"] > 400
