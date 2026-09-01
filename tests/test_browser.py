@@ -200,11 +200,18 @@ def _highlight_state(page, obj_id):
         "(id) => {"
         " const o = window.threejsViewer._objects.get(id);"
         " if (!o) return null;"
-        " const out = { outlines: 0, outlineColors: [], meshes: [] };"
+        " const out = { outlines: 0, outlineColors: [], outlineSegs: [],"
+        "               outlineThresholds: [], outlineStyles: [],"
+        "               outlineSharesGeometry: [], meshes: [] };"
         " o.traverse((child) => {"
         "  if (child.userData.__highlightOutline) {"
         "   out.outlines++;"
         "   out.outlineColors.push(child.material.color.getHex());"
+        "   out.outlineSegs.push(child.geometry.attributes.position.count / 2);"
+        "   out.outlineThresholds.push(child.userData.__highlightThreshold);"
+        "   out.outlineStyles.push(child.userData.__highlightStyle);"
+        "   out.outlineSharesGeometry.push("
+        "     child.geometry === child.parent.geometry);"
         "   return;"
         "  }"
         "  if (!child.isMesh) return;"
@@ -296,7 +303,7 @@ def test_set_highlight_composes_with_set_color_and_opacity(viewer_client, viewer
         " return op;"
         "}"
     )
-    assert outline_opacity == 0.95  # not dimmed by set_opacity
+    assert outline_opacity == 1.0  # silhouette hull, not dimmed by set_opacity
 
 
 def _get_material_color(page, obj_id):
@@ -5687,3 +5694,176 @@ def test_orbit_pivot_ignores_invisible_objects(viewer_client, viewer_page):
     # ...while the near/far fit still reaches the hidden one, so making it
     # visible later can't leave it clipped.
     assert result["nearFarRadius"] > 400
+
+
+@pytest.mark.browser
+def test_set_highlight_default_style_is_silhouette(viewer_client, viewer_page):
+    """The default highlight is an inverted-hull contour that shares the
+    mesh's geometry — legible on a smooth body, where a feature-edge outline
+    has no crease to draw at all (issues #158/#165)."""
+    viewer_client.add_sphere("ball", radius=1.0)
+    _wait_highlight_state(viewer_page, "ball", lambda s: len(s["meshes"]) == 1)
+    viewer_client.set_highlight("ball")
+    state = _wait_highlight_state(viewer_page, "ball", lambda s: s["outlines"] == 1)
+    assert state["outlineStyles"] == ["silhouette"]
+    assert state["outlineSharesGeometry"] == [True]  # no duplicate buffers
+    hull = viewer_page.evaluate(
+        "() => {"
+        " let h = null;"
+        " window.threejsViewer._objects.get('ball').traverse((c) => {"
+        "  if (c.userData.__highlightOutline) h = c;"
+        " });"
+        " const res = window.threejsViewer._highlightResolution.value;"
+        " return h ? { side: h.material.side, depthTest: h.material.depthTest,"
+        "              depthWrite: h.material.depthWrite,"
+        "              width: h.material.userData.__highlightWidth.value,"
+        "              resX: res.x } : null;"
+        "}"
+    )
+    assert hull["side"] == 1  # THREE.BackSide
+    # Depth-tested on purpose: a depthTest:false hull would paint its
+    # backfaces over the object body.
+    assert hull["depthTest"] is True
+    assert hull["depthWrite"] is False
+    assert hull["width"] == 3
+    assert hull["resX"] > 0  # viewport uniform wired for screen-constant width
+
+
+@pytest.mark.browser
+def test_set_highlight_silhouette_is_visible_on_a_smooth_body(
+    viewer_client, viewer_page
+):
+    """End-to-end: the silhouette actually renders around a sphere, which is
+    the case the feature-edge outline cannot express (issue #165)."""
+    viewer_client.add_sphere("ball", radius=1.0, color=0x1133AA)
+    _wait_highlight_state(viewer_page, "ball", lambda s: len(s["meshes"]) == 1)
+    viewer_client.frame_object("ball")
+
+    def orange_pixels():
+        # Render and read the drawing buffer in one JS turn: the canvas has no
+        # preserveDrawingBuffer, so a later drawImage() would come back blank.
+        return viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " v._renderer.render(v._scene, v._camera);"
+            " const gl = v._renderer.getContext();"
+            " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
+            " const px = new Uint8Array(w * h * 4);"
+            " gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);"
+            " let n = 0;"
+            " for (let i = 0; i < px.length; i += 4) {"
+            "  if (px[i] > 150 && px[i + 1] > 80 && px[i + 1] < 200 && px[i + 2] < 90) n++;"
+            " }"
+            " return n;"
+            "}"
+        )
+
+    for _ in range(60):
+        if orange_pixels() == 0:
+            break
+        time.sleep(0.05)
+    assert orange_pixels() == 0, "no selection orange before highlighting"
+
+    viewer_client.set_highlight("ball", width_px=6)
+    _wait_highlight_state(viewer_page, "ball", lambda s: s["outlines"] == 1)
+    lit = 0
+    for _ in range(60):
+        lit = orange_pixels()
+        if lit > 200:
+            break
+        time.sleep(0.05)
+    assert lit > 200, f"silhouette must draw a visible rim, got {lit} px"
+
+    viewer_client.set_highlight("ball", enabled=False)
+    for _ in range(60):
+        if orange_pixels() == 0:
+            break
+        time.sleep(0.05)
+    assert orange_pixels() == 0, "disable must leave no trace of the outline"
+
+
+@pytest.mark.browser
+def test_set_highlight_edges_threshold_angle(viewer_client, viewer_page):
+    """The outline's edge-detection threshold drops tessellation edges by
+    default and is tunable per call, rebuilding in place (issue #158).
+
+    A sphere is the worst case from the issue: at THREE's own 1 degree
+    default every triangulation edge survives and the highlight reads as an
+    X-ray wireframe.
+    """
+    viewer_client.add_sphere("ball", radius=1.0)
+    _wait_highlight_state(viewer_page, "ball", lambda s: len(s["meshes"]) == 1)
+
+    viewer_client.set_highlight("ball", style="edges")
+    default = _wait_highlight_state(viewer_page, "ball", lambda s: s["outlines"] == 1)
+    assert default["outlineThresholds"] == [30]
+
+    # Same object at the old 1-degree behaviour: every tessellation edge.
+    viewer_client.set_highlight("ball", style="edges", threshold_deg=1.0)
+    fine = _wait_highlight_state(
+        viewer_page, "ball", lambda s: s["outlineThresholds"] == [1]
+    )
+    assert fine["outlines"] == 1  # rebuilt in place, never stacked
+    # A smooth-shaded sphere has no crease above 30 degrees at all, so the
+    # default outline is empty where the 1-degree one is the full wire grid.
+    assert default["outlineSegs"][0] == 0
+    assert fine["outlineSegs"][0] > 500
+
+    # A box's 90-degree creases survive the default threshold.
+    viewer_client.add_box("cube")
+    viewer_client.set_highlight("cube", style="edges")
+    cube = _wait_highlight_state(viewer_page, "cube", lambda s: s["outlines"] == 1)
+    assert cube["outlineSegs"][0] == 12  # exactly the 12 cube edges
+
+
+@pytest.mark.browser
+def test_set_highlight_threshold_survives_toggle_off(viewer_client, viewer_page):
+    """Disposing and re-enabling after a custom threshold leaves no stale
+    geometry and restores the default."""
+    viewer_client.add_box("tbox")
+    _wait_highlight_state(viewer_page, "tbox", lambda s: len(s["meshes"]) == 1)
+    viewer_client.set_highlight("tbox", style="edges", threshold_deg=120.0)
+    coarse = _wait_highlight_state(
+        viewer_page, "tbox", lambda s: s["outlineThresholds"] == [120]
+    )
+    assert coarse["outlineSegs"][0] == 0  # no crease that sharp on a box
+    viewer_client.set_highlight("tbox", enabled=False)
+    _wait_highlight_state(viewer_page, "tbox", lambda s: s["outlines"] == 0)
+    viewer_client.set_highlight("tbox", style="edges")
+    back = _wait_highlight_state(viewer_page, "tbox", lambda s: s["outlines"] == 1)
+    assert back["outlineThresholds"] == [30]
+    assert back["outlineSegs"][0] == 12
+
+
+@pytest.mark.browser
+def test_set_highlight_style_switch_rebuilds_in_place(viewer_client, viewer_page):
+    """Switching style disposes the old outline and builds the new one — still
+    exactly one outline per mesh, and off leaves nothing behind."""
+    viewer_client.add_box("sbox")
+    _wait_highlight_state(viewer_page, "sbox", lambda s: len(s["meshes"]) == 1)
+    viewer_client.set_highlight("sbox")
+    hull = _wait_highlight_state(
+        viewer_page, "sbox", lambda s: s["outlineStyles"] == ["silhouette"]
+    )
+    assert hull["outlines"] == 1
+    viewer_client.set_highlight("sbox", style="edges")
+    edges = _wait_highlight_state(
+        viewer_page, "sbox", lambda s: s["outlineStyles"] == ["edges"]
+    )
+    assert edges["outlines"] == 1  # replaced, not stacked
+    assert edges["outlineSegs"][0] == 12
+    assert edges["outlineSharesGeometry"] == [False]  # its own EdgesGeometry
+    viewer_client.set_highlight("sbox", style="silhouette")
+    back = _wait_highlight_state(
+        viewer_page, "sbox", lambda s: s["outlineStyles"] == ["silhouette"]
+    )
+    assert back["outlines"] == 1
+    viewer_client.set_highlight("sbox", enabled=False)
+    off = _wait_highlight_state(viewer_page, "sbox", lambda s: s["outlines"] == 0)
+    assert off["outlines"] == 0
+    # The hull shares the mesh geometry — disabling must not have disposed it.
+    still_drawable = viewer_page.evaluate(
+        "() => { const g = window.threejsViewer._objects.get('sbox').geometry;"
+        " return !!(g && g.attributes.position && g.attributes.position.count > 0); }"
+    )
+    assert still_drawable

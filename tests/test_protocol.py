@@ -1414,3 +1414,45 @@ def test_enable_polyline_picking_max_pick_points_below_two_normalizes_to_zero(
     on #112)."""
     client.enable_polyline_picking(max_pick_points=raw)
     assert client._polyline_picking["maxPickPoints"] == 0
+
+
+def test_set_highlight_with_threshold(client):
+    client.set_highlight("box", threshold_deg=45)
+    assert client._messages == [
+        {
+            "type": "set_highlight",
+            "id": "box",
+            "enabled": True,
+            "threshold_deg": 45.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("bad", [-1.0, 181.0, float("nan"), float("inf")])
+def test_set_highlight_threshold_validated(client, bad):
+    with pytest.raises(ValueError, match="threshold_deg"):
+        client.set_highlight("box", threshold_deg=bad)
+
+
+def test_set_highlight_style_and_width(client):
+    client.set_highlight("box", style="silhouette", width_px=5)
+    assert client._messages == [
+        {
+            "type": "set_highlight",
+            "id": "box",
+            "enabled": True,
+            "style": "silhouette",
+            "width_px": 5.0,
+        }
+    ]
+
+
+def test_set_highlight_style_validated(client):
+    with pytest.raises(ValueError, match="style"):
+        client.set_highlight("box", style="glow")
+
+
+@pytest.mark.parametrize("bad", [0, -1.0, float("nan")])
+def test_set_highlight_width_validated(client, bad):
+    with pytest.raises(ValueError, match="width_px"):
+        client.set_highlight("box", width_px=bad)
