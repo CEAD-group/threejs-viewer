@@ -16,8 +16,21 @@ verbatim from published reference color data:
   **Apache License, Version 2.0**. Copyright 2019 Google LLC.
   Source: <https://gist.github.com/mikhailov-work/6a308c20e494d9e0ccc29036b28faa7a>
 
+## Draco 3D data compression decoder — `src/threejs_viewer/viewer/static/draco/`
+
+`draco_decoder.wasm` and `draco_wasm_wrapper.js` are the glTF-targeted Draco
+decoder builds, vendored verbatim from three.js
+`examples/jsm/libs/draco/gltf/` (three r0.183.2), which in turn redistributes
+them from [google/draco](https://github.com/google/draco). They are embedded
+(gzipped + base64) in the generated `src/threejs_viewer/viewer.html` so
+KHR_draco_mesh_compression glTF/GLB assets decode with no network access.
+
+Draco is released under the **Apache License, Version 2.0**.
+Copyright 2017 The Draco Authors.
+
 A copy of the Apache License, Version 2.0 is included below, as required by
-sections 4(a)–4(d) of that license.
+sections 4(a)–4(d) of that license (it applies to both the turbo colormap data
+and the Draco decoder above).
 
 ---
 
