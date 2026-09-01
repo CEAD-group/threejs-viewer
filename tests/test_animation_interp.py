@@ -5,6 +5,7 @@ import time
 import numpy as np
 import pytest
 
+from conftest import frames, settle
 from threejs_viewer import Animation, Frame
 
 
@@ -129,7 +130,7 @@ def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
     viewer_client.load_animation(anim)
 
     for _ in range(20):
-        time.sleep(0.1)
+        settle(viewer_client)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             break
     assert viewer_client.query_scene()["meta"]["animation"]["playing"], (
@@ -138,7 +139,7 @@ def test_linear_interp_draw_range_midpoint(viewer_client, viewer_page):
 
     seek = _pause_and_seek_to_midpoint(viewer_page)
     assert seek is not None
-    time.sleep(0.05)
+    settle(viewer_client)
 
     result = viewer_client.query_scene()
     dr = result["objects"]["m1"]["drawRange"]
@@ -166,7 +167,7 @@ def test_hold_interp_draw_range_midpoint(viewer_client, viewer_page):
     viewer_client.load_animation(anim)
 
     for _ in range(20):
-        time.sleep(0.1)
+        settle(viewer_client)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             break
     assert viewer_client.query_scene()["meta"]["animation"]["playing"], (
@@ -174,7 +175,7 @@ def test_hold_interp_draw_range_midpoint(viewer_client, viewer_page):
     )
 
     _pause_and_seek_to_midpoint(viewer_page)
-    time.sleep(0.05)
+    settle(viewer_client)
 
     result = viewer_client.query_scene()
     dr = result["objects"]["m2"]["drawRange"]
@@ -191,7 +192,7 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
     JSON applier is responsible for the midpoint lerp.
     """
     viewer_client.add_box("b1")
-    time.sleep(0.1)
+    settle(viewer_client)
 
     identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
     translated = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1]
@@ -205,7 +206,7 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
     viewer_client.load_animation(anim)
 
     for _ in range(20):
-        time.sleep(0.1)
+        settle(viewer_client)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             break
     assert viewer_client.query_scene()["meta"]["animation"]["playing"], (
@@ -213,7 +214,7 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
     )
 
     _pause_and_seek_to_midpoint(viewer_page)
-    time.sleep(0.05)
+    frames(viewer_page)
 
     x = viewer_page.evaluate(
         """() => {
@@ -228,7 +229,7 @@ def test_linear_interp_transforms_midpoint(viewer_client, viewer_page):
 
 def _wait_for_playing(viewer_client):
     for _ in range(20):
-        time.sleep(0.1)
+        settle(viewer_client)
         if viewer_client.query_scene()["meta"]["animation"]["playing"]:
             return
     raise AssertionError("animation did not start playing within timeout")
@@ -257,7 +258,7 @@ def _object_hex(page, object_id):
 def test_colors_channel_lerps_rgb_midpoint(viewer_client, viewer_page):
     """uint32 'colors' binary channel lerps hex values in 8-bit RGB."""
     viewer_client.add_box("cb1")
-    time.sleep(0.1)
+    settle(viewer_client)
 
     anim = Animation(loop=False)
     anim.set_frame_times(np.array([0.0, 1.0]))
@@ -280,7 +281,7 @@ def test_colors_channel_lerps_rgb_midpoint(viewer_client, viewer_page):
     _wait_for_playing(viewer_client)
 
     _pause_and_seek_to_midpoint(viewer_page)
-    time.sleep(0.05)
+    frames(viewer_page)
 
     hex_mid = _object_hex(viewer_page, "cb1")
     r = (hex_mid >> 16) & 0xFF
@@ -295,7 +296,7 @@ def test_colors_channel_lerps_rgb_midpoint(viewer_client, viewer_page):
 def test_colors_channel_colormap_lerps_midpoint(viewer_client, viewer_page):
     """uint8 'colors' channel with a colormap lerps palette entries in RGB."""
     viewer_client.add_box("cb2")
-    time.sleep(0.1)
+    settle(viewer_client)
 
     anim = Animation(loop=False)
     anim.set_frame_times(np.array([0.0, 1.0]))
@@ -316,7 +317,7 @@ def test_colors_channel_colormap_lerps_midpoint(viewer_client, viewer_page):
     _wait_for_playing(viewer_client)
 
     _pause_and_seek_to_midpoint(viewer_page)
-    time.sleep(0.05)
+    frames(viewer_page)
 
     hex_mid = _object_hex(viewer_page, "cb2")
     r = (hex_mid >> 16) & 0xFF
@@ -331,7 +332,7 @@ def test_colors_channel_colormap_lerps_midpoint(viewer_client, viewer_page):
 def test_visibility_channel_always_holds_even_when_linear(viewer_client, viewer_page):
     """visibility is boolean — requesting interpolation='linear' must still hold."""
     viewer_client.add_box("vb1")
-    time.sleep(0.1)
+    settle(viewer_client)
 
     anim = Animation(loop=False)
     anim.set_frame_times(np.array([0.0, 1.0]))
@@ -351,7 +352,7 @@ def test_visibility_channel_always_holds_even_when_linear(viewer_client, viewer_
     _wait_for_playing(viewer_client)
 
     _pause_and_seek_to_midpoint(viewer_page)
-    time.sleep(0.05)
+    frames(viewer_page)
 
     # Midpoint hold on floor keyframe → object is still visible.
     visible = viewer_page.evaluate(
@@ -364,7 +365,7 @@ def test_visibility_channel_always_holds_even_when_linear(viewer_client, viewer_
 def test_json_frame_colors_lerp_midpoint(viewer_client, viewer_page):
     """JSON Frame.colors field lerps in 8-bit RGB via the fallback path."""
     viewer_client.add_box("jc1")
-    time.sleep(0.1)
+    settle(viewer_client)
 
     identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
     anim = Animation(
@@ -378,7 +379,7 @@ def test_json_frame_colors_lerp_midpoint(viewer_client, viewer_page):
     _wait_for_playing(viewer_client)
 
     _pause_and_seek_to_midpoint(viewer_page)
-    time.sleep(0.05)
+    frames(viewer_page)
 
     hex_mid = _object_hex(viewer_page, "jc1")
     r = (hex_mid >> 16) & 0xFF
