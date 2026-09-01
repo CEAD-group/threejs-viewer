@@ -2413,6 +2413,7 @@ function resolveLightingDefaults(options, urlParams) {
  * @param {number} opacity
  */
 function applyOpacity(obj, opacity) {
+    /** @type {any[]} */ const highlighted = [];
     obj.traverse(/** @param {any} child */ child => {
         if (!child.material) return;
         // Highlight outlines keep their own styling — set_opacity addresses
@@ -2426,7 +2427,14 @@ function applyOpacity(obj, opacity) {
             mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
         }
+        // transparent/depthWrite just changed, and a silhouette highlight is
+        // only legible on a depth-priming mesh (see resolveHighlightStyle) — so a highlight
+        // riding on this mesh may need to swap style. Collected and re-applied
+        // after the walk: re-applying rebuilds the outline child, and mutating
+        // the tree mid-traverse is how you skip a node.
+        if (child.userData.__highlightEdge && child.userData.__highlightOpts) highlighted.push(child);
     });
+    for (const child of highlighted) applyHighlight(child, true, child.userData.__highlightOpts);
 }
 
 // ---- Selection highlight (issues #147 / #158 / #165) ----
@@ -2531,6 +2539,52 @@ function buildHighlightEdges(geometry, color, thresholdDeg) {
 }
 
 /**
+ * Can this mesh prime the depth buffer for a silhouette hull drawn over it?
+ *
+ * The hull is drawn with `side: BackSide` and relies on the mesh's own front
+ * faces already sitting in the depth buffer: the backfaces then fail the depth
+ * test everywhere the object covers, and only the pushed-out rim survives. If
+ * nothing primed that depth, the entire hull draws and the "outline" reads as
+ * a solid shell of the selection colour over the object.
+ *
+ * Two ways a mesh fails to prime it, and **both** matter:
+ *  - `depthWrite === false` — `applyOpacity` clears it below opacity 1.
+ *  - `transparent === true` — the subtler one. three.js renders the opaque
+ *    pass in full before the transparent pass, and `renderOrder` only sorts
+ *    *within* a pass. The hull's material is opaque, so it always draws before
+ *    a transparent mesh no matter how high its renderOrder, and the depth
+ *    buffer is still empty when it does. A primitive added with `opacity < 1`
+ *    is exactly this case: `_createMaterial` sets `transparent` but leaves
+ *    `depthWrite` true, so testing depthWrite alone would miss it.
+ * @param {any} child
+ * @returns {boolean}
+ */
+function meshPrimesDepth(child) {
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    return mats.every(/** @param {any} m */ m => m && m.depthWrite !== false && !m.transparent);
+}
+
+/**
+ * Resolve the outline style actually usable on this mesh. `'silhouette'`
+ * degrades to `'edges'` when the hull could not represent the mesh honestly:
+ * a skinned mesh (the hull's basic material is un-skinned, so it would lag the
+ * skeleton), geometry with no `normal` attribute (nothing to extrude along, so
+ * the hull collapses onto the mesh), or a mesh that cannot prime the depth
+ * buffer the hull is culled against (the hull would paint a solid shell — see
+ * meshPrimesDepth).
+ * @param {any} child
+ * @param {string} wantStyle
+ * @returns {string}
+ */
+function resolveHighlightStyle(child, wantStyle) {
+    if (wantStyle !== 'silhouette') return 'edges';
+    if (child.isSkinnedMesh) return 'edges';
+    if (!child.geometry.attributes || !child.geometry.attributes.normal) return 'edges';
+    if (!meshPrimesDepth(child)) return 'edges';
+    return 'silhouette';
+}
+
+/**
  * Toggle a persistent selection outline on `obj` and its mesh descendants
  * (issue #147). Never mutates the mesh's own materials — the outline is a
  * separate child object that is removed and disposed on disable, so toggling
@@ -2549,10 +2603,14 @@ function buildHighlightEdges(geometry, color, thresholdDeg) {
  * `'edges'` is the EdgesGeometry feature-edge outline, always-on-top, with a
  * tunable threshold angle (issue #158).
  *
- * A skinned mesh, or one whose geometry carries no `normal` attribute, falls
- * back to `'edges'`: the hull is drawn with a plain (un-skinned) basic
- * material and extrudes along the normal, so it would either lag the skeleton
- * or collapse onto the mesh.
+ * A skinned mesh, one whose geometry carries no `normal` attribute, or one
+ * that cannot prime the depth buffer falls back to `'edges'` (see
+ * resolveHighlightStyle): the hull is drawn with a plain (un-skinned) basic
+ * material, extrudes along the normal, and is culled by the object's own
+ * depth — so it would respectively lag the skeleton, collapse onto the mesh,
+ * or paint a solid shell. The depth case is the translucent object, and a
+ * later `set_opacity` on an already-highlighted mesh re-resolves the style
+ * from the retained opts so the order of the two calls does not matter.
  * @param {THREE.Object3D} obj
  * @param {boolean} enabled
  * @param {{color?: number|string, style?: string, thresholdDeg?: number,
@@ -2574,12 +2632,16 @@ function applyHighlight(obj, enabled, opts = {}) {
         // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
             || child.userData.__highlightOutline) return;
-        const style = (wantStyle === 'silhouette' && !child.isSkinnedMesh
-            && child.geometry.attributes && child.geometry.attributes.normal)
-            ? 'silhouette' : 'edges';
+        const style = resolveHighlightStyle(child, wantStyle);
         const existing = child.userData.__highlightEdge;
         if (enabled) {
             const col = new THREE.Color(opts.color != null ? opts.color : HIGHLIGHT_DEFAULT_COLOR);
+            // Retained so a later set_opacity can re-resolve the style against
+            // the mesh's new depthWrite state without the caller re-sending.
+            child.userData.__highlightOpts = {
+                color: opts.color, style: wantStyle, thresholdDeg: thr,
+                widthPx, resolution,
+            };
             if (existing && existing.userData.__highlightStyle === style) {
                 existing.material.color.copy(col);   // idempotent: re-tint in place
                 if (style === 'silhouette') {
@@ -2609,8 +2671,11 @@ function applyHighlight(obj, enabled, opts = {}) {
             outline.name = (child.name || 'mesh') + '_highlight';
             child.userData.__highlightEdge = outline;
             child.add(outline);
-        } else if (existing) {
-            disposeHighlightOutline(child, existing);
+        } else {
+            if (existing) disposeHighlightOutline(child, existing);
+            // Drop the retained opts too, so a later set_opacity on a
+            // no-longer-highlighted mesh has nothing to re-apply.
+            delete child.userData.__highlightOpts;
         }
     });
 }

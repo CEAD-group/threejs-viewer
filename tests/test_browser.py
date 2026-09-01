@@ -294,6 +294,10 @@ def test_set_highlight_composes_with_set_color_and_opacity(viewer_client, viewer
     assert state["outlineColors"] == [0xFF00FF]  # not recoloured by set_color
     assert state["meshes"][0]["color"] == 0x00FF00
     assert state["meshes"][0]["opacity"] == 0.5
+    # Turning the mesh translucent re-resolves the style: a transparent mesh
+    # renders after the opaque hull, so it cannot prime the depth buffer the
+    # hull is culled against, and the silhouette gives way to the edge outline.
+    assert state["outlineStyles"] == ["edges"]
     outline_opacity = viewer_page.evaluate(
         "() => {"
         " let op = null;"
@@ -303,7 +307,9 @@ def test_set_highlight_composes_with_set_color_and_opacity(viewer_client, viewer
         " return op;"
         "}"
     )
-    assert outline_opacity == 1.0  # silhouette hull, not dimmed by set_opacity
+    # The outline keeps its own styling — 0.95 is the edge outline's baked
+    # opacity, not the mesh's 0.5 leaking into the selection indicator.
+    assert outline_opacity == 0.95
 
 
 def _get_material_color(page, obj_id):
@@ -5780,6 +5786,120 @@ def test_set_highlight_silhouette_is_visible_on_a_smooth_body(
             break
         time.sleep(0.05)
     assert orange_pixels() == 0, "disable must leave no trace of the outline"
+
+
+@pytest.mark.browser
+def test_set_highlight_silhouette_falls_back_on_a_translucent_mesh(
+    viewer_client, viewer_page
+):
+    """A silhouette hull needs the mesh in the depth buffer to cull its
+    backfaces. set_opacity() below 1 clears depthWrite, so the hull would draw
+    in full and paint a solid shell of the selection colour over the object —
+    fall back to the feature-edge outline there instead."""
+    viewer_client.add_box(
+        "tbox", width=2.0, height=2.0, depth=2.0, color=0x1133AA, opacity=0.4
+    )
+    _wait_highlight_state(viewer_page, "tbox", lambda s: len(s["meshes"]) == 1)
+    viewer_client.set_highlight("tbox")
+    state = _wait_highlight_state(viewer_page, "tbox", lambda s: s["outlines"] == 1)
+    assert state["outlineStyles"] == ["edges"], (
+        "a non-depth-writing mesh must not get a silhouette hull"
+    )
+    # And the object is genuinely the translucent case that triggers it.
+    assert state["meshes"][0]["transparent"] is True
+
+
+@pytest.mark.browser
+def test_set_highlight_does_not_paint_a_shell_over_a_translucent_mesh(
+    viewer_client, viewer_page
+):
+    """The visible consequence of the fallback: the highlight stays a thin
+    outline instead of covering the object's whole projected footprint.
+
+    A box is used rather than a sphere because it has creases for the edge
+    outline to draw, so this measures 'outline, not shell' rather than
+    'nothing at all'.
+    """
+    viewer_client.add_box(
+        "tbox", width=2.0, height=2.0, depth=2.0, color=0x1133AA, opacity=0.4
+    )
+    _wait_highlight_state(viewer_page, "tbox", lambda s: len(s["meshes"]) == 1)
+    viewer_client.frame_object("tbox")
+    viewer_client.set_highlight("tbox", width_px=6)
+    _wait_highlight_state(viewer_page, "tbox", lambda s: s["outlines"] == 1)
+
+    def coverage():
+        # Orange highlight pixels vs. all non-background pixels, in one JS turn
+        # (no preserveDrawingBuffer, so the read must follow the render).
+        return viewer_page.evaluate(
+            "() => {"
+            " const v = window.threejsViewer;"
+            " v._renderer.render(v._scene, v._camera);"
+            " const gl = v._renderer.getContext();"
+            " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
+            " const px = new Uint8Array(w * h * 4);"
+            " gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);"
+            " let orange = 0, covered = 0;"
+            " for (let i = 0; i < px.length; i += 4) {"
+            "  const r = px[i], g = px[i + 1], b = px[i + 2];"
+            "  if (Math.abs(r - 34) < 12 && Math.abs(g - 34) < 12"
+            "      && Math.abs(b - 34) < 12) continue;"  # background #222222
+            "  covered++;"
+            "  if (r > 150 && g > 80 && g < 200 && b < 90) orange++;"
+            " }"
+            " return { orange, covered };"
+            "}"
+        )
+
+    seen = {"orange": 0, "covered": 0}
+    for _ in range(60):
+        seen = coverage()
+        if seen["covered"] > 500 and seen["orange"] > 0:
+            break
+        time.sleep(0.05)
+    assert seen["covered"] > 500, "box must be framed and visible"
+    assert seen["orange"] > 0, "highlight must draw something"
+    # A silhouette hull on a non-depth-writing mesh covers essentially the
+    # whole footprint; an outline is a thin fraction of it.
+    assert seen["orange"] < 0.35 * seen["covered"], (
+        f"highlight painted a shell, not an outline: "
+        f"{seen['orange']}/{seen['covered']} px"
+    )
+
+
+@pytest.mark.browser
+def test_set_highlight_style_re_resolves_when_opacity_changes(
+    viewer_client, viewer_page
+):
+    """The style is re-resolved when set_opacity flips depthWrite under an
+    already-highlighted mesh, so the order of the two calls does not matter."""
+    viewer_client.add_box("obox", width=2.0, height=2.0, depth=2.0, color=0x1133AA)
+    _wait_highlight_state(viewer_page, "obox", lambda s: len(s["meshes"]) == 1)
+    viewer_client.set_highlight("obox")
+    state = _wait_highlight_state(viewer_page, "obox", lambda s: s["outlines"] == 1)
+    assert state["outlineStyles"] == ["silhouette"], "opaque mesh gets the hull"
+
+    # Highlight first, opacity second: the hull must give way to edges.
+    viewer_client.set_opacity("obox", 0.4)
+    state = _wait_highlight_state(
+        viewer_page, "obox", lambda s: s["outlineStyles"] == ["edges"]
+    )
+    assert state["outlineStyles"] == ["edges"]
+    assert state["outlines"] == 1, "re-resolving must not stack a second outline"
+
+    # Back to opaque: the hull comes back.
+    viewer_client.set_opacity("obox", 1.0)
+    state = _wait_highlight_state(
+        viewer_page, "obox", lambda s: s["outlineStyles"] == ["silhouette"]
+    )
+    assert state["outlineStyles"] == ["silhouette"]
+    assert state["outlines"] == 1
+
+    # Still fully reversible after the style round-trip.
+    viewer_client.set_highlight("obox", enabled=False)
+    state = _wait_highlight_state(viewer_page, "obox", lambda s: s["outlines"] == 0)
+    assert state["outlines"] == 0
+    assert state["meshes"][0]["hasEdgeRef"] is False
 
 
 @pytest.mark.browser
