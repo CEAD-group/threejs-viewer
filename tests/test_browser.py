@@ -1485,6 +1485,28 @@ def test_load_progress_and_assets_loaded_hooks(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_wait_for_assets_replies_to_every_marker(viewer_client, viewer_page):
+    """`assets_loaded` is a reply, not a one-shot event, and must not be
+    deduplicated on the "nothing changed since last time" reasoning.
+
+    wait_for_assets() clears its event, sends mark_assets_complete and blocks
+    until the viewer answers. A script that stages its scene in two passes
+    calls it twice with no new assets in between — suppressing the second
+    reply would hang it forever (up to the timeout).
+    """
+    viewer_client.add_box("wfa", width=1.0, height=1.0, depth=1.0)
+    viewer_client.wait_for_assets(timeout=15, disconnect=False)
+    # Second pass, deliberately with no new assets: still must be answered.
+    viewer_client.wait_for_assets(timeout=15, disconnect=False)
+    # And once more after actual new work, the ordinary case.
+    viewer_client.add_box("wfa2", width=1.0, height=1.0, depth=1.0)
+    viewer_client.wait_for_assets(timeout=15, disconnect=False)
+    assert "wfa2" in viewer_client.query_scene()["objects"]
+    viewer_client.delete("wfa")
+    viewer_client.delete("wfa2")
+
+
+@pytest.mark.browser
 def test_on_unknown_message_hook(viewer_client, viewer_page):
     """`viewer.onUnknownMessage(cb)` (issue #145) is the sanctioned hook for
     application-defined message types: it fires from handleMessage's default

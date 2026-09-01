@@ -10935,9 +10935,19 @@ class ThreeJSViewer {
 
     _maybeNotifyAssetsLoaded() {
         if (this._pendingFetches !== 0 || !this._assetsComplete) return;
-        // The WS notification is gated on an open socket; the embedder hooks
-        // are not — a no-WebSocket page feeding handleMessage() directly is
-        // exactly the case that needs them (issue #163).
+        // Deliberately NOT deduplicated, on either path.
+        //
+        // The WS message is a *reply*, not an event: wait_for_assets() clears
+        // its event, sends mark_assets_complete, and blocks until this lands.
+        // Suppressing a repeat because "nothing changed since the last one"
+        // would hang the second wait_for_assets(disconnect=False) in a script
+        // that stages its scene in two passes.
+        //
+        // The hooks then fire whenever the viewer is genuinely idle with the
+        // producer's stream marked complete, which is what an embedder's
+        // overlay wants to know — a repeat carries the same true answer, and
+        // hiding an already-hidden overlay costs nothing. onAssetsLoaded's
+        // JSDoc says so ("may fire again if further assets arrive").
         if (this._ws && this._ws.readyState === WebSocket.OPEN) {
             this._ws.send(JSON.stringify({ type: 'assets_loaded' }));
         }
