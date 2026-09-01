@@ -6,6 +6,7 @@ Source files (edit these):
   - viewer.css     — styles for the viewer UI
   - template.html  — HTML template for UI controls
   - static/*.jpg   — cubemap face images
+  - static/draco/  — vendored Draco glTF decoder (wasm + emscripten wrapper)
 
 Generated file (do not edit):
   - ../viewer.html — standalone file for file:// usage with everything inlined
@@ -15,12 +16,15 @@ Run from repo root:
 """
 
 import base64
+import gzip
+import io
 import re
 from pathlib import Path
 
 VIEWER_DIR = Path(__file__).parent
 OUTPUT_HTML = VIEWER_DIR.parent / "viewer.html"
 STATIC_DIR = VIEWER_DIR / "static"
+DRACO_DIR = STATIC_DIR / "draco"
 
 THREE_VERSION = "0.183.2"
 CUBEMAP_FACES = ["px", "nx", "py", "ny", "pz", "nz"]
@@ -35,12 +39,34 @@ def _read_cubemap_b64() -> dict:
     return data
 
 
+def _gzip_b64(raw: bytes) -> str:
+    """Deterministically gzip + base64 a blob (mtime=0 so rebuilds are stable)."""
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gz:
+        gz.write(raw)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _read_draco_b64() -> dict:
+    """Read the vendored Draco glTF decoder and return gzip+base64 payloads.
+
+    Raw is ~251 KB (wasm 188 KB + wrapper 57 KB); gzip+base64 is ~100 KB, so
+    the decoder costs ~15% of viewer.html rather than ~49%. The viewer inflates
+    both with DecompressionStream('gzip') before handing them to DRACOLoader.
+    """
+    return {
+        "wasm": _gzip_b64((DRACO_DIR / "draco_decoder.wasm").read_bytes()),
+        "wrapper": _gzip_b64((DRACO_DIR / "draco_wasm_wrapper.js").read_bytes()),
+    }
+
+
 def build():
     js_content = (VIEWER_DIR / "viewer.js").read_text(encoding="utf-8")
     controls_content = (VIEWER_DIR / "controls.js").read_text(encoding="utf-8")
     css_content = (VIEWER_DIR / "viewer.css").read_text(encoding="utf-8")
     html_template = (VIEWER_DIR / "template.html").read_text(encoding="utf-8")
     cubemap_data = _read_cubemap_b64()
+    draco_data = _read_draco_b64()
 
     # Strip the local controls.js import from viewer.js (we inline it instead).
     js_content = re.sub(
@@ -81,6 +107,14 @@ def build():
         cubemap_js_entries.append(f"    {face}: '{cubemap_data[face]}'")
     cubemap_js = "const CUBEMAP_DATA = {\n" + ",\n".join(cubemap_js_entries) + "\n};"
 
+    # Draco glTF decoder, gzip+base64 (inflated in the browser before use).
+    draco_js = (
+        "const DRACO_DECODER_DATA = {\n"
+        f"    wasmGzB64: '{draco_data['wasm']}',\n"
+        f"    wrapperGzB64: '{draco_data['wrapper']}'\n"
+        "};"
+    )
+
     # Escape backticks and ${} in template for JS template literal
     html_escaped = (
         html_template.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
@@ -120,6 +154,8 @@ def build():
     <script type="module">
 {cubemap_js}
 
+{draco_js}
+
 {template_js}
 
 {js_inlined}
@@ -128,7 +164,8 @@ def build():
 const container = document.getElementById('viewer-container');
 window.threejsViewer = new ThreeJSViewer(container, {{
     htmlTemplate: HTML_TEMPLATE,
-    cubemapData: CUBEMAP_DATA
+    cubemapData: CUBEMAP_DATA,
+    dracoDecoder: DRACO_DECODER_DATA
 }});
     </script>
 </body>

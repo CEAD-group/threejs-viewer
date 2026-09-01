@@ -11,5 +11,9 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"]
   },
   "include": ["src/threejs_viewer/viewer/**/*.js"],
-  "exclude": ["node_modules", "src/threejs_viewer/viewer.html"]
+  "exclude": [
+    "node_modules",
+    "src/threejs_viewer/viewer.html",
+    "src/threejs_viewer/viewer/static/draco"
+  ]
 }

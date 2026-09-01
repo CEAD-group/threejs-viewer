@@ -1,5 +1,6 @@
 """Integration tests using Playwright — verify browser-side behavior end-to-end."""
 
+import base64
 import json
 import math
 import socket
@@ -5144,3 +5145,167 @@ def test_orbit_pivot_falls_back_to_bounds_center(viewer_client, viewer_page):
     assert abs(result["x"] - 10.0) < 1.0
     assert abs(result["y"] - 20.0) < 1.0
     assert abs(result["z"] - 30.0) < 1.0
+
+
+# A KHR_draco_mesh_compression-encoded unit quad: 4 verts, 2 triangles, POSITION
+# only, EDGEBREAKER, 14-bit quantization — 75 bytes, the smallest useful Draco
+# payload. Checked in as base64 rather than as a binary fixture file because the
+# test builds the GLB container around it in Python (mirroring _two_triangle_glb,
+# so the two fixtures differ only in the compression), and because encoding it at
+# test time would need a Draco *encoder* the project does not ship. Regenerate
+# with three's examples/jsm/libs/draco/draco_encoder.js:
+#   const mesh = new m.Mesh(), mb = new m.MeshBuilder();
+#   mb.AddFacesToMesh(mesh, 2, new Uint32Array([0,1,2, 0,2,3]));
+#   mb.AddFloatAttributeToMesh(mesh, m.POSITION, 4, 3, positions);  // -> attr id 0
+#   encoder.SetEncodingMethod(m.MESH_EDGEBREAKER_ENCODING);
+#   encoder.SetAttributeQuantization(m.POSITION, 14);
+#   encoder.EncodeMeshToDracoBuffer(mesh, out);
+_DRACO_QUAD_B64 = (
+    "RFJBQ08CAgEBAAAABAIAAgAAAR//AREB/wAAAQAJAwAAAgEBAQADAwEwARADACiCmAAAAAAA"
+    "/z8AAAAAAAAAAAAAAAAAAAAAgD8O"
+)
+
+
+def _draco_quad_glb() -> bytes:
+    """The `_two_triangle_glb` quad, but with its geometry Draco-compressed.
+
+    Per the KHR_draco_mesh_compression spec the accessors keep count/type/min/max
+    but carry no bufferView — the decoder supplies the data — and the primitive
+    points at the compressed bufferView plus the per-attribute unique ids.
+    """
+    bin_chunk = base64.b64decode(_DRACO_QUAD_B64)
+    draco_len = len(bin_chunk)
+    bin_chunk += b"\x00" * (-len(bin_chunk) % 4)
+    gltf = {
+        "asset": {"version": "2.0"},
+        "extensionsUsed": ["KHR_draco_mesh_compression"],
+        "extensionsRequired": ["KHR_draco_mesh_compression"],
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [
+            {
+                "primitives": [
+                    {
+                        "attributes": {"POSITION": 0},
+                        "indices": 1,
+                        "extensions": {
+                            "KHR_draco_mesh_compression": {
+                                "bufferView": 0,
+                                "attributes": {"POSITION": 0},
+                            }
+                        },
+                    }
+                ]
+            }
+        ],
+        "buffers": [{"byteLength": len(bin_chunk)}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": draco_len}],
+        "accessors": [
+            {
+                "componentType": 5126,
+                "count": 4,
+                "type": "VEC3",
+                "min": [0, 0, 0],
+                "max": [1, 1, 0],
+            },
+            {"componentType": 5125, "count": 6, "type": "SCALAR"},
+        ],
+    }
+    json_chunk = json.dumps(gltf, separators=(",", ":")).encode()
+    json_chunk += b" " * (-len(json_chunk) % 4)
+    total = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
+    return (
+        struct.pack("<III", 0x46546C67, 2, total)
+        + struct.pack("<II", len(json_chunk), 0x4E4F534A)
+        + json_chunk
+        + struct.pack("<II", len(bin_chunk), 0x004E4942)
+        + bin_chunk
+    )
+
+
+@pytest.mark.browser
+def test_draco_compressed_glb_loads(viewer_client, viewer_page):
+    """A KHR_draco_mesh_compression GLB decodes and renders (issue #167).
+
+    The page is loaded from file:// with no network, so this also proves the
+    decoder ships inside viewer.html: DRACOLoader never fetches a CDN, it gets
+    the wasm + emscripten wrapper from the inlined gzip+base64 payload.
+    """
+    viewer_client.add_model_binary("quad", _draco_quad_glb(), format="glb")
+    objects = {}
+    for _ in range(100):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "quad" in objects:
+            break
+    assert "quad" in objects, "Draco GLB did not load"
+
+    state = viewer_page.evaluate(
+        "() => {"
+        " const root = window.threejsViewer._objects.get('quad');"
+        " let mesh = null;"
+        " root.traverse(o => { if (o.isMesh && !mesh) mesh = o; });"
+        " if (!mesh) return null;"
+        " const g = mesh.geometry;"
+        " g.computeBoundingBox();"
+        " const bb = g.boundingBox;"
+        " return {"
+        "  verts: g.attributes.position.count,"
+        "  indices: g.index ? g.index.count : 0,"
+        "  min: bb.min.toArray(), max: bb.max.toArray(),"
+        "  visible: mesh.visible,"
+        "  decoderPath: window.threejsViewer._dracoLoader.decoderPath,"
+        "  dracoWorkers: window.threejsViewer._dracoLoader.workerPool.length,"
+        " };"
+        "}"
+    )
+    assert state is not None, "no mesh under the loaded Draco model"
+    # The decoder really ran (a worker was spun up) and it was never given a
+    # URL prefix to fetch from — the bytes came from the inlined payload.
+    assert state["dracoWorkers"] >= 1
+    assert state["decoderPath"] == ""
+    # Decoded geometry: the 4-vertex / 2-triangle unit quad in the XY plane.
+    assert state["verts"] == 4
+    assert state["indices"] == 6
+    assert state["visible"] is True
+    for got, want in zip(state["min"], [0.0, 0.0, 0.0]):
+        assert abs(got - want) < 1e-3, state["min"]
+    for got, want in zip(state["max"], [1.0, 1.0, 0.0]):
+        assert abs(got - want) < 1e-3, state["max"]
+
+    # The draw-range stamp (issue #104) runs on Draco models like any other.
+    assert state["indices"] == viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('quad')"
+        ".userData.drawRangeMeshes[0].userData.totalIndexCount"
+    )
+
+
+@pytest.mark.browser
+def test_uncompressed_glb_still_loads_with_draco_wired(viewer_client, viewer_page):
+    """Attaching a DRACOLoader must not change the uncompressed path: the
+    extension is per-primitive and GLTFLoader falls back on its own, so a plain
+    GLB loads without the decoder ever being touched (issue #167). The worker
+    count asserts that laziness — DRACOLoader spins one up only on a compressed
+    primitive, so an all-uncompressed scene never inflates the wasm."""
+    viewer_client.add_model_binary("plain", _two_triangle_glb(), format="glb")
+    objects = {}
+    for _ in range(60):
+        time.sleep(0.05)
+        objects = viewer_client.query_scene()["objects"]
+        if "plain" in objects:
+            break
+    assert "plain" in objects, "uncompressed GLB did not load"
+    state = viewer_page.evaluate(
+        "() => {"
+        " const root = window.threejsViewer._objects.get('plain');"
+        " let mesh = null;"
+        " root.traverse(o => { if (o.isMesh && !mesh) mesh = o; });"
+        " return { verts: mesh.geometry.attributes.position.count,"
+        "          indices: mesh.geometry.index.count,"
+        "          dracoWorkers: window.threejsViewer._dracoLoader.workerPool.length };"
+        "}"
+    )
+    assert state["verts"] == 4
+    assert state["indices"] == 6
+    assert state["dracoWorkers"] == 0

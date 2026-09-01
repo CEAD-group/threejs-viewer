@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { ViewerControls } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
@@ -4841,6 +4842,78 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
     }
 }
 
+// ========== Draco-compressed glTF (issue #167) ==========
+//
+// KHR_draco_mesh_compression shrinks CAD-tessellated GLB by ~90%. GLTFLoader
+// handles it once a DRACOLoader is attached, but DRACOLoader needs the actual
+// decoder — an emscripten wrapper (JS text) plus a wasm blob — which it
+// normally fetches from `setDecoderPath()`, i.e. a CDN. Production runs
+// offline behind a firewall, so the decoder ships *inside* viewer.html:
+// build.py gzips both files (vendored from three's
+// examples/jsm/libs/draco/gltf/) and base64s them into the DRACO_DECODER_DATA
+// constructor option. gzip+base64 is ~100 KB where raw base64 would be
+// ~334 KB — the wasm is highly compressible and DecompressionStream('gzip')
+// is native, so the inflate costs nothing worth measuring.
+//
+// The injection seam is DRACOLoader._loadLibrary(url, responseType): it is the
+// single place the class turns a decoder filename into bytes (a FileLoader GET
+// under decoderPath). Overriding it to answer from memory keeps every other
+// DRACOLoader behaviour — worker pool, decoder config, dispose — untouched.
+// It is a private method, so it is pinned to the vendored decoder pair and to
+// the three version in build.py's THREE_VERSION; a three upgrade that renames
+// it fails loudly on the first Draco GLB (and in the browser test).
+
+/**
+ * Inflate a gzip+base64 payload to an ArrayBuffer.
+ * @param {string} b64
+ * @returns {Promise<ArrayBuffer>}
+ */
+function inflateGzipBase64(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(stream).arrayBuffer();
+}
+
+/**
+ * Build the DRACOLoader that GLTFLoader delegates KHR_draco_mesh_compression
+ * primitives to. Decoder source, in precedence order:
+ *   1. `options.dracoDecoder` — `{wasmGzB64, wrapperGzB64}` inlined by
+ *      build.py; the standalone viewer.html path, works under `file://`.
+ *   2. `options.dracoDecoderPath` — a URL prefix an embedder serves the two
+ *      decoder files from (three's `setDecoderPath` contract, trailing slash).
+ *   3. `static/draco/` next to this module — works when an embedder serves the
+ *      `viewer/` source directory as static files.
+ * No CDN default at any level.
+ * @param {any} options
+ * @returns {DRACOLoader}
+ */
+function createDracoLoader(options) {
+    const loader = new DRACOLoader();
+    const inline = options.dracoDecoder;
+    if (inline && inline.wasmGzB64 && inline.wrapperGzB64) {
+        /** @type {any} */ (loader)._loadLibrary = (/** @type {string} */ url) => {
+            if (url === 'draco_decoder.wasm') return inflateGzipBase64(inline.wasmGzB64);
+            if (url === 'draco_wasm_wrapper.js') {
+                return inflateGzipBase64(inline.wrapperGzB64)
+                    .then(buf => new TextDecoder().decode(buf));
+            }
+            // Only reachable on a WebAssembly-less browser (DRACOLoader then
+            // asks for the pure-JS decoder, which is not bundled) — the viewer
+            // needs WebGL2 anyway, so fail loudly rather than fall back.
+            return Promise.reject(new Error(
+                `ThreeJSViewer: Draco decoder asset "${url}" is not bundled (WebAssembly required)`
+            ));
+        };
+    } else if (options.dracoDecoderPath) {
+        loader.setDecoderPath(options.dracoDecoderPath);
+    } else {
+        loader.setDecoderPath(new URL('static/draco/', import.meta.url).href);
+    }
+    return loader;
+}
+
 // ========== Loaded-model draw ranges (issue #104) ==========
 //
 // Models arrive through the format loaders (GLTF/GLB → a Group wrapper, STL/
@@ -7696,11 +7769,14 @@ export class ThreeJSViewer {
         this._gridHelper.visible = false;
         this._scene.add(this._gridHelper);
 
-        // Loaders
+        // Loaders. One DRACOLoader (one worker pool) shared by both glTF
+        // loaders — uncompressed assets never touch it, so their load path is
+        // unchanged (issue #167).
+        this._dracoLoader = createDracoLoader(this._options);
         this._loaders = {
             obj: new OBJLoader(),
-            gltf: new GLTFLoader(),
-            glb: new GLTFLoader(),
+            gltf: new GLTFLoader().setDRACOLoader(this._dracoLoader),
+            glb: new GLTFLoader().setDRACOLoader(this._dracoLoader),
             fbx: new FBXLoader(),
             dae: new ColladaLoader(),
             stl: new STLLoader(),
