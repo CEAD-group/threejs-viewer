@@ -2528,6 +2528,25 @@ class ViewerClient:
         the hardest creases and a lower one (e.g. 1°) draws every tessellation
         edge. Each option applies to its own style and is ignored by the other.
 
+        **Translucent objects fall back to** ``"edges"``. The silhouette is a
+        back-face hull culled by the object's own depth, and a translucent
+        mesh cannot supply that depth: three.js draws the whole opaque pass
+        before the transparent one, so the hull would be drawn first, against
+        an empty depth buffer, and would cover the object in a solid shell of
+        the selection colour. Any mesh with ``transparent`` set or
+        ``depthWrite`` cleared — i.e. anything with ``opacity < 1``, whether
+        from :meth:`set_opacity` or an add-time ``opacity=`` — is outlined
+        with ``"edges"`` instead, whatever ``style`` asks for. The same
+        fallback covers skinned meshes and geometry with no vertex normals.
+
+        **Known limitation:** that leaves one combination with no visible
+        highlight — a *smooth* translucent body (a sphere, a fillet), where
+        the fallback draws feature edges but the surface has no crease above
+        ``threshold_deg`` to draw. Lower ``threshold_deg`` to pull out
+        tessellation edges if you need a marker there, or make the object
+        opaque while it is selected. Prismatic translucent parts are
+        unaffected — they have creases, and outline normally.
+
         Transient viewer state like :meth:`set_color` (not replayed on
         reconnect).
         """
