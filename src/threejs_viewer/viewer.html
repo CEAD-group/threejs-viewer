@@ -8602,6 +8602,25 @@ class ThreeJSViewer {
         /** @type {Array<(data: any) => void>} */
         this._unknownMessageHooks = [];
 
+        // Embedder asset-load hooks (issue #163). Binary payloads (models,
+        // meshes, polylines, tubes, point-cloud nodes, animations) are
+        // fetched over HTTP as their messages arrive, so there is no
+        // knowable up-front total. Instead the counters describe the current
+        // *load batch*: a batch opens when _pendingFetches goes 0 -> 1 and
+        // closes when it returns to 0. _loadBatchTotal is the number of
+        // fetches started in that batch (a running count of what has been
+        // seen, which may grow mid-batch — never a prediction), and
+        // _loadBatchLoaded the number of them already finished. The
+        // finished batch's counters are retained after the drain and reset
+        // by the next batch's first fetch, so the last progress event stays
+        // valid while idle.
+        /** @type {Array<(state: any) => void>} */
+        this._loadProgressHooks = [];
+        /** @type {Array<(state: any) => void>} */
+        this._assetsLoadedHooks = [];
+        this._loadBatchTotal = 0;
+        this._loadBatchLoaded = 0;
+
 
         // Channel apply functions
         this._CHANNEL_APPLY = makeChannelApply(this);
@@ -11236,15 +11255,73 @@ class ThreeJSViewer {
     // ========== Asset Tracking ==========
 
     _maybeNotifyAssetsLoaded() {
-        if (this._pendingFetches === 0 && this._assetsComplete && this._ws && this._ws.readyState === WebSocket.OPEN) {
+        if (this._pendingFetches !== 0 || !this._assetsComplete) return;
+        // Deliberately NOT deduplicated, on either path.
+        //
+        // The WS message is a *reply*, not an event: wait_for_assets() clears
+        // its event, sends mark_assets_complete, and blocks until this lands.
+        // Suppressing a repeat because "nothing changed since the last one"
+        // would hang the second wait_for_assets(disconnect=False) in a script
+        // that stages its scene in two passes.
+        //
+        // The hooks then fire whenever the viewer is genuinely idle with the
+        // producer's stream marked complete, which is what an embedder's
+        // overlay wants to know — a repeat carries the same true answer, and
+        // hiding an already-hidden overlay costs nothing. onAssetsLoaded's
+        // JSDoc says so ("may fire again if further assets arrive").
+        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
             this._ws.send(JSON.stringify({ type: 'assets_loaded' }));
+        }
+        this._fireAssetsLoaded();
+    }
+
+    _onFetchStart() {
+        if (this._pendingFetches === 0) {
+            // New batch: clear the retained counters of the previous one.
+            this._loadBatchTotal = 0;
+            this._loadBatchLoaded = 0;
+        }
+        this._pendingFetches++;
+        this._loadBatchTotal++;
+        this._fireLoadProgress();
+    }
+    _onFetchEnd() {
+        this._pendingFetches = Math.max(0, this._pendingFetches - 1);
+        this._loadBatchLoaded = Math.min(this._loadBatchTotal, this._loadBatchLoaded + 1);
+        this._fireLoadProgress();
+        this._maybeNotifyAssetsLoaded();
+    }
+
+    /**
+     * Snapshot of the viewer's asset-fetch state — the public replacement
+     * for polling the private `_pendingFetches` counter.
+     * @returns {{loaded: number, total: number, pending: number, assetsComplete: boolean}}
+     */
+    getLoadState() {
+        return {
+            loaded: this._loadBatchLoaded,
+            total: this._loadBatchTotal,
+            pending: this._pendingFetches,
+            assetsComplete: this._assetsComplete,
+        };
+    }
+
+    /** Fire the onLoadProgress hooks (no-op with none registered). */
+    _fireLoadProgress() {
+        if (!this._loadProgressHooks.length) return;
+        const state = this.getLoadState();
+        for (const cb of this._loadProgressHooks.slice()) {
+            try { cb(state); } catch (err) { console.error('onLoadProgress hook error', err); }
         }
     }
 
-    _onFetchStart() { this._pendingFetches++; }
-    _onFetchEnd() {
-        this._pendingFetches = Math.max(0, this._pendingFetches - 1);
-        this._maybeNotifyAssetsLoaded();
+    /** Fire the onAssetsLoaded hooks (no-op with none registered). */
+    _fireAssetsLoaded() {
+        if (!this._assetsLoadedHooks.length) return;
+        const state = this.getLoadState();
+        for (const cb of this._assetsLoadedHooks.slice()) {
+            try { cb(state); } catch (err) { console.error('onAssetsLoaded hook error', err); }
+        }
     }
 
     // ========== Events ==========
@@ -14265,6 +14342,54 @@ class ThreeJSViewer {
         return () => {
             const i = this._unknownMessageHooks.indexOf(cb);
             if (i >= 0) this._unknownMessageHooks.splice(i, 1);
+        };
+    }
+
+    /**
+     * Register a hook fired on every asset-fetch start and every fetch
+     * completion, with the same snapshot `getLoadState()` returns
+     * (issue #163) — lets an embedder drive a loading overlay without
+     * polling the private `_pendingFetches` counter.
+     *
+     * Semantics: binary payloads are fetched as their messages arrive, so
+     * there is no honest up-front total. `total` is the number of fetches
+     * *started* in the current load batch (a batch opens on the first fetch
+     * while idle and closes when the last one finishes) and may grow while
+     * the batch is in flight; `loaded` is how many of them have finished.
+     * `pending === 0` means every fetch the viewer knows about is done —
+     * the honest "spinner off" signal; it does not promise the producer has
+     * no more messages to send (that is `onAssetsLoaded`). The finished
+     * batch's counters are retained while idle and reset by the next batch.
+     * @param {(state: {loaded:number, total:number, pending:number, assetsComplete:boolean}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onLoadProgress(cb) {
+        this._loadProgressHooks.push(cb);
+        return () => {
+            const i = this._loadProgressHooks.indexOf(cb);
+            if (i >= 0) this._loadProgressHooks.splice(i, 1);
+        };
+    }
+
+    /**
+     * Register a hook fired when the viewer goes fully idle: no fetch is in
+     * flight *and* the producer has declared its stream complete by sending
+     * `{type: 'mark_assets_complete'}` (Python's `wait_for_assets()` sends
+     * it; a no-WebSocket embedder feeds it through `handleMessage()` after
+     * its last add). This is the browser side of the existing
+     * `assets_loaded` WS notification, and now fires on the direct
+     * `handleMessage()` path too — no socket required. Without the
+     * completion marker it never fires; watch `onLoadProgress`'s
+     * `pending === 0` for the weaker "everything requested so far has
+     * landed". May fire again if further assets arrive after a completion.
+     * @param {(state: {loaded:number, total:number, pending:number, assetsComplete:boolean}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onAssetsLoaded(cb) {
+        this._assetsLoadedHooks.push(cb);
+        return () => {
+            const i = this._assetsLoadedHooks.indexOf(cb);
+            if (i >= 0) this._assetsLoadedHooks.splice(i, 1);
         };
     }
 

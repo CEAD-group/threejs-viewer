@@ -1513,6 +1513,129 @@ def test_handle_message_dispatches_without_websocket(viewer_client, viewer_page)
 
 
 @pytest.mark.browser
+def test_load_progress_and_assets_loaded_hooks(viewer_client, viewer_page):
+    """Issue #163: `viewer.onLoadProgress(cb)` / `viewer.onAssetsLoaded(cb)` /
+    `viewer.getLoadState()` are the public replacement for polling the private
+    `_pendingFetches` counter. Progress fires on every fetch start and end with
+    the running batch counters; assets-loaded fires when the batch drains AND
+    the producer has sent `mark_assets_complete` — and, crucially, it must fire
+    on the direct `handleMessage()` path with no WebSocket, which the old
+    WS-OPEN gate on `_maybeNotifyAssetsLoaded` blocked. Both return an
+    unsubscribe fn. Two 404 blob fetches drive the counters (the fetch is
+    balanced in a finally block regardless of the HTTP status)."""
+    url = f"http://{viewer_client.host}:{viewer_client._http_port}/no_such_blob"
+    started = viewer_page.evaluate(
+        """(url) => {
+            const v = window.threejsViewer;
+            window.__progress = [];
+            window.__complete = [];
+            window.__offProgress = v.onLoadProgress((s) => window.__progress.push(s));
+            window.__offComplete = v.onAssetsLoaded((s) => window.__complete.push(s));
+            // Detach the socket: the embedder case is a page with no WS at all.
+            window.__ws = v._ws;
+            v._ws = null;
+            v.handleMessage({ type: 'add_model_binary', id: 'lp_a', format: 'glb', blob_url: url });
+            v.handleMessage({ type: 'add_model_binary', id: 'lp_b', format: 'glb', blob_url: url });
+            return v.getLoadState();
+        }""",
+        url,
+    )
+    # Two fetches registered synchronously: the batch total counts what has
+    # been *seen*, and nothing has landed yet.
+    assert started == {"loaded": 0, "total": 2, "pending": 2, "assetsComplete": False}
+
+    for _ in range(100):
+        viewer_page.wait_for_timeout(100)
+        if (
+            viewer_page.evaluate("() => window.threejsViewer.getLoadState().pending")
+            == 0
+        ):
+            break
+
+    result = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const drained = v.getLoadState();
+            const completeBeforeMark = window.__complete.length;
+            // The completion marker, fed straight in with no socket open.
+            v.handleMessage({ type: 'mark_assets_complete' });
+            const afterMark = window.__complete.slice();
+            window.__offProgress();
+            window.__offComplete();
+            v.handleMessage({ type: 'mark_assets_complete' });
+            const progressCount = window.__progress.length;
+            v.handleMessage({ type: 'add_model_binary', id: 'lp_c', format: 'glb',
+                              blob_url: 'http://127.0.0.1:1/nope' });
+            return {
+                drained,
+                completeBeforeMark,
+                afterMark,
+                progressCount,
+                progressAfterUnsub: window.__progress.length,
+                completeAfterUnsub: window.__complete.length,
+                progress: window.__progress,
+            };
+        }"""
+    )
+    assert result["drained"] == {
+        "loaded": 2,
+        "total": 2,
+        "pending": 0,
+        "assetsComplete": False,
+    }
+    # Four progress events: start, start, end, end.
+    assert result["progressCount"] == 4
+    assert [
+        (p["loaded"], p["total"], p["pending"]) for p in result["progress"][:4]
+    ] == [
+        (0, 1, 1),
+        (0, 2, 2),
+        (1, 2, 1),
+        (2, 2, 0),
+    ]
+    # No completion until the producer says the stream is done.
+    assert result["completeBeforeMark"] == 0
+    assert len(result["afterMark"]) == 1
+    assert result["afterMark"][0]["assetsComplete"] is True
+    # Unsubscribe stops both hooks.
+    assert result["completeAfterUnsub"] == 1
+    assert result["progressAfterUnsub"] == 4
+
+    viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            v._ws = window.__ws;
+            v._assetsComplete = false;
+            v.handleMessage({ type: 'delete_object', id: 'lp_a' });
+            v.handleMessage({ type: 'delete_object', id: 'lp_b' });
+            v.handleMessage({ type: 'delete_object', id: 'lp_c' });
+        }"""
+    )
+
+
+@pytest.mark.browser
+def test_wait_for_assets_replies_to_every_marker(viewer_client, viewer_page):
+    """`assets_loaded` is a reply, not a one-shot event, and must not be
+    deduplicated on the "nothing changed since last time" reasoning.
+
+    wait_for_assets() clears its event, sends mark_assets_complete and blocks
+    until the viewer answers. A script that stages its scene in two passes
+    calls it twice with no new assets in between — suppressing the second
+    reply would hang it forever (up to the timeout).
+    """
+    viewer_client.add_box("wfa", width=1.0, height=1.0, depth=1.0)
+    viewer_client.wait_for_assets(timeout=15, disconnect=False)
+    # Second pass, deliberately with no new assets: still must be answered.
+    viewer_client.wait_for_assets(timeout=15, disconnect=False)
+    # And once more after actual new work, the ordinary case.
+    viewer_client.add_box("wfa2", width=1.0, height=1.0, depth=1.0)
+    viewer_client.wait_for_assets(timeout=15, disconnect=False)
+    assert "wfa2" in viewer_client.query_scene()["objects"]
+    viewer_client.delete("wfa")
+    viewer_client.delete("wfa2")
+
+
+@pytest.mark.browser
 def test_on_unknown_message_hook(viewer_client, viewer_page):
     """`viewer.onUnknownMessage(cb)` (issue #145) is the sanctioned hook for
     application-defined message types: it fires from handleMessage's default
