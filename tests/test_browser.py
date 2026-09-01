@@ -12,6 +12,7 @@ from http.server import HTTPServer
 import numpy as np
 import pytest
 
+from conftest import frames, settle
 from threejs_viewer import Animation, Frame, ViewerClient
 from threejs_viewer.client import _BlobHandler
 
@@ -26,7 +27,7 @@ def test_viewer_connects(viewer_client, viewer_page):
 def test_add_box_appears_in_scene(viewer_client, viewer_page):
     """Adding a box from Python creates it in the browser scene graph."""
     viewer_client.add_box("mybox")
-    time.sleep(0.1)
+    settle(viewer_client)
     result = viewer_client.query_scene()
     assert "mybox" in result["objects"]
     assert result["objects"]["mybox"]["type"] == "Mesh"
@@ -37,7 +38,7 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
     """add_grid creates a tracked mesh that never inflates scene bounds."""
     viewer_client.add_box("ref")
     viewer_client.add_grid("floor", cell_size=10.0, extent=10000.0)
-    time.sleep(0.2)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert objects["floor"]["type"] == "Mesh"
     spheres = viewer_page.evaluate(
@@ -60,7 +61,7 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
     )
     assert frame_extent < 100
     viewer_client.delete("floor")
-    time.sleep(0.1)
+    settle(viewer_client)
     assert "floor" not in viewer_client.query_scene()["objects"]
 
 
@@ -69,7 +70,7 @@ def test_grouping(viewer_client, viewer_page):
     """Parent-child hierarchy works end-to-end."""
     viewer_client.add_group("arm")
     viewer_client.add_box("joint", parent="arm")
-    time.sleep(0.1)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert objects["arm"]["type"] == "Group"
     assert "joint" in objects["arm"]["children"]
@@ -94,7 +95,7 @@ def test_deferred_reparent_child_before_parent(viewer_client, viewer_page):
     """A child added with parent="P" BEFORE P exists renders at the scene root,
     then re-parents under P when P arrives (issue #138)."""
     viewer_client.add_box("orphan", parent="P", position=[1.0, 0.0, 0.0])
-    time.sleep(0.2)
+    settle(viewer_client)
     # Renders immediately at the scene root (not dropped).
     objects = viewer_client.query_scene()["objects"]
     assert "orphan" in objects
@@ -102,7 +103,7 @@ def test_deferred_reparent_child_before_parent(viewer_client, viewer_page):
     assert _world_position(viewer_page, "orphan") == pytest.approx([1.0, 0.0, 0.0])
     # Parent arrives late with its own transform.
     viewer_client.add_group("P", position=[5.0, 0.0, 0.0])
-    time.sleep(0.2)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert objects["orphan"]["parent"] == "P"
     assert "orphan" in objects["P"]["children"]
@@ -114,11 +115,11 @@ def test_deferred_reparent_child_before_parent(viewer_client, viewer_page):
 def test_deferred_reparent_follows_parent_transforms(viewer_client, viewer_page):
     """After a deferred re-parent, transform updates to the parent move the child."""
     viewer_client.add_box("child", parent="P", position=[1.0, 0.0, 0.0])
-    time.sleep(0.1)
+    settle(viewer_client)
     viewer_client.add_group("P", position=[5.0, 0.0, 0.0])
-    time.sleep(0.2)
+    settle(viewer_client)
     viewer_client.batch_update({"P": {"position": [0.0, 10.0, 0.0]}})
-    time.sleep(0.2)
+    settle(viewer_client)
     assert _world_position(viewer_page, "child") == pytest.approx([1.0, 10.0, 0.0])
 
 
@@ -128,14 +129,14 @@ def test_deferred_reparent_pruned_on_child_delete(viewer_client, viewer_page):
     entry, so a later add of the parent doesn't touch anything — and an
     unrelated object reusing the child's id is not mis-parented."""
     viewer_client.add_box("ephemeral", parent="P", position=[1.0, 0.0, 0.0])
-    time.sleep(0.1)
+    settle(viewer_client)
     viewer_client.delete("ephemeral")
-    time.sleep(0.1)
+    settle(viewer_client)
     # Reuse the id with NO parent — must stay at the scene root.
     viewer_client.add_box("ephemeral", position=[2.0, 0.0, 0.0])
-    time.sleep(0.1)
+    settle(viewer_client)
     viewer_client.add_group("P", position=[5.0, 0.0, 0.0])
-    time.sleep(0.2)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert objects["ephemeral"]["parent"] is None
     assert "ephemeral" not in objects["P"]["children"]
@@ -146,9 +147,9 @@ def test_deferred_reparent_pruned_on_child_delete(viewer_client, viewer_page):
 def test_delete_object(viewer_client, viewer_page):
     """Deleting an object removes it from the scene."""
     viewer_client.add_sphere("s1")
-    time.sleep(0.05)
+    settle(viewer_client)
     viewer_client.delete("s1")
-    time.sleep(0.1)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert "s1" not in objects
 
@@ -157,9 +158,9 @@ def test_delete_object(viewer_client, viewer_page):
 def test_visibility(viewer_client, viewer_page):
     """set_visible toggles object visibility."""
     viewer_client.add_box("v1")
-    time.sleep(0.05)
+    settle(viewer_client)
     viewer_client.set_visible("v1", False)
-    time.sleep(0.1)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert objects["v1"]["visible"] is False
 
@@ -171,9 +172,9 @@ def test_set_scene_visibility_before_add_is_honoured(viewer_client, viewer_page)
     during a slow GLB fetch was silently dropped, leaving the loaded object
     permanently at its initial `visible` state (PR #47)."""
     viewer_client.set_scene_visibility({"m1": False})
-    time.sleep(0.05)
+    settle(viewer_client)
     viewer_client.add_box("m1")
-    time.sleep(0.1)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert "m1" in objects
     assert objects["m1"]["visible"] is False
@@ -185,11 +186,11 @@ def test_baseline_visibility_pruned_on_delete(viewer_client, viewer_page):
     by stale visibility from a prior set_scene_visibility."""
     viewer_client.add_box("m1")
     viewer_client.set_scene_visibility({"m1": False})
-    time.sleep(0.05)
+    settle(viewer_client)
     viewer_client.delete("m1")
-    time.sleep(0.05)
+    settle(viewer_client)
     viewer_client.add_box("m1")
-    time.sleep(0.1)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert objects["m1"]["visible"] is True
 
@@ -363,7 +364,7 @@ def test_set_visibility_during_binary_load_is_honoured(viewer_client, viewer_pag
     viewer_client.set_visible("vc", False)
     objects = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "vc" in objects:
             break
@@ -381,7 +382,7 @@ def test_delete_during_binary_load_drops_queued_ops(viewer_client, viewer_page):
     viewer_client.add_mesh("dc", positions, indices)
     viewer_client.set_color("dc", 0x00FF00)  # queued on inflight
     viewer_client.delete("dc")  # rejects inflight → set_color drops
-    time.sleep(0.4)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert "dc" not in objects
 
@@ -591,7 +592,7 @@ def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_pag
     viewer_client.set_draw_range("dr", 0.5)
     dr = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "dr" in objects:
             dr = objects["dr"]["drawRange"]
@@ -610,7 +611,7 @@ def test_add_points_appears_in_scene(viewer_client, viewer_page):
     viewer_client.add_points("cloud", pts, colors=scalars, colormap="turbo")
     obj = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "cloud" in objects:
             obj = objects["cloud"]
@@ -646,7 +647,7 @@ def test_append_points_grows_the_cloud_in_place(viewer_client, viewer_page):
     pts = rng.random((100, 3)).astype(np.float32)
     viewer_client.add_points("cloud", pts, colors=pts[:, 2], colormap="turbo")
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         if "cloud" in viewer_client.query_scene()["objects"]:
             break
     chunk = None
@@ -690,7 +691,7 @@ def test_append_points_bounds_stay_incremental_across_a_capacity_growth(
     pts = rng.random((100, 3)).astype(np.float32)
     viewer_client.add_points("cloud", pts)
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         if "cloud" in viewer_client.query_scene()["objects"]:
             break
     # First append: grows 100 -> the 1024 floor, and legitimately seeds the
@@ -774,7 +775,7 @@ def test_set_draw_range_on_points(viewer_client, viewer_page):
     viewer_client.set_draw_range("cloud", 0.5)
     dr = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "cloud" in objects:
             dr = objects["cloud"]["drawRange"]
@@ -948,7 +949,7 @@ def test_add_swept_tool_appears_in_scene(viewer_client, viewer_page):
     viewer_client.add_swept_tool("shank", positions, axes, profile, sections=16)
     obj = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "shank" in objects:
             obj = objects["shank"]
@@ -969,7 +970,7 @@ def test_set_draw_range_on_swept_tool(viewer_client, viewer_page):
     viewer_client.set_draw_range("shank", 0.5)
     dr = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "shank" in objects:
             dr = objects["shank"]["drawRange"]
@@ -1030,7 +1031,7 @@ def test_set_draw_range_on_glb_model(viewer_client, viewer_page):
     viewer_client.add_model_binary("bellows", _two_triangle_glb(), format="glb")
     objects = {}
     for _ in range(60):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "bellows" in objects:
             break
@@ -1080,7 +1081,7 @@ def test_binary_draw_ranges_channel_on_glb_model(viewer_client, viewer_page):
     viewer_client.add_model_binary("bellows", _two_triangle_glb(), format="glb")
     objects = {}
     for _ in range(60):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "bellows" in objects:
             break
@@ -1200,7 +1201,7 @@ def _load_animated_glb(viewer_client, obj_id="anim"):
     viewer_client.add_model_binary(obj_id, _scale_animated_glb(), format="glb")
     objects = {}
     for _ in range(60):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if obj_id in objects:
             return objects
@@ -1318,9 +1319,9 @@ def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
     viewer_client.add_box("a")
     viewer_client.add_sphere("b")
-    time.sleep(0.05)
+    settle(viewer_client)
     viewer_client.clear()
-    time.sleep(0.1)
+    settle(viewer_client)
     objects = viewer_client.query_scene()["objects"]
     assert "a" not in objects
     assert "b" not in objects
@@ -1344,13 +1345,13 @@ def test_unload_animation_resets_draw_range(viewer_client, viewer_page):
     viewer_client.load_animation(anim)
     # Wait for async HTTP animation load to complete
     for _ in range(20):
-        time.sleep(0.1)
+        settle(viewer_client)
         result = viewer_client.query_scene()
         if result["meta"]["animation"]["playing"]:
             break
     assert result["meta"]["animation"]["playing"] is True, "Animation did not start"
     viewer_client.unload_animation()
-    time.sleep(0.1)
+    settle(viewer_client)
     result = viewer_client.query_scene()
     assert result["objects"]["m1"]["drawRange"] == 1.0
 
@@ -1549,7 +1550,7 @@ def test_nonfinite_matrix_holds_last_good_pose(viewer_client, viewer_page):
     object stays visible at its last good pose.
     """
     viewer_client.add_box("nanbox")
-    time.sleep(0.1)
+    settle(viewer_client)
     eye = np.eye(4, dtype=np.float32).flatten(order="F")
     data = np.tile(eye, (3, 1, 1)).astype(np.float32)  # (3 frames, 1 obj, 16)
     data[1, 0, 12] = 5.0  # x = 5 at t=1 — the last good pose
@@ -1559,21 +1560,21 @@ def test_nonfinite_matrix_holds_last_good_pose(viewer_client, viewer_page):
     anim.set_transform_data(["nanbox"], data)
     viewer_client.load_animation(anim, autoplay=False, initial_time=1.0)
     _wait_for_animation_loaded(viewer_page)
-    time.sleep(0.3)
+    frames(viewer_page)
     assert _world_position(viewer_page, "nanbox") == pytest.approx(
         [5.0, 0.0, 0.0], abs=1e-4
     ), "setup: object should sit at x=5 on the last good keyframe"
 
     # Between the good and the NaN keyframe the lerp result is NaN...
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(1.5)")
-    time.sleep(0.2)
+    frames(viewer_page)
     pos = _world_position(viewer_page, "nanbox")
     assert all(math.isfinite(c) for c in pos), f"NaN leaked into matrixWorld: {pos}"
     assert pos == pytest.approx([5.0, 0.0, 0.0], abs=1e-4)
 
     # ...and landing exactly on the NaN keyframe holds it too.
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(2.0)")
-    time.sleep(0.2)
+    frames(viewer_page)
     pos = _world_position(viewer_page, "nanbox")
     assert all(math.isfinite(c) for c in pos), f"NaN leaked into matrixWorld: {pos}"
     assert pos == pytest.approx([5.0, 0.0, 0.0], abs=1e-4)
@@ -1604,15 +1605,15 @@ def test_pause_and_resume_animation(viewer_client, viewer_page):
     # Autoplay default is True, so the animation should be playing after load.
     deadline = time.time() + 2.0
     while time.time() < deadline and not _is_playing(viewer_page):
-        time.sleep(0.05)
+        settle(viewer_client)
     assert viewer_client.query_scene()["meta"]["animation"]["playing"] is True
 
     viewer_client.pause_animation()
-    time.sleep(0.1)
+    settle(viewer_client)
     assert viewer_client.query_scene()["meta"]["animation"]["playing"] is False
 
     viewer_client.resume_animation()
-    time.sleep(0.1)
+    settle(viewer_client)
     assert viewer_client.query_scene()["meta"]["animation"]["playing"] is True
 
 
@@ -1631,13 +1632,13 @@ def test_clear_resets_animation_state(viewer_client, viewer_page):
     viewer_client.load_animation(anim)
     # Wait for async HTTP animation load to complete
     for _ in range(20):
-        time.sleep(0.1)
+        settle(viewer_client)
         result = viewer_client.query_scene()
         if result["meta"]["animation"]["playing"]:
             break
     assert result["meta"]["animation"]["playing"] is True, "Animation did not start"
     viewer_client.clear()
-    time.sleep(0.2)
+    settle(viewer_client)
     result = viewer_client.query_scene()
     assert result["meta"]["animation"]["playing"] is False
 
@@ -1842,18 +1843,18 @@ def test_on_unknown_message_hook(viewer_client, viewer_page):
 @pytest.mark.browser
 def test_show_grid(viewer_client, viewer_page):
     """show_grid() toggles grid visibility."""
-    time.sleep(0.1)
+    settle(viewer_client)
     meta = viewer_client.query_scene()["meta"]
     # Grid is hidden by default
     assert meta["grid"]["visible"] is False
 
     viewer_client.show_grid(visible=True)
-    time.sleep(0.1)
+    settle(viewer_client)
     meta = viewer_client.query_scene()["meta"]
     assert meta["grid"]["visible"] is True
 
     viewer_client.show_grid(visible=False)
-    time.sleep(0.1)
+    settle(viewer_client)
     meta = viewer_client.query_scene()["meta"]
     assert meta["grid"]["visible"] is False
 
@@ -1877,7 +1878,7 @@ def _press_key(page, code):
 def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
     """M key cycles wireframe mode 0 → 1 → 2 → 0 across the whole scene."""
     viewer_client.add_box("wbox")
-    time.sleep(0.1)
+    frames(viewer_page)
     get_mode = "() => window.threejsViewer._shading.wireframeMode"
     assert viewer_page.evaluate(get_mode) == 0
 
@@ -1890,7 +1891,7 @@ def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
     # In combined mode (2), the box should have a wireframe overlay child.
     _press_key(viewer_page, "KeyM")  # back to 1
     _press_key(viewer_page, "KeyM")  # to 2
-    time.sleep(0.05)
+    frames(viewer_page)
     has_overlay = viewer_page.evaluate(
         """() => {
             const obj = window.threejsViewer._objects.get('wbox');
@@ -1905,7 +1906,7 @@ def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
 def test_n_key_cycles_shading_mode(viewer_client, viewer_page):
     """N key cycles shading debug mode 0 → 1 → 2 → 3 → 0."""
     viewer_client.add_sphere("sdebug")
-    time.sleep(0.1)
+    frames(viewer_page)
     get_mode = "() => window.threejsViewer._shading.shadingMode"
     assert viewer_page.evaluate(get_mode) == 0
 
@@ -1919,10 +1920,10 @@ def test_n_key_cycles_shading_mode(viewer_client, viewer_page):
 def test_m_and_n_compose(viewer_client, viewer_page):
     """M and N modes are independent and compose."""
     viewer_client.add_box("compose_box")
-    time.sleep(0.1)
+    frames(viewer_page)
     _press_key(viewer_page, "KeyM")  # wireframe = 1
     _press_key(viewer_page, "KeyN")  # shading = 1
-    time.sleep(0.05)
+    frames(viewer_page)
     state = viewer_page.evaluate(
         "() => ({w: window.threejsViewer._shading.wireframeMode, s: window.threejsViewer._shading.shadingMode})"
     )
@@ -1979,7 +1980,7 @@ def test_viewer_controls_r_key_toggles_orbit_mode(viewer_client, viewer_page):
     """R key toggles orbit mode between turntable and free."""
     start = viewer_page.evaluate("() => window.threejsViewer._controls.mode")
     _press_key(viewer_page, "KeyR")
-    time.sleep(0.05)
+    frames(viewer_page)
     after = viewer_page.evaluate("() => window.threejsViewer._controls.mode")
     assert after != start
     assert {start, after} == {"turntable", "free"}
@@ -2148,7 +2149,7 @@ def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
     viewer_client.add_polyline("pl_swap", pts, colors=rgb_red)
     # Polyline create is async (HTTP fetch); poll until the object exists.
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         if viewer_client.query_scene()["objects"].get("pl_swap"):
             break
     else:
@@ -2184,7 +2185,7 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
     # as black (red × green = 0).
     viewer_client.add_polyline("pl_noinit", pts, color=0xFF0000)
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         if viewer_client.query_scene()["objects"].get("pl_noinit"):
             break
     else:
@@ -4230,7 +4231,7 @@ def test_binary_draw_ranges_channel_on_swept_tool_and_points(
     viewer_page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
     got = None
     for _ in range(40):
-        time.sleep(0.05)
+        settle(viewer_client)
         objs = viewer_client.query_scene()["objects"]
         shank = objs.get("shank", {}).get("drawRange")
         cloud = objs.get("cloud", {}).get("drawRange")
@@ -4540,7 +4541,7 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
     track, clear() empties the map (issue #85)."""
     viewer_client.add_box("fp_a")
     viewer_client.add_box("fp_b")
-    time.sleep(0.1)
+    settle(viewer_client)
     path = dict(
         times=[0.0, 1.0],
         positions=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -5596,7 +5597,7 @@ def test_draco_compressed_glb_loads(viewer_client, viewer_page):
     viewer_client.add_model_binary("quad", _draco_quad_glb(), format="glb")
     objects = {}
     for _ in range(100):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "quad" in objects:
             break
@@ -5652,7 +5653,7 @@ def test_uncompressed_glb_still_loads_with_draco_wired(viewer_client, viewer_pag
     viewer_client.add_model_binary("plain", _two_triangle_glb(), format="glb")
     objects = {}
     for _ in range(60):
-        time.sleep(0.05)
+        settle(viewer_client)
         objects = viewer_client.query_scene()["objects"]
         if "plain" in objects:
             break
