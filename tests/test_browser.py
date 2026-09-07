@@ -1878,7 +1878,7 @@ def _press_key(page, code):
 def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
     """M key cycles wireframe mode 0 → 1 → 2 → 0 across the whole scene."""
     viewer_client.add_box("wbox")
-    frames(viewer_page)
+    settle(viewer_client)
     get_mode = "() => window.threejsViewer._shading.wireframeMode"
     assert viewer_page.evaluate(get_mode) == 0
 
@@ -1906,13 +1906,13 @@ def test_m_key_cycles_wireframe_mode(viewer_client, viewer_page):
 def test_n_key_cycles_shading_mode(viewer_client, viewer_page):
     """N key cycles shading debug mode 0 → 1 → 2 → 3 → 0."""
     viewer_client.add_sphere("sdebug")
-    frames(viewer_page)
+    settle(viewer_client)
     get_mode = "() => window.threejsViewer._shading.shadingMode"
     assert viewer_page.evaluate(get_mode) == 0
 
     for want in [1, 2, 3, 0]:
         _press_key(viewer_page, "KeyN")
-        time.sleep(0.05)
+        frames(viewer_page)
         assert viewer_page.evaluate(get_mode) == want
 
 
@@ -1920,7 +1920,7 @@ def test_n_key_cycles_shading_mode(viewer_client, viewer_page):
 def test_m_and_n_compose(viewer_client, viewer_page):
     """M and N modes are independent and compose."""
     viewer_client.add_box("compose_box")
-    frames(viewer_page)
+    settle(viewer_client)
     _press_key(viewer_page, "KeyM")  # wireframe = 1
     _press_key(viewer_page, "KeyN")  # shading = 1
     frames(viewer_page)
