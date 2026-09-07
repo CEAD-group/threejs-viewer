@@ -1,13 +1,15 @@
-"""Regenerate materials.gltf / materials.bin: one chamfered cylinder per material.
+"""Regenerate materials.gltf / materials.bin: one test body per material.
 
-The test shape is an upright cylinder standing on the floor (axis +Z — the
-file keeps Blender's Z-up frame, like the original export) with a closed top
-whose rim carries a quarter-round fillet of radius 25% of the height, and a
-sharp bottom rim. Every material is thus seen on a flat cap, a doubly-curved
-fillet, and a curved wall in one silhouette. Normals are smooth around the
-circumference and across the fillet (tangent-continuous into wall and cap);
-only the bottom rim is a hard edge. The cylinders sit
-at the same grid positions as the original Blender export (``CENTRES``).
+The test body is an upright cylinder standing on the floor (axis +Z — the
+file keeps Blender's Z-up frame, like the original export) with a 90° "pac-man"
+wedge removed (0°..90°), so two flat radial cut faces are exposed. The closed
+top rim is treated two ways over the remaining 270°: a quarter-round fillet on
+the first half and a 45° chamfer on the second half, both sized 25% of the
+height, so fillet and chamfer are compared on one material. The bottom rim is
+sharp. Normals are smooth around the circumference and across the fillet
+(tangent-continuous into wall and cap); the chamfer, the cut faces, and the
+bottom rim are hard edges. The bodies sit at the same grid positions as the
+original Blender export (``CENTRES``).
 
 The material definitions are read from the existing materials.gltf, so this
 script only replaces the geometry and layout:
@@ -28,9 +30,10 @@ BIN = HERE / "materials.bin"
 
 RADIUS = 1.29  # footprint of the original cubes
 HEIGHT = 2.0
-FILLET = 0.25 * HEIGHT  # quarter-round on the top rim
-SEGMENTS = 64  # around the circumference
-FILLET_STEPS = 12  # rings across the 90° fillet arc
+EDGE = 0.25 * HEIGHT  # fillet radius / chamfer size on the top rim
+SEGMENTS = 64  # columns per full circle
+WEDGE_DEG = 90.0  # pac-man wedge removed, starting at 0°
+RIM_STEPS = 12  # rings across the fillet arc (and the chamfer, for a uniform strip)
 
 # Node name -> centre, taken from the original Blender export's bounding boxes.
 CENTRES: dict[str, list[float]] = {
@@ -67,60 +70,96 @@ CENTRES: dict[str, list[float]] = {
 }
 
 
-def filleted_cylinder():
+def pacman_cylinder():
     """Return (positions (N,3) f32, normals (N,3) f32, indices (M,) u32)."""
-    ang = np.linspace(0.0, 2 * np.pi, SEGMENTS, endpoint=False)
-    c, s = np.cos(ang), np.sin(ang)
-    top = HEIGHT / 2
-    bot = -HEIGHT / 2  # centre at z=0 like the original cubes: floor at z=-1
-    radial = np.column_stack([c, s, np.zeros(SEGMENTS)])
+    top, bot = HEIGHT / 2, -HEIGHT / 2  # centre at z=0 like the original cubes
+    start = np.radians(WEDGE_DEG)
+    ncol = int(round(SEGMENTS * (360.0 - WEDGE_DEG) / 360.0)) + 1
+    ang = np.linspace(start, 2 * np.pi, ncol)  # open sweep, both ends kept
+    c, s_ = np.cos(ang), np.sin(ang)
+    radial = np.column_stack([c, s_, np.zeros(ncol)])
     up = np.array([0.0, 0.0, 1.0])
+    chamfer_col = ang >= (start + 2 * np.pi) / 2  # second half of the sweep
+
+    pos, nrm, tris = [], [], []
+
+    def add(p, n):
+        pos.extend(np.atleast_2d(p))
+        nrm.extend(np.atleast_2d(n))
 
     def ring(radius, z):
-        return np.column_stack([radius * c, radius * s, np.full(SEGMENTS, z)])
+        return np.column_stack([radius * c, radius * s_, np.full(ncol, z)])
 
-    # One smooth strip from the bottom rim up the wall and over the fillet to
-    # the cap's inner rim: rings share vertices, so shading is continuous.
-    rings, normals = [ring(RADIUS, bot), ring(RADIUS, top - FILLET)], [radial, radial]
-    for k in range(1, FILLET_STEPS + 1):
-        t = np.pi / 2 * k / FILLET_STEPS  # 0 = wall tangent, 90° = cap tangent
-        n = np.cos(t) * radial + np.sin(t) * up
-        centre_r, centre_z = RADIUS - FILLET, top - FILLET
-        rings.append(ring(centre_r, centre_z) + FILLET * n)
-        normals.append(n)
+    def strip(rings):
+        """Open quad strip between consecutive rings of ncol columns."""
+        base = len(pos) - len(rings) * ncol
+        for r in range(len(rings) - 1):
+            a0, b0 = base + r * ncol, base + (r + 1) * ncol
+            for i in range(ncol - 1):
+                tris.extend(
+                    [(a0 + i, a0 + i + 1, b0 + i), (b0 + i, a0 + i + 1, b0 + i + 1)]
+                )
 
-    pos = np.concatenate(rings)
-    nrm = np.concatenate(normals)
-    idx = []
-    for r in range(len(rings) - 1):
-        a0 = r * SEGMENTS
-        b0 = a0 + SEGMENTS
-        for i in range(SEGMENTS):
-            j = (i + 1) % SEGMENTS
-            idx.extend([a0 + i, a0 + j, b0 + i, b0 + i, a0 + j, b0 + j])  # CCW outside
+    # Wall.
+    add(ring(RADIUS, bot), radial)
+    add(ring(RADIUS, top - EDGE), radial)
+    strip([0, 1])
 
-    # Top cap fan continues the last fillet ring (already carrying the +Z normal).
-    top_ring = len(rings) - 1
+    # Rim: fillet arc on the first half, straight 45° chamfer on the second.
+    rim_rings = []
+    for k in range(RIM_STEPS + 1):
+        t = np.pi / 2 * k / RIM_STEPS
+        n_fillet = np.cos(t) * radial + np.sin(t) * up
+        p_fillet = ring(RADIUS - EDGE, top - EDGE) + EDGE * n_fillet
+        f = k / RIM_STEPS
+        p_chamfer = ring(RADIUS - EDGE * f, top - EDGE * (1 - f))
+        n_chamfer = (radial + up) / np.sqrt(2.0)
+        p = np.where(chamfer_col[:, None], p_chamfer, p_fillet)
+        n = np.where(chamfer_col[:, None], n_chamfer, n_fillet)
+        rim_rings.append(p)
+        add(p, n)
+    strip(rim_rings)
+
+    # Top cap: own rim vertices (hard against the chamfer, seamless on the fillet).
     centre = len(pos)
-    pos = np.vstack([pos, [[0.0, 0.0, top]]])
-    nrm = np.vstack([nrm, [[0.0, 0.0, 1.0]]])
-    for i in range(SEGMENTS):
-        j = (i + 1) % SEGMENTS
-        idx.extend([centre, top_ring * SEGMENTS + i, top_ring * SEGMENTS + j])
+    add([0.0, 0.0, top], up)
+    add(ring(RADIUS - EDGE, top), np.tile(up, (ncol, 1)))
+    for i in range(ncol - 1):
+        tris.append((centre, centre + 1 + i, centre + 2 + i))
 
-    # Bottom cap: own rim vertices (hard edge) with -Z normals.
-    base = len(pos)
-    pos = np.vstack([pos, [[0.0, 0.0, bot]], ring(RADIUS, bot)])
-    nrm = np.vstack([nrm, np.tile([0.0, 0.0, -1.0], (SEGMENTS + 1, 1))])
-    for i in range(SEGMENTS):
-        j = (i + 1) % SEGMENTS
-        idx.extend([base, base + 1 + j, base + 1 + i])
+    # Bottom cap.
+    centre = len(pos)
+    add([0.0, 0.0, bot], -up)
+    add(ring(RADIUS, bot), np.tile(-up, (ncol, 1)))
+    for i in range(ncol - 1):
+        tris.append((centre, centre + 2 + i, centre + 1 + i))
 
-    return (
-        np.asarray(pos, np.float32),
-        np.asarray(nrm, np.float32),
-        np.asarray(idx, np.uint32),
-    )
+    # Two flat radial cut faces, each a fan from the bottom axis point over the
+    # column's full profile (rim -> wall top -> rim strip -> top axis).
+    for col in (0, ncol - 1):
+        profile = [pos[col]] + [
+            r[col] for r in rim_rings
+        ]  # rim_rings[0] is the wall top
+        profile += [[0.0, 0.0, top]]
+        # Outward = away from the solid, which lies at increasing angle for the
+        # first cut and decreasing angle for the last.
+        tangent = np.array([-s_[col], c[col], 0.0])
+        n = -tangent if col == 0 else tangent
+        base = len(pos)
+        add([0.0, 0.0, bot], n)
+        add(np.asarray(profile), np.tile(n, (len(profile), 1)))
+        for i in range(len(profile) - 1):
+            tris.append((base, base + 1 + i, base + 2 + i))
+
+    pos = np.asarray(pos, np.float32)
+    nrm = np.asarray(nrm, np.float32)
+    tris = np.asarray(tris, np.int64)
+    # Orient every triangle to agree with its (per-surface constant) vertex normal.
+    t = pos[tris]
+    fn = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    flip = (fn * nrm[tris].mean(1)).sum(1) < 0
+    tris[flip] = tris[flip][:, [0, 2, 1]]
+    return pos, nrm, tris.ravel().astype(np.uint32)
 
 
 def main() -> None:
@@ -132,7 +171,7 @@ def main() -> None:
         for n in old["nodes"]
     ]
 
-    positions, normals, indices = filleted_cylinder()
+    positions, normals, indices = pacman_cylinder()
     pos_b = positions.tobytes()
     nrm_b = normals.tobytes()
     idx_b = indices.tobytes()

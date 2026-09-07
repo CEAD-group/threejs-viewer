@@ -1117,7 +1117,7 @@
   {
    "bufferView": 0,
    "componentType": 5126,
-   "count": 962,
+   "count": 867,
    "type": "VEC3",
    "min": [
     -1.2899999618530273,
@@ -1133,13 +1133,13 @@
   {
    "bufferView": 1,
    "componentType": 5126,
-   "count": 962,
+   "count": 867,
    "type": "VEC3"
   },
   {
    "bufferView": 2,
    "componentType": 5125,
-   "count": 5376,
+   "count": 4116,
    "type": "SCALAR"
   }
  ],
@@ -1147,25 +1147,25 @@
   {
    "buffer": 0,
    "byteOffset": 0,
-   "byteLength": 11544,
+   "byteLength": 10404,
    "target": 34962
   },
   {
    "buffer": 0,
-   "byteOffset": 11544,
-   "byteLength": 11544,
+   "byteOffset": 10404,
+   "byteLength": 10404,
    "target": 34962
   },
   {
    "buffer": 0,
-   "byteOffset": 23088,
-   "byteLength": 21504,
+   "byteOffset": 20808,
+   "byteLength": 16464,
    "target": 34963
   }
  ],
  "buffers": [
   {
-   "byteLength": 44592,
+   "byteLength": 37272,
    "uri": "materials.bin"
   }
  ]
