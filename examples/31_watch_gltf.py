@@ -219,6 +219,9 @@ def main() -> None:
                     f"({st['glb'].stat().st_size / 1024:.0f} KB)"
                 )
             except Exception as exc:
+                # Forget the mtime so the next poll retries without another save
+                # (transient errors: npx cold start, half-written file, ...).
+                st["mtime"] = None
                 print(f"{src.name}: reload failed: {exc}")
 
         time.sleep(args.poll)
