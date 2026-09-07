@@ -1,0 +1,1172 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "threejs-viewer examples/materials/make_materials_gltf.py",
+  "copyright": "DanielMeursing"
+ },
+ "extensionsUsed": [
+  "KHR_materials_clearcoat",
+  "KHR_materials_specular",
+  "KHR_materials_anisotropy",
+  "KHR_materials_ior",
+  "KHR_materials_sheen"
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "name": "Scene",
+   "nodes": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "ANODIZED_BLACK",
+   "mesh": 0,
+   "translation": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "ANODIZED_CLEAR",
+   "mesh": 1,
+   "translation": [
+    3.877000093460083,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "ANODIZED_VIBRANT_BLUE",
+   "mesh": 2,
+   "translation": [
+    7.7540998458862305,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "ANODIZED_CHARCOAL_GREY",
+   "mesh": 3,
+   "translation": [
+    11.631099700927734,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "BEADBLASTED_STEEL",
+   "mesh": 4,
+   "translation": [
+    27.139299392700195,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "BEADBLASTED_ALUMINIUM",
+   "mesh": 5,
+   "translation": [
+    31.016399383544922,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "POWDERCOAT_WHITE",
+   "mesh": 6,
+   "translation": [
+    3.877000093460083,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "POWDERCOAT_BLACK",
+   "mesh": 7,
+   "translation": [
+    7.7540998458862305,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "SPRAYPAINTED_BLACK",
+   "mesh": 8,
+   "translation": [
+    11.631099700927734,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "SPRAYPAINTED_WHITE",
+   "mesh": 9,
+   "translation": [
+    15.508199691772461,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "HARDCHROMATIC",
+   "mesh": 10,
+   "translation": [
+    19.38520050048828,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "BLACK_OXIDE",
+   "mesh": 11,
+   "translation": [
+    34.89339828491211,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "COLORDYE_BLACK",
+   "mesh": 12,
+   "translation": [
+    23.262300491333008,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "POLISHED_STEEL",
+   "mesh": 13,
+   "translation": [
+    7.7540998458862305,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "GOLD",
+   "mesh": 14,
+   "translation": [
+    31.016399383544922,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "COPPER",
+   "mesh": 15,
+   "translation": [
+    15.508199691772461,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "TITANIUM",
+   "mesh": 16,
+   "translation": [
+    19.38520050048828,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "BRASS",
+   "mesh": 17,
+   "translation": [
+    23.262300491333008,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "STEEL",
+   "mesh": 18,
+   "translation": [
+    15.508199691772461,
+    11.631099700927734,
+    0.0
+   ]
+  },
+  {
+   "name": "PLASTIC_BLUE",
+   "mesh": 19,
+   "translation": [
+    34.89339828491211,
+    3.877000093460083,
+    0.0
+   ]
+  },
+  {
+   "name": "PA630GF",
+   "mesh": 20,
+   "translation": [
+    0.0,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "PLASTIC_BLACK",
+   "mesh": 21,
+   "translation": [
+    3.877000093460083,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "PC",
+   "mesh": 22,
+   "translation": [
+    0.0,
+    11.631099700927734,
+    0.0
+   ]
+  },
+  {
+   "name": "PVC",
+   "mesh": 23,
+   "translation": [
+    3.877000093460083,
+    11.631099700927734,
+    0.0
+   ]
+  },
+  {
+   "name": "HDPE",
+   "mesh": 24,
+   "translation": [
+    7.7540998458862305,
+    11.631099700927734,
+    0.0
+   ]
+  },
+  {
+   "name": "POM",
+   "mesh": 25,
+   "translation": [
+    11.631099700927734,
+    11.631099700927734,
+    0.0
+   ]
+  },
+  {
+   "name": "PA630GF.001",
+   "mesh": 26,
+   "translation": [
+    0.0,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "POM.001",
+   "mesh": 27,
+   "translation": [
+    11.631099700927734,
+    11.631099700927734,
+    0.0
+   ]
+  },
+  {
+   "name": "PAINT_GREY",
+   "mesh": 28,
+   "translation": [
+    34.89339828491211,
+    7.7540998458862305,
+    0.0
+   ]
+  },
+  {
+   "name": "PAINT_LIGHT_GREY",
+   "mesh": 29,
+   "translation": [
+    27.139299392700195,
+    7.7540998458862305,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "name": "ANODIZED_BLACK",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 0
+    }
+   ]
+  },
+  {
+   "name": "ANODIZED_CLEAR",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 1
+    }
+   ]
+  },
+  {
+   "name": "ANODIZED_VIBRANT_BLUE",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 2
+    }
+   ]
+  },
+  {
+   "name": "ANODIZED_CHARCOAL_GREY",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": null
+    }
+   ]
+  },
+  {
+   "name": "BEADBLASTED_STEEL",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 3
+    }
+   ]
+  },
+  {
+   "name": "BEADBLASTED_ALUMINIUM",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 4
+    }
+   ]
+  },
+  {
+   "name": "POWDERCOAT_WHITE",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 5
+    }
+   ]
+  },
+  {
+   "name": "POWDERCOAT_BLACK",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 6
+    }
+   ]
+  },
+  {
+   "name": "SPRAYPAINTED_BLACK",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 7
+    }
+   ]
+  },
+  {
+   "name": "SPRAYPAINTED_WHITE",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 8
+    }
+   ]
+  },
+  {
+   "name": "HARDCHROMATIC",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 9
+    }
+   ]
+  },
+  {
+   "name": "BLACK_OXIDE",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 10
+    }
+   ]
+  },
+  {
+   "name": "COLORDYE_BLACK",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 11
+    }
+   ]
+  },
+  {
+   "name": "POLISHED_STEEL",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "GOLD",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 13
+    }
+   ]
+  },
+  {
+   "name": "COPPER",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 14
+    }
+   ]
+  },
+  {
+   "name": "TITANIUM",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 15
+    }
+   ]
+  },
+  {
+   "name": "BRASS",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 16
+    }
+   ]
+  },
+  {
+   "name": "STEEL",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 17
+    }
+   ]
+  },
+  {
+   "name": "PLASTIC_BLUE",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 18
+    }
+   ]
+  },
+  {
+   "name": "PA630GF",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "PLASTIC_BLACK",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 19
+    }
+   ]
+  },
+  {
+   "name": "PC",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "PVC",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "HDPE",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "POM",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "PA630GF.001",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "POM.001",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 12
+    }
+   ]
+  },
+  {
+   "name": "PAINT_GREY",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 20
+    }
+   ]
+  },
+  {
+   "name": "PAINT_LIGHT_GREY",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 21
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "name": "ANODIZED_BLACK",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.017387639731168747,
+     0.017387639731168747,
+     0.017387639731168747,
+     1
+    ],
+    "metallicFactor": 0.20472441613674164,
+    "roughnessFactor": 0.2706815302371979
+   }
+  },
+  {
+   "name": "ANODIZED_CLEAR",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.1640879511833191,
+     0.18589723110198975,
+     0.17604370415210724,
+     1
+    ],
+    "metallicFactor": 0.3937007784843445,
+    "roughnessFactor": 0.6992126107215881
+   }
+  },
+  {
+   "name": "ANODIZED_VIBRANT_BLUE",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.10207577049732208,
+     0.45302748680114746,
+     0.41985034942626953,
+     1
+    ],
+    "metallicFactor": 0.5937007784843445,
+    "roughnessFactor": 0.25476816296577454
+   }
+  },
+  {
+   "name": "BEADBLASTED_STEEL",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.22730002403259278,
+     0.22730002403259278,
+     0.22730002403259278,
+     1
+    ],
+    "roughnessFactor": 0.374015748500824
+   },
+   "extensions": {
+    "KHR_materials_anisotropy": {
+     "anisotropyStrength": 0.29133859276771545
+    }
+   }
+  },
+  {
+   "name": "BEADBLASTED_ALUMINIUM",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.21404045820236206,
+     0.21404045820236206,
+     0.21404045820236206,
+     1
+    ],
+    "metallicFactor": 0.8031499981880188,
+    "roughnessFactor": 0.33529478311538696
+   }
+  },
+  {
+   "name": "POWDERCOAT_WHITE",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.6146419405937195,
+     0.627441918849945,
+     0.52076176404953,
+     1
+    ],
+    "roughnessFactor": 0.24375000596046448,
+    "metallicFactor": 0
+   }
+  },
+  {
+   "name": "POWDERCOAT_BLACK",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.004375820979475975,
+     0.004426612053066492,
+     0.004350588656961918,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.24375000596046448
+   }
+  },
+  {
+   "name": "SPRAYPAINT_BLACK",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.004375820979475975,
+     0.004426612053066492,
+     0.004350588656961918,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.20000000298023224
+   }
+  },
+  {
+   "name": "SPRAYPAINT_WHITE",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.6239561438560486,
+     0.6375976800918579,
+     0.6172069311141968,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.20000000298023224
+   }
+  },
+  {
+   "name": "HARDCHROMATIC",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.5169214200973511,
+     0.5169214200973511,
+     0.5269214200973511,
+     1
+    ],
+    "roughnessFactor": 0.02493123084306717
+   },
+   "extensions": {
+    "KHR_materials_anisotropy": {
+     "anisotropyStrength": 0.19133859276771545
+    }
+   }
+  },
+  {
+   "name": "BLACK_OXIDE",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.017387639731168747,
+     0.017387639731168747,
+     0.017387639731168747,
+     1
+    ],
+    "metallicFactor": 0.20472441613674164,
+    "roughnessFactor": 0.2706815302371979
+   }
+  },
+  {
+   "name": "SLS_PRINTED",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.00038827600656077266,
+     0.00038827600656077266,
+     0.00038827600656077266,
+     1
+    ],
+    "metallicFactor": 0.0394265241920948,
+    "roughnessFactor": 0.629189133644104
+   },
+   "extensions": {
+    "KHR_materials_clearcoat": {
+     "clearcoatRoughnessFactor": 0
+    },
+    "KHR_materials_specular": {
+     "specularFactor": 0.4803149700164795,
+     "specularColorFactor": [
+      0.3,
+      0.3,
+      0.3
+     ]
+    },
+    "KHR_materials_ior": {
+     "ior": 1.3999999523162843
+    }
+   }
+  },
+  {
+   "doubleSided": true,
+   "name": "Material",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.800000011920929,
+     0.800000011920929,
+     0.800000011920929,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.5
+   }
+  },
+  {
+   "doubleSided": true,
+   "extensions": {
+    "KHR_materials_sheen": {
+     "sheenColorFactor": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "sheenRoughnessFactor": 0.5
+    },
+    "KHR_materials_anisotropy": {
+     "anisotropyStrength": 0.29133859276771545
+    }
+   },
+   "name": "GOLD",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.7094181776046753,
+     0.41931647062301636,
+     0.022755375131964684,
+     1
+    ],
+    "roughnessFactor": 0.21571697294712067
+   }
+  },
+  {
+   "doubleSided": true,
+   "extensions": {
+    "KHR_materials_sheen": {
+     "sheenColorFactor": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "sheenRoughnessFactor": 0.5
+    },
+    "KHR_materials_anisotropy": {
+     "anisotropyStrength": 0.29133859276771545
+    }
+   },
+   "name": "COPPER",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.2661656141281128,
+     0.12881924211978912,
+     0.09645909070968628,
+     1
+    ],
+    "roughnessFactor": 0.265896201133728
+   }
+  },
+  {
+   "doubleSided": true,
+   "extensions": {
+    "KHR_materials_sheen": {
+     "sheenColorFactor": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "sheenRoughnessFactor": 0.5
+    },
+    "KHR_materials_anisotropy": {
+     "anisotropyStrength": 0.29133859276771545
+    }
+   },
+   "name": "TITANIUM",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.4969214200973511,
+     0.4969214200973511,
+     0.4969214200973511,
+     1
+    ],
+    "roughnessFactor": 0.17629045248031616
+   }
+  },
+  {
+   "name": "BRASS",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.598169481754303,
+     0.34987509846687315,
+     0.11365284528583289,
+     1
+    ],
+    "roughnessFactor": 0.21571697294712067
+   },
+   "extensions": {
+    "KHR_materials_anisotropy": {
+     "anisotropyStrength": 0.29133859276771545
+    }
+   }
+  },
+  {
+   "name": "STEEL",
+   "doubleSided": true,
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.5140404582023621,
+     0.5140404582023621,
+     0.5140404582023621,
+     1
+    ],
+    "roughnessFactor": 0.23529478311538696,
+    "metallicFactor": 0.9031499981880188
+   }
+  },
+  {
+   "name": "PLASTIC_BLUE",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.0019960817880928516,
+     0.08201064169406891,
+     0.2982444167137146,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.36175480484962463
+   },
+   "extensions": {
+    "KHR_materials_specular": {
+     "specularFactor": 0.32283467054367065
+    },
+    "KHR_materials_ior": {
+     "ior": 1.4500000476837158
+    }
+   }
+  },
+  {
+   "name": "PLASTIC_BLACK",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.010021463967859745,
+     0.010021463967859745,
+     0.010021463967859745,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.5961297750473022
+   },
+   "extensions": {
+    "KHR_materials_specular": {
+     "specularFactor": 0.32283467054367065
+    },
+    "KHR_materials_ior": {
+     "ior": 1.4500000476837158
+    }
+   }
+  },
+  {
+   "name": "PAINT_GREY",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.03360031172633171,
+     0.04132808744907379,
+     0.04715195298194885,
+     1
+    ],
+    "metallicFactor": 0.10236220806837082,
+    "roughnessFactor": 0.2769750952720642
+   }
+  },
+  {
+   "name": "PAINT_LIGHT_GREY",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.14606048166751862,
+     0.16005244851112366,
+     0.15567326545715332,
+     1
+    ],
+    "metallicFactor": 0.10236220806837082,
+    "roughnessFactor": 0.49561309814453125
+   }
+  },
+  {
+   "name": "ALUMINIUM_SHEET",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.27404045820236206,
+     0.27404045820236206,
+     0.28404045820236207,
+     1
+    ],
+    "roughnessFactor": 0.33529478311538696,
+    "metallicFactor": 0.8031499981880188
+   }
+  },
+  {
+   "name": "ANODIZED_BLUEISH",
+   "doubleSided": true,
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.10207577049732208,
+     0.45302748680114746,
+     0.41985034942626953,
+     1
+    ],
+    "roughnessFactor": 0.25476816296577454,
+    "metallicFactor": 0.3937007784843445
+   }
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 867,
+   "type": "VEC3",
+   "min": [
+    -1.2899999618530273,
+    -1.2899999618530273,
+    -1.0
+   ],
+   "max": [
+    1.2899999618530273,
+    1.2899999618530273,
+    1.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5126,
+   "count": 867,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5125,
+   "count": 4116,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 10404,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 10404,
+   "byteLength": 10404,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 20808,
+   "byteLength": 16464,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 37272,
+   "uri": "materials.bin"
+  }
+ ]
+}
