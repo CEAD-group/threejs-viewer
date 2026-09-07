@@ -5669,6 +5669,7 @@ class DepthCueController {
         this._composer = null;
         this._edlPass = null;
         this._renderPass = null;
+        this._smaaPass = null;
         this._depthTexture = null;
         // Line-only depth target for the EDL depth pre-pass (created with the
         // composer). Rendering just the polyline layer into this gives the EDL
@@ -6104,6 +6105,7 @@ class DepthCueController {
         }
         this._renderPass = null;
         this._edlPass = null;
+        this._smaaPass = null;  // disposed by composer.dispose() above
     }
 
     /** @param {string} text */
