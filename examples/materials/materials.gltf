@@ -63,7 +63,7 @@
    "name": "ANODIZED_CLEAR",
    "mesh": 1,
    "translation": [
-    3.0,
+    3.877000093460083,
     0.0,
     0.0
    ]
@@ -72,7 +72,7 @@
    "name": "ANODIZED_VIBRANT_BLUE",
    "mesh": 2,
    "translation": [
-    6.0,
+    7.7540998458862305,
     0.0,
     0.0
    ]
@@ -81,7 +81,7 @@
    "name": "ANODIZED_CHARCOAL_GREY",
    "mesh": 3,
    "translation": [
-    9.0,
+    11.631099700927734,
     0.0,
     0.0
    ]
@@ -90,7 +90,7 @@
    "name": "BEADBLASTED_STEEL",
    "mesh": 4,
    "translation": [
-    12.0,
+    27.139299392700195,
     0.0,
     0.0
    ]
@@ -99,7 +99,7 @@
    "name": "BEADBLASTED_ALUMINIUM",
    "mesh": 5,
    "translation": [
-    15.0,
+    31.016399383544922,
     0.0,
     0.0
    ]
@@ -108,216 +108,216 @@
    "name": "POWDERCOAT_WHITE",
    "mesh": 6,
    "translation": [
-    0.0,
-    0.0,
-    3.0
+    3.877000093460083,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "POWDERCOAT_BLACK",
    "mesh": 7,
    "translation": [
-    3.0,
-    0.0,
-    3.0
+    7.7540998458862305,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "SPRAYPAINTED_BLACK",
    "mesh": 8,
    "translation": [
-    6.0,
-    0.0,
-    3.0
+    11.631099700927734,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "SPRAYPAINTED_WHITE",
    "mesh": 9,
    "translation": [
-    9.0,
-    0.0,
-    3.0
+    15.508199691772461,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "HARDCHROMATIC",
    "mesh": 10,
    "translation": [
-    12.0,
-    0.0,
-    3.0
+    19.38520050048828,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "BLACK_OXIDE",
    "mesh": 11,
    "translation": [
-    15.0,
+    34.89339828491211,
     0.0,
-    3.0
+    0.0
    ]
   },
   {
    "name": "COLORDYE_BLACK",
    "mesh": 12,
    "translation": [
-    0.0,
-    0.0,
-    6.0
+    23.262300491333008,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "POLISHED_STEEL",
    "mesh": 13,
    "translation": [
-    3.0,
-    0.0,
-    6.0
+    7.7540998458862305,
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "GOLD",
    "mesh": 14,
    "translation": [
-    6.0,
-    0.0,
-    6.0
+    31.016399383544922,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "COPPER",
    "mesh": 15,
    "translation": [
-    9.0,
-    0.0,
-    6.0
+    15.508199691772461,
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "TITANIUM",
    "mesh": 16,
    "translation": [
-    12.0,
-    0.0,
-    6.0
+    19.38520050048828,
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "BRASS",
    "mesh": 17,
    "translation": [
-    15.0,
-    0.0,
-    6.0
+    23.262300491333008,
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "STEEL",
    "mesh": 18,
    "translation": [
-    0.0,
-    0.0,
-    9.0
+    15.508199691772461,
+    11.631099700927734,
+    0.0
    ]
   },
   {
    "name": "PLASTIC_BLUE",
    "mesh": 19,
    "translation": [
-    3.0,
-    0.0,
-    9.0
+    34.89339828491211,
+    3.877000093460083,
+    0.0
    ]
   },
   {
    "name": "PA630GF",
    "mesh": 20,
    "translation": [
-    6.0,
     0.0,
-    9.0
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "PLASTIC_BLACK",
    "mesh": 21,
    "translation": [
-    9.0,
-    0.0,
-    9.0
+    3.877000093460083,
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "PC",
    "mesh": 22,
    "translation": [
-    12.0,
     0.0,
-    9.0
+    11.631099700927734,
+    0.0
    ]
   },
   {
    "name": "PVC",
    "mesh": 23,
    "translation": [
-    15.0,
-    0.0,
-    9.0
+    3.877000093460083,
+    11.631099700927734,
+    0.0
    ]
   },
   {
    "name": "HDPE",
    "mesh": 24,
    "translation": [
-    0.0,
-    0.0,
-    12.0
+    7.7540998458862305,
+    11.631099700927734,
+    0.0
    ]
   },
   {
    "name": "POM",
    "mesh": 25,
    "translation": [
-    3.0,
-    0.0,
-    12.0
+    11.631099700927734,
+    11.631099700927734,
+    0.0
    ]
   },
   {
    "name": "PA630GF.001",
    "mesh": 26,
    "translation": [
-    6.0,
     0.0,
-    12.0
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "POM.001",
    "mesh": 27,
    "translation": [
-    9.0,
-    0.0,
-    12.0
+    11.631099700927734,
+    11.631099700927734,
+    0.0
    ]
   },
   {
    "name": "PAINT_GREY",
    "mesh": 28,
    "translation": [
-    12.0,
-    0.0,
-    12.0
+    34.89339828491211,
+    7.7540998458862305,
+    0.0
    ]
   },
   {
    "name": "PAINT_LIGHT_GREY",
    "mesh": 29,
    "translation": [
-    15.0,
-    0.0,
-    12.0
+    27.139299392700195,
+    7.7540998458862305,
+    0.0
    ]
   }
  ],
@@ -1117,29 +1117,29 @@
   {
    "bufferView": 0,
    "componentType": 5126,
-   "count": 386,
+   "count": 962,
    "type": "VEC3",
    "min": [
-    -1.0,
-    -1.0,
+    -1.2899999618530273,
+    -1.2899999618530273,
     -1.0
    ],
    "max": [
-    1.0,
-    1.0,
+    1.2899999618530273,
+    1.2899999618530273,
     1.0
    ]
   },
   {
    "bufferView": 1,
    "componentType": 5126,
-   "count": 386,
+   "count": 962,
    "type": "VEC3"
   },
   {
    "bufferView": 2,
    "componentType": 5125,
-   "count": 1152,
+   "count": 5376,
    "type": "SCALAR"
   }
  ],
@@ -1147,25 +1147,25 @@
   {
    "buffer": 0,
    "byteOffset": 0,
-   "byteLength": 4632,
+   "byteLength": 11544,
    "target": 34962
   },
   {
    "buffer": 0,
-   "byteOffset": 4632,
-   "byteLength": 4632,
+   "byteOffset": 11544,
+   "byteLength": 11544,
    "target": 34962
   },
   {
    "buffer": 0,
-   "byteOffset": 9264,
-   "byteLength": 4608,
+   "byteOffset": 23088,
+   "byteLength": 21504,
    "target": 34963
   }
  ],
  "buffers": [
   {
-   "byteLength": 13872,
+   "byteLength": 44592,
    "uri": "materials.bin"
   }
  ]

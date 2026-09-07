@@ -1,9 +1,13 @@
 """Regenerate materials.gltf / materials.bin: one chamfered cylinder per material.
 
-The test shape is a cylinder (axis +Y, glTF up) with a 45° chamfer on the top
-rim and a sharp bottom rim, so every material is seen on a flat cap, a
-conical chamfer band, and a curved wall in one silhouette. Normals are smooth
-around the circumference and split (hard) between the four surfaces.
+The test shape is an upright cylinder standing on the floor (axis +Z — the
+file keeps Blender's Z-up frame, like the original export) with a closed top
+whose rim carries a quarter-round fillet of radius 25% of the height, and a
+sharp bottom rim. Every material is thus seen on a flat cap, a doubly-curved
+fillet, and a curved wall in one silhouette. Normals are smooth around the
+circumference and across the fillet (tangent-continuous into wall and cap);
+only the bottom rim is a hard edge. The cylinders sit
+at the same grid positions as the original Blender export (``CENTRES``).
 
 The material definitions are read from the existing materials.gltf, so this
 script only replaces the geometry and layout:
@@ -22,67 +26,95 @@ HERE = Path(__file__).parent
 GLTF = HERE / "materials.gltf"
 BIN = HERE / "materials.bin"
 
-RADIUS = 1.0
+RADIUS = 1.29  # footprint of the original cubes
 HEIGHT = 2.0
-CHAMFER = 0.3  # 45° chamfer size on the top rim
-SEGMENTS = 64
-COLUMNS = 6
-SPACING = 3.0
+FILLET = 0.25 * HEIGHT  # quarter-round on the top rim
+SEGMENTS = 64  # around the circumference
+FILLET_STEPS = 12  # rings across the 90° fillet arc
+
+# Node name -> centre, taken from the original Blender export's bounding boxes.
+CENTRES: dict[str, list[float]] = {
+    "ANODIZED_BLACK": [0.0, 0.0, 0.0],
+    "ANODIZED_CLEAR": [3.877000093460083, 0.0, 0.0],
+    "ANODIZED_VIBRANT_BLUE": [7.7540998458862305, 0.0, 0.0],
+    "ANODIZED_CHARCOAL_GREY": [11.631099700927734, 0.0, 0.0],
+    "BEADBLASTED_STEEL": [27.139299392700195, 0.0, 0.0],
+    "BEADBLASTED_ALUMINIUM": [31.016399383544922, 0.0, 0.0],
+    "POWDERCOAT_WHITE": [3.877000093460083, 3.877000093460083, 0.0],
+    "POWDERCOAT_BLACK": [7.7540998458862305, 3.877000093460083, 0.0],
+    "SPRAYPAINTED_BLACK": [11.631099700927734, 3.877000093460083, 0.0],
+    "SPRAYPAINTED_WHITE": [15.508199691772461, 3.877000093460083, 0.0],
+    "HARDCHROMATIC": [19.38520050048828, 3.877000093460083, 0.0],
+    "BLACK_OXIDE": [34.89339828491211, 0.0, 0.0],
+    "COLORDYE_BLACK": [23.262300491333008, 3.877000093460083, 0.0],
+    "POLISHED_STEEL": [7.7540998458862305, 7.7540998458862305, 0.0],
+    "GOLD": [31.016399383544922, 3.877000093460083, 0.0],
+    "COPPER": [15.508199691772461, 7.7540998458862305, 0.0],
+    "TITANIUM": [19.38520050048828, 7.7540998458862305, 0.0],
+    "BRASS": [23.262300491333008, 7.7540998458862305, 0.0],
+    "STEEL": [15.508199691772461, 11.631099700927734, 0.0],
+    "PLASTIC_BLUE": [34.89339828491211, 3.877000093460083, 0.0],
+    "PA630GF": [0.0, 7.7540998458862305, 0.0],
+    "PLASTIC_BLACK": [3.877000093460083, 7.7540998458862305, 0.0],
+    "PC": [0.0, 11.631099700927734, 0.0],
+    "PVC": [3.877000093460083, 11.631099700927734, 0.0],
+    "HDPE": [7.7540998458862305, 11.631099700927734, 0.0],
+    "POM": [11.631099700927734, 11.631099700927734, 0.0],
+    "PA630GF.001": [0.0, 7.7540998458862305, 0.0],
+    "POM.001": [11.631099700927734, 11.631099700927734, 0.0],
+    "PAINT_GREY": [34.89339828491211, 7.7540998458862305, 0.0],
+    "PAINT_LIGHT_GREY": [27.139299392700195, 7.7540998458862305, 0.0],
+}
 
 
-def chamfered_cylinder():
+def filleted_cylinder():
     """Return (positions (N,3) f32, normals (N,3) f32, indices (M,) u32)."""
     ang = np.linspace(0.0, 2 * np.pi, SEGMENTS, endpoint=False)
     c, s = np.cos(ang), np.sin(ang)
     top = HEIGHT / 2
-    bot = -HEIGHT / 2
-    r_in = RADIUS - CHAMFER
-    y_ch = top - CHAMFER
+    bot = -HEIGHT / 2  # centre at z=0 like the original cubes: floor at z=-1
+    radial = np.column_stack([c, s, np.zeros(SEGMENTS)])
+    up = np.array([0.0, 0.0, 1.0])
 
-    pos, nrm, idx = [], [], []
+    def ring(radius, z):
+        return np.column_stack([radius * c, radius * s, np.full(SEGMENTS, z)])
 
-    def ring(radius, y):
-        return np.column_stack([radius * c, np.full(SEGMENTS, y), radius * s])
+    # One smooth strip from the bottom rim up the wall and over the fillet to
+    # the cap's inner rim: rings share vertices, so shading is continuous.
+    rings, normals = [ring(RADIUS, bot), ring(RADIUS, top - FILLET)], [radial, radial]
+    for k in range(1, FILLET_STEPS + 1):
+        t = np.pi / 2 * k / FILLET_STEPS  # 0 = wall tangent, 90° = cap tangent
+        n = np.cos(t) * radial + np.sin(t) * up
+        centre_r, centre_z = RADIUS - FILLET, top - FILLET
+        rings.append(ring(centre_r, centre_z) + FILLET * n)
+        normals.append(n)
 
-    def band(ring_a, ring_b, normal_a, normal_b):
-        """Quad strip between two rings with per-ring normals; returns base index."""
-        base = len(pos)
-        pos.extend(ring_a)
-        pos.extend(ring_b)
-        nrm.extend(normal_a)
-        nrm.extend(normal_b)
+    pos = np.concatenate(rings)
+    nrm = np.concatenate(normals)
+    idx = []
+    for r in range(len(rings) - 1):
+        a0 = r * SEGMENTS
+        b0 = a0 + SEGMENTS
         for i in range(SEGMENTS):
             j = (i + 1) % SEGMENTS
-            a0, a1 = base + i, base + j
-            b0, b1 = base + SEGMENTS + i, base + SEGMENTS + j
-            # CCW seen from outside
-            idx.extend([a0, b0, a1, a1, b0, b1])
-        return base
+            idx.extend([a0 + i, a0 + j, b0 + i, b0 + i, a0 + j, b0 + j])  # CCW outside
 
-    radial = np.column_stack([c, np.zeros(SEGMENTS), s])
+    # Top cap fan continues the last fillet ring (already carrying the +Z normal).
+    top_ring = len(rings) - 1
+    centre = len(pos)
+    pos = np.vstack([pos, [[0.0, 0.0, top]]])
+    nrm = np.vstack([nrm, [[0.0, 0.0, 1.0]]])
+    for i in range(SEGMENTS):
+        j = (i + 1) % SEGMENTS
+        idx.extend([centre, top_ring * SEGMENTS + i, top_ring * SEGMENTS + j])
 
-    # Wall: sharp bottom rim, up to the chamfer start.
-    band(ring(RADIUS, bot), ring(RADIUS, y_ch), radial, radial)
-
-    # Chamfer band: 45° between radial and +Y.
-    ch_n = (radial + np.array([0.0, 1.0, 0.0])) / np.sqrt(2.0)
-    band(ring(RADIUS, y_ch), ring(r_in, top), ch_n, ch_n)
-
-    def cap(radius, y, normal_y):
-        base = len(pos)
-        pos.append([0.0, y, 0.0])
-        nrm.append([0.0, normal_y, 0.0])
-        pos.extend(ring(radius, y))
-        nrm.extend(np.tile([0.0, normal_y, 0.0], (SEGMENTS, 1)))
-        for i in range(SEGMENTS):
-            j = (i + 1) % SEGMENTS
-            if normal_y > 0:
-                idx.extend([base, base + 1 + i, base + 1 + j])
-            else:
-                idx.extend([base, base + 1 + j, base + 1 + i])
-
-    cap(r_in, top, 1.0)
-    cap(RADIUS, bot, -1.0)
+    # Bottom cap: own rim vertices (hard edge) with -Z normals.
+    base = len(pos)
+    pos = np.vstack([pos, [[0.0, 0.0, bot]], ring(RADIUS, bot)])
+    nrm = np.vstack([nrm, np.tile([0.0, 0.0, -1.0], (SEGMENTS + 1, 1))])
+    for i in range(SEGMENTS):
+        j = (i + 1) % SEGMENTS
+        idx.extend([base, base + 1 + j, base + 1 + i])
 
     return (
         np.asarray(pos, np.float32),
@@ -100,7 +132,7 @@ def main() -> None:
         for n in old["nodes"]
     ]
 
-    positions, normals, indices = chamfered_cylinder()
+    positions, normals, indices = filleted_cylinder()
     pos_b = positions.tobytes()
     nrm_b = normals.tobytes()
     idx_b = indices.tobytes()
@@ -143,7 +175,6 @@ def main() -> None:
 
     meshes, nodes = [], []
     for i, (name, mat) in enumerate(node_mats):
-        col, row = i % COLUMNS, i // COLUMNS
         meshes.append(
             {
                 "name": name,
@@ -156,13 +187,7 @@ def main() -> None:
                 ],
             }
         )
-        nodes.append(
-            {
-                "name": name,
-                "mesh": i,
-                "translation": [col * SPACING, 0.0, row * SPACING],
-            }
-        )
+        nodes.append({"name": name, "mesh": i, "translation": CENTRES[name]})
 
     gltf = {
         "asset": {
