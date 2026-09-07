@@ -11,17 +11,17 @@ sharp. Normals are smooth around the circumference and across the fillet
 bottom rim are hard edges. The bodies sit at the same grid positions as the
 original Blender export (``CENTRES``).
 
-The material name is embossed on the flat top cap in a built-in 5x7 block font
-(no external font files): every lit pixel becomes a box standing on the cap,
-horizontal runs and identical stacked runs are merged into one box each, and
-the bottom face is omitted (it sits flush on the cap). The name is wrapped at
-its ``_`` separators into up to ``TEXT_MAX_LINES`` lines, reading correctly
-from +Z looking down with +Y up; the wrap, the block's vertical offset, and the
-pixel size (capped at ``TEXT_PIXEL_MAX``) are chosen per name to maximise the
-pixel size such that every line fits the flat 270° disc — a line may use the
-full chord where it lies below the cap centre and only the left half where it
-lies above it (the removed wedge is the +x/+y quadrant); each line is centred
-in its own allowed span.
+The material name lies on the floor in front of the body (the -Y side, so it
+reads in the front view and from +Z looking down with +Y up) in a built-in
+5x7 block font (no external font files): every lit pixel becomes a low box
+standing on the floor, horizontal runs and identical stacked runs are merged
+into one box each, and the bottom face is omitted (it sits flush on the floor).
+The name is wrapped at its ``_`` separators into up to ``TEXT_MAX_LINES``
+lines, centred on the body's x, with the block's top edge ``TEXT_GAP`` in front
+of the wall; the wrap and the pixel size (capped at ``TEXT_PIXEL_MAX``) are
+chosen per name to maximise the pixel size such that the block fits the
+``TEXT_MAX_WIDTH`` x ``TEXT_MAX_DEPTH`` area that keeps it clear of the
+neighbouring bodies in the grid.
 
 Geometry is shared through the glTF node graph to keep the file small: the base
 body is one set of accessors used by every material's mesh, and every glyph is
@@ -56,13 +56,15 @@ SEGMENTS = 64  # columns per full circle
 WEDGE_DEG = 90.0  # pac-man wedge removed, starting at 0°
 RIM_STEPS = 12  # rings across the fillet arc (and the chamfer, for a uniform strip)
 
-TEXT_HEIGHT = 0.08  # emboss height above the cap
-TEXT_PIXEL_MAX = 0.05  # largest pixel size (glyph height = 7 px)
+TEXT_HEIGHT = 0.06  # box height above the floor
+TEXT_PIXEL_MAX = 0.06  # largest pixel size (glyph height = 7 px)
 TEXT_PIXEL_STEP = 0.0005  # pixel-size search resolution
-TEXT_MAX_LINES = 3
-TEXT_MARGIN = 0.96  # fraction of the flat cap radius the text may reach
+TEXT_MAX_LINES = 2
 TEXT_LINE_GAP = 2  # blank pixel rows between lines
-TEXT_OFFSET_STEPS = 48  # candidate block-top positions between the rim and centre
+TEXT_GAP = 0.15  # floor distance between the wall (y = -RADIUS) and the block's top
+GRID_PITCH = 3.877  # original export's grid spacing
+TEXT_MAX_WIDTH = GRID_PITCH - 0.3  # block may not reach the neighbouring columns
+TEXT_MAX_DEPTH = GRID_PITCH - 2 * RADIUS - TEXT_GAP - 0.15  # ... nor the next row
 FONT_ROWS = 7
 
 # Node name -> centre, taken from the original Blender export's bounding boxes.
@@ -217,66 +219,41 @@ def wrap_candidates(name: str) -> list[list[str]]:
     return out
 
 
-def line_span(y_top: float, y_bot: float, reach: float) -> tuple[float, float] | None:
-    """Allowed x-range for a text line occupying y in [y_bot, y_top].
-
-    The flat cap is a disc of radius ``reach`` minus the +x/+y quadrant: below
-    the centre a line may use the full chord at its farthest y; a line that
-    reaches above the centre must stop at x = 0 on the right.
-    """
-    far = max(abs(y_top), abs(y_bot))
-    if far >= reach:
-        return None
-    chord = float(np.sqrt(reach**2 - far**2))
-    return -chord, (0.0 if y_top > 0 else chord)
-
-
-def layout_text(name: str, cap_radius: float):
+def layout_text(name: str):
     """Return (pixel size, [(line glyph pens, x0, y_top)]) for the name.
 
-    Searches the wrap (``wrap_candidates``), the block's vertical offset (from
-    the block touching the rim down to its top at the centre) and the pixel
-    size, for the largest pixel size (capped at TEXT_PIXEL_MAX) at which every
-    line fits its ``line_span``; ties prefer fewer lines, then the block
-    centred closest to the cap centre. Each line is centred in its own span.
+    Searches the wrap (``wrap_candidates``) and the pixel size for the largest
+    pixel size (capped at TEXT_PIXEL_MAX) at which the block fits
+    TEXT_MAX_WIDTH x TEXT_MAX_DEPTH; ties prefer fewer lines. Lines are centred
+    on x = 0 and stacked downward from y = -RADIUS - TEXT_GAP.
     """
-    reach = TEXT_MARGIN * cap_radius
     candidates = [[line_glyphs(t) for t in w] for w in wrap_candidates(name)]
     pitch = FONT_ROWS + TEXT_LINE_GAP
-
-    def place(lines, p, block_top):
-        out, y_top = [], block_top
-        for pens, width in lines:
-            span = line_span(y_top, y_top - FONT_ROWS * p, reach)
-            if span is None or span[1] - span[0] < width * p:
-                return None
-            out.append((pens, (span[0] + span[1] - width * p) / 2, y_top))
-            y_top -= pitch * p
-        return out
 
     p = TEXT_PIXEL_MAX
     while p > 0:
         best = None
         for lines in candidates:
-            height = (len(lines) * pitch - TEXT_LINE_GAP) * p
-            for block_top in np.linspace(reach, 0.0, TEXT_OFFSET_STEPS):
-                placed = place(lines, p, block_top)
-                if placed is None:
-                    continue
-                key = (len(lines), abs(block_top - height / 2))
-                if best is None or key < best[0]:
-                    best = (key, placed)
+            width = max(w for _, w in lines) * p
+            depth = (len(lines) * pitch - TEXT_LINE_GAP) * p
+            if width > TEXT_MAX_WIDTH or depth > TEXT_MAX_DEPTH:
+                continue
+            if best is None or len(lines) < len(best):
+                best = lines
         if best is not None:
-            return p, best[1]
+            y_top = -RADIUS - TEXT_GAP
+            out = []
+            for pens, w in best:
+                out.append((pens, -w * p / 2, y_top))
+                y_top -= pitch * p
+            return p, out
         p = round(p - TEXT_PIXEL_STEP, 6)
-    raise ValueError(f"cannot fit {name!r} on the cap")
+    raise ValueError(f"cannot fit {name!r} in front of the body")
 
 
-def text_placements(
-    name: str, cap_radius: float
-) -> list[tuple[str, float, float, float]]:
-    """(char, x, y_top, pixel size) for every character of the name on the cap."""
-    p, lines = layout_text(name, cap_radius)
+def text_placements(name: str) -> list[tuple[str, float, float, float]]:
+    """(char, x, y_top, pixel size) for every character of the name on the floor."""
+    p, lines = layout_text(name)
     return [
         (ch, x0 + pen * p, y_top, p) for pens, x0, y_top in lines for ch, pen in pens
     ]
@@ -288,7 +265,7 @@ def glyph_geometry(ch: str):
     Pixel units, glyph top-left at the origin (x right, y down from 0 to
     -FONT_ROWS), z from 0 to TEXT_HEIGHT (unscaled: the placing node scales
     x/y by the pixel size and z by 1). One box per merged pixel run: top face
-    plus four sides with hard normals, no bottom face (flush on the cap).
+    plus four sides with hard normals, no bottom face (flush on the floor).
     Same array contract as ``pacman_cylinder``.
     """
     pos, nrm, tris = [], [], []
@@ -483,7 +460,7 @@ def main() -> None:
     n_tris = len(body[2]) // 3
     for name, mat in node_mats:
         children = []
-        for ch, x, y_top, p in text_placements(name, RADIUS - EDGE):
+        for ch, x, y_top, p in text_placements(name):
             key = ch.upper() if ch.upper() in FONT else "?"
             if key not in glyph_acc:
                 glyph_acc[key] = add_geometry(*glyph_geometry(key))
@@ -500,7 +477,7 @@ def main() -> None:
             nodes.append(
                 {
                     "mesh": glyph_mesh[key, mat],
-                    "translation": [x, y_top, HEIGHT / 2],
+                    "translation": [x, y_top, -HEIGHT / 2],
                     "scale": [p, p, 1.0],
                 }
             )
