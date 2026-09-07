@@ -11,6 +11,27 @@ sharp. Normals are smooth around the circumference and across the fillet
 bottom rim are hard edges. The bodies sit at the same grid positions as the
 original Blender export (``CENTRES``).
 
+The material name lies on the floor in front of the body (the -Y side, so it
+reads in the front view and from +Z looking down with +Y up) in a built-in
+5x7 block font (no external font files): every lit pixel becomes a low box
+standing on the floor, horizontal runs and identical stacked runs are merged
+into one box each, and the bottom face is omitted (it sits flush on the floor).
+The name is wrapped at its ``_`` separators into up to ``TEXT_MAX_LINES``
+lines, centred on the body's x, with the block's top edge ``TEXT_GAP`` in front
+of the wall; the wrap and the pixel size (capped at ``TEXT_PIXEL_MAX``) are
+chosen per name to maximise the pixel size such that the block fits the
+``TEXT_MAX_WIDTH`` x ``TEXT_MAX_DEPTH`` area that keeps it clear of the
+neighbouring bodies in the grid.
+
+Geometry is shared through the glTF node graph to keep the file small: the base
+body is one set of accessors used by every material's mesh, and every glyph is
+one set of accessors (boxes in pixel units, glyph top-left at the origin)
+referenced by a per-(glyph, material) mesh, with one child node per character
+placing it under its material's body node (translation = pen position, scale =
+[pixel, pixel, 1]). So the bin holds one body plus one copy of each glyph used,
+not a copy per character. The material definitions and node -> material
+mapping are carried over unchanged.
+
 The material definitions are read from the existing materials.gltf, so this
 script only replaces the geometry and layout:
 
@@ -34,6 +55,17 @@ EDGE = 0.25 * HEIGHT  # fillet radius / chamfer size on the top rim
 SEGMENTS = 64  # columns per full circle
 WEDGE_DEG = 90.0  # pac-man wedge removed, starting at 0°
 RIM_STEPS = 12  # rings across the fillet arc (and the chamfer, for a uniform strip)
+
+TEXT_HEIGHT = 0.06  # box height above the floor
+TEXT_PIXEL_MAX = 0.06  # largest pixel size (glyph height = 7 px)
+TEXT_PIXEL_STEP = 0.0005  # pixel-size search resolution
+TEXT_MAX_LINES = 2
+TEXT_LINE_GAP = 2  # blank pixel rows between lines
+TEXT_GAP = 0.15  # floor distance between the wall (y = -RADIUS) and the block's top
+GRID_PITCH = 3.877  # original export's grid spacing
+TEXT_MAX_WIDTH = GRID_PITCH - 0.3  # block may not reach the neighbouring columns
+TEXT_MAX_DEPTH = GRID_PITCH - 2 * RADIUS - TEXT_GAP - 0.15  # ... nor the next row
+FONT_ROWS = 7
 
 # Node name -> centre, taken from the original Blender export's bounding boxes.
 CENTRES: dict[str, list[float]] = {
@@ -68,6 +100,204 @@ CENTRES: dict[str, list[float]] = {
     "PAINT_GREY": [34.89339828491211, 7.7540998458862305, 0.0],
     "PAINT_LIGHT_GREY": [27.139299392700195, 7.7540998458862305, 0.0],
 }
+
+# 5x7 block font: '#' = lit pixel, rows top to bottom. Glyphs are trimmed to
+# their lit columns (proportional advance) with a one-pixel gap between them.
+FONT: dict[str, list[str]] = {
+    "A": [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+    "B": ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
+    "C": [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
+    "D": ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+    "E": ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+    "F": ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
+    "G": [".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####"],
+    "H": ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+    "I": ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+    "J": ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
+    "K": ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
+    "L": ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+    "M": ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+    "N": ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
+    "O": [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+    "P": ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+    "Q": [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
+    "R": ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+    "S": [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
+    "T": ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
+    "U": ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+    "V": ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+    "W": ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
+    "X": ["#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"],
+    "Y": ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
+    "Z": ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+    "0": [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
+    "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+    "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+    "3": ["#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."],
+    "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+    "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+    "6": ["..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."],
+    "7": ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
+    "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+    "9": [".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."],
+    ".": [".....", ".....", ".....", ".....", ".....", ".##..", ".##.."],
+    "-": [".....", ".....", ".....", "#####", ".....", ".....", "....."],
+    "_": [".....", ".....", ".....", ".....", ".....", ".....", "#####"],
+    "?": [".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."],
+}
+
+
+def glyph(ch: str) -> list[str]:
+    """Rows of the glyph trimmed to its lit columns (unknown chars -> '?')."""
+    rows = FONT.get(ch.upper(), FONT["?"])
+    lit = [i for i in range(len(rows[0])) if any(r[i] == "#" for r in rows)]
+    return [r[lit[0] : lit[-1] + 1] for r in rows]
+
+
+def glyph_pixels(ch: str) -> set[tuple[int, int]]:
+    """Lit (col, row) pixels of one trimmed glyph (row 0 = top)."""
+    rows = glyph(ch)
+    return {(i, r) for r, row in enumerate(rows) for i, c in enumerate(row) if c == "#"}
+
+
+def line_glyphs(text: str) -> tuple[list[tuple[str, int]], int]:
+    """(char, pen x in px) per character of a text line, and its width in px."""
+    pens, x = [], 0
+    for ch in text:
+        pens.append((ch, x))
+        x += len(glyph(ch)[0]) + 1
+    return pens, x - 1
+
+
+def pixel_boxes(pixels: set[tuple[int, int]]) -> list[tuple[int, int, int, int]]:
+    """Merge lit pixels into (x0, x1, r0, r1) boxes, half-open on x1 / r1.
+
+    Horizontal runs per row first; identical runs on consecutive rows are then
+    stacked into one box.
+    """
+    runs: dict[int, set[tuple[int, int]]] = {}
+    for r in sorted({p[1] for p in pixels}):
+        cols = sorted(c for c, rr in pixels if rr == r)
+        row_runs, start = set(), cols[0]
+        for a, b in zip(cols, cols[1:] + [None]):
+            if b != a + 1:
+                row_runs.add((start, a + 1))
+                start = b
+        runs[r] = row_runs
+    boxes: list[tuple[int, int, int, int]] = []
+    open_boxes: dict[tuple[int, int], int] = {}  # (x0, x1) -> top row of open box
+    for r in range(max(runs) + 2):
+        here = runs.get(r, set())
+        for key, r0 in list(open_boxes.items()):
+            if key not in here:
+                boxes.append((key[0], key[1], r0, r))
+                del open_boxes[key]
+        for key in sorted(here):
+            open_boxes.setdefault(key, r)
+    return sorted(boxes)
+
+
+def wrap_candidates(name: str) -> list[list[str]]:
+    """Every way to wrap the name at its '_' separators into <= TEXT_MAX_LINES.
+
+    Lines keep the separators they absorb (``A_B`` stays ``A_B``), so the text
+    on the cap is always the literal name; only the line breaks vary.
+    """
+    tokens = name.split("_")
+    out: list[list[str]] = []
+
+    def rec(i: int, lines: list[str]) -> None:
+        if i == len(tokens):
+            out.append(lines)
+            return
+        if len(lines) == TEXT_MAX_LINES:
+            return
+        for j in range(i + 1, len(tokens) + 1):
+            rec(j, lines + ["_".join(tokens[i:j])])
+
+    rec(0, [])
+    return out
+
+
+def layout_text(name: str):
+    """Return (pixel size, [(line glyph pens, x0, y_top)]) for the name.
+
+    Searches the wrap (``wrap_candidates``) and the pixel size for the largest
+    pixel size (capped at TEXT_PIXEL_MAX) at which the block fits
+    TEXT_MAX_WIDTH x TEXT_MAX_DEPTH; ties prefer fewer lines. Lines are centred
+    on x = 0 and stacked downward from y = -RADIUS - TEXT_GAP.
+    """
+    candidates = [[line_glyphs(t) for t in w] for w in wrap_candidates(name)]
+    pitch = FONT_ROWS + TEXT_LINE_GAP
+
+    p = TEXT_PIXEL_MAX
+    while p > 0:
+        best = None
+        for lines in candidates:
+            width = max(w for _, w in lines) * p
+            depth = (len(lines) * pitch - TEXT_LINE_GAP) * p
+            if width > TEXT_MAX_WIDTH or depth > TEXT_MAX_DEPTH:
+                continue
+            if best is None or len(lines) < len(best):
+                best = lines
+        if best is not None:
+            y_top = -RADIUS - TEXT_GAP
+            out = []
+            for pens, w in best:
+                out.append((pens, -w * p / 2, y_top))
+                y_top -= pitch * p
+            return p, out
+        p = round(p - TEXT_PIXEL_STEP, 6)
+    raise ValueError(f"cannot fit {name!r} in front of the body")
+
+
+def text_placements(name: str) -> list[tuple[str, float, float, float]]:
+    """(char, x, y_top, pixel size) for every character of the name on the floor."""
+    p, lines = layout_text(name)
+    return [
+        (ch, x0 + pen * p, y_top, p) for pens, x0, y_top in lines for ch, pen in pens
+    ]
+
+
+def glyph_geometry(ch: str):
+    """Return (positions, normals, indices) of one glyph as raised boxes.
+
+    Pixel units, glyph top-left at the origin (x right, y down from 0 to
+    -FONT_ROWS), z from 0 to TEXT_HEIGHT (unscaled: the placing node scales
+    x/y by the pixel size and z by 1). One box per merged pixel run: top face
+    plus four sides with hard normals, no bottom face (flush on the floor).
+    Same array contract as ``pacman_cylinder``.
+    """
+    pos, nrm, tris = [], [], []
+
+    def quad(corners, n):
+        base = len(pos)
+        pos.extend(corners)
+        nrm.extend([n] * 4)
+        tris.extend([(base, base + 1, base + 2), (base, base + 2, base + 3)])
+
+    z0, z1 = 0.0, TEXT_HEIGHT
+    for xa, xb, br0, br1 in pixel_boxes(glyph_pixels(ch)):
+        ya, yb = -br1, -br0
+        quad([(xa, ya, z1), (xb, ya, z1), (xb, yb, z1), (xa, yb, z1)], (0, 0, 1))
+        quad([(xa, ya, z0), (xb, ya, z0), (xb, ya, z1), (xa, ya, z1)], (0, -1, 0))
+        quad([(xa, yb, z0), (xb, yb, z0), (xb, yb, z1), (xa, yb, z1)], (0, 1, 0))
+        quad([(xa, ya, z0), (xa, yb, z0), (xa, yb, z1), (xa, ya, z1)], (-1, 0, 0))
+        quad([(xb, ya, z0), (xb, yb, z0), (xb, yb, z1), (xb, ya, z1)], (1, 0, 0))
+    return orient(pos, nrm, tris)
+
+
+def orient(pos, nrm, tris):
+    """Pack to f32/u32, flipping every triangle to agree with its vertex normals."""
+    pos = np.asarray(pos, np.float32)
+    nrm = np.asarray(nrm, np.float32)
+    tris = np.asarray(tris, np.int64)
+    t = pos[tris]
+    fn = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    flip = (fn * nrm[tris].mean(1)).sum(1) < 0
+    tris[flip] = tris[flip][:, [0, 2, 1]]
+    idx_dtype = np.uint16 if len(pos) <= 0xFFFF else np.uint32
+    return pos, nrm, tris.ravel().astype(idx_dtype)
 
 
 def pacman_cylinder():
@@ -151,82 +381,117 @@ def pacman_cylinder():
         for i in range(len(profile) - 1):
             tris.append((base, base + 1 + i, base + 2 + i))
 
-    pos = np.asarray(pos, np.float32)
-    nrm = np.asarray(nrm, np.float32)
-    tris = np.asarray(tris, np.int64)
     # Orient every triangle to agree with its (per-surface constant) vertex normal.
-    t = pos[tris]
-    fn = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
-    flip = (fn * nrm[tris].mean(1)).sum(1) < 0
-    tris[flip] = tris[flip][:, [0, 2, 1]]
-    return pos, nrm, tris.ravel().astype(np.uint32)
+    return orient(pos, nrm, tris)
 
 
 def main() -> None:
     old = json.loads(GLTF.read_text())
     materials = old["materials"]
-    # Preserve node name -> material mapping from the current file.
-    node_mats = [
-        (n["name"], old["meshes"][n["mesh"]]["primitives"][0].get("material"))
-        for n in old["nodes"]
-    ]
+    # Preserve node name -> material mapping from the current file (its scene
+    # roots are the bodies; glyph child nodes carry no name).
+    node_mats = []
+    for i in old["scenes"][old.get("scene", 0)]["nodes"]:
+        n = old["nodes"][i]
+        node_mats.append(
+            (n["name"], old["meshes"][n["mesh"]]["primitives"][0].get("material"))
+        )
 
-    positions, normals, indices = pacman_cylinder()
-    pos_b = positions.tobytes()
-    nrm_b = normals.tobytes()
-    idx_b = indices.tobytes()
-    blob = pos_b + nrm_b + idx_b
-    blob += b"\0" * (-len(blob) % 4)
-    BIN.write_bytes(blob)
+    blob = b""
+    buffer_views, accessors = [], []
 
-    buffer_views = [
-        {"buffer": 0, "byteOffset": 0, "byteLength": len(pos_b), "target": 34962},
-        {
-            "buffer": 0,
-            "byteOffset": len(pos_b),
-            "byteLength": len(nrm_b),
-            "target": 34962,
-        },
-        {
-            "buffer": 0,
-            "byteOffset": len(pos_b) + len(nrm_b),
-            "byteLength": len(idx_b),
-            "target": 34963,
-        },
-    ]
-    accessors = [
-        {
-            "bufferView": 0,
-            "componentType": 5126,
-            "count": len(positions),
-            "type": "VEC3",
-            "min": positions.min(0).tolist(),
-            "max": positions.max(0).tolist(),
-        },
-        {"bufferView": 1, "componentType": 5126, "count": len(normals), "type": "VEC3"},
-        {
-            "bufferView": 2,
-            "componentType": 5125,
-            "count": len(indices),
-            "type": "SCALAR",
-        },
-    ]
-
-    meshes, nodes = [], []
-    for i, (name, mat) in enumerate(node_mats):
-        meshes.append(
+    def add_geometry(positions, normals, indices) -> int:
+        """Append one geometry's three accessors; return the first accessor index."""
+        nonlocal blob
+        first = len(accessors)
+        index_type = {np.uint16: 5123, np.uint32: 5125}[indices.dtype.type]
+        for arr, target in ((positions, 34962), (normals, 34962), (indices, 34963)):
+            data = arr.tobytes()
+            buffer_views.append(
+                {
+                    "buffer": 0,
+                    "byteOffset": len(blob),
+                    "byteLength": len(data),
+                    "target": target,
+                }
+            )
+            blob += data + b"\0" * (-len(data) % 4)
+        accessors.append(
             {
-                "name": name,
-                "primitives": [
-                    {
-                        "attributes": {"POSITION": 0, "NORMAL": 1},
-                        "indices": 2,
-                        "material": mat,
-                    }
-                ],
+                "bufferView": first,
+                "componentType": 5126,
+                "count": len(positions),
+                "type": "VEC3",
+                "min": positions.min(0).tolist(),
+                "max": positions.max(0).tolist(),
             }
         )
-        nodes.append({"name": name, "mesh": i, "translation": CENTRES[name]})
+        accessors.append(
+            {
+                "bufferView": first + 1,
+                "componentType": 5126,
+                "count": len(normals),
+                "type": "VEC3",
+            }
+        )
+        accessors.append(
+            {
+                "bufferView": first + 2,
+                "componentType": index_type,
+                "count": len(indices),
+                "type": "SCALAR",
+            }
+        )
+        return first
+
+    def primitive(first: int, mat) -> dict:
+        return {
+            "attributes": {"POSITION": first, "NORMAL": first + 1},
+            "indices": first + 2,
+            "material": mat,
+        }
+
+    # Shared base body; glyph accessors and (glyph, material) meshes on demand.
+    body = pacman_cylinder()
+    body_acc = add_geometry(*body)
+    meshes, nodes = [], []
+    glyph_acc: dict[str, int] = {}
+    glyph_mesh: dict[tuple[str, int | None], int] = {}
+    n_tris = len(body[2]) // 3
+    for name, mat in node_mats:
+        children = []
+        for ch, x, y_top, p in text_placements(name):
+            key = ch.upper() if ch.upper() in FONT else "?"
+            if key not in glyph_acc:
+                glyph_acc[key] = add_geometry(*glyph_geometry(key))
+            if (key, mat) not in glyph_mesh:
+                glyph_mesh[key, mat] = len(meshes)
+                meshes.append(
+                    {
+                        "name": f"glyph_{key}",
+                        "primitives": [primitive(glyph_acc[key], mat)],
+                    }
+                )
+            n_tris += accessors[glyph_acc[key] + 2]["count"] // 3
+            children.append(len(nodes))
+            nodes.append(
+                {
+                    "mesh": glyph_mesh[key, mat],
+                    "translation": [x, y_top, -HEIGHT / 2],
+                    "scale": [p, p, 1.0],
+                }
+            )
+        meshes.append({"name": name, "primitives": [primitive(body_acc, mat)]})
+        nodes.append(
+            {
+                "name": name,
+                "mesh": len(meshes) - 1,
+                "translation": CENTRES[name],
+                "children": children,
+            }
+        )
+    roots = [i for i, n in enumerate(nodes) if "name" in n]
+    BIN.write_bytes(blob)
 
     gltf = {
         "asset": {
@@ -236,7 +501,7 @@ def main() -> None:
         },
         "extensionsUsed": old.get("extensionsUsed", []),
         "scene": 0,
-        "scenes": [{"name": "Scene", "nodes": list(range(len(nodes)))}],
+        "scenes": [{"name": "Scene", "nodes": roots}],
         "nodes": nodes,
         "meshes": meshes,
         "materials": materials,
@@ -246,7 +511,9 @@ def main() -> None:
     }
     GLTF.write_text(json.dumps(gltf, indent=1) + "\n")
     print(
-        f"{GLTF.name}: {len(nodes)} nodes, {len(positions)} verts, {len(indices) // 3} tris"
+        f"{GLTF.name}: {len(roots)} bodies, {len(nodes) - len(roots)} glyph nodes, "
+        f"{len(glyph_acc)} glyphs, {n_tris} tris drawn "
+        f"(body {len(body[2]) // 3}), {BIN.name} {len(blob)} bytes"
     )
 
 
