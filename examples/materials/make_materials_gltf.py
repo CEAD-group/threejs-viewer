@@ -14,12 +14,23 @@ original Blender export (``CENTRES``).
 The material name is embossed on the flat top cap in a built-in 5x7 block font
 (no external font files): every lit pixel becomes a box standing on the cap,
 horizontal runs and identical stacked runs are merged into one box each, and
-the bottom face is omitted (it sits flush on the cap). The name is split on
-``_`` into up to ``TEXT_MAX_LINES`` lines laid out in the lower half of the cap
-disc, reading correctly from +Z looking down with +Y up, and each node's pixel
-size is the largest (capped at ``TEXT_PIXEL_MAX``) that fits every line inside
-the flat disc. So each node carries its own geometry; the material definitions
-and node -> material mapping are carried over unchanged.
+the bottom face is omitted (it sits flush on the cap). The name is wrapped at
+its ``_`` separators into up to ``TEXT_MAX_LINES`` lines, reading correctly
+from +Z looking down with +Y up; the wrap, the block's vertical offset, and the
+pixel size (capped at ``TEXT_PIXEL_MAX``) are chosen per name to maximise the
+pixel size such that every line fits the flat 270° disc — a line may use the
+full chord where it lies below the cap centre and only the left half where it
+lies above it (the removed wedge is the +x/+y quadrant); each line is centred
+in its own allowed span.
+
+Geometry is shared through the glTF node graph to keep the file small: the base
+body is one set of accessors used by every material's mesh, and every glyph is
+one set of accessors (boxes in pixel units, glyph top-left at the origin)
+referenced by a per-(glyph, material) mesh, with one child node per character
+placing it under its material's body node (translation = pen position, scale =
+[pixel, pixel, 1]). So the bin holds one body plus one copy of each glyph used,
+not a copy per character. The material definitions and node -> material
+mapping are carried over unchanged.
 
 The material definitions are read from the existing materials.gltf, so this
 script only replaces the geometry and layout:
@@ -45,11 +56,13 @@ SEGMENTS = 64  # columns per full circle
 WEDGE_DEG = 90.0  # pac-man wedge removed, starting at 0°
 RIM_STEPS = 12  # rings across the fillet arc (and the chamfer, for a uniform strip)
 
-TEXT_HEIGHT = 0.06  # emboss height above the cap
-TEXT_PIXEL_MAX = 0.04  # largest pixel size (glyph height = 7 px)
+TEXT_HEIGHT = 0.08  # emboss height above the cap
+TEXT_PIXEL_MAX = 0.05  # largest pixel size (glyph height = 7 px)
+TEXT_PIXEL_STEP = 0.0005  # pixel-size search resolution
 TEXT_MAX_LINES = 3
-TEXT_MARGIN = 0.94  # fraction of the flat cap radius the text may reach
-TEXT_LINE_GAP = 3  # blank pixel rows between lines
+TEXT_MARGIN = 0.96  # fraction of the flat cap radius the text may reach
+TEXT_LINE_GAP = 2  # blank pixel rows between lines
+TEXT_OFFSET_STEPS = 48  # candidate block-top positions between the rim and centre
 FONT_ROWS = 7
 
 # Node name -> centre, taken from the original Blender export's bounding boxes.
@@ -139,16 +152,19 @@ def glyph(ch: str) -> list[str]:
     return [r[lit[0] : lit[-1] + 1] for r in rows]
 
 
-def line_pixels(text: str) -> tuple[set[tuple[int, int]], int]:
-    """Lit (col, row) pixels of a text line (row 0 = top) and its width in px."""
-    pixels: set[tuple[int, int]] = set()
-    x = 0
+def glyph_pixels(ch: str) -> set[tuple[int, int]]:
+    """Lit (col, row) pixels of one trimmed glyph (row 0 = top)."""
+    rows = glyph(ch)
+    return {(i, r) for r, row in enumerate(rows) for i, c in enumerate(row) if c == "#"}
+
+
+def line_glyphs(text: str) -> tuple[list[tuple[str, int]], int]:
+    """(char, pen x in px) per character of a text line, and its width in px."""
+    pens, x = [], 0
     for ch in text:
-        rows = glyph(ch)
-        for r, row in enumerate(rows):
-            pixels.update((x + i, r) for i, c in enumerate(row) if c == "#")
-        x += len(rows[0]) + 1
-    return pixels, x - 1
+        pens.append((ch, x))
+        x += len(glyph(ch)[0]) + 1
+    return pens, x - 1
 
 
 def pixel_boxes(pixels: set[tuple[int, int]]) -> list[tuple[int, int, int, int]]:
@@ -179,58 +195,102 @@ def pixel_boxes(pixels: set[tuple[int, int]]) -> list[tuple[int, int, int, int]]
     return sorted(boxes)
 
 
-def wrap_name(name: str) -> list[str]:
-    """Split on '_' into at most TEXT_MAX_LINES lines (re-joining the tail)."""
-    parts = name.split("_")
-    if len(parts) > TEXT_MAX_LINES:
-        head, tail = parts[: TEXT_MAX_LINES - 1], parts[TEXT_MAX_LINES - 1 :]
-        parts = head + ["_".join(tail)]
-    return parts
+def wrap_candidates(name: str) -> list[list[str]]:
+    """Every way to wrap the name at its '_' separators into <= TEXT_MAX_LINES.
+
+    Lines keep the separators they absorb (``A_B`` stays ``A_B``), so the text
+    on the cap is always the literal name; only the line breaks vary.
+    """
+    tokens = name.split("_")
+    out: list[list[str]] = []
+
+    def rec(i: int, lines: list[str]) -> None:
+        if i == len(tokens):
+            out.append(lines)
+            return
+        if len(lines) == TEXT_MAX_LINES:
+            return
+        for j in range(i + 1, len(tokens) + 1):
+            rec(j, lines + ["_".join(tokens[i:j])])
+
+    rec(0, [])
+    return out
+
+
+def line_span(y_top: float, y_bot: float, reach: float) -> tuple[float, float] | None:
+    """Allowed x-range for a text line occupying y in [y_bot, y_top].
+
+    The flat cap is a disc of radius ``reach`` minus the +x/+y quadrant: below
+    the centre a line may use the full chord at its farthest y; a line that
+    reaches above the centre must stop at x = 0 on the right.
+    """
+    far = max(abs(y_top), abs(y_bot))
+    if far >= reach:
+        return None
+    chord = float(np.sqrt(reach**2 - far**2))
+    return -chord, (0.0 if y_top > 0 else chord)
 
 
 def layout_text(name: str, cap_radius: float):
-    """Return (pixel size, [(line pixels, width px, x0, y_top)]) for the name.
+    """Return (pixel size, [(line glyph pens, x0, y_top)]) for the name.
 
-    Lines are stacked downwards from just below the cap centre (pitch 7 rows +
-    TEXT_LINE_GAP) inside the lower half of the flat disc, so the removed wedge
-    (first quadrant) is never touched. The pixel size is the largest, capped at
-    TEXT_PIXEL_MAX, at which every line's box fits inside the chord of the disc
-    at the line's lowest edge.
+    Searches the wrap (``wrap_candidates``), the block's vertical offset (from
+    the block touching the rim down to its top at the centre) and the pixel
+    size, for the largest pixel size (capped at TEXT_PIXEL_MAX) at which every
+    line fits its ``line_span``; ties prefer fewer lines, then the block
+    centred closest to the cap centre. Each line is centred in its own span.
     """
-    lines = [line_pixels(t) for t in wrap_name(name)]
     reach = TEXT_MARGIN * cap_radius
+    candidates = [[line_glyphs(t) for t in w] for w in wrap_candidates(name)]
+    pitch = FONT_ROWS + TEXT_LINE_GAP
 
-    def placed(p):
-        out, y_top = [], -TEXT_LINE_GAP * p
-        for pixels, width in lines:
-            out.append((pixels, width, -width * p / 2, y_top))
-            y_top -= (FONT_ROWS + TEXT_LINE_GAP) * p
+    def place(lines, p, block_top):
+        out, y_top = [], block_top
+        for pens, width in lines:
+            span = line_span(y_top, y_top - FONT_ROWS * p, reach)
+            if span is None or span[1] - span[0] < width * p:
+                return None
+            out.append((pens, (span[0] + span[1] - width * p) / 2, y_top))
+            y_top -= pitch * p
         return out
 
-    def fits(p):
-        for _, width, _, y_top in placed(p):
-            y_bot = y_top - FONT_ROWS * p
-            if abs(y_bot) >= reach:
-                return False
-            if width * p / 2 > np.sqrt(reach**2 - y_bot**2):
-                return False
-        return True
-
     p = TEXT_PIXEL_MAX
-    while not fits(p):
-        p -= 0.0005
-        if p <= 0:
-            raise ValueError(f"cannot fit {name!r} on the cap")
-    return p, placed(p)
+    while p > 0:
+        best = None
+        for lines in candidates:
+            height = (len(lines) * pitch - TEXT_LINE_GAP) * p
+            for block_top in np.linspace(reach, 0.0, TEXT_OFFSET_STEPS):
+                placed = place(lines, p, block_top)
+                if placed is None:
+                    continue
+                key = (len(lines), abs(block_top - height / 2))
+                if best is None or key < best[0]:
+                    best = (key, placed)
+        if best is not None:
+            return p, best[1]
+        p = round(p - TEXT_PIXEL_STEP, 6)
+    raise ValueError(f"cannot fit {name!r} on the cap")
 
 
-def emboss_text(name: str, z_top: float, cap_radius: float):
-    """Return (positions, normals, tris) of the raised name on the cap.
-
-    One box per merged pixel run: top face plus four sides with hard normals,
-    no bottom face (it sits flush on the cap at z_top).
-    """
+def text_placements(
+    name: str, cap_radius: float
+) -> list[tuple[str, float, float, float]]:
+    """(char, x, y_top, pixel size) for every character of the name on the cap."""
     p, lines = layout_text(name, cap_radius)
+    return [
+        (ch, x0 + pen * p, y_top, p) for pens, x0, y_top in lines for ch, pen in pens
+    ]
+
+
+def glyph_geometry(ch: str):
+    """Return (positions, normals, indices) of one glyph as raised boxes.
+
+    Pixel units, glyph top-left at the origin (x right, y down from 0 to
+    -FONT_ROWS), z from 0 to TEXT_HEIGHT (unscaled: the placing node scales
+    x/y by the pixel size and z by 1). One box per merged pixel run: top face
+    plus four sides with hard normals, no bottom face (flush on the cap).
+    Same array contract as ``pacman_cylinder``.
+    """
     pos, nrm, tris = [], [], []
 
     def quad(corners, n):
@@ -239,24 +299,32 @@ def emboss_text(name: str, z_top: float, cap_radius: float):
         nrm.extend([n] * 4)
         tris.extend([(base, base + 1, base + 2), (base, base + 2, base + 3)])
 
-    z0, z1 = z_top, z_top + TEXT_HEIGHT
-    for pixels, _, x0, y_top in lines:
-        for bx0, bx1, br0, br1 in pixel_boxes(pixels):
-            xa, xb = x0 + bx0 * p, x0 + bx1 * p
-            ya, yb = y_top - br1 * p, y_top - br0 * p
-            quad([(xa, ya, z1), (xb, ya, z1), (xb, yb, z1), (xa, yb, z1)], (0, 0, 1))
-            quad([(xa, ya, z0), (xb, ya, z0), (xb, ya, z1), (xa, ya, z1)], (0, -1, 0))
-            quad([(xa, yb, z0), (xb, yb, z0), (xb, yb, z1), (xa, yb, z1)], (0, 1, 0))
-            quad([(xa, ya, z0), (xa, yb, z0), (xa, yb, z1), (xa, ya, z1)], (-1, 0, 0))
-            quad([(xb, ya, z0), (xb, yb, z0), (xb, yb, z1), (xb, ya, z1)], (1, 0, 0))
-    return np.asarray(pos, np.float64), np.asarray(nrm, np.float64), tris
+    z0, z1 = 0.0, TEXT_HEIGHT
+    for xa, xb, br0, br1 in pixel_boxes(glyph_pixels(ch)):
+        ya, yb = -br1, -br0
+        quad([(xa, ya, z1), (xb, ya, z1), (xb, yb, z1), (xa, yb, z1)], (0, 0, 1))
+        quad([(xa, ya, z0), (xb, ya, z0), (xb, ya, z1), (xa, ya, z1)], (0, -1, 0))
+        quad([(xa, yb, z0), (xb, yb, z0), (xb, yb, z1), (xa, yb, z1)], (0, 1, 0))
+        quad([(xa, ya, z0), (xa, yb, z0), (xa, yb, z1), (xa, ya, z1)], (-1, 0, 0))
+        quad([(xb, ya, z0), (xb, yb, z0), (xb, yb, z1), (xb, ya, z1)], (1, 0, 0))
+    return orient(pos, nrm, tris)
 
 
-def pacman_cylinder(name: str):
-    """Return (positions (N,3) f32, normals (N,3) f32, indices (M,) u32).
+def orient(pos, nrm, tris):
+    """Pack to f32/u32, flipping every triangle to agree with its vertex normals."""
+    pos = np.asarray(pos, np.float32)
+    nrm = np.asarray(nrm, np.float32)
+    tris = np.asarray(tris, np.int64)
+    t = pos[tris]
+    fn = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    flip = (fn * nrm[tris].mean(1)).sum(1) < 0
+    tris[flip] = tris[flip][:, [0, 2, 1]]
+    idx_dtype = np.uint16 if len(pos) <= 0xFFFF else np.uint32
+    return pos, nrm, tris.ravel().astype(idx_dtype)
 
-    The test body with ``name`` embossed on its top cap.
-    """
+
+def pacman_cylinder():
+    """Return (positions (N,3) f32, normals (N,3) f32, indices (M,) u32)."""
     top, bot = HEIGHT / 2, -HEIGHT / 2  # centre at z=0 like the original cubes
     start = np.radians(WEDGE_DEG)
     ncol = int(round(SEGMENTS * (360.0 - WEDGE_DEG) / 360.0)) + 1
@@ -336,41 +404,30 @@ def pacman_cylinder(name: str):
         for i in range(len(profile) - 1):
             tris.append((base, base + 1 + i, base + 2 + i))
 
-    # Embossed material name standing on the flat cap.
-    t_pos, t_nrm, t_tris = emboss_text(name, top, RADIUS - EDGE)
-    base = len(pos)
-    add(t_pos, t_nrm)
-    tris.extend((base + a, base + b, base + c) for a, b, c in t_tris)
-
-    pos = np.asarray(pos, np.float32)
-    nrm = np.asarray(nrm, np.float32)
-    tris = np.asarray(tris, np.int64)
     # Orient every triangle to agree with its (per-surface constant) vertex normal.
-    t = pos[tris]
-    fn = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
-    flip = (fn * nrm[tris].mean(1)).sum(1) < 0
-    tris[flip] = tris[flip][:, [0, 2, 1]]
-    return pos, nrm, tris.ravel().astype(np.uint32)
+    return orient(pos, nrm, tris)
 
 
 def main() -> None:
     old = json.loads(GLTF.read_text())
     materials = old["materials"]
-    # Preserve node name -> material mapping from the current file.
-    node_mats = [
-        (n["name"], old["meshes"][n["mesh"]]["primitives"][0].get("material"))
-        for n in old["nodes"]
-    ]
+    # Preserve node name -> material mapping from the current file (its scene
+    # roots are the bodies; glyph child nodes carry no name).
+    node_mats = []
+    for i in old["scenes"][old.get("scene", 0)]["nodes"]:
+        n = old["nodes"][i]
+        node_mats.append(
+            (n["name"], old["meshes"][n["mesh"]]["primitives"][0].get("material"))
+        )
 
-    # One geometry per node (the embossed name differs), packed back to back.
     blob = b""
-    buffer_views, accessors, meshes, nodes = [], [], [], []
-    n_verts = n_tris = 0
-    for i, (name, mat) in enumerate(node_mats):
-        positions, normals, indices = pacman_cylinder(name)
-        n_verts += len(positions)
-        n_tris += len(indices) // 3
-        acc_base = len(accessors)
+    buffer_views, accessors = [], []
+
+    def add_geometry(positions, normals, indices) -> int:
+        """Append one geometry's three accessors; return the first accessor index."""
+        nonlocal blob
+        first = len(accessors)
+        index_type = {np.uint16: 5123, np.uint32: 5125}[indices.dtype.type]
         for arr, target in ((positions, 34962), (normals, 34962), (indices, 34963)):
             data = arr.tobytes()
             buffer_views.append(
@@ -382,41 +439,81 @@ def main() -> None:
                 }
             )
             blob += data + b"\0" * (-len(data) % 4)
-        accessors += [
+        accessors.append(
             {
-                "bufferView": acc_base,
+                "bufferView": first,
                 "componentType": 5126,
                 "count": len(positions),
                 "type": "VEC3",
                 "min": positions.min(0).tolist(),
                 "max": positions.max(0).tolist(),
-            },
+            }
+        )
+        accessors.append(
             {
-                "bufferView": acc_base + 1,
+                "bufferView": first + 1,
                 "componentType": 5126,
                 "count": len(normals),
                 "type": "VEC3",
-            },
-            {
-                "bufferView": acc_base + 2,
-                "componentType": 5125,
-                "count": len(indices),
-                "type": "SCALAR",
-            },
-        ]
-        meshes.append(
-            {
-                "name": name,
-                "primitives": [
-                    {
-                        "attributes": {"POSITION": acc_base, "NORMAL": acc_base + 1},
-                        "indices": acc_base + 2,
-                        "material": mat,
-                    }
-                ],
             }
         )
-        nodes.append({"name": name, "mesh": i, "translation": CENTRES[name]})
+        accessors.append(
+            {
+                "bufferView": first + 2,
+                "componentType": index_type,
+                "count": len(indices),
+                "type": "SCALAR",
+            }
+        )
+        return first
+
+    def primitive(first: int, mat) -> dict:
+        return {
+            "attributes": {"POSITION": first, "NORMAL": first + 1},
+            "indices": first + 2,
+            "material": mat,
+        }
+
+    # Shared base body; glyph accessors and (glyph, material) meshes on demand.
+    body = pacman_cylinder()
+    body_acc = add_geometry(*body)
+    meshes, nodes = [], []
+    glyph_acc: dict[str, int] = {}
+    glyph_mesh: dict[tuple[str, int | None], int] = {}
+    n_tris = len(body[2]) // 3
+    for name, mat in node_mats:
+        children = []
+        for ch, x, y_top, p in text_placements(name, RADIUS - EDGE):
+            key = ch.upper() if ch.upper() in FONT else "?"
+            if key not in glyph_acc:
+                glyph_acc[key] = add_geometry(*glyph_geometry(key))
+            if (key, mat) not in glyph_mesh:
+                glyph_mesh[key, mat] = len(meshes)
+                meshes.append(
+                    {
+                        "name": f"glyph_{key}",
+                        "primitives": [primitive(glyph_acc[key], mat)],
+                    }
+                )
+            n_tris += accessors[glyph_acc[key] + 2]["count"] // 3
+            children.append(len(nodes))
+            nodes.append(
+                {
+                    "mesh": glyph_mesh[key, mat],
+                    "translation": [x, y_top, HEIGHT / 2],
+                    "scale": [p, p, 1.0],
+                }
+            )
+        meshes.append({"name": name, "primitives": [primitive(body_acc, mat)]})
+        nodes.append(
+            {
+                "name": name,
+                "mesh": len(meshes) - 1,
+                "translation": CENTRES[name],
+                "children": children,
+            }
+        )
+    roots = [i for i, n in enumerate(nodes) if "name" in n]
     BIN.write_bytes(blob)
 
     gltf = {
@@ -427,7 +524,7 @@ def main() -> None:
         },
         "extensionsUsed": old.get("extensionsUsed", []),
         "scene": 0,
-        "scenes": [{"name": "Scene", "nodes": list(range(len(nodes)))}],
+        "scenes": [{"name": "Scene", "nodes": roots}],
         "nodes": nodes,
         "meshes": meshes,
         "materials": materials,
@@ -436,7 +533,11 @@ def main() -> None:
         "buffers": [{"byteLength": len(blob), "uri": BIN.name}],
     }
     GLTF.write_text(json.dumps(gltf, indent=1) + "\n")
-    print(f"{GLTF.name}: {len(nodes)} nodes, {n_verts} verts, {n_tris} tris")
+    print(
+        f"{GLTF.name}: {len(roots)} bodies, {len(nodes) - len(roots)} glyph nodes, "
+        f"{len(glyph_acc)} glyphs, {n_tris} tris drawn "
+        f"(body {len(body[2]) // 3}), {BIN.name} {len(blob)} bytes"
+    )
 
 
 if __name__ == "__main__":
