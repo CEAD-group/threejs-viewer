@@ -8,6 +8,11 @@ On each save of the source .gltf file:
 
 Usage:
     uv run python examples/31_watch_gltf.py path/to/model.gltf
+    uv run python examples/31_watch_gltf.py name name2   # -> name/name.gltf, name2/name2.gltf
+
+Each argument is either a .gltf file or a directory ``name`` holding
+``name/name.gltf`` (the Blender export convention of one folder per asset).
+Several can be watched at once; each gets its own viewer id (the file stem).
 
 Optional setup (if gltf-transform is not already available):
     npm install -g @gltf-transform/cli
@@ -110,18 +115,29 @@ def _stage_model_revision(
     return rev_id
 
 
+def _resolve_gltf(arg: Path) -> Path:
+    """Accept ``foo.gltf`` or a directory ``foo`` meaning ``foo/foo.gltf``."""
+    p = arg.expanduser().resolve()
+    if p.is_dir():
+        p = p / f"{p.name}.gltf"
+    if p.suffix.lower() != ".gltf":
+        raise ValueError(f"Expected a .gltf file or a directory, got: {arg}")
+    if not p.exists():
+        raise FileNotFoundError(f"Source GLTF not found: {p}")
+    return p
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Watch a .gltf file, convert it to .glb on save, and reload it in threejs-viewer."
         )
     )
-    parser.add_argument("gltf", type=Path, help="Path to source .gltf file")
     parser.add_argument(
-        "--id",
-        dest="model_id",
-        default="watched_model",
-        help="Viewer object id to replace on each save",
+        "gltf",
+        type=Path,
+        nargs="+",
+        help="Source .gltf file(s), or directory NAME meaning NAME/NAME.gltf",
     )
     parser.add_argument(
         "--poll",
@@ -150,63 +166,60 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    src_gltf = args.gltf.expanduser().resolve()
-    if src_gltf.suffix.lower() != ".gltf":
-        raise ValueError(f"Expected a .gltf file, got: {src_gltf}")
-
-    if not src_gltf.exists():
-        raise FileNotFoundError(f"Source GLTF not found: {src_gltf}")
-
+    sources = [_resolve_gltf(a) for a in args.gltf]
     TMP_DIR.mkdir(exist_ok=True)
-    dst_glb = TMP_DIR / f"{src_gltf.stem}.glb"
 
     v = viewer()
 
-    seen_mtime_ns: int | None = None
-    revision = 0
+    # Per-source state: output .glb, last seen mtime, revision counter, live id.
+    state: dict[Path, dict] = {
+        src: {"glb": TMP_DIR / f"{src.stem}.glb", "mtime": None, "rev": 0, "live": None}
+        for src in sources
+    }
 
-    print(f"Watching: {src_gltf}")
-    print(f"Output:   {dst_glb}")
+    for src, st in state.items():
+        print(f"Watching: {src}  ->  {st['glb']}")
     print("Press Ctrl+C to stop.")
 
     while True:
-        try:
-            mtime_ns = src_gltf.stat().st_mtime_ns
-        except FileNotFoundError:
-            print("Source file missing. Waiting for it to reappear...")
-            time.sleep(args.poll)
-            continue
-
-        if mtime_ns != seen_mtime_ns:
-            seen_mtime_ns = mtime_ns
+        for src, st in state.items():
             try:
-                _convert_gltf_to_glb(src_gltf, dst_glb)
-                revision += 1
+                mtime_ns = src.stat().st_mtime_ns
+            except FileNotFoundError:
+                if st["mtime"] is not None:
+                    print(
+                        f"{src.name}: source file missing. Waiting for it to reappear..."
+                    )
+                    st["mtime"] = None
+                continue
+            if mtime_ns == st["mtime"]:
+                continue
+            st["mtime"] = mtime_ns
+            try:
+                _convert_gltf_to_glb(src, st["glb"])
+                st["rev"] += 1
                 new_id = _stage_model_revision(
                     v,
-                    args.model_id,
-                    revision,
-                    dst_glb,
+                    src.stem,
+                    st["rev"],
+                    st["glb"],
                     scale=args.scale,
                     position=args.position,
                     y_up=args.y_up,
                 )
 
                 # Ensure the staged model has finished loading before we
-                # remove older revisions, so the scene never goes blank.
+                # remove the previous revision, so the scene never goes blank.
                 v.wait_for_assets(disconnect=False)
-
-                scene = v.query_scene()
-                object_ids = list(scene.get("objects", {}).keys())
-                for object_id in object_ids:
-                    if object_id != new_id:
-                        v.delete(object_id)
+                if st["live"] is not None:
+                    v.delete(st["live"])
+                st["live"] = new_id
                 print(
                     f"Reloaded {new_id} at {time.strftime('%H:%M:%S')} "
-                    f"({dst_glb.stat().st_size / 1024:.0f} KB)"
+                    f"({st['glb'].stat().st_size / 1024:.0f} KB)"
                 )
             except Exception as exc:
-                print(f"Reload failed: {exc}")
+                print(f"{src.name}: reload failed: {exc}")
 
         time.sleep(args.poll)
 
