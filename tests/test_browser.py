@@ -3117,6 +3117,9 @@ def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
             "  outNoBlend: out && out.material"
             "   ? (out.material.blending === NO_BLENDING) : null,"
             "  smaaLast: !!(smaa && smaa === dc._smaaPass),"
+            "  parityStable: dc._composer"
+            "   ? (dc._composer.readBuffer === dc._composer.renderTarget2"
+            "      && dc._composer.renderTarget2.depthTexture === dc._depthTexture) : null,"
             "  smaaNoBlend: smaa && smaa._materialBlend"
             "   ? (smaa._materialBlend.blending === NO_BLENDING) : null,"
             " };"
@@ -3138,6 +3141,11 @@ def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
     assert state["smaaLast"] is True, (
         "SMAA anti-aliasing pass must be the final composer pass (after OutputPass, "
         "so its luma edge detection sees display-referred colour)"
+    )
+    assert state["parityStable"] is True, (
+        "composer read buffer must be renderTarget2 (the one carrying the EDL "
+        "depth texture) between frames; an odd swap count per frame would flip "
+        "it every other frame and render blank"
     )
     assert state["smaaNoBlend"] is True, (
         "SMAA blend quad must use NoBlending (writes to screen) so transparent "

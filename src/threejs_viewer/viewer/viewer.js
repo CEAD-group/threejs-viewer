@@ -5915,9 +5915,9 @@ class DepthCueController {
         const composer = new EffectComposer(renderer);
         // Route FULL-SCENE depth into a sampleable texture for the EDL pass'
         // occlusion guard. RenderPass always renders into the composer's
-        // readBuffer (= renderTarget2, stable since the pipeline makes an even
-        // number of buffer swaps per frame), so the depth texture lives there
-        // ONLY. Attaching it to renderTarget1 too would form a GL feedback loop:
+        // readBuffer (= renderTarget2 — renderComposer() normalises the buffer
+        // parity after every render, so this holds regardless of how many
+        // swapping passes follow), so the depth texture lives there ONLY. Attaching it to renderTarget1 too would form a GL feedback loop:
         // the EDL pass writes renderTarget1 while sampling this very texture.
         composer.renderTarget2.depthTexture = depthTexture;
 
@@ -6034,6 +6034,18 @@ class DepthCueController {
         renderer.setRenderTarget(prevTarget);
 
         this._composer.render();
+        // EffectComposer never resets its read/write parity between frames: it
+        // swaps after every `needsSwap` pass and carries the result over. The
+        // full-scene depth texture is attached to renderTarget2 ONLY (see
+        // _ensureComposer), so RenderPass must land there every frame. With the
+        // SMAA pass the chain makes an odd number of swaps, which would flip the
+        // parity each frame — RenderPass alternating into the depth-less
+        // renderTarget1 while the EDL pass samples a stale depth texture (and
+        // the frame rendered blank). Normalise the parity here so the invariant
+        // "readBuffer === renderTarget2 between frames" holds for any pass count.
+        if (this._composer.readBuffer !== this._composer.renderTarget2) {
+            this._composer.swapBuffers();
+        }
         v._scene.background = prevBg;
     }
 
