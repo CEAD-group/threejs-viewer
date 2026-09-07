@@ -3108,7 +3108,8 @@ def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
             " const dc = v._depthCue;"
             " const gl = v._renderer.getContext();"
             " const passes = (dc._composer && dc._composer.passes) || [];"
-            " const out = passes[passes.length - 1];"
+            " const smaa = passes[passes.length - 1];"
+            " const out = passes[passes.length - 2];"
             " const NO_BLENDING = 0;"  # THREE.NoBlending
             " return {"
             "  hasComposer: !!dc._composer,"
@@ -3116,6 +3117,12 @@ def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
             "  canvasBg: v._renderer.domElement.style.backgroundColor,"
             "  outNoBlend: out && out.material"
             "   ? (out.material.blending === NO_BLENDING) : null,"
+            "  smaaLast: !!(smaa && smaa === dc._smaaPass),"
+            "  parityStable: dc._composer"
+            "   ? (dc._composer.readBuffer === dc._composer.renderTarget2"
+            "      && dc._composer.renderTarget2.depthTexture === dc._depthTexture) : null,"
+            "  smaaNoBlend: smaa && smaa._materialBlend"
+            "   ? (smaa._materialBlend.blending === NO_BLENDING) : null,"
             " };"
             "}"
         )
@@ -3131,6 +3138,19 @@ def test_depth_cue_edl_preserves_background(viewer_client, viewer_page):
     assert state["outNoBlend"] is True, (
         "composer output pass must use NoBlending so background pixels are "
         "replaced (transparent) rather than blended as a tone-mapped colour"
+    )
+    assert state["smaaLast"] is True, (
+        "SMAA anti-aliasing pass must be the final composer pass (after OutputPass, "
+        "so its luma edge detection sees display-referred colour)"
+    )
+    assert state["parityStable"] is True, (
+        "composer read buffer must be renderTarget2 (the one carrying the EDL "
+        "depth texture) between frames; an odd swap count per frame would flip "
+        "it every other frame and render blank"
+    )
+    assert state["smaaNoBlend"] is True, (
+        "SMAA blend quad must use NoBlending (writes to screen) so transparent "
+        "background pixels are replaced, not blended over the prior frame"
     )
 
 

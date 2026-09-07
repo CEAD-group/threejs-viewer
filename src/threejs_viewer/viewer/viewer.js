@@ -19,6 +19,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
 
@@ -5668,6 +5669,7 @@ class DepthCueController {
         this._composer = null;
         this._edlPass = null;
         this._renderPass = null;
+        this._smaaPass = null;
         this._depthTexture = null;
         // Line-only depth target for the EDL depth pre-pass (created with the
         // composer). Rendering just the polyline layer into this gives the EDL
@@ -5914,9 +5916,9 @@ class DepthCueController {
         const composer = new EffectComposer(renderer);
         // Route FULL-SCENE depth into a sampleable texture for the EDL pass'
         // occlusion guard. RenderPass always renders into the composer's
-        // readBuffer (= renderTarget2, stable since the pipeline makes an even
-        // number of buffer swaps per frame), so the depth texture lives there
-        // ONLY. Attaching it to renderTarget1 too would form a GL feedback loop:
+        // readBuffer (= renderTarget2 — renderComposer() normalises the buffer
+        // parity after every render, so this holds regardless of how many
+        // swapping passes follow), so the depth texture lives there ONLY. Attaching it to renderTarget1 too would form a GL feedback loop:
         // the EDL pass writes renderTarget1 while sampling this very texture.
         composer.renderTarget2.depthTexture = depthTexture;
 
@@ -5946,13 +5948,37 @@ class DepthCueController {
         const outputPass = new OutputPass();
         outputPass.material.blending = THREE.NoBlending;
 
+        // Anti-aliasing. The direct (EDL-off) render gets the browser's hardware
+        // MSAA from `antialias: true`, but that only covers the default
+        // framebuffer: every composer target is single-sampled, so EDL-on used
+        // to lose geometry-edge AA entirely. A multisampled composer target is
+        // not an option here — the EDL pass samples the composer's depth
+        // texture, which a multisampled target cannot expose — so SMAA runs as
+        // a screen-space pass instead. It goes LAST, after OutputPass: SMAA's
+        // edge detection is luma-based and expects display-referred (sRGB,
+        // tone-mapped) colour. Cost is a fixed ~1 ms at 1080p / ~4 ms at 4K,
+        // independent of scene size. Like OutputPass, the final blend quad
+        // must REPLACE canvas pixels (NoBlending) so transparent background
+        // pixels are written as (0,0,0,0) rather than blended over the prior
+        // frame. `_materialBlend` is a private SMAAPass member (three r183);
+        // a rename would fail loudly in the browser test.
+        const smaaPass = new SMAAPass();
+        // r183 runtime names it `_materialBlend`; the bundled typings still say
+        // `materialBlend`. Resolve whichever exists and fail loudly on neither.
+        const smaaBlend = /** @type {any} */ (smaaPass)._materialBlend
+            ?? /** @type {any} */ (smaaPass).materialBlend;
+        if (!smaaBlend) throw new Error('SMAAPass blend material not found (three upgrade?)');
+        smaaBlend.blending = THREE.NoBlending;
+
         composer.addPass(renderPass);
         composer.addPass(edlPass);
         composer.addPass(outputPass);
+        composer.addPass(smaaPass);
 
         this._composer = composer;
         this._renderPass = renderPass;
         this._edlPass = edlPass;
+        this._smaaPass = smaaPass;
     }
 
     renderComposer() {
@@ -6009,6 +6035,18 @@ class DepthCueController {
         renderer.setRenderTarget(prevTarget);
 
         this._composer.render();
+        // EffectComposer never resets its read/write parity between frames: it
+        // swaps after every `needsSwap` pass and carries the result over. The
+        // full-scene depth texture is attached to renderTarget2 ONLY (see
+        // _ensureComposer), so RenderPass must land there every frame. With the
+        // SMAA pass the chain makes an odd number of swaps, which would flip the
+        // parity each frame — RenderPass alternating into the depth-less
+        // renderTarget1 while the EDL pass samples a stale depth texture (and
+        // the frame rendered blank). Normalise the parity here so the invariant
+        // "readBuffer === renderTarget2 between frames" holds for any pass count.
+        if (this._composer.readBuffer !== this._composer.renderTarget2) {
+            this._composer.swapBuffers();
+        }
         v._scene.background = prevBg;
     }
 
@@ -6067,6 +6105,7 @@ class DepthCueController {
         }
         this._renderPass = null;
         this._edlPass = null;
+        this._smaaPass = null;  // disposed by composer.dispose() above
     }
 
     /** @param {string} text */
