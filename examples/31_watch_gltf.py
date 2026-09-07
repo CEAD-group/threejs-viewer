@@ -7,7 +7,7 @@ On each save of the source .gltf file:
 3) Stage-load a new model revision, then remove older revisions.
 
 Usage:
-    uv run python examples/29_watch_gltf.py path/to/model.gltf
+    uv run python examples/31_watch_gltf.py path/to/model.gltf
 
 Optional setup (if gltf-transform is not already available):
     npm install -g @gltf-transform/cli
