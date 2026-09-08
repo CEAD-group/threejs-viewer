@@ -332,6 +332,7 @@ class ViewerClient:
         URL param > ``ThreeJSViewer`` option > hard default.
         """
         self.host = host
+        self._http_host = "127.0.0.1" if host == "localhost" else host
         self.port = port
         self.open_browser = open_browser
         # Lighting overrides — forwarded to the viewer via query string on launch.
@@ -735,6 +736,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a box primitive to the scene."""
         params = {
@@ -748,7 +750,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "box", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "box",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_sphere(
         self,
@@ -762,6 +773,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a sphere primitive to the scene."""
         params = {"radius": radius, "color": color, "opacity": opacity}
@@ -769,7 +781,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "sphere", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "sphere",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_cylinder(
         self,
@@ -785,6 +806,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a cylinder primitive to the scene."""
         params = {
@@ -798,7 +820,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "cylinder", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "cylinder",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_capsule(
         self,
@@ -813,6 +844,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a capsule (pill) primitive to the scene."""
         params = {
@@ -825,7 +857,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "capsule", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "capsule",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_grid(
         self,
@@ -842,6 +883,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a shader floor grid: an anti-aliased, distance-faded grid plane.
 
@@ -920,6 +962,90 @@ class ViewerClient:
             msg["transform"] = transform
         if parent:
             msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
+        self._send(msg)
+
+    def add_billboard(
+        self,
+        id: str,
+        width: float = 1.0,
+        height: float = 1.0,
+        color: int = 0xFFFFFF,
+        opacity: float = 1.0,
+        axis: Optional[List[float]] = None,
+        lit: bool = False,
+        position: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        parent: Optional[str] = None,
+        visible: bool = True,
+    ) -> None:
+        """Add a billboard: a flat plane the viewer rotates to face the camera.
+
+        The plane spans ``width`` x ``height`` in its local XY plane and is
+        re-oriented every rendered frame so its normal points at the camera —
+        useful for markers/labels that must stay readable from any viewpoint.
+
+        Orientation is computed in world space and written back into the
+        parent's frame, so a billboard parented under a rotating group keeps
+        facing the camera rather than tumbling with the parent.
+
+        There is no ``rotation`` argument: the viewer owns the orientation.
+
+        Args:
+            id: Unique identifier for the object.
+            width: Plane width in world units.
+            height: Plane height in world units.
+            color: Fill colour (0xRRGGBB).
+            opacity: Opacity in [0, 1].
+            axis: Optional world-space axis to lock the spin to, e.g.
+                ``[0, 0, 1]`` for an upright billboard that only turns about
+                the Z axis (cylindrical). ``None`` (default) faces the camera
+                fully, staying parallel to the view plane.
+            lit: ``True`` renders with a lit PBR material; the default
+                (unlit) keeps the billboard evenly shaded from any angle.
+            position: Optional [x, y, z] position.
+            scale: Optional [x, y, z] scale.
+            parent: Optional parent object id.
+            visible: Initial visibility.
+        """
+        if not (width > 0):
+            raise ValueError(f"width must be > 0, got {width}")
+        if not (height > 0):
+            raise ValueError(f"height must be > 0, got {height}")
+        if not (0.0 <= opacity <= 1.0):
+            raise ValueError(f"opacity must be in [0, 1], got {opacity}")
+
+        msg: dict = {
+            "type": "add_billboard",
+            "id": id,
+            "width": float(width),
+            "height": float(height),
+            "color": color,
+            "opacity": float(opacity),
+        }
+        if lit:
+            msg["materialType"] = "standard"
+        if axis is not None:
+            axis = [float(v) for v in axis]
+            if len(axis) != 3:
+                raise ValueError(f"axis must be a 3-vector, got {axis}")
+            if not all(math.isfinite(v) for v in axis):
+                raise ValueError(f"axis must be finite, got {axis}")
+            if axis == [0.0, 0.0, 0.0]:
+                raise ValueError("axis must be non-zero")
+            msg["axis"] = axis
+        transform = {}
+        if position:
+            transform["position"] = position
+        if scale:
+            transform["scale"] = scale
+        if transform:
+            msg["transform"] = transform
+        if parent:
+            msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
         self._send(msg)
 
     def add_model(
@@ -932,6 +1058,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         y_up: bool = False,
+        visible: bool = True,
     ) -> None:
         """
         Add a 3D model to the scene.
@@ -948,6 +1075,7 @@ class ViewerClient:
                   models to the Z-up viewer convention. Default False (no correction).
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
+            visible: Initial visibility
         """
         transform = {}
         if position:
@@ -964,6 +1092,8 @@ class ViewerClient:
         }
         if y_up:
             obj_data["yUp"] = True
+        if not visible:
+            obj_data["visible"] = False
 
         msg = {
             "type": "add_object",
@@ -972,6 +1102,8 @@ class ViewerClient:
         }
         if parent:
             msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
         self._send(msg)
 
     def _send_binary(self, header_dict: dict, payload: bytes) -> str:
@@ -982,7 +1114,9 @@ class ViewerClient:
         """
         blob_key = f"/blob_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = payload
-        header_dict["blob_url"] = f"http://{self.host}:{self._http_port}{blob_key}"
+        header_dict["blob_url"] = (
+            f"http://{self._http_host}:{self._http_port}{blob_key}"
+        )
         self._send(header_dict)
         return blob_key
 
@@ -997,6 +1131,7 @@ class ViewerClient:
         matrix: Optional[List[float]] = None,
         parent: Optional[str] = None,
         y_up: bool = False,
+        visible: bool = True,
     ) -> None:
         """
         Add a 3D model to the scene by sending file bytes over WebSocket.
@@ -1014,6 +1149,7 @@ class ViewerClient:
                   models to the Z-up viewer convention. Default False (no correction).
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
+            visible: Initial visibility
         """
         if isinstance(path_or_bytes, bytes):
             mesh_bytes = path_or_bytes
@@ -1028,6 +1164,8 @@ class ViewerClient:
             header["parent"] = parent
         if y_up:
             header["yUp"] = True
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -1056,6 +1194,7 @@ class ViewerClient:
         fat: bool = True,
         pickable: bool = True,
         segments: bool = False,
+        visible: bool = True,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -1145,6 +1284,8 @@ class ViewerClient:
             header["segments"] = True
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         self._send_binary(header, raw_bytes)
 
     def add_mesh(
@@ -1163,6 +1304,7 @@ class ViewerClient:
         rotation: Optional[list] = None,
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
+        visible: bool = True,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -1172,7 +1314,7 @@ class ViewerClient:
             positions: (N, 3) float32 vertex positions
             indices: (M,) uint32 flat index array (3 per triangle)
             normals: optional (N, 3) float32 vertex normals
-            colors: optional (N, 3) float32 per-vertex RGB colors (0-1)
+            colors: optional (N, 3 / 4) float32 per-vertex RGB/RGBA colors (0-1)
             color: Material color (hex), ignored when colors is provided
             opacity: Material opacity (0.0 = invisible, 1.0 = fully opaque)
             metalness: PBR metalness (0-1)
@@ -1189,13 +1331,42 @@ class ViewerClient:
 
         has_normals = normals is not None
         has_vertex_colors = colors is not None
+        vertex_color_components = 3
         parts = [positions.tobytes()]
         if has_normals:
             normals = np.ascontiguousarray(normals, dtype=np.float32).reshape(-1)
             parts.append(normals.tobytes())
         if has_vertex_colors:
-            colors = np.ascontiguousarray(colors, dtype=np.float32).reshape(-1)
-            parts.append(colors.tobytes())
+            colors_arr = np.ascontiguousarray(colors, dtype=np.float32)
+            if colors_arr.ndim == 2:
+                if colors_arr.shape[0] != num_vertices:
+                    raise ValueError(
+                        f"colors must have {num_vertices} rows matching vertex count, got {colors_arr.shape[0]}"
+                    )
+                if colors_arr.shape[1] == 4:
+                    vertex_color_components = 4
+                elif colors_arr.shape[1] == 3:
+                    vertex_color_components = 3
+                else:
+                    raise ValueError(
+                        f"colors must have shape (N, 3) or (N, 4), got {colors_arr.shape}"
+                    )
+            elif colors_arr.ndim == 1:
+                if colors_arr.size == num_vertices * 4:
+                    vertex_color_components = 4
+                elif colors_arr.size == num_vertices * 3:
+                    vertex_color_components = 3
+                else:
+                    raise ValueError(
+                        f"colors array size ({colors_arr.size}) does not match "
+                        f"num_vertices ({num_vertices}) for 3 or 4 components"
+                    )
+            else:
+                raise ValueError(
+                    f"colors must have shape (N, 3) or (N, 4), got shape {colors_arr.shape}"
+                )
+            colors_flat = colors_arr.reshape(-1)
+            parts.append(colors_flat.tobytes())
         parts.append(indices.tobytes())
 
         header = {
@@ -1205,6 +1376,7 @@ class ViewerClient:
             "numIndices": len(indices),
             "hasNormals": has_normals,
             "hasVertexColors": has_vertex_colors,
+            "vertexColorComponents": vertex_color_components,
             "color": color,
             "opacity": opacity,
             "metalness": metalness,
@@ -1212,6 +1384,8 @@ class ViewerClient:
         }
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -1240,6 +1414,7 @@ class ViewerClient:
         removal_times: Optional[np.ndarray] = None,
         lod: Optional[Union[bool, dict]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """
         Add a GPU point cloud (``THREE.Points``) using binary transfer.
@@ -1381,6 +1556,7 @@ class ViewerClient:
                 size_attenuation=size_attenuation,
                 parent=parent,
                 lod=lod,
+                visible=visible,
             )
             return
 
@@ -1408,6 +1584,8 @@ class ViewerClient:
             header["hasRemovalTimes"] = True
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         self._send_binary(header, raw_bytes)
         # Remember what append_points needs to keep a later chunk consistent
         # with this one (colour mode, and the colormap range frozen here).
@@ -1587,6 +1765,7 @@ class ViewerClient:
         size_attenuation: bool,
         parent: Optional[str],
         lod: Union[bool, dict],
+        visible: bool = True,
     ) -> None:
         """Build the sampled octree, register lazy node providers on the
         blob store, and send the add_points_lod header (see
@@ -1682,7 +1861,7 @@ class ViewerClient:
             self._blob_store[f"{key_base}/{i}"] = functools.partial(node_payload, i)
         self._points_lod[id] = key_base
 
-        base_url = f"http://{self.host}:{self._http_port}{key_base}"
+        base_url = f"http://{self._http_host}:{self._http_port}{key_base}"
         header = {
             "type": "add_points_lod",
             "id": id,
@@ -1705,6 +1884,8 @@ class ViewerClient:
             header["hasRemovalTimes"] = True
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         self._send(header)
 
     def _release_points_lod(self, id: str) -> None:
@@ -1741,6 +1922,7 @@ class ViewerClient:
         bias_index_offset: int = 0,
         bias_index_total: Optional[int] = None,
         break_before: Optional[np.ndarray] = None,
+        visible: bool = True,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -1981,6 +2163,8 @@ class ViewerClient:
             ]
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -2033,6 +2217,7 @@ class ViewerClient:
         rotation: Optional[list] = None,
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
+        visible: bool = True,
     ) -> None:
         """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
 
@@ -2143,6 +2328,8 @@ class ViewerClient:
         }
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -2206,6 +2393,7 @@ class ViewerClient:
         toolpath,
         travel: Optional[str] = None,
         travel_color: int = 0x666666,
+        visible: bool = True,
         **kwargs,
     ) -> None:
         """Add a Toolpath as one or more parametric tubes.
@@ -2250,6 +2438,7 @@ class ViewerClient:
         if travel not in (None, False, "line"):
             raise ValueError(f"travel must be None or 'line' (got {travel!r})")
         want_travel = travel == "line"
+        kwargs["visible"] = visible
         if "colors" not in kwargs:
             packed = toolpath.packed_colors
             if packed is not None:
@@ -2325,6 +2514,7 @@ class ViewerClient:
 
         # Multiple segments — create group + child tubes
         parent = kwargs.pop("parent", None)
+        visible_val = kwargs.get("visible", True)
         # Local-transform kwargs go on the GROUP (one transform node), not on
         # each child: children stay in local coordinates, so the beads AND
         # the travel line move together. Forwarding them per-child looked the
@@ -2336,7 +2526,7 @@ class ViewerClient:
             if (v := kwargs.pop(k, None)) is not None
         }
         matrix = kwargs.pop("matrix", None)
-        self.add_group(id, parent=parent, **xform)
+        self.add_group(id, parent=parent, visible=visible_val, **xform)
         if matrix is not None:
             self.set_matrix(id, matrix)
         colors = kwargs.pop("colors", None)
@@ -2395,6 +2585,7 @@ class ViewerClient:
                 fat=False,
                 segments=True,
                 parent=id,
+                visible=visible_val,
             )
             msg["travelId"] = travel_id
             msg["travelEndFracs"] = (
@@ -2443,6 +2634,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Internal method to add a primitive."""
         transform = {}
@@ -2464,6 +2656,9 @@ class ViewerClient:
         }
         if parent:
             msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
+            msg["object"]["visible"] = False
         self._send(msg)
 
     # === Transform Updates ===
@@ -3662,7 +3857,7 @@ class ViewerClient:
             del self._blob_store[k]
         blob_key = f"/animation_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = binary_payload
-        blob_url = f"http://{self.host}:{self._http_port}{blob_key}"
+        blob_url = f"http://{self._http_host}:{self._http_port}{blob_key}"
 
         # Binary-channel animations skip reconnect replay — storing hundreds of MB
         # of typed arrays for re-send isn't worthwhile; the user re-runs the script.

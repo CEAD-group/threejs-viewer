@@ -1599,6 +1599,92 @@ function buildFloorGridMesh(data) {
     return mesh;
 }
 
+// ========== Billboards ==========
+
+const _bbCamPos = new THREE.Vector3();
+const _bbObjPos = new THREE.Vector3();
+const _bbForward = new THREE.Vector3();
+const _bbRight = new THREE.Vector3();
+const _bbUp = new THREE.Vector3();
+const _bbQuat = new THREE.Quaternion();
+const _bbParentQuat = new THREE.Quaternion();
+const _bbBasis = new THREE.Matrix4();
+
+/**
+ * Re-orient a billboard so its local +Z (the plane's normal) points at the
+ * camera. Called every frame from `_updateBillboards`.
+ *
+ * With no `axis` this is a full billboard: the object simply copies the
+ * camera's orientation, so the plane stays parallel to the view plane.
+ * With an `axis` it is a cylindrical billboard: the object may only spin
+ * about that world-space axis (local +Y is pinned to it), so an upright
+ * label stays upright while turning to face the viewer.
+ *
+ * The result is a *world* orientation, so it is converted back into the
+ * parent's frame before being written — a billboard parented under a
+ * rotating group must not inherit that rotation.
+ *
+ * @param {THREE.Object3D} obj
+ * @param {THREE.Camera} camera
+ * @param {THREE.Vector3 | null} axis
+ */
+function orientBillboard(obj, camera, axis) {
+    if (axis) {
+        obj.getWorldPosition(_bbObjPos);
+        camera.getWorldPosition(_bbCamPos);
+        _bbUp.copy(axis).normalize();
+        _bbForward.subVectors(_bbCamPos, _bbObjPos);
+        _bbForward.addScaledVector(_bbUp, -_bbForward.dot(_bbUp));
+        // Camera sits on the lock axis: no spin faces it. Hold the last pose.
+        if (_bbForward.lengthSq() < 1e-12) return;
+        _bbForward.normalize();
+        _bbRight.crossVectors(_bbUp, _bbForward);
+        _bbBasis.makeBasis(_bbRight, _bbUp, _bbForward);
+        _bbQuat.setFromRotationMatrix(_bbBasis);
+    } else {
+        camera.getWorldQuaternion(_bbQuat);
+    }
+    if (obj.parent) {
+        obj.parent.getWorldQuaternion(_bbParentQuat);
+        obj.quaternion.copy(_bbParentQuat.invert()).multiply(_bbQuat);
+    } else {
+        obj.quaternion.copy(_bbQuat);
+    }
+}
+
+/**
+ * Build the plane mesh for an `add_billboard` message.
+ * @param {any} data
+ * @param {THREE.Material} material
+ * @returns {THREE.Mesh}
+ */
+function buildBillboardMesh(data, material) {
+    const width = data.width > 0 ? data.width : 1;
+    const height = data.height > 0 ? data.height : 1;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+    mesh.userData.isBillboard = true;
+    // Python validates `axis`, but handleMessage is a public no-WS embedder
+    // surface: a zero or non-finite axis survives normalize() as a zero/NaN
+    // vector, so orientBillboard would feed a degenerate basis into
+    // setFromRotationMatrix and write a corrupt quaternion every frame.
+    // Degrade to a full billboard instead, once, loudly.
+    let axis = null;
+    if (data.axis != null) {
+        const a = data.axis;
+        if (Array.isArray(a) && a.length === 3 && a.every(Number.isFinite)
+            && (a[0] !== 0 || a[1] !== 0 || a[2] !== 0)) {
+            axis = new THREE.Vector3().fromArray(a);
+        } else {
+            console.warn(
+                `add_billboard '${data.id}': axis must be a finite non-zero 3-vector ` +
+                `(got ${JSON.stringify(a)}); falling back to a full billboard.`
+            );
+        }
+    }
+    mesh.userData.billboardAxis = axis;
+    return mesh;
+}
+
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
 // min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
 // When w > h: flat top & bottom, pointed left & right (hexagon).
@@ -7700,6 +7786,11 @@ export class ThreeJSViewer {
         /** @type {Map<string, {times: Float64Array, data: Float32Array}>} */
         this._followPaths = new Map();
 
+        // Billboards (add_billboard): id -> mesh re-oriented toward the
+        // active camera every frame in _updateBillboards.
+        /** @type {Map<string, THREE.Object3D>} */
+        this._billboards = new Map();
+
         // Embedder-owned overlays (addOverlay): id -> Object3D. Not part of
         // _objects — excluded from framing/scene bounds by default, never
         // touched by clear/animation, and the embedder keeps ownership
@@ -8968,6 +9059,18 @@ export class ThreeJSViewer {
         this._sceneBoundsDirty = true;
     }
 
+    /**
+     * @param {string} id
+     * @param {THREE.Object3D} obj
+     * @param {boolean | undefined} [dataVisibility]
+     */
+    _applyInitialVisibility(id, obj, dataVisibility) {
+        if (dataVisibility === false) obj.visible = false;
+        else if (dataVisibility === true) obj.visible = true;
+        const baseline = this._baselineVisibility.get(id);
+        if (baseline !== undefined) obj.visible = baseline;
+    }
+
     // TODO(types): objData is a highly polymorphic add_object payload
     // (primitive | model | polyline | mesh | tube | group); tightening it
     // requires splitting the dispatch into per-kind helpers or a tagged-union
@@ -9030,12 +9133,7 @@ export class ThreeJSViewer {
         obj.name = id;
         obj.userData.id = id;
         this._applyTransform(obj, objData.transform);
-        if (objData.visible === false) obj.visible = false;
-        // A set_scene_visibility that arrived during the async load
-        // recorded a baseline with no object to apply to; honour it
-        // now so the request isn't silently dropped behind objData.visible.
-        const baseline = this._baselineVisibility.get(id);
-        if (baseline !== undefined) obj.visible = baseline;
+        this._applyInitialVisibility(id, obj, objData.visible);
         this._deleteObject(id, deleteOpts);
         this._addToParentOrScene(obj, parentId);
         this._registerObject(id, obj);
@@ -9777,13 +9875,14 @@ export class ThreeJSViewer {
             }
         }
         // Prune any recorded baseline so set_scene_visibility entries for
-        // never-loaded or explicitly-deleted ids don't accumulate. _addObject
-        // reads the baseline into a local before calling _deleteObject, so the
-        // race fix is unaffected.
+        // never-loaded or explicitly-deleted ids don't accumulate. Every add
+        // path calls _applyInitialVisibility (which reads the baseline) before
+        // _deleteObject, so the race fix is unaffected.
         this._baselineVisibility.delete(id);
         // Same for follow-path tracks: a deleted id must not keep its path
         // (a later re-add with the same id would silently snap to it).
         this._followPaths.delete(id);
+        this._billboards.delete(id);
         const obj = this._objects.get(id);
         if (obj) {
             // Prune a stale deferred-re-parent entry: if this object was
@@ -9806,6 +9905,7 @@ export class ThreeJSViewer {
             });
             for (const childId of childIds) {
                 this._objects.delete(childId);
+                this._billboards.delete(childId);
                 const childMixer = this._mixers.get(childId);
                 if (childMixer) { childMixer.stopAllAction(); this._mixers.delete(childId); this._mixerGeneration++; }
             }
@@ -10997,7 +11097,7 @@ export class ThreeJSViewer {
                 group.name = data.id;
                 group.userData.id = data.id;
                 if (data.transform) this._applyTransform(group, data.transform);
-                if (data.visible === false) group.visible = false;
+                this._applyInitialVisibility(data.id, group, data.visible);
                 this._addToParentOrScene(group, data.parent);
                 this._registerObject(data.id, group);
                 break;
@@ -11284,6 +11384,7 @@ export class ThreeJSViewer {
                             model: blobUrl,
                             format: data.format || 'stl',
                             yUp: data.yUp === true,
+                            visible: data.visible,
                         }, data.parent, { preserveInflight: true });
                         if (obj) {
                             obj.userData.blobUrl = blobUrl;
@@ -11427,6 +11528,10 @@ export class ThreeJSViewer {
                         if (data.pickable !== false) {
                             line.userData.pickPoints = pointData;
                         }
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
+                        this._applyInitialVisibility(data.id, line, data.visible);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
@@ -11564,6 +11669,10 @@ export class ThreeJSViewer {
                         // draw_range fraction reveals the leading frac*N points.
                         geometry.setDrawRange(0, numPoints);
 
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
+                        this._applyInitialVisibility(data.id, points, data.visible);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(points, data.parent);
                         this._registerObject(data.id, points);
@@ -11679,6 +11788,10 @@ export class ThreeJSViewer {
                         console.log(
                             `Creating LOD point cloud ${data.id}: ${data.numPoints} points, ` +
                             `${nodes.count} nodes, maxLevel ${data.maxLevel}`);
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
+                        this._applyInitialVisibility(data.id, group, data.visible);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(group, data.parent);
                         this._registerObject(data.id, group);
@@ -11812,6 +11925,7 @@ export class ThreeJSViewer {
                         }
                         const nv = data.numVertices;
                         const ni = data.numIndices;
+                        const vcc = data.vertexColorComponents || 3;
 
                         let offset = 0;
                         const positions = new Float32Array(buffer, offset, nv * 3);
@@ -11825,8 +11939,8 @@ export class ThreeJSViewer {
 
                         let colors = null;
                         if (data.hasVertexColors) {
-                            colors = new Float32Array(buffer, offset, nv * 3);
-                            offset += nv * 3 * 4;
+                            colors = new Float32Array(buffer, offset, nv * vcc);
+                            offset += nv * vcc * 4;
                         }
 
                         const indices = new Uint32Array(buffer, offset, ni);
@@ -11840,17 +11954,19 @@ export class ThreeJSViewer {
                             geometry.computeVertexNormals();
                         }
                         if (colors) {
-                            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                            geometry.setAttribute('color', new THREE.BufferAttribute(colors, vcc));
                         }
 
+                        const hasAlphaColor = data.hasVertexColors && vcc === 4;
                         const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
+                        const isTransparent = meshOpacity < 1 || hasAlphaColor;
                         const meshMaterial = new THREE.MeshStandardMaterial({
                             color: colors ? 0xffffff : (data.color || 0x7ab8cc),
                             metalness: data.metalness !== undefined ? data.metalness : 0.1,
                             roughness: data.roughness !== undefined ? data.roughness : 0.8,
                             opacity: meshOpacity,
-                            transparent: meshOpacity < 1,
-                            depthWrite: meshOpacity >= 1,
+                            transparent: isTransparent,
+                            depthWrite: !isTransparent,
                             side: THREE.DoubleSide,
                             vertexColors: !!colors,
                             clippingPlanes: this._activeClippingPlanes(),
@@ -11861,6 +11977,10 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
+                        this._applyInitialVisibility(data.id, mesh, data.visible);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
@@ -12179,6 +12299,10 @@ export class ThreeJSViewer {
                         // 'init' first would let the trailing 'dispose' that
                         // _deleteObject queues for the old tubeLOD clobber the
                         // new tube's worker state (same tubeId).
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
+                        this._applyInitialVisibility(data.id, mesh, data.visible);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
@@ -12335,6 +12459,10 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isSweptTool = true;
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
+                        this._applyInitialVisibility(data.id, mesh, data.visible);
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
@@ -12769,10 +12897,30 @@ export class ThreeJSViewer {
                 grid.name = data.id;
                 grid.userData.id = data.id;
                 if (data.transform) this._applyTransform(grid, data.transform);
-                if (data.visible === false) grid.visible = false;
+                this._applyInitialVisibility(data.id, grid, data.visible);
                 this._deleteObject(data.id);
                 this._addToParentOrScene(grid, data.parent);
                 this._registerObject(data.id, grid);
+                break;
+            }
+            case 'add_billboard': {
+                const material = this._createMaterial({
+                    ...data,
+                    materialType: data.materialType || 'basic',
+                });
+                material.side = THREE.DoubleSide;
+                const billboard = buildBillboardMesh(data, material);
+                billboard.name = data.id;
+                billboard.userData.id = data.id;
+                if (data.transform) this._applyTransform(billboard, data.transform);
+                this._applyInitialVisibility(data.id, billboard, data.visible);
+                this._deleteObject(data.id);
+                this._addToParentOrScene(billboard, data.parent);
+                this._registerObject(data.id, billboard);
+                if (this._clipEnabled) this._applyClipToObject(billboard);
+                // Set after _deleteObject, which prunes the map for this id.
+                this._billboards.set(data.id, billboard);
+                orientBillboard(billboard, this._camera, billboard.userData.billboardAxis);
                 break;
             }
             case 'show_grid':
@@ -12805,6 +12953,17 @@ export class ThreeJSViewer {
                 }
         }
         return null;
+    }
+
+    // ========== Billboards ==========
+
+    /** Re-orient every registered billboard toward the active camera. */
+    _updateBillboards() {
+        if (this._billboards.size === 0) return;
+        for (const obj of this._billboards.values()) {
+            if (!obj.visible || !obj.parent) continue;
+            orientBillboard(obj, this._camera, obj.userData.billboardAxis || null);
+        }
     }
 
     // ========== Dynamic Near/Far ==========
@@ -12852,6 +13011,9 @@ export class ThreeJSViewer {
         this._controls.update();
         this._depthCue.update();
         this._updateNearFar();
+
+        // Billboards: re-face the camera after controls have moved it.
+        this._updateBillboards();
 
         // Octree-streamed point clouds: budgeted LOD traversal + on-demand
         // node fetches (no-op when no LOD cloud is in the scene).

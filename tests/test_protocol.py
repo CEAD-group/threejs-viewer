@@ -205,6 +205,67 @@ def test_add_grid_validation(client, kwargs):
     assert client._messages == []
 
 
+# === add_billboard ===
+
+
+def test_add_billboard_default_payload(client):
+    """Regression guard: verify complete default payload for add_billboard."""
+    client.add_billboard("marker")
+    msg = client._messages[0]
+    assert msg == {
+        "type": "add_billboard",
+        "id": "marker",
+        "width": 1.0,
+        "height": 1.0,
+        "color": 0xFFFFFF,
+        "opacity": 1.0,
+    }
+
+
+def test_add_billboard_full_payload(client):
+    client.add_billboard(
+        "marker",
+        width=2.0,
+        height=0.5,
+        color=0xFF0000,
+        opacity=0.5,
+        axis=[0, 0, 1],
+        lit=True,
+        position=[1, 2, 3],
+        scale=[2, 2, 2],
+        parent="cell",
+        visible=False,
+    )
+    msg = client._messages[0]
+    assert msg["type"] == "add_billboard"
+    assert msg["width"] == 2.0
+    assert msg["height"] == 0.5
+    assert msg["color"] == 0xFF0000
+    assert msg["opacity"] == 0.5
+    assert msg["axis"] == [0.0, 0.0, 1.0]
+    assert msg["materialType"] == "standard"
+    assert msg["transform"] == {"position": [1, 2, 3], "scale": [2, 2, 2]}
+    assert msg["parent"] == "cell"
+    assert msg["visible"] is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"width": 0},
+        {"height": -1},
+        {"opacity": 1.1},
+        {"axis": [0, 0]},
+        {"axis": [0, 0, 0]},
+        {"axis": [0, 0, float("nan")]},
+    ],
+)
+def test_add_billboard_validation(client, kwargs):
+    with pytest.raises(ValueError):
+        client.add_billboard("marker", **kwargs)
+    assert client._messages == []
+
+
 # === add_model ===
 
 
@@ -372,6 +433,43 @@ def test_add_mesh_no_transform(client):
     client.add_mesh("m", pos, idx)
     header, _ = client._binary_messages[0]
     assert "transform" not in header
+
+
+def test_add_mesh_rgb_vertex_colors(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    colors = np.array(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
+    )
+    client.add_mesh("m", pos, idx, colors=colors)
+    header, payload = client._binary_messages[0]
+    assert header["hasVertexColors"] is True
+    assert header["vertexColorComponents"] == 3
+    # pos (3x3 float32 = 36 bytes) + colors (3x3 float32 = 36 bytes) + idx (3 uint32 = 12 bytes) = 84 bytes
+    assert len(payload) == 84
+
+
+def test_add_mesh_rgba_vertex_colors(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    colors = np.array(
+        [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.5], [0.0, 0.0, 1.0, 0.0]],
+        dtype=np.float32,
+    )
+    client.add_mesh("m", pos, idx, colors=colors)
+    header, payload = client._binary_messages[0]
+    assert header["hasVertexColors"] is True
+    assert header["vertexColorComponents"] == 4
+    # pos (3x3 float32 = 36 bytes) + colors (3x4 float32 = 48 bytes) + idx (3 uint32 = 12 bytes) = 96 bytes
+    assert len(payload) == 96
+
+
+def test_add_mesh_invalid_colors_shape(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    bad_colors = np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]], dtype=np.float32)
+    with pytest.raises(ValueError, match="colors must have shape"):
+        client.add_mesh("m", pos, idx, colors=bad_colors)
 
 
 # === add_points ===
@@ -660,6 +758,91 @@ def test_append_points_after_delete_or_clear_raises(client):
     client.clear()
     with pytest.raises(ValueError, match="no point cloud"):
         client.append_points("pc", pts)
+
+
+# === add_* visible=False tests ===
+
+
+def test_add_primitives_invisible(client):
+    client.add_box("box1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+    client.add_sphere("sph1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+    client.add_cylinder("cyl1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+    client.add_capsule("cap1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+
+def test_add_grid_invisible(client):
+    client.add_grid("grid1", visible=False)
+    assert client._messages[-1]["visible"] is False
+
+
+def test_add_model_invisible(client):
+    client.add_model("mod1", "http://example.com/model.gltf", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+
+def test_add_model_binary_invisible(client):
+    client.add_model_binary("mod_b", b"data", visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_polyline_invisible(client):
+    pts = np.zeros((2, 3), dtype=np.float32)
+    client.add_polyline("poly1", pts, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_mesh_invisible(client):
+    pos = np.zeros((3, 3), dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("mesh1", pos, idx, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_points_invisible(client):
+    pts = np.zeros((3, 3), dtype=np.float32)
+    client.add_points("pts1", pts, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_points_lod_invisible(client):
+    pts = np.zeros((10, 3), dtype=np.float32)
+    client.add_points("pts_lod", pts, lod=True, visible=False)
+    header = client._messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_parametric_tube_invisible(client):
+    spine = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    w = np.array([1, 1], dtype=np.float32)
+    h = np.array([1, 1], dtype=np.float32)
+    client.add_parametric_tube("tube1", spine, w, h, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_swept_tool_invisible(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    axes = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
+    prof = np.array([[0, 1], [1, 1]], dtype=np.float32)
+    client.add_swept_tool("st1", pos, axes, prof, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
 
 
 def test_append_points_rejects_lod_cloud(client):

@@ -604,6 +604,158 @@ def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_add_mesh_rgba_vertex_colors_browser(viewer_client, viewer_page):
+    """add_mesh with (N, 4) colors sets itemSize=4 color attribute and material.transparent=true."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    colors = np.array(
+        [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.5], [0.0, 0.0, 1.0, 0.2]],
+        dtype=np.float32,
+    )
+    viewer_client.add_mesh("rgba_mesh", positions, indices, colors=colors)
+    settle(viewer_client)
+    res = viewer_page.evaluate(
+        "() => {"
+        " const o = window.threejsViewer._objects.get('rgba_mesh');"
+        " if (!o) return null;"
+        " const col = o.geometry.getAttribute('color');"
+        " return {"
+        "   itemSize: col ? col.itemSize : null,"
+        "   transparent: o.material.transparent,"
+        "   vertexColors: o.material.vertexColors,"
+        "   count: col ? col.count : null,"
+        "   colors: col ? Array.from(col.array) : null,"
+        " };"
+        "}"
+    )
+    assert res is not None, "rgba_mesh never landed in scene"
+    assert res["itemSize"] == 4
+    assert res["transparent"] is True
+    assert res["vertexColors"] is True
+    assert res["count"] == 3
+    assert np.allclose(
+        res["colors"], [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.2]
+    )
+
+
+@pytest.mark.browser
+def test_add_invisible_object_browser(viewer_client, viewer_page):
+    """Adding an object with visible=False sets its initial visibility to False in the scene."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("inv_mesh", positions, indices, visible=False)
+    viewer_client.add_box("inv_box", visible=False)
+    settle(viewer_client)
+    res = viewer_page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer._objects.get('inv_mesh');"
+        " const b = window.threejsViewer._objects.get('inv_box');"
+        " return {"
+        "   meshVisible: m ? m.visible : null,"
+        "   boxVisible: b ? b.visible : null,"
+        " };"
+        "}"
+    )
+    assert res is not None
+    assert res["meshVisible"] is False
+    assert res["boxVisible"] is False
+
+
+@pytest.mark.browser
+def test_billboard_faces_camera_browser(viewer_client, viewer_page):
+    """A full billboard copies the camera orientation; a Z-locked one stays upright.
+
+    Also covers the parented case: the billboard under a rotated group must
+    divide the parent's rotation out rather than tumble with it.
+    """
+    viewer_client.add_billboard("bb_full", position=[0, 0, 0])
+    viewer_client.add_billboard("bb_up", axis=[0, 0, 1], position=[3, 0, 0])
+    # A group rotated 90 deg about Z (column-major 4x4).
+    viewer_client.add_group("bb_group")
+    viewer_client.set_matrix(
+        "bb_group", [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    )
+    viewer_client.add_billboard("bb_child", parent="bb_group")
+    settle(viewer_client)
+    frames(viewer_page)
+
+    res = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const THREE = window.tjsv.THREE;
+            const q = new THREE.Quaternion();
+            const camQ = v._camera.getWorldQuaternion(new THREE.Quaternion());
+            const worldQuat = (id) => {
+                const o = v._objects.get(id);
+                return o ? o.getWorldQuaternion(q.clone()).toArray() : null;
+            };
+            const localY = (id) => {
+                const o = v._objects.get(id);
+                if (!o) return null;
+                return new THREE.Vector3(0, 1, 0)
+                    .applyQuaternion(o.getWorldQuaternion(q.clone())).toArray();
+            };
+            return {
+                camQuat: camQ.toArray(),
+                fullQuat: worldQuat('bb_full'),
+                childQuat: worldQuat('bb_child'),
+                upY: localY('bb_up'),
+            };
+        }"""
+    )
+    assert res["fullQuat"] is not None, "bb_full never landed in scene"
+    # A full billboard's world orientation is the camera's, parent or no parent.
+    assert np.allclose(res["fullQuat"], res["camQuat"], atol=1e-5)
+    assert np.allclose(res["childQuat"], res["camQuat"], atol=1e-5), (
+        "billboard under a rotated group tumbled with the parent"
+    )
+    # A Z-locked billboard's local +Y stays pinned to world +Z.
+    assert np.allclose(res["upY"], [0, 0, 1], atol=1e-5)
+
+
+@pytest.mark.browser
+def test_billboard_invalid_axis_degrades_browser(viewer_page):
+    """A zero/non-finite axis off handleMessage degrades to a full billboard.
+
+    Python validates `axis`, but handleMessage is a public embedder surface,
+    and a degenerate axis would otherwise reach setFromRotationMatrix as a
+    zero basis on every frame.
+    """
+    viewer_page.evaluate(
+        """() => {
+            window.threejsViewer.handleMessage(
+                {type: 'add_billboard', id: 'bb_zero', width: 1, height: 1, axis: [0, 0, 0]});
+            window.threejsViewer.handleMessage(
+                {type: 'add_billboard', id: 'bb_nan', width: 1, height: 1, axis: [0, 0, null]});
+        }"""
+    )
+    frames(viewer_page)
+    res = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const state = (id) => {
+                const o = v._objects.get(id);
+                if (!o) return null;
+                return {
+                    axis: o.userData.billboardAxis,
+                    finite: o.quaternion.toArray().every(Number.isFinite)
+                        && o.matrixWorld.elements.every(Number.isFinite),
+                };
+            };
+            return {zero: state('bb_zero'), nan: state('bb_nan')};
+        }"""
+    )
+    for name in ("zero", "nan"):
+        assert res[name] is not None, f"bb_{name} never landed in scene"
+        assert res[name]["axis"] is None, (
+            "invalid axis should degrade to a full billboard"
+        )
+        assert res[name]["finite"] is True, (
+            "invalid axis produced a non-finite transform"
+        )
+
+
+@pytest.mark.browser
 def test_add_points_appears_in_scene(viewer_client, viewer_page):
     """add_points creates a THREE.Points cloud in the browser scene graph."""
     pts = np.random.default_rng(0).random((500, 3)).astype(np.float32)
