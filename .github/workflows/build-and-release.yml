@@ -131,6 +131,10 @@ jobs:
           export SETUPTOOLS_SCM_PRETEND_VERSION=$VERSION
           uv pip install build
           uv run python -m build
+          # PRETEND_VERSION dictates the version rather than deriving it, so a
+          # wrong $VERSION would publish silently. Assert what we actually built.
+          test -f "dist/threejs_viewer-$VERSION-py3-none-any.whl" \
+            || (echo "ERROR: built wheel is not version $VERSION" && ls dist && exit 1)
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
