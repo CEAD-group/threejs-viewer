@@ -3205,6 +3205,11 @@ function applyBillboard(obj, camera) {
 
 /**
  * Build the plane mesh for an `add_billboard` message.
+ *
+ * Nothing marks the mesh as a billboard here: `add_billboard` is just a plane
+ * plus `set_billboard`, and the flag that matters (`__isBillboard`, which gates
+ * base capture in every transform writer) is set by `_enableBillboard` for any
+ * object that carries the property.
  * @param {any} data
  * @param {THREE.Material} material
  * @returns {THREE.Mesh}
@@ -3212,9 +3217,7 @@ function applyBillboard(obj, camera) {
 function buildBillboardMesh(data, material) {
     const width = data.width > 0 ? data.width : 1;
     const height = data.height > 0 ? data.height : 1;
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
-    mesh.userData.isBillboard = true;
-    return mesh;
+    return new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
 }
 
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
