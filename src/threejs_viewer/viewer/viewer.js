@@ -9859,9 +9859,9 @@ export class ThreeJSViewer {
             }
         }
         // Prune any recorded baseline so set_scene_visibility entries for
-        // never-loaded or explicitly-deleted ids don't accumulate. _addObject
-        // reads the baseline into a local before calling _deleteObject, so the
-        // race fix is unaffected.
+        // never-loaded or explicitly-deleted ids don't accumulate. Every add
+        // path calls _applyInitialVisibility (which reads the baseline) before
+        // _deleteObject, so the race fix is unaffected.
         this._baselineVisibility.delete(id);
         // Same for follow-path tracks: a deleted id must not keep its path
         // (a later re-add with the same id would silently snap to it).
@@ -11512,8 +11512,11 @@ export class ThreeJSViewer {
                         if (data.pickable !== false) {
                             line.userData.pickPoints = pointData;
                         }
-                        this._deleteObject(data.id, { preserveInflight: true });
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
                         this._applyInitialVisibility(data.id, line, data.visible);
+                        this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
                         deferred.resolve();
@@ -11650,8 +11653,11 @@ export class ThreeJSViewer {
                         // draw_range fraction reveals the leading frac*N points.
                         geometry.setDrawRange(0, numPoints);
 
-                        this._deleteObject(data.id, { preserveInflight: true });
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
                         this._applyInitialVisibility(data.id, points, data.visible);
+                        this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(points, data.parent);
                         this._registerObject(data.id, points);
                         // Unlit point quads read flat without a depth cue —
@@ -11766,8 +11772,11 @@ export class ThreeJSViewer {
                         console.log(
                             `Creating LOD point cloud ${data.id}: ${data.numPoints} points, ` +
                             `${nodes.count} nodes, maxLevel ${data.maxLevel}`);
-                        this._deleteObject(data.id, { preserveInflight: true });
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
                         this._applyInitialVisibility(data.id, group, data.visible);
+                        this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(group, data.parent);
                         this._registerObject(data.id, group);
                         // Sculpt the streaming octree nodes with EDL from the
@@ -11902,8 +11911,6 @@ export class ThreeJSViewer {
                         const ni = data.numIndices;
                         const vcc = data.vertexColorComponents || 3;
 
-                        console.log(`Creating mesh ${data.id}: ${nv} verts, ${(ni / 3)|0} tris via HTTP`);
-
                         let offset = 0;
                         const positions = new Float32Array(buffer, offset, nv * 3);
                         offset += nv * 3 * 4;
@@ -11949,15 +11956,16 @@ export class ThreeJSViewer {
                             clippingPlanes: this._activeClippingPlanes(),
                         });
 
-                        console.log(meshMaterial);
-
                         const mesh = new THREE.Mesh(geometry, meshMaterial);
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
-                        this._deleteObject(data.id, { preserveInflight: true });
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
                         this._applyInitialVisibility(data.id, mesh, data.visible);
+                        this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
@@ -12275,8 +12283,11 @@ export class ThreeJSViewer {
                         // 'init' first would let the trailing 'dispose' that
                         // _deleteObject queues for the old tubeLOD clobber the
                         // new tube's worker state (same tubeId).
-                        this._deleteObject(data.id, { preserveInflight: true });
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
                         this._applyInitialVisibility(data.id, mesh, data.visible);
+                        this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
@@ -12432,8 +12443,11 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isSweptTool = true;
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
-                        this._deleteObject(data.id, { preserveInflight: true });
+                        // Before _deleteObject, which prunes this id's recorded
+                        // visibility baseline (a set_scene_visibility that arrived
+                        // mid-fetch would otherwise be dropped).
                         this._applyInitialVisibility(data.id, mesh, data.visible);
+                        this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
