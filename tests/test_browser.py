@@ -604,6 +604,41 @@ def test_set_draw_range_during_binary_load_is_honoured(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_add_mesh_rgba_vertex_colors_browser(viewer_client, viewer_page):
+    """add_mesh with (N, 4) colors sets itemSize=4 color attribute and material.transparent=true."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    colors = np.array(
+        [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.5], [0.0, 0.0, 1.0, 0.2]],
+        dtype=np.float32,
+    )
+    viewer_client.add_mesh("rgba_mesh", positions, indices, colors=colors)
+    settle(viewer_client)
+    res = viewer_page.evaluate(
+        "() => {"
+        " const o = window.threejsViewer._objects.get('rgba_mesh');"
+        " if (!o) return null;"
+        " const col = o.geometry.getAttribute('color');"
+        " return {"
+        "   itemSize: col ? col.itemSize : null,"
+        "   transparent: o.material.transparent,"
+        "   vertexColors: o.material.vertexColors,"
+        "   count: col ? col.count : null,"
+        "   colors: col ? Array.from(col.array) : null,"
+        " };"
+        "}"
+    )
+    assert res is not None, "rgba_mesh never landed in scene"
+    assert res["itemSize"] == 4
+    assert res["transparent"] is True
+    assert res["vertexColors"] is True
+    assert res["count"] == 3
+    assert np.allclose(
+        res["colors"], [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.2]
+    )
+
+
+@pytest.mark.browser
 def test_add_points_appears_in_scene(viewer_client, viewer_page):
     """add_points creates a THREE.Points cloud in the browser scene graph."""
     pts = np.random.default_rng(0).random((500, 3)).astype(np.float32)
