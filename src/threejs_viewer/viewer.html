@@ -2912,7 +2912,9 @@ const _bbBasisZ = new THREE.Vector3();
  * Python normalizes these before sending, but `handleMessage` is a public
  * no-WS embedder surface: a zero or non-finite axis survives normalize() as a
  * zero/NaN vector and would feed a degenerate basis into the aim math every
- * frame. Fall back to the documented default instead, once, loudly.
+ * frame. Fall back to the documented default instead, loudly. Options are
+ * resolved once per set_billboard/add_billboard message, so a bad value warns
+ * once per message — not once per object, and not once per frame.
  *
  * @param {unknown} value
  * @param {[number, number, number]} fallback
