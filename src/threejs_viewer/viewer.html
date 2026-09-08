@@ -1532,6 +1532,7 @@ function setObjectMatrixChecked(obj, src, base, what) {
     }
     obj.matrix.fromArray(src, base);
     obj.matrixWorldNeedsUpdate = true;
+    captureBillboardBase(obj);
     return true;
 }
 
@@ -1550,6 +1551,7 @@ function setObjectMatrix4Checked(obj, mat, what) {
     }
     obj.matrix.copy(mat);
     obj.matrixWorldNeedsUpdate = true;
+    captureBillboardBase(obj);
     return true;
 }
 
@@ -2840,55 +2842,362 @@ function buildFloorGridMesh(data) {
 }
 
 // ========== Billboards ==========
-
-const _bbCamPos = new THREE.Vector3();
-const _bbObjPos = new THREE.Vector3();
-const _bbForward = new THREE.Vector3();
-const _bbRight = new THREE.Vector3();
-const _bbUp = new THREE.Vector3();
-const _bbQuat = new THREE.Quaternion();
-const _bbParentQuat = new THREE.Quaternion();
-const _bbBasis = new THREE.Matrix4();
+//
+// "Orient to viewer" is a per-object property, not a kind of object: any
+// tracked object can carry it (`set_billboard`), and `add_billboard` is just a
+// plane that comes with it switched on.
+//
+// Every mode is one composition, applied per rendered frame:
+//
+//     R_final = R_aim · R_own
+//
+// R_own is the object's own rotation (authored, or driven by an animation
+// channel). It acts FIRST, in the object's local frame, which is what lets a
+// wheel keep spinning about its own axle while the axle is aimed at the
+// camera: a spin about an axis leaves that axis fixed, so the spin never
+// fights the aim. The modes differ only in how many degrees of freedom the
+// viewer claims — see BILLBOARD_MODES.
 
 /**
- * Re-orient a billboard so its local +Z (the plane's normal) points at the
- * camera. Called every frame from `_updateBillboards`.
- *
- * With no `axis` this is a full billboard: the object simply copies the
- * camera's orientation, so the plane stays parallel to the view plane.
- * With an `axis` it is a cylindrical billboard: the object may only spin
- * about that world-space axis (local +Y is pinned to it), so an upright
- * label stays upright while turning to face the viewer.
- *
- * The result is a *world* orientation, so it is converted back into the
- * parent's frame before being written — a billboard parented under a
- * rotating group must not inherit that rotation.
- *
- * @param {THREE.Object3D} obj
- * @param {THREE.Camera} camera
- * @param {THREE.Vector3 | null} axis
+ * `camera`   3 DOF, own rotation overridden — copies the camera's orientation,
+ *            so the object stays parallel to the view plane and does not swing
+ *            as it moves off-axis. Screen-aligned labels.
+ * `world_up` 3 DOF, own rotation overridden — aims `face` at the camera's
+ *            actual position, roll taken from `worldUp`. Stays upright.
+ * `aim`      2 DOF, own rotation kept as roll — minimal rotation putting
+ *            `face` on the camera. The wheel.
+ * `hinge`    1 DOF, own rotation kept — spins about `hinge` only (held along
+ *            `hingeWorld` when given), turning to aim `face` as best it can.
  */
-function orientBillboard(obj, camera, axis) {
-    if (axis) {
-        obj.getWorldPosition(_bbObjPos);
-        camera.getWorldPosition(_bbCamPos);
-        _bbUp.copy(axis).normalize();
-        _bbForward.subVectors(_bbCamPos, _bbObjPos);
-        _bbForward.addScaledVector(_bbUp, -_bbForward.dot(_bbUp));
-        // Camera sits on the lock axis: no spin faces it. Hold the last pose.
-        if (_bbForward.lengthSq() < 1e-12) return;
-        _bbForward.normalize();
-        _bbRight.crossVectors(_bbUp, _bbForward);
-        _bbBasis.makeBasis(_bbRight, _bbUp, _bbForward);
-        _bbQuat.setFromRotationMatrix(_bbBasis);
-    } else {
-        camera.getWorldQuaternion(_bbQuat);
+const BILLBOARD_MODES = ['camera', 'world_up', 'aim', 'hinge'];
+
+/** @type {Record<string, [number, number, number]>} */
+const BILLBOARD_AXIS_NAMES = {
+    '+x': [1, 0, 0], '-x': [-1, 0, 0],
+    '+y': [0, 1, 0], '-y': [0, -1, 0],
+    '+z': [0, 0, 1], '-z': [0, 0, -1],
+};
+
+const _bbCamPos = new THREE.Vector3();
+const _bbCamQuat = new THREE.Quaternion();
+const _bbParentQuat = new THREE.Quaternion();
+const _bbParentQuatInv = new THREE.Quaternion();
+const _bbAnchor = new THREE.Vector3();
+const _bbPivotScaled = new THREE.Vector3();
+const _bbDir = new THREE.Vector3();
+const _bbTargetFace = new THREE.Vector3();
+const _bbTargetUp = new THREE.Vector3();
+const _bbU = new THREE.Vector3();
+const _bbTmp = new THREE.Vector3();
+const _bbPos = new THREE.Vector3();
+const _bbHinge = new THREE.Vector3();
+const _bbAxis = new THREE.Vector3();
+const _bbV0 = new THREE.Vector3();
+const _bbV1 = new THREE.Vector3();
+const _bbCross = new THREE.Vector3();
+const _bbAlign = new THREE.Quaternion();
+const _bbAim = new THREE.Quaternion();
+const _bbFinal = new THREE.Quaternion();
+const _bbWorldQuat = new THREE.Quaternion();
+const _bbSrcBasis = new THREE.Matrix4();
+const _bbDstBasis = new THREE.Matrix4();
+const _bbRotMat = new THREE.Matrix4();
+const _bbBasisX = new THREE.Vector3();
+const _bbBasisY = new THREE.Vector3();
+const _bbBasisZ = new THREE.Vector3();
+
+/**
+ * Resolve an axis given as an axis name (`"+z"`, `"-x"`) or a 3-vector.
+ *
+ * Python normalizes these before sending, but `handleMessage` is a public
+ * no-WS embedder surface: a zero or non-finite axis survives normalize() as a
+ * zero/NaN vector and would feed a degenerate basis into the aim math every
+ * frame. Fall back to the documented default instead, once, loudly.
+ *
+ * @param {unknown} value
+ * @param {[number, number, number]} fallback
+ * @param {string} what
+ * @param {string} id
+ * @returns {THREE.Vector3} unit vector
+ */
+function parseBillboardAxis(value, fallback, what, id) {
+    if (value == null) return new THREE.Vector3().fromArray(fallback);
+    if (typeof value === 'string') {
+        const key = value.trim().toLowerCase();
+        const named = BILLBOARD_AXIS_NAMES[key] || BILLBOARD_AXIS_NAMES['+' + key];
+        if (named) return new THREE.Vector3().fromArray(named);
+    } else if (Array.isArray(value) && value.length === 3 && value.every(Number.isFinite)
+        && (value[0] !== 0 || value[1] !== 0 || value[2] !== 0)) {
+        return new THREE.Vector3().fromArray(value).normalize();
     }
-    if (obj.parent) {
-        obj.parent.getWorldQuaternion(_bbParentQuat);
-        obj.quaternion.copy(_bbParentQuat.invert()).multiply(_bbQuat);
+    console.warn(
+        `billboard '${id}': ${what} must be an axis name or a finite non-zero 3-vector ` +
+        `(got ${JSON.stringify(value)}); using ${JSON.stringify(fallback)}.`
+    );
+    return new THREE.Vector3().fromArray(fallback);
+}
+
+/**
+ * The pivot is a *point*, so zero is legal and it must not be normalized.
+ * @param {unknown} value
+ * @param {string} id
+ * @returns {THREE.Vector3}
+ */
+function parseBillboardPivot(value, id) {
+    if (value == null) return new THREE.Vector3();
+    if (Array.isArray(value) && value.length === 3 && value.every(Number.isFinite)) {
+        return new THREE.Vector3().fromArray(value);
+    }
+    console.warn(
+        `billboard '${id}': pivot must be a finite 3-vector ` +
+        `(got ${JSON.stringify(value)}); using [0, 0, 0].`
+    );
+    return new THREE.Vector3();
+}
+
+/**
+ * Normalize an `add_billboard` / `set_billboard` payload into resolved options.
+ * @param {any} data
+ * @param {string} id
+ */
+function resolveBillboardOptions(data, id) {
+    let mode = typeof data.mode === 'string' ? data.mode : 'camera';
+    if (!BILLBOARD_MODES.includes(mode)) {
+        console.warn(
+            `billboard '${id}': unknown mode ${JSON.stringify(data.mode)} ` +
+            `(expected one of ${BILLBOARD_MODES.join(', ')}); using 'camera'.`
+        );
+        mode = 'camera';
+    }
+    return {
+        mode,
+        face: parseBillboardAxis(data.face, [0, 0, 1], 'face', id),
+        up: parseBillboardAxis(data.up, [0, 1, 0], 'up', id),
+        worldUp: parseBillboardAxis(data.world_up, [0, 0, 1], 'world_up', id),
+        hinge: parseBillboardAxis(data.hinge, [0, 1, 0], 'hinge', id),
+        hingeWorld: data.hinge_world == null
+            ? null
+            : parseBillboardAxis(data.hinge_world, [0, 0, 1], 'hinge_world', id),
+        pivot: parseBillboardPivot(data.pivot, id),
+    };
+}
+
+/**
+ * Orthonormal basis whose columns are (a, b orthogonalized against a, a×b), so
+ * the matrix maps +X onto `a` and +Y onto the in-plane part of `b`.
+ * @param {THREE.Vector3} a
+ * @param {THREE.Vector3} b
+ * @param {THREE.Matrix4} out
+ * @returns {boolean} false when the pair is degenerate (parallel or zero)
+ */
+function billboardBasis(a, b, out) {
+    _bbBasisX.copy(a);
+    if (_bbBasisX.lengthSq() < 1e-20) return false;
+    _bbBasisX.normalize();
+    _bbBasisY.copy(b).addScaledVector(_bbBasisX, -b.dot(_bbBasisX));
+    if (_bbBasisY.lengthSq() < 1e-12) return false;
+    _bbBasisY.normalize();
+    _bbBasisZ.crossVectors(_bbBasisX, _bbBasisY);
+    out.makeBasis(_bbBasisX, _bbBasisY, _bbBasisZ);
+    return true;
+}
+
+/**
+ * 1-DOF hinge aim: the rotation about the hinge axis that best points `u`
+ * (the object's current facing, in parent space) at `dir`.
+ *
+ * With `hingeWorld` the hinge is first aligned to that world direction and the
+ * spin happens about it; without, the hinge stays wherever the object's own
+ * rotation puts it.
+ *
+ * @param {{hinge: THREE.Vector3, hingeWorld: THREE.Vector3 | null}} opts
+ * @param {{quaternion: THREE.Quaternion}} base
+ * @param {THREE.Quaternion} parentQuatInv
+ * @param {THREE.Vector3} dir facing target, parent space
+ * @param {THREE.Vector3} u current facing, parent space
+ * @param {THREE.Quaternion} out
+ * @returns {boolean} false when the spin cannot aim at all (face ∥ hinge)
+ */
+function computeHingeAim(opts, base, parentQuatInv, dir, u, out) {
+    _bbHinge.copy(opts.hinge).applyQuaternion(base.quaternion).normalize();
+    if (opts.hingeWorld) {
+        _bbAxis.copy(opts.hingeWorld).applyQuaternion(parentQuatInv).normalize();
+        _bbAlign.setFromUnitVectors(_bbHinge, _bbAxis);
     } else {
-        obj.quaternion.copy(_bbQuat);
+        _bbAxis.copy(_bbHinge);
+        _bbAlign.identity();
+    }
+    _bbV0.copy(u).applyQuaternion(_bbAlign).projectOnPlane(_bbAxis);
+    _bbV1.copy(dir).projectOnPlane(_bbAxis);
+    // face ∥ hinge (no spin can aim it) or camera on the hinge axis.
+    if (_bbV0.lengthSq() < 1e-12 || _bbV1.lengthSq() < 1e-12) return false;
+    _bbV0.normalize();
+    _bbV1.normalize();
+    const angle = Math.atan2(
+        _bbCross.crossVectors(_bbV0, _bbV1).dot(_bbAxis),
+        _bbV0.dot(_bbV1)
+    );
+    out.setFromAxisAngle(_bbAxis, angle).multiply(_bbAlign);
+    return true;
+}
+
+/**
+ * Record the pose a producer just wrote, as the base the billboard composes on.
+ *
+ * Called from every transform writer. The composed result must NEVER be read
+ * back as R_own: `_updateBillboards` runs every frame but `_applyFrame` only
+ * runs while an animation is *playing*, so a paused-then-orbited animation
+ * would integrate a fresh R_aim per frame into unbounded runaway.
+ *
+ * No-op for objects that are not billboards, so the writers pay one property
+ * read.
+ *
+ * @param {any} obj
+ */
+function captureBillboardBase(obj) {
+    if (!obj || obj.userData.__isBillboard !== true) return;
+    let base = obj.userData.__billboardBase;
+    if (!base) {
+        base = obj.userData.__billboardBase = {
+            position: new THREE.Vector3(),
+            quaternion: new THREE.Quaternion(),
+            scale: new THREE.Vector3(1, 1, 1),
+        };
+    }
+    if (obj.matrixAutoUpdate) {
+        base.position.copy(obj.position);
+        base.quaternion.copy(obj.quaternion);
+        base.scale.copy(obj.scale);
+    } else {
+        // The transforms channel writes obj.matrix and never touches the
+        // components, so obj.scale is stale here — decompose instead.
+        obj.matrix.decompose(base.position, base.quaternion, base.scale);
+    }
+}
+
+/**
+ * Turn the property off and restore the pose the producer last set.
+ * @param {any} obj
+ */
+function disableBillboard(obj) {
+    const base = obj.userData.__billboardBase;
+    if (base) {
+        if (obj.matrixAutoUpdate) {
+            obj.position.copy(base.position);
+            obj.quaternion.copy(base.quaternion);
+            obj.scale.copy(base.scale);
+        } else {
+            obj.matrix.compose(base.position, base.quaternion, base.scale);
+            obj.matrixWorldNeedsUpdate = true;
+        }
+    }
+    delete obj.userData.__isBillboard;
+    delete obj.userData.__billboardOpts;
+    delete obj.userData.__billboardBase;
+    delete obj.userData.__billboardHold;
+    delete obj.userData.__billboardDepth;
+}
+
+/**
+ * Re-orient one billboard toward the camera. Called every frame from
+ * `_updateBillboards`, parents before children.
+ * @param {any} obj
+ * @param {THREE.Camera} camera
+ */
+function applyBillboard(obj, camera) {
+    const opts = obj.userData.__billboardOpts;
+    const base = obj.userData.__billboardBase;
+    if (!opts || !base) return;
+
+    if (obj.parent) obj.parent.getWorldQuaternion(_bbParentQuat);
+    else _bbParentQuat.identity();
+    _bbParentQuatInv.copy(_bbParentQuat).invert();
+
+    // Anchor = the pivot point under the BASE pose, in world space. Deriving it
+    // from the base rather than the live transform keeps the aim a pure
+    // function of producer state + camera, so it cannot drift into its own
+    // output even with a non-zero pivot moving the object.
+    _bbPivotScaled.copy(opts.pivot).multiply(base.scale);
+    _bbAnchor.copy(_bbPivotScaled).applyQuaternion(base.quaternion).add(base.position);
+    if (obj.parent) _bbAnchor.applyMatrix4(obj.parent.matrixWorld);
+
+    camera.getWorldPosition(_bbCamPos);
+    let ok = true;
+
+    if (opts.mode === 'camera' || opts.mode === 'world_up') {
+        // 3 DOF: the pose is fully determined and the object's own rotation is
+        // overridden.
+        if (opts.mode === 'camera') {
+            camera.getWorldQuaternion(_bbCamQuat);
+            _bbTargetFace.set(0, 0, 1).applyQuaternion(_bbCamQuat);
+            _bbTargetUp.set(0, 1, 0).applyQuaternion(_bbCamQuat);
+        } else {
+            _bbTargetFace.subVectors(_bbCamPos, _bbAnchor);
+            ok = _bbTargetFace.lengthSq() > 1e-20;
+            if (ok) {
+                _bbTargetFace.normalize();
+                _bbTargetUp.copy(opts.worldUp);
+            }
+        }
+        if (ok) {
+            ok = billboardBasis(opts.face, opts.up, _bbSrcBasis)
+                && billboardBasis(_bbTargetFace, _bbTargetUp, _bbDstBasis);
+        }
+        if (ok) {
+            // R_world = T · Sᵀ maps face -> targetFace and up -> targetUp.
+            _bbRotMat.multiplyMatrices(_bbDstBasis, _bbSrcBasis.transpose());
+            _bbWorldQuat.setFromRotationMatrix(_bbRotMat);
+            _bbFinal.copy(_bbParentQuatInv).multiply(_bbWorldQuat);
+        }
+    } else {
+        // R_final = R_aim · R_own — the own rotation acts first, in local space.
+        _bbDir.subVectors(_bbCamPos, _bbAnchor);
+        ok = _bbDir.lengthSq() > 1e-20;
+        if (ok) {
+            _bbDir.normalize().applyQuaternion(_bbParentQuatInv);
+            _bbU.copy(opts.face).applyQuaternion(base.quaternion);
+            if (opts.mode === 'aim') {
+                _bbAim.setFromUnitVectors(_bbU, _bbDir);
+            } else {
+                ok = computeHingeAim(opts, base, _bbParentQuatInv, _bbDir, _bbU, _bbAim);
+            }
+            if (ok) _bbFinal.copy(_bbAim).multiply(base.quaternion);
+        }
+    }
+
+    if (ok) {
+        let hold = obj.userData.__billboardHold;
+        if (!hold) hold = obj.userData.__billboardHold = new THREE.Quaternion();
+        hold.copy(_bbFinal);
+    } else {
+        // Degenerate this frame (camera on the hinge axis, face ∥ hinge).
+        // Re-apply the last good pose rather than skipping the write: an
+        // animated object's matrix was just overwritten with the *un-aimed*
+        // pose, so skipping would flash the base orientation.
+        const hold = obj.userData.__billboardHold;
+        if (!hold) return;
+        _bbFinal.copy(hold);
+    }
+
+    // Pivot: keep the anchor point exactly where the base pose put it.
+    //   P_final = P_own + R_own·(S∘pivot) − R_final·(S∘pivot)
+    _bbPos.copy(base.position);
+    if (opts.pivot.lengthSq() > 0) {
+        _bbTmp.copy(_bbPivotScaled).applyQuaternion(base.quaternion);
+        _bbPos.add(_bbTmp);
+        _bbTmp.copy(_bbPivotScaled).applyQuaternion(_bbFinal);
+        _bbPos.sub(_bbTmp);
+    }
+
+    if (obj.matrixAutoUpdate) {
+        obj.quaternion.copy(_bbFinal);
+        obj.position.copy(_bbPos);
+    } else {
+        // Animation / follow-path own obj.matrix here: a component write would
+        // be ignored, because updateMatrix() is never called. (That is the bug
+        // that made an animated billboard silently not billboard.)
+        obj.matrix.compose(_bbPos, _bbFinal, base.scale);
+        obj.matrixWorldNeedsUpdate = true;
     }
 }
 
@@ -2903,25 +3212,6 @@ function buildBillboardMesh(data, material) {
     const height = data.height > 0 ? data.height : 1;
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
     mesh.userData.isBillboard = true;
-    // Python validates `axis`, but handleMessage is a public no-WS embedder
-    // surface: a zero or non-finite axis survives normalize() as a zero/NaN
-    // vector, so orientBillboard would feed a degenerate basis into
-    // setFromRotationMatrix and write a corrupt quaternion every frame.
-    // Degrade to a full billboard instead, once, loudly.
-    let axis = null;
-    if (data.axis != null) {
-        const a = data.axis;
-        if (Array.isArray(a) && a.length === 3 && a.every(Number.isFinite)
-            && (a[0] !== 0 || a[1] !== 0 || a[2] !== 0)) {
-            axis = new THREE.Vector3().fromArray(a);
-        } else {
-            console.warn(
-                `add_billboard '${data.id}': axis must be a finite non-zero 3-vector ` +
-                `(got ${JSON.stringify(a)}); falling back to a full billboard.`
-            );
-        }
-    }
-    mesh.userData.billboardAxis = axis;
     return mesh;
 }
 
@@ -8466,8 +8756,18 @@ class TransformGizmoController {
                 g._snapOrigin.copy(g.object.position);
                 g._snapQuat.copy(g.object.quaternion);
                 this._spawnGhost(g);
+                // A billboard would re-aim the object every frame of the drag,
+                // fighting the handle and reporting a camera-derived pose back
+                // to the producer. The drag owns the transform until release.
+                g.object.userData.__billboardDragging = true;
             }
         } else {
+            if (g.object) {
+                delete g.object.userData.__billboardDragging;
+                // The drag IS the new producer pose: adopt it as the base, or
+                // the billboard would snap back to the pre-drag transform.
+                captureBillboardBase(g.object);
+            }
             this._clearGhost(g);
             this._report(g, true);
         }
@@ -9030,6 +9330,10 @@ class ThreeJSViewer {
         // active camera every frame in _updateBillboards.
         /** @type {Map<string, THREE.Object3D>} */
         this._billboards = new Map();
+        /** @type {any[] | null} Billboards ordered parents-first (see _billboardOrder). */
+        this._billboardSorted = null;
+        this._billboardOrderDirty = false;
+        this._billboardOrderGen = -1;
 
         // Embedder-owned overlays (addOverlay): id -> Object3D. Not part of
         // _objects — excluded from framing/scene bounds by default, never
@@ -10291,6 +10595,9 @@ class ThreeJSViewer {
             if (transform.quaternion) obj.quaternion.fromArray(transform.quaternion);
             if (transform.scale) obj.scale.fromArray(transform.scale);
         }
+        // A billboard composes on the pose the producer set, so record it
+        // here rather than reading back what the billboard itself wrote.
+        captureBillboardBase(obj);
         // A moved object can leave the cached scene sphere; the perspective
         // near fit ((dist - radius) * 0.5, see updateNearFar) assumes the
         // sphere is honest, so a stale sphere can front-clip a fast mover for
@@ -11123,6 +11430,7 @@ class ThreeJSViewer {
         // (a later re-add with the same id would silently snap to it).
         this._followPaths.delete(id);
         this._billboards.delete(id);
+        this._billboardOrderDirty = true;
         const obj = this._objects.get(id);
         if (obj) {
             // Prune a stale deferred-re-parent entry: if this object was
@@ -11146,6 +11454,7 @@ class ThreeJSViewer {
             for (const childId of childIds) {
                 this._objects.delete(childId);
                 this._billboards.delete(childId);
+                this._billboardOrderDirty = true;
                 const childMixer = this._mixers.get(childId);
                 if (childMixer) { childMixer.stopAllAction(); this._mixers.delete(childId); this._mixerGeneration++; }
             }
@@ -11799,6 +12108,7 @@ class ThreeJSViewer {
             // silently un-scale a tool mesh that was scaled at add time.
             obj.matrix.compose(_fpPos, _fpQuat, obj.scale);
             obj.matrixWorldNeedsUpdate = true;
+            captureBillboardBase(obj);
         }
         this._sceneBoundsDirty = true;
     }
@@ -14143,6 +14453,14 @@ class ThreeJSViewer {
                 this._registerObject(data.id, grid);
                 break;
             }
+            case 'set_billboard':
+                // Orient-to-viewer as a per-object property. Transient like
+                // set_color/set_highlight — not replayed on reconnect.
+                this._withObject(data.id, 'set_billboard', (obj) => {
+                    if (data.enabled === false) this._disableBillboard(data.id, obj);
+                    else this._enableBillboard(data.id, obj, data);
+                });
+                break;
             case 'add_billboard': {
                 const material = this._createMaterial({
                     ...data,
@@ -14158,9 +14476,8 @@ class ThreeJSViewer {
                 this._addToParentOrScene(billboard, data.parent);
                 this._registerObject(data.id, billboard);
                 if (this._clipEnabled) this._applyClipToObject(billboard);
-                // Set after _deleteObject, which prunes the map for this id.
-                this._billboards.set(data.id, billboard);
-                orientBillboard(billboard, this._camera, billboard.userData.billboardAxis);
+                // After _deleteObject, which prunes the map for this id.
+                this._enableBillboard(data.id, billboard, data);
                 break;
             }
             case 'show_grid':
@@ -14197,12 +14514,71 @@ class ThreeJSViewer {
 
     // ========== Billboards ==========
 
+    /**
+     * Turn the orient-to-viewer property on (or re-configure it) for one object.
+     * @param {string} id
+     * @param {any} obj
+     * @param {any} data the add_billboard / set_billboard payload
+     */
+    _enableBillboard(id, obj, data) {
+        obj.userData.__isBillboard = true;
+        obj.userData.__billboardOpts = resolveBillboardOptions(data, id);
+        // Whatever pose the producer has set so far is the base we compose on.
+        captureBillboardBase(obj);
+        this._billboards.set(id, obj);
+        this._billboardOrderDirty = true;
+        applyBillboard(obj, this._camera);
+    }
+
+    /**
+     * Turn it off and restore the producer's pose exactly.
+     * @param {string} id
+     * @param {any} obj
+     */
+    _disableBillboard(id, obj) {
+        disableBillboard(obj);
+        this._billboards.delete(id);
+        this._billboardOrderDirty = true;
+    }
+
+    /**
+     * Billboards ordered parents-first.
+     *
+     * A child billboard reads its parent's world quaternion, so insertion
+     * order would leave it a frame behind whenever the child was registered
+     * first — an angular lag on its own, but a *positional* one once a pivot
+     * is in play, which visibly swims during an orbit.
+     * @returns {any[]}
+     */
+    _billboardOrder() {
+        if (!this._billboardOrderDirty
+            && this._billboardOrderGen === this._objGeneration
+            && this._billboardSorted) {
+            return this._billboardSorted;
+        }
+        const arr = [...this._billboards.values()];
+        for (const obj of arr) {
+            let depth = 0;
+            for (let p = obj.parent; p; p = p.parent) depth++;
+            obj.userData.__billboardDepth = depth;
+        }
+        arr.sort((a, b) => a.userData.__billboardDepth - b.userData.__billboardDepth);
+        this._billboardSorted = arr;
+        this._billboardOrderDirty = false;
+        this._billboardOrderGen = this._objGeneration;
+        return arr;
+    }
+
     /** Re-orient every registered billboard toward the active camera. */
     _updateBillboards() {
         if (this._billboards.size === 0) return;
-        for (const obj of this._billboards.values()) {
+        for (const obj of this._billboardOrder()) {
             if (!obj.visible || !obj.parent) continue;
-            orientBillboard(obj, this._camera, obj.userData.billboardAxis || null);
+            // A gizmo drag owns the transform for its duration: re-aiming here
+            // would fight the drag and report a camera-derived pose back to
+            // the producer as if the user had chosen it.
+            if (obj.userData.__billboardDragging) continue;
+            applyBillboard(obj, this._camera);
         }
     }
 
