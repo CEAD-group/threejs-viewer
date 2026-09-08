@@ -374,3 +374,37 @@ def test_load_animation_rejects_bad_initial_time(bad_time):
     client = ViewerClient()
     with pytest.raises(ValueError, match="initial_time must be"):
         client.load_animation(_mini_animation(), initial_time=bad_time)
+
+
+class TestVersion:
+    """Version derivation (issue #183: hatch-vcs replaces the 0.0.0-dev placeholder)."""
+
+    def test_version_is_pep440_and_not_the_old_placeholder(self):
+        import threejs_viewer
+
+        version = threejs_viewer.__version__
+        assert isinstance(version, str) and version
+        # The whole point of #183: an installed checkout no longer reports the
+        # unsatisfiable 0.0.0 floor.
+        assert not version.startswith("0.0.0")
+
+    @pytest.mark.parametrize(
+        "version",
+        [
+            "0.0.0-dev",
+            "0.0.0.dev0",
+            "0.0.51.dev3+ge8da667",
+            "0.0.51+ge8da667",
+            "unknown",
+        ],
+    )
+    def test_dev_versions_suppress_mismatch_warning(self, version):
+        from threejs_viewer.client import _is_dev_version
+
+        assert _is_dev_version(version)
+
+    @pytest.mark.parametrize("version", ["0.0.50", "1.2.3", "0.0.51a1"])
+    def test_released_versions_still_compared(self, version):
+        from threejs_viewer.client import _is_dev_version
+
+        assert not _is_dev_version(version)
