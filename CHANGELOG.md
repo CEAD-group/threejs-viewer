@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.0.51
+
+### Orient to viewer: billboards as a per-object property (#185, #186, #188)
+
+- **`set_billboard(id, ...)` makes any tracked object face the camera** — a primitive, mesh, model or group, not a special kind of object. `add_billboard(...)` is sugar for a plane that comes with the property switched on. Every mode is one composition applied per rendered frame, `R_final = R_aim · R_own`: the object's own rotation acts **first, in its local frame**, which is what lets a wheel keep spinning about its axle while the axle points at the camera (a spin about an axis leaves that axis fixed, so it never fights the aim).
+- **The modes differ only in how many degrees of freedom the viewer claims**: `camera` (3, copies the camera's orientation so the object stays parallel to the view plane), `world_up` (3, aims at the camera's actual position with roll from a world reference), `aim` (2, own rotation kept as the roll — the wheel), `hinge` (1, spins about one axis). `aim` is the only mode that always preserves the own rotation: with `hinge_world` set, aligning the hinge and then solving the spin fixes every degree of freedom, so the own rotation is absorbed exactly and the pose is a function of `hinge_world`/`face`/camera alone.
+- **All axes are read in the object's own frame.** `face` is whichever axis of *your* geometry should point at the viewer; `pivot` is a local point held fixed while the object re-orients. The exception is `hinge_world`, since a hinge needs both which local axis it is and which way it points in the world. Orientation is computed in world space and converted back into the parent's frame, so a billboard under a rotating group faces the camera instead of tumbling with it, and `enabled=False` restores the producer's pose exactly.
+- **An animated billboard now actually billboards.** A `transforms` channel, a JSON `Frame.transforms`, or a follow path pins `matrixAutoUpdate` off and never calls `updateMatrix()`, so writing `obj.quaternion` was dead code — the write goes into `obj.matrix` on that path. Relatedly, the producer's pose is captured by every transform writer rather than read back off the object: `_updateBillboards` runs every frame while `_applyFrame` runs only while an animation is *playing*, so a paused-then-orbited animation would otherwise compose each frame on its own output and drift without bound.
+- Billboards are iterated parents-first, so a nested billboard is not a frame behind its billboard parent (an angular lag alone, but a positional one once a pivot is in play). A degenerate frame re-applies the last good aim rather than leaving an un-aimed pose on screen, and a degenerate axis arriving through the public `handleMessage` surface degrades to the documented default with one console.warn. New examples: `examples/32_billboard.py` and `examples/34_billboard_modes.py`.
+
+### Per-vertex mesh alpha and `visible=` on every `add_*` (#185)
+
+- **`add_mesh(colors=...)` accepts `(N, 4)` RGBA**, not just `(N, 3)`. The component count travels in the binary header and becomes the color attribute's `itemSize`, so per-vertex alpha needs no separate message; any RGBA mesh is forced `transparent` with `depthWrite` off, since a vertex alpha below 1 is invisible in an opaque material. RGB meshes keep the old `opacity < 1` rule and are byte-identical on the wire. New example: `examples/33_mesh_vertex_alpha.py`.
+- **Every `add_*` method takes `visible=True`**, so an object can be created hidden. The alternative — add, then immediately `set_visible(False)` — renders one frame of the object first. The viewer applies it through a single choke point that runs *before* `_deleteObject`, which prunes the id's baseline-visibility entry: a `set_scene_visibility` that arrived while a binary load was still in flight still wins, which is the exact race that map exists for.
+
+### The package version comes from the git tag (#184)
+
+- **`pyproject.toml` declares `dynamic = ["version"]` with hatch-vcs**, so a tagged build is `0.0.51` and an untagged checkout reports e.g. `0.0.51.dev3+g<sha>`. An editable install finally has a meaningful `importlib.metadata.version("threejs-viewer")` instead of `0.0.0.dev0`, which downstream floors like `threejs-viewer>=0.0.26` could never satisfy. Anything checking out the repo to build it needs the tags (`fetch-depth: 0`).
+- **The JS bundle keeps its `0.0.0-dev` placeholder** — `viewer.html` is generated and committed, so it cannot read git at import time; CI substitutes the version at tag time and rebuilds. The two sides therefore legitimately disagree in a dev checkout, so the `hello` version-mismatch warning is skipped whenever *either* side looks like a dev build. Two released versions that differ still warn exactly as before.
+- Only `v*` tags are matched: the repo has carried `pr-<N>-images` tags for screenshot hosting since long before this change, and hatch-vcs picking one up failed with "Can't parse version from tag" before any test could run.
+
 ## 0.0.50
 
 ### Anti-aliasing under eye-dome lighting (#179)
