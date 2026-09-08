@@ -2903,9 +2903,25 @@ function buildBillboardMesh(data, material) {
     const height = data.height > 0 ? data.height : 1;
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
     mesh.userData.isBillboard = true;
-    mesh.userData.billboardAxis = (Array.isArray(data.axis) && data.axis.length === 3)
-        ? new THREE.Vector3().fromArray(data.axis)
-        : null;
+    // Python validates `axis`, but handleMessage is a public no-WS embedder
+    // surface: a zero or non-finite axis survives normalize() as a zero/NaN
+    // vector, so orientBillboard would feed a degenerate basis into
+    // setFromRotationMatrix and write a corrupt quaternion every frame.
+    // Degrade to a full billboard instead, once, loudly.
+    let axis = null;
+    if (data.axis != null) {
+        const a = data.axis;
+        if (Array.isArray(a) && a.length === 3 && a.every(Number.isFinite)
+            && (a[0] !== 0 || a[1] !== 0 || a[2] !== 0)) {
+            axis = new THREE.Vector3().fromArray(a);
+        } else {
+            console.warn(
+                `add_billboard '${data.id}': axis must be a finite non-zero 3-vector ` +
+                `(got ${JSON.stringify(a)}); falling back to a full billboard.`
+            );
+        }
+    }
+    mesh.userData.billboardAxis = axis;
     return mesh;
 }
 

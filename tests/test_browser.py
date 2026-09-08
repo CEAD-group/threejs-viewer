@@ -662,6 +662,100 @@ def test_add_invisible_object_browser(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_billboard_faces_camera_browser(viewer_client, viewer_page):
+    """A full billboard copies the camera orientation; a Z-locked one stays upright.
+
+    Also covers the parented case: the billboard under a rotated group must
+    divide the parent's rotation out rather than tumble with it.
+    """
+    viewer_client.add_billboard("bb_full", position=[0, 0, 0])
+    viewer_client.add_billboard("bb_up", axis=[0, 0, 1], position=[3, 0, 0])
+    # A group rotated 90 deg about Z (column-major 4x4).
+    viewer_client.add_group("bb_group")
+    viewer_client.set_matrix(
+        "bb_group", [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    )
+    viewer_client.add_billboard("bb_child", parent="bb_group")
+    settle(viewer_client)
+    frames(viewer_page)
+
+    res = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const THREE = window.tjsv.THREE;
+            const q = new THREE.Quaternion();
+            const camQ = v._camera.getWorldQuaternion(new THREE.Quaternion());
+            const worldQuat = (id) => {
+                const o = v._objects.get(id);
+                return o ? o.getWorldQuaternion(q.clone()).toArray() : null;
+            };
+            const localY = (id) => {
+                const o = v._objects.get(id);
+                if (!o) return null;
+                return new THREE.Vector3(0, 1, 0)
+                    .applyQuaternion(o.getWorldQuaternion(q.clone())).toArray();
+            };
+            return {
+                camQuat: camQ.toArray(),
+                fullQuat: worldQuat('bb_full'),
+                childQuat: worldQuat('bb_child'),
+                upY: localY('bb_up'),
+            };
+        }"""
+    )
+    assert res["fullQuat"] is not None, "bb_full never landed in scene"
+    # A full billboard's world orientation is the camera's, parent or no parent.
+    assert np.allclose(res["fullQuat"], res["camQuat"], atol=1e-5)
+    assert np.allclose(res["childQuat"], res["camQuat"], atol=1e-5), (
+        "billboard under a rotated group tumbled with the parent"
+    )
+    # A Z-locked billboard's local +Y stays pinned to world +Z.
+    assert np.allclose(res["upY"], [0, 0, 1], atol=1e-5)
+
+
+@pytest.mark.browser
+def test_billboard_invalid_axis_degrades_browser(viewer_page):
+    """A zero/non-finite axis off handleMessage degrades to a full billboard.
+
+    Python validates `axis`, but handleMessage is a public embedder surface,
+    and a degenerate axis would otherwise reach setFromRotationMatrix as a
+    zero basis on every frame.
+    """
+    viewer_page.evaluate(
+        """() => {
+            window.threejsViewer.handleMessage(
+                {type: 'add_billboard', id: 'bb_zero', width: 1, height: 1, axis: [0, 0, 0]});
+            window.threejsViewer.handleMessage(
+                {type: 'add_billboard', id: 'bb_nan', width: 1, height: 1, axis: [0, 0, null]});
+        }"""
+    )
+    frames(viewer_page)
+    res = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const state = (id) => {
+                const o = v._objects.get(id);
+                if (!o) return null;
+                return {
+                    axis: o.userData.billboardAxis,
+                    finite: o.quaternion.toArray().every(Number.isFinite)
+                        && o.matrixWorld.elements.every(Number.isFinite),
+                };
+            };
+            return {zero: state('bb_zero'), nan: state('bb_nan')};
+        }"""
+    )
+    for name in ("zero", "nan"):
+        assert res[name] is not None, f"bb_{name} never landed in scene"
+        assert res[name]["axis"] is None, (
+            "invalid axis should degrade to a full billboard"
+        )
+        assert res[name]["finite"] is True, (
+            "invalid axis produced a non-finite transform"
+        )
+
+
+@pytest.mark.browser
 def test_add_points_appears_in_scene(viewer_client, viewer_page):
     """add_points creates a THREE.Points cloud in the browser scene graph."""
     pts = np.random.default_rng(0).random((500, 3)).astype(np.float32)
