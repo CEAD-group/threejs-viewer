@@ -45,6 +45,23 @@ _ALLOWED_VIEWS = frozenset(
 )
 
 
+def _is_dev_version(version: object) -> bool:
+    """Is this a development build rather than a released version?
+
+    The bundled ``viewer.html`` carries the ``0.0.0-dev`` placeholder that CI
+    substitutes at tag time, while the Python package derives its version from
+    the git tag (``0.0.51.dev3+g<sha>`` in a checkout). Those never match, so
+    the handshake mismatch warning only means something between two *released*
+    versions.
+    """
+    return (
+        not isinstance(version, str)
+        or "dev" in version
+        or "+" in version
+        or version == "unknown"
+    )
+
+
 def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     """Reject NaN/Inf so they never leak into the query string."""
     if value is None:
@@ -592,7 +609,9 @@ class ViewerClient:
         viewer_version = data.get("viewer_version", "unknown")
         logger = logging.getLogger(__name__)
         logger.info("Viewer v%s connected", viewer_version)
-        if viewer_version != __version__:
+        if viewer_version != __version__ and not (
+            _is_dev_version(viewer_version) or _is_dev_version(__version__)
+        ):
             print(
                 f"WARNING: Version mismatch — client v{__version__}, "
                 f"viewer v{viewer_version}. "

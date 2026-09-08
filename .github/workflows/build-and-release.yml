@@ -24,6 +24,9 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from git tags
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -64,6 +67,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from git tags
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -98,26 +104,42 @@ jobs:
     environment: pypi
     steps:
       - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from git tags
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
 
-      - name: Update version from tag
+      - name: Stamp viewer version from tag
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Setting version to $VERSION"
-          sed -i "s/0\.0\.0-dev/$VERSION/g" \
-            pyproject.toml \
-            src/threejs_viewer/__init__.py \
+          echo "Setting viewer version to $VERSION"
+          # The Python package version comes from the tag via hatch-vcs; only
+          # the JS bundle still carries a placeholder to substitute.
+          # Only the VIEWER_VERSION assignment — a global replace would also
+          # rewrite the literal where comments discuss the placeholder.
+          sed -i "s/^const VIEWER_VERSION = '0\.0\.0-dev';$/const VIEWER_VERSION = '$VERSION';/" \
             src/threejs_viewer/viewer/viewer.js
+          grep -q "const VIEWER_VERSION = '$VERSION';" src/threejs_viewer/viewer/viewer.js \
+            || (echo "ERROR: VIEWER_VERSION was not stamped" && exit 1)
           uv run python src/threejs_viewer/viewer/build.py
 
       - name: Build package
         run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # The sed above leaves the tree dirty, which would otherwise make
+          # hatch-vcs append a +d<date> local segment that PyPI rejects. Pin
+          # the version to the tag instead.
+          export SETUPTOOLS_SCM_PRETEND_VERSION=$VERSION
           uv pip install build
           uv run python -m build
+          # PRETEND_VERSION dictates the version rather than deriving it, so a
+          # wrong $VERSION would publish silently. Assert what we actually built.
+          test -f "dist/threejs_viewer-$VERSION-py3-none-any.whl" \
+            || (echo "ERROR: built wheel is not version $VERSION" && ls dist && exit 1)
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

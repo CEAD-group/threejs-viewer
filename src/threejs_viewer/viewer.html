@@ -1263,6 +1263,21 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
 
+/**
+ * Is this a development build rather than a released version?
+ *
+ * The bundled viewer carries the `0.0.0-dev` placeholder that CI substitutes at
+ * tag time, while the Python side derives its version from the git tag
+ * (`0.0.51.dev3+g<sha>` in a checkout). Those never match, so the handshake's
+ * mismatch warning is only meaningful between two *released* versions.
+ *
+ * @param {unknown} v Version string off the wire; may be anything.
+ * @returns {boolean}
+ */
+function isDevVersion(v) {
+    return typeof v !== 'string' || v.includes('dev') || v.includes('+') || v === 'unknown';
+}
+
 const ORTHO_FRUSTUM = 10;
 
 // Scene clear / background colour. Used both as scene.background (direct render
@@ -12209,7 +12224,8 @@ class ThreeJSViewer {
         switch (data.type) {
             case 'hello':
                 console.log(`Python client v${data.client_version}`);
-                if (data.client_version !== VIEWER_VERSION) {
+                if (data.client_version !== VIEWER_VERSION
+                    && !isDevVersion(VIEWER_VERSION) && !isDevVersion(data.client_version)) {
                     console.warn(
                         `Version mismatch: viewer v${VIEWER_VERSION}, client v${data.client_version}. ` +
                         `Close this tab and re-open viewer.html to pick up the latest version.`

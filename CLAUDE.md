@@ -29,12 +29,19 @@ uv run python examples/04_flying_teapots.py
 
 ## Versioning
 
-Source files use `0.0.0-dev` as a placeholder version. CI replaces it before build/publish:
+**The Python package version comes from the git tag** (`hatch-vcs`, issue #183): `pyproject.toml` declares `dynamic = ["version"]` with `[tool.hatch.version] source = "vcs"`, so a tagged build is `0.0.51` and an untagged checkout reports e.g. `0.0.51.dev3+g<sha>` — an editable install finally has a meaningful `importlib.metadata.version("threejs-viewer")` instead of the old `0.0.0.dev0`, which downstream floors (`threejs-viewer>=0.0.26`) could never satisfy. `__init__.__version__` reads that installed metadata, falling back to `0.0.0.dev0` for an uninstalled source tree. Anything that checks out this repo to build it needs the tags: `actions/checkout` with `fetch-depth: 0`.
+
+**The JS bundle still carries a placeholder.** `viewer.html` is generated and committed, so it cannot read git at import time — `src/threejs_viewer/viewer/viewer.js` keeps `VIEWER_VERSION = '0.0.0-dev'` and CI substitutes it at tag time before rebuilding:
 ```bash
-sed -i "s/0\.0\.0-dev/$VERSION/g" pyproject.toml src/threejs_viewer/__init__.py src/threejs_viewer/viewer/viewer.js
+# Only the assignment — a global replace would also rewrite the literal in
+# comments that discuss the placeholder (`isDevVersion`'s doc block).
+sed -i "s/^const VIEWER_VERSION = '0\.0\.0-dev';$/const VIEWER_VERSION = '$VERSION';/" \
+  src/threejs_viewer/viewer/viewer.js
 uv run python src/threejs_viewer/viewer/build.py  # regenerate viewer.html with substituted version
 ```
-The placeholder appears in three files: `pyproject.toml`, `src/threejs_viewer/__init__.py`, `src/threejs_viewer/viewer/viewer.js`. The build step propagates the version into `viewer.html`. Never commit a real version number — always keep `0.0.0-dev`.
+Never commit a real version number into `viewer.js` — always keep `0.0.0-dev`. The publish step also exports `SETUPTOOLS_SCM_PRETEND_VERSION=$VERSION`, because that `sed` leaves the working tree dirty and hatch-vcs would otherwise append a `+d<date>` local segment that PyPI rejects (the `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<NAME>` form does **not** work here — hatch-vcs does not pass the dist name through to setuptools_scm).
+
+**Handshake consequence**: in a dev checkout the two sides now legitimately disagree (`0.0.51.dev3+g…` vs `0.0.0-dev`), so the `hello` version-mismatch warning is skipped whenever *either* side looks like a dev build — `_is_dev_version` in `client.py` and `isDevVersion` in `viewer.js`, both matching `dev`/`+`/`unknown`. Two released versions that differ still warn exactly as before.
 
 ## Project Overview
 

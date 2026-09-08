@@ -1,6 +1,6 @@
 [project]
 name = "threejs-viewer"
-version = "0.0.0-dev"
+dynamic = ["version"]
 description = "Lightweight Three.js viewer controlled from Python via WebSocket"
 readme = "README.md"
 license = "MIT"
@@ -33,8 +33,13 @@ Repository = "https://github.com/thijsdamsma/threejs-viewer"
 threejs-viewer = "threejs_viewer.__main__:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# Version comes from the git tag (e.g. v0.0.50 -> 0.0.50); an untagged dev
+# checkout reports 0.0.50.dev<N>+g<sha>.
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/threejs_viewer"]
