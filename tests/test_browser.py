@@ -1041,6 +1041,36 @@ def test_billboard_hinge_holds_axis_browser(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_billboard_pinned_hinge_absorbs_own_rotation_browser(
+    viewer_client, viewer_page
+):
+    """`hinge` + `hinge_world` leaves the own rotation with nowhere to go.
+
+    Aligning the hinge onto `hinge_world` and then solving the spin to aim
+    `face` fixes every degree of freedom, so the pose is a function of
+    (hinge_world, face, camera) alone. Two objects with wildly different own
+    rotations must land on the same pose — the property the demo's "still"
+    donuts are showing.
+    """
+    for name, rotation in (("pinned_a", [0, 0, 0]), ("pinned_b", [0.9, 0.4, 1.3])):
+        viewer_client.add_box(name, position=[0, 0, 0], rotation=rotation)
+        viewer_client.set_billboard(
+            name, mode="hinge", hinge="+y", hinge_world=[0, 0, 1], face="+z"
+        )
+    viewer_client.set_camera(position=[6, -5, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    a = viewer_page.evaluate(_BB_PROBE_JS, "pinned_a")
+    b = viewer_page.evaluate(_BB_PROBE_JS, "pinned_b")
+    assert a is not None and b is not None
+    assert np.allclose(a["quat"], b["quat"], atol=1e-5), (
+        f"pinned hinge should not depend on the object's own rotation: "
+        f"{a['quat']} vs {b['quat']}"
+    )
+
+
+@pytest.mark.browser
 def test_billboard_degenerate_hinge_holds_pose_browser(viewer_client, viewer_page):
     """face ∥ hinge cannot be aimed by a spin: hold a finite pose, don't NaN."""
     viewer_client.add_box("degenerate", position=[0, 0, 0])

@@ -409,7 +409,13 @@ class ViewerClient:
         URL param > ``ThreeJSViewer`` option > hard default.
         """
         self.host = host
-        self._http_host = "127.0.0.1" if host == "localhost" else host
+        # Blob URLs must use the SAME hostname the page uses to reach the WS
+        # server. Rewriting "localhost" to "127.0.0.1" here (#185) makes
+        # Firefox refuse every sidecar fetch from a file:// viewer page:
+        # "CORS request did not succeed", status (null), while the very same
+        # page reaches http://localhost:<ws_port>/ fine. Chromium allows it,
+        # which is why the browser suite never saw it.
+        self._http_host = host
         self.port = port
         self.open_browser = open_browser
         # Lighting overrides — forwarded to the viewer via query string on launch.
@@ -1159,9 +1165,18 @@ class ViewerClient:
           the camera's actual position and takes roll from ``world_up``, so the
           object stays upright even if the camera rolls.
         - ``"aim"`` — 2 DOF, **own rotation kept as the roll**. The minimal
-          rotation putting ``face`` on the camera. This is the wheel case.
-        - ``"hinge"`` — 1 DOF, own rotation kept. Spins about ``hinge`` only,
-          turning to aim ``face`` as well as it can. The cylindrical billboard.
+          rotation putting ``face`` on the camera. This is the wheel case, and
+          the only mode that always preserves the object's own rotation.
+        - ``"hinge"`` — 1 DOF. Spins about ``hinge`` only, turning to aim
+          ``face`` as well as it can. The cylindrical billboard.
+
+        A wrinkle worth knowing in ``"hinge"``: **with ``hinge_world`` set, the
+        own rotation is absorbed entirely.** Aligning the hinge onto
+        ``hinge_world`` and then solving the spin fixes every degree of
+        freedom, so the pose is a function of (``hinge_world``, ``face``,
+        camera) alone and rotating the object changes nothing. Leave
+        ``hinge_world`` as ``None`` and the own rotation is what decides where
+        the hinge points, so it does matter.
 
         **Axes are read in the object's own coordinate frame** — ``face`` is
         whichever axis of *your* geometry should point at the viewer, ``hinge``
