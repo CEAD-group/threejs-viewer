@@ -45,7 +45,7 @@ _ALLOWED_VIEWS = frozenset(
 )
 
 
-def _is_dev_version(version: str) -> bool:
+def _is_dev_version(version: object) -> bool:
     """Is this a development build rather than a released version?
 
     The bundled ``viewer.html`` carries the ``0.0.0-dev`` placeholder that CI

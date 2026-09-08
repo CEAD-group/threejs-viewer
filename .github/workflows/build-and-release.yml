@@ -119,7 +119,12 @@ jobs:
           echo "Setting viewer version to $VERSION"
           # The Python package version comes from the tag via hatch-vcs; only
           # the JS bundle still carries a placeholder to substitute.
-          sed -i "s/0\.0\.0-dev/$VERSION/g" src/threejs_viewer/viewer/viewer.js
+          # Only the VIEWER_VERSION assignment — a global replace would also
+          # rewrite the literal where comments discuss the placeholder.
+          sed -i "s/^const VIEWER_VERSION = '0\.0\.0-dev';$/const VIEWER_VERSION = '$VERSION';/" \
+            src/threejs_viewer/viewer/viewer.js
+          grep -q "const VIEWER_VERSION = '$VERSION';" src/threejs_viewer/viewer/viewer.js \
+            || (echo "ERROR: VIEWER_VERSION was not stamped" && exit 1)
           uv run python src/threejs_viewer/viewer/build.py
 
       - name: Build package

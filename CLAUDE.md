@@ -33,7 +33,10 @@ uv run python examples/04_flying_teapots.py
 
 **The JS bundle still carries a placeholder.** `viewer.html` is generated and committed, so it cannot read git at import time — `src/threejs_viewer/viewer/viewer.js` keeps `VIEWER_VERSION = '0.0.0-dev'` and CI substitutes it at tag time before rebuilding:
 ```bash
-sed -i "s/0\.0\.0-dev/$VERSION/g" src/threejs_viewer/viewer/viewer.js
+# Only the assignment — a global replace would also rewrite the literal in
+# comments that discuss the placeholder (`isDevVersion`'s doc block).
+sed -i "s/^const VIEWER_VERSION = '0\.0\.0-dev';$/const VIEWER_VERSION = '$VERSION';/" \
+  src/threejs_viewer/viewer/viewer.js
 uv run python src/threejs_viewer/viewer/build.py  # regenerate viewer.html with substituted version
 ```
 Never commit a real version number into `viewer.js` — always keep `0.0.0-dev`. The publish step also exports `SETUPTOOLS_SCM_PRETEND_VERSION=$VERSION`, because that `sed` leaves the working tree dirty and hatch-vcs would otherwise append a `+d<date>` local segment that PyPI rejects (the `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<NAME>` form does **not** work here — hatch-vcs does not pass the dist name through to setuptools_scm).

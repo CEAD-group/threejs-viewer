@@ -31,7 +31,7 @@ const VIEWER_VERSION = '0.0.0-dev';
  * (`0.0.51.dev3+g<sha>` in a checkout). Those never match, so the handshake's
  * mismatch warning is only meaningful between two *released* versions.
  *
- * @param {string} v
+ * @param {unknown} v Version string off the wire; may be anything.
  * @returns {boolean}
  */
 function isDevVersion(v) {
