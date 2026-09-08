@@ -7,11 +7,15 @@ must stay readable from any viewpoint.
 
 Two flavours sit side by side above a row of boxes:
 
-  * full billboards (`axis=None`) stay parallel to the view plane, so they
-    face the camera exactly no matter where you orbit;
-  * cylindrical billboards (`axis=[0, 0, 1]`) may only spin about world Z,
-    so they turn toward you while staying upright — orbit up over the top
-    and they tilt away edge-on, which the full ones never do.
+  * full billboards (`mode="camera"`, the default) stay parallel to the view
+    plane, so they face the camera exactly no matter where you orbit;
+  * hinged billboards (`mode="hinge"`, hinge held along world Z) may only
+    spin about that axis, so they turn toward you while staying upright —
+    orbit up over the top and they tilt away edge-on, which the full ones
+    never do.
+
+For the whole option space — including billboarding objects that have their
+own rotation — see examples/34_billboard_modes.py.
 
 The third pair is parented to a rotating group to show that a billboard
 under a rotating parent keeps facing the camera instead of tumbling with it.
@@ -50,14 +54,16 @@ for i, color in enumerate(COLORS):
         color=color,
         position=[x, 0, 1.6],
     )
-    # Cylindrical billboard: locked upright, spins about world Z only.
+    # Hinged billboard: locked upright, spins about world Z only.
     v.add_billboard(
         f"tag_up_{i}",
         width=1.4,
         height=0.7,
         color=color,
         opacity=0.6,
-        axis=[0, 0, 1],
+        mode="hinge",
+        hinge="+y",
+        hinge_world=[0, 0, 1],
         position=[x, 0, 2.6],
     )
 

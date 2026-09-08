@@ -205,7 +205,15 @@ def test_add_grid_validation(client, kwargs):
     assert client._messages == []
 
 
-# === add_billboard ===
+# === add_billboard / set_billboard ===
+
+_BILLBOARD_DEFAULT_OPTS = {
+    "mode": "camera",
+    "face": [0.0, 0.0, 1.0],
+    "up": [0.0, 1.0, 0.0],
+    "world_up": [0.0, 0.0, 1.0],
+    "hinge": [0.0, 1.0, 0.0],
+}
 
 
 def test_add_billboard_default_payload(client):
@@ -219,6 +227,7 @@ def test_add_billboard_default_payload(client):
         "height": 1.0,
         "color": 0xFFFFFF,
         "opacity": 1.0,
+        **_BILLBOARD_DEFAULT_OPTS,
     }
 
 
@@ -229,12 +238,15 @@ def test_add_billboard_full_payload(client):
         height=0.5,
         color=0xFF0000,
         opacity=0.5,
-        axis=[0, 0, 1],
         lit=True,
         position=[1, 2, 3],
+        rotation=[0.1, 0.2, 0.3],
         scale=[2, 2, 2],
         parent="cell",
         visible=False,
+        mode="hinge",
+        hinge="+y",
+        hinge_world=[0, 0, 1],
     )
     msg = client._messages[0]
     assert msg["type"] == "add_billboard"
@@ -242,9 +254,15 @@ def test_add_billboard_full_payload(client):
     assert msg["height"] == 0.5
     assert msg["color"] == 0xFF0000
     assert msg["opacity"] == 0.5
-    assert msg["axis"] == [0.0, 0.0, 1.0]
+    assert msg["mode"] == "hinge"
+    assert msg["hinge"] == [0.0, 1.0, 0.0]
+    assert msg["hinge_world"] == [0.0, 0.0, 1.0]
     assert msg["materialType"] == "standard"
-    assert msg["transform"] == {"position": [1, 2, 3], "scale": [2, 2, 2]}
+    assert msg["transform"] == {
+        "position": [1, 2, 3],
+        "rotation": [0.1, 0.2, 0.3],
+        "scale": [2, 2, 2],
+    }
     assert msg["parent"] == "cell"
     assert msg["visible"] is False
 
@@ -255,15 +273,79 @@ def test_add_billboard_full_payload(client):
         {"width": 0},
         {"height": -1},
         {"opacity": 1.1},
-        {"axis": [0, 0]},
-        {"axis": [0, 0, 0]},
-        {"axis": [0, 0, float("nan")]},
+        {"mode": "sideways"},
+        {"face": "+q"},
+        {"hinge": [0, 0]},
+        {"hinge": [0, 0, 0]},
+        {"up": [0, 0, float("nan")]},
+        {"pivot": [1, 2]},
     ],
 )
 def test_add_billboard_validation(client, kwargs):
     with pytest.raises(ValueError):
         client.add_billboard("marker", **kwargs)
     assert client._messages == []
+
+
+def test_set_billboard_default_payload(client):
+    client.set_billboard("wheel")
+    assert client._messages[0] == {
+        "type": "set_billboard",
+        "id": "wheel",
+        "enabled": True,
+        **_BILLBOARD_DEFAULT_OPTS,
+    }
+
+
+def test_set_billboard_disable_carries_no_options(client):
+    """Turning it off needs only the id: the viewer restores the base pose."""
+    client.set_billboard("wheel", enabled=False)
+    assert client._messages[0] == {
+        "type": "set_billboard",
+        "id": "wheel",
+        "enabled": False,
+    }
+
+
+def test_set_billboard_wheel_payload(client):
+    """The headline case: aim the local axle at the camera, keep the spin."""
+    client.set_billboard("wheel", mode="aim", face="+y")
+    msg = client._messages[0]
+    assert msg["mode"] == "aim"
+    assert msg["face"] == [0.0, 1.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [
+        ("+z", [0.0, 0.0, 1.0]),
+        ("-x", [-1.0, 0.0, 0.0]),
+        ("y", [0.0, 1.0, 0.0]),
+        ("+Y", [0.0, 1.0, 0.0]),
+        ([0, 0, 2], [0.0, 0.0, 1.0]),  # normalized on the way out
+        ((0, -3, 0), [0.0, -1.0, 0.0]),
+    ],
+)
+def test_billboard_axis_spellings(client, spelling, expected):
+    client.set_billboard("m", face=spelling)
+    assert client._messages[-1]["face"] == pytest.approx(expected)
+
+
+def test_set_billboard_pivot_allows_zero_but_not_ragged(client):
+    """A pivot is a point, so zero is legal (it is the default origin)."""
+    client.set_billboard("m", pivot=[0, 0, 0])
+    assert client._messages[-1]["pivot"] == [0.0, 0.0, 0.0]
+    with pytest.raises(ValueError):
+        client.set_billboard("m", pivot=[0, 0, float("inf")])
+
+
+def test_set_billboard_omits_optional_keys_when_unset(client):
+    """hinge_world=None means 'from the object's own rotation', not a vector."""
+    msg = client._messages[0] if client._messages else None
+    client.set_billboard("m")
+    msg = client._messages[-1]
+    assert "hinge_world" not in msg
+    assert "pivot" not in msg
 
 
 # === add_model ===

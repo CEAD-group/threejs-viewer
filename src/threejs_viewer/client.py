@@ -45,6 +45,83 @@ _ALLOWED_VIEWS = frozenset(
 )
 
 
+_ALLOWED_BILLBOARD_MODES = ("camera", "world_up", "aim", "hinge")
+
+_AXIS_NAMES = {
+    "+x": [1.0, 0.0, 0.0],
+    "-x": [-1.0, 0.0, 0.0],
+    "+y": [0.0, 1.0, 0.0],
+    "-y": [0.0, -1.0, 0.0],
+    "+z": [0.0, 0.0, 1.0],
+    "-z": [0.0, 0.0, -1.0],
+}
+
+
+def _parse_axis(value, name: str) -> List[float]:
+    """Resolve an axis name (``"+z"``, ``"-x"``, ``"z"``) or 3-vector to a vector.
+
+    Axes are normalized here so the viewer receives one shape on the wire.
+    """
+    if isinstance(value, str):
+        key = value.strip().lower()
+        named = _AXIS_NAMES.get(key) or _AXIS_NAMES.get("+" + key)
+        if named is None:
+            raise ValueError(
+                f"{name} must be one of {sorted(_AXIS_NAMES)} or a 3-vector, got {value!r}"
+            )
+        return list(named)
+    vec = _parse_point(value, name)
+    length = math.sqrt(sum(v * v for v in vec))
+    if length == 0.0:
+        raise ValueError(f"{name} must be non-zero, got {vec}")
+    return [v / length for v in vec]
+
+
+def _parse_point(value, name: str) -> List[float]:
+    """Validate a finite 3-vector. Unlike an axis, zero is legal for a point."""
+    try:
+        vec = [float(v) for v in value]
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a 3-vector, got {value!r}") from None
+    if len(vec) != 3:
+        raise ValueError(f"{name} must be a 3-vector, got {vec}")
+    if not all(math.isfinite(v) for v in vec):
+        raise ValueError(f"{name} must be finite, got {vec}")
+    return vec
+
+
+def _billboard_option_payload(
+    mode: str = "camera",
+    face="+z",
+    up="+y",
+    world_up="+z",
+    hinge="+y",
+    hinge_world=None,
+    pivot=None,
+) -> dict:
+    """Validate the shared `set_billboard` / `add_billboard` options.
+
+    Everything is sent explicitly rather than relying on viewer-side defaults,
+    so one message fully describes the property.
+    """
+    if mode not in _ALLOWED_BILLBOARD_MODES:
+        raise ValueError(
+            f"mode must be one of {list(_ALLOWED_BILLBOARD_MODES)}, got {mode!r}"
+        )
+    payload = {
+        "mode": mode,
+        "face": _parse_axis(face, "face"),
+        "up": _parse_axis(up, "up"),
+        "world_up": _parse_axis(world_up, "world_up"),
+        "hinge": _parse_axis(hinge, "hinge"),
+    }
+    if hinge_world is not None:
+        payload["hinge_world"] = _parse_axis(hinge_world, "hinge_world")
+    if pivot is not None:
+        payload["pivot"] = _parse_point(pivot, "pivot")
+    return payload
+
+
 def _is_dev_version(version: object) -> bool:
     """Is this a development build rather than a released version?
 
@@ -332,7 +409,13 @@ class ViewerClient:
         URL param > ``ThreeJSViewer`` option > hard default.
         """
         self.host = host
-        self._http_host = "127.0.0.1" if host == "localhost" else host
+        # Blob URLs must use the SAME hostname the page uses to reach the WS
+        # server. Rewriting "localhost" to "127.0.0.1" here (#185) makes
+        # Firefox refuse every sidecar fetch from a file:// viewer page:
+        # "CORS request did not succeed", status (null), while the very same
+        # page reaches http://localhost:<ws_port>/ fine. Chromium allows it,
+        # which is why the browser suite never saw it.
+        self._http_host = host
         self.port = port
         self.open_browser = open_browser
         # Lighting overrides — forwarded to the viewer via query string on launch.
@@ -973,24 +1056,23 @@ class ViewerClient:
         height: float = 1.0,
         color: int = 0xFFFFFF,
         opacity: float = 1.0,
-        axis: Optional[List[float]] = None,
         lit: bool = False,
         position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        **billboard_options,
     ) -> None:
-        """Add a billboard: a flat plane the viewer rotates to face the camera.
+        """Add a plane that faces the camera.
 
-        The plane spans ``width`` x ``height`` in its local XY plane and is
-        re-oriented every rendered frame so its normal points at the camera —
-        useful for markers/labels that must stay readable from any viewpoint.
+        Sugar for a flat plane plus :meth:`set_billboard`: the plane spans
+        ``width`` x ``height`` in its local XY plane (so its normal is local
+        ``+z``, the default ``face``) and every ``set_billboard`` option is
+        accepted here and applied at add time.
 
-        Orientation is computed in world space and written back into the
-        parent's frame, so a billboard parented under a rotating group keeps
-        facing the camera rather than tumbling with the parent.
-
-        There is no ``rotation`` argument: the viewer owns the orientation.
+        With no options this is a screen-aligned billboard (``mode="camera"``)
+        — the classic label that stays parallel to the view plane.
 
         Args:
             id: Unique identifier for the object.
@@ -998,16 +1080,18 @@ class ViewerClient:
             height: Plane height in world units.
             color: Fill colour (0xRRGGBB).
             opacity: Opacity in [0, 1].
-            axis: Optional world-space axis to lock the spin to, e.g.
-                ``[0, 0, 1]`` for an upright billboard that only turns about
-                the Z axis (cylindrical). ``None`` (default) faces the camera
-                fully, staying parallel to the view plane.
             lit: ``True`` renders with a lit PBR material; the default
                 (unlit) keeps the billboard evenly shaded from any angle.
             position: Optional [x, y, z] position.
+            rotation: Optional [rx, ry, rz] Euler rotation (radians). This is
+                the object's *own* rotation — see :meth:`set_billboard` for
+                which modes preserve it and which override it.
             scale: Optional [x, y, z] scale.
             parent: Optional parent object id.
             visible: Initial visibility.
+            **billboard_options: ``mode``, ``face``, ``up``, ``world_up``,
+                ``hinge``, ``hinge_world``, ``pivot`` — see
+                :meth:`set_billboard`.
         """
         if not (width > 0):
             raise ValueError(f"width must be > 0, got {width}")
@@ -1026,18 +1110,12 @@ class ViewerClient:
         }
         if lit:
             msg["materialType"] = "standard"
-        if axis is not None:
-            axis = [float(v) for v in axis]
-            if len(axis) != 3:
-                raise ValueError(f"axis must be a 3-vector, got {axis}")
-            if not all(math.isfinite(v) for v in axis):
-                raise ValueError(f"axis must be finite, got {axis}")
-            if axis == [0.0, 0.0, 0.0]:
-                raise ValueError("axis must be non-zero")
-            msg["axis"] = axis
+        msg.update(_billboard_option_payload(**billboard_options))
         transform = {}
         if position:
             transform["position"] = position
+        if rotation:
+            transform["rotation"] = rotation
         if scale:
             transform["scale"] = scale
         if transform:
@@ -1046,6 +1124,102 @@ class ViewerClient:
             msg["parent"] = parent
         if not visible:
             msg["visible"] = False
+        self._send(msg)
+
+    def set_billboard(
+        self,
+        id: str,
+        enabled: bool = True,
+        *,
+        mode: str = "camera",
+        face: Union[str, List[float]] = "+z",
+        up: Union[str, List[float]] = "+y",
+        world_up: Union[str, List[float]] = "+z",
+        hinge: Union[str, List[float]] = "+y",
+        hinge_world: Optional[Union[str, List[float]]] = None,
+        pivot: Optional[List[float]] = None,
+    ) -> None:
+        """Make an object orient itself toward the viewer, every frame.
+
+        Works on **any** object — primitive, mesh, loaded model or group — not
+        just the plane from :meth:`add_billboard`.
+
+        Every mode is one composition::
+
+            R_final = R_aim · R_own
+
+        where ``R_own`` is the object's own rotation (whatever you set with
+        ``rotation=``/:meth:`set_matrix`, or an animation ``transforms``
+        channel is driving) and ``R_aim`` is what the viewer computes. The own
+        rotation acts **first, in the object's local frame** — which is what
+        lets a wheel keep spinning about its own axle while the axle points at
+        the camera: a spin about an axis leaves that axis fixed, so it never
+        fights the aim.
+
+        ``mode`` chooses how many degrees of freedom the viewer takes:
+
+        - ``"camera"`` (default) — 3 DOF, **own rotation overridden**. Copies
+          the camera's orientation, so the object stays parallel to the view
+          plane and does not swing as it moves off-axis. Screen-aligned labels.
+        - ``"world_up"`` — 3 DOF, **own rotation overridden**. Aims ``face`` at
+          the camera's actual position and takes roll from ``world_up``, so the
+          object stays upright even if the camera rolls.
+        - ``"aim"`` — 2 DOF, **own rotation kept as the roll**. The minimal
+          rotation putting ``face`` on the camera. This is the wheel case, and
+          the only mode that always preserves the object's own rotation.
+        - ``"hinge"`` — 1 DOF. Spins about ``hinge`` only, turning to aim
+          ``face`` as well as it can. The cylindrical billboard.
+
+        A wrinkle worth knowing in ``"hinge"``: **with ``hinge_world`` set, the
+        own rotation is absorbed entirely.** Aligning the hinge onto
+        ``hinge_world`` and then solving the spin fixes every degree of
+        freedom, so the pose is a function of (``hinge_world``, ``face``,
+        camera) alone and rotating the object changes nothing. Leave
+        ``hinge_world`` as ``None`` and the own rotation is what decides where
+        the hinge points, so it does matter.
+
+        **Axes are read in the object's own coordinate frame** — ``face`` is
+        whichever axis of *your* geometry should point at the viewer, ``hinge``
+        is whichever axis is the hinge. Give them as an axis name (``"+z"``,
+        ``"-x"``) or a 3-vector. The one exception is ``hinge_world``: a hinge
+        needs both *which local axis is the hinge* and *which way it points in
+        the world*, and ``hinge_world`` is that world direction. Leave it
+        ``None`` and the hinge stays wherever the object's own rotation puts it.
+
+        ``pivot`` is the rotation origin: a point in the object's local
+        coordinates that stays put while the object re-orients. The default
+        ``[0, 0, 0]`` is the object's origin, which leaves its position
+        untouched; a pivot at the foot of a sign makes it swing about its base
+        instead of its centre.
+
+        ``enabled=False`` turns the property off and restores the pose you last
+        set, exactly.
+
+        Options that do not apply to the chosen ``mode`` are accepted and
+        ignored (as with :meth:`set_highlight`'s per-style options).
+
+        **Caveat:** while a move gizmo is dragging the object the drag owns the
+        transform (otherwise the aim would fight the handle and report a
+        camera-derived pose back to you); the drag's final pose becomes the new
+        base on release. A *rotate* drag on a billboard is therefore pointless —
+        the aim overwrites it on the next frame.
+
+        Transient viewer state like :meth:`set_color` (not replayed on
+        reconnect).
+        """
+        msg: dict = {"type": "set_billboard", "id": id, "enabled": bool(enabled)}
+        if enabled:
+            msg.update(
+                _billboard_option_payload(
+                    mode=mode,
+                    face=face,
+                    up=up,
+                    world_up=world_up,
+                    hinge=hinge,
+                    hinge_world=hinge_world,
+                    pivot=pivot,
+                )
+            )
         self._send(msg)
 
     def add_model(

@@ -40,6 +40,13 @@ build-backend = "hatchling.build"
 # checkout reports 0.0.50.dev<N>+g<sha>.
 [tool.hatch.version]
 source = "vcs"
+# Only release tags describe a version. The repo also carries `pr-<N>-images`
+# tags (PR screenshot hosting), and `git describe` picks the *nearest* tag —
+# so one screenshot release on main made every build fail with
+# "Can't parse version from tag 'pr-186-images'". Match `v*` only.
+raw-options = { git_describe_command = [
+    "git", "describe", "--dirty", "--tags", "--long", "--match", "v*",
+] }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/threejs_viewer"]

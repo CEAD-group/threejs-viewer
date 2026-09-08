@@ -669,7 +669,9 @@ def test_billboard_faces_camera_browser(viewer_client, viewer_page):
     divide the parent's rotation out rather than tumble with it.
     """
     viewer_client.add_billboard("bb_full", position=[0, 0, 0])
-    viewer_client.add_billboard("bb_up", axis=[0, 0, 1], position=[3, 0, 0])
+    viewer_client.add_billboard(
+        "bb_up", mode="hinge", hinge="+y", hinge_world=[0, 0, 1], position=[3, 0, 0]
+    )
     # A group rotated 90 deg about Z (column-major 4x4).
     viewer_client.add_group("bb_group")
     viewer_client.set_matrix(
@@ -715,18 +717,20 @@ def test_billboard_faces_camera_browser(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_billboard_invalid_axis_degrades_browser(viewer_page):
-    """A zero/non-finite axis off handleMessage degrades to a full billboard.
+    """A zero/non-finite axis off handleMessage degrades to the default axis.
 
-    Python validates `axis`, but handleMessage is a public embedder surface,
-    and a degenerate axis would otherwise reach setFromRotationMatrix as a
-    zero basis on every frame.
+    Python validates the axes, but handleMessage is a public embedder surface,
+    and a degenerate axis would otherwise reach the aim math as a zero basis on
+    every frame.
     """
     viewer_page.evaluate(
         """() => {
             window.threejsViewer.handleMessage(
-                {type: 'add_billboard', id: 'bb_zero', width: 1, height: 1, axis: [0, 0, 0]});
+                {type: 'add_billboard', id: 'bb_zero', width: 1, height: 1,
+                 mode: 'hinge', hinge: [0, 0, 0]});
             window.threejsViewer.handleMessage(
-                {type: 'add_billboard', id: 'bb_nan', width: 1, height: 1, axis: [0, 0, null]});
+                {type: 'add_billboard', id: 'bb_nan', width: 1, height: 1,
+                 mode: 'hinge', hinge: [0, 0, null]});
         }"""
     )
     frames(viewer_page)
@@ -737,7 +741,7 @@ def test_billboard_invalid_axis_degrades_browser(viewer_page):
                 const o = v._objects.get(id);
                 if (!o) return null;
                 return {
-                    axis: o.userData.billboardAxis,
+                    hinge: o.userData.__billboardOpts.hinge.toArray(),
                     finite: o.quaternion.toArray().every(Number.isFinite)
                         && o.matrixWorld.elements.every(Number.isFinite),
                 };
@@ -747,12 +751,335 @@ def test_billboard_invalid_axis_degrades_browser(viewer_page):
     )
     for name in ("zero", "nan"):
         assert res[name] is not None, f"bb_{name} never landed in scene"
-        assert res[name]["axis"] is None, (
-            "invalid axis should degrade to a full billboard"
-        )
+        # Degenerate hinge falls back to the documented default (+y).
+        assert res[name]["hinge"] == pytest.approx([0.0, 1.0, 0.0])
         assert res[name]["finite"] is True, (
             "invalid axis produced a non-finite transform"
         )
+
+
+_BB_PROBE_JS = """(id) => {
+    const v = window.threejsViewer;
+    const THREE = window.tjsv.THREE;
+    const o = v._objects.get(id);
+    if (!o) return null;
+    o.updateWorldMatrix(true, false);
+    const q = o.getWorldQuaternion(new THREE.Quaternion());
+    const camPos = v._camera.getWorldPosition(new THREE.Vector3());
+    const objPos = o.getWorldPosition(new THREE.Vector3());
+    const opts = o.userData.__billboardOpts;
+    const face = opts ? opts.face.clone() : new THREE.Vector3(0, 0, 1);
+    return {
+        quat: q.toArray(),
+        pos: objPos.toArray(),
+        // World direction of the object's local `face` axis.
+        faceWorld: face.applyQuaternion(q).toArray(),
+        // Unit vector from the object toward the camera.
+        toCamera: camPos.sub(objPos).normalize().toArray(),
+        finite: o.matrixWorld.elements.every(Number.isFinite),
+    };
+}"""
+
+
+def _spin_animation(object_id, axis="y", turns=1.0, n=61, duration=6.0):
+    """A transforms channel spinning one object about its own local axis.
+
+    Binary channel on purpose: that is the path that pins `matrixAutoUpdate`
+    off and writes `obj.matrix` directly.
+    """
+    from threejs_viewer import Animation
+
+    times = np.linspace(0.0, duration, n)
+    data = np.zeros((n, 1, 16), dtype=np.float32)
+    for i, t in enumerate(times):
+        a = 2 * np.pi * turns * t / duration
+        c, s = np.cos(a), np.sin(a)
+        m = np.eye(4)
+        if axis == "y":
+            m[0, 0], m[0, 2], m[2, 0], m[2, 2] = c, s, -s, c
+        else:
+            m[0, 0], m[0, 1], m[1, 0], m[1, 1] = c, -s, s, c
+        data[i, 0] = m.T.flatten()
+    anim = Animation(frames=[])
+    anim.set_frame_times(times)
+    anim.set_transform_data([object_id], data)
+    return anim
+
+
+@pytest.mark.browser
+def test_billboard_aim_does_not_drift_browser(viewer_client, viewer_page):
+    """`aim` composes on a retained base, never on its own previous output.
+
+    The regression test for the core hazard: if the viewer read the pose back
+    as R_own it would compose R_aim into itself every frame and the object
+    would spin away on its own.
+    """
+    viewer_client.add_box("drifter", position=[0, 0, 0])
+    viewer_client.set_billboard("drifter", mode="aim", face="+y")
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    early = viewer_page.evaluate(_BB_PROBE_JS, "drifter")
+    frames(viewer_page, 30)
+    late = viewer_page.evaluate(_BB_PROBE_JS, "drifter")
+
+    assert early is not None and late is not None
+    assert np.allclose(early["quat"], late["quat"], atol=1e-6), (
+        f"pose drifted over 30 still frames: {early['quat']} -> {late['quat']}"
+    )
+    # And it is actually aimed: local +y points at the camera.
+    assert np.allclose(late["faceWorld"], late["toCamera"], atol=1e-5)
+
+
+@pytest.mark.browser
+def test_billboard_aim_tracks_moving_camera_browser(viewer_client, viewer_page):
+    """The aim follows the camera and stays a pure function of it."""
+    viewer_client.add_box("tracker", position=[0, 0, 0])
+    viewer_client.set_billboard("tracker", mode="aim", face="+y")
+    settle(viewer_client)
+    frames(viewer_page)
+
+    for position in ([10, 0, 0], [0, 12, 3], [-6, -6, 8]):
+        viewer_client.set_camera(position=position, target=[0, 0, 0])
+        settle(viewer_client)
+        frames(viewer_page)
+        res = viewer_page.evaluate(_BB_PROBE_JS, "tracker")
+        assert res["finite"] is True
+        assert np.allclose(res["faceWorld"], res["toCamera"], atol=1e-5), (
+            f"camera at {position}: face {res['faceWorld']} != toCamera {res['toCamera']}"
+        )
+
+
+@pytest.mark.browser
+def test_billboard_wheel_keeps_spinning_browser(viewer_client, viewer_page):
+    """The headline case: an animated wheel spins while its axle tracks the camera.
+
+    Covers the `matrixAutoUpdate === false` write path — an object driven by a
+    binary `transforms` channel. Before this change the viewer wrote
+    `obj.quaternion`, which that path ignores, so an animated billboard did not
+    billboard at all.
+    """
+    viewer_client.add_group("wheel")
+    # An off-axis marker makes the spin about the axle observable.
+    viewer_client.add_box("wheel_marker", width=0.2, position=[1, 0, 0], parent="wheel")
+    viewer_client.load_animation(_spin_animation("wheel"), loop=True)
+    viewer_client.set_billboard("wheel", mode="aim", face="+y")
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    first = viewer_page.evaluate(_BB_PROBE_JS, "wheel")
+    marker_first = viewer_page.evaluate(_BB_PROBE_JS, "wheel_marker")
+    time.sleep(0.4)  # let the animation clock advance (wall-clock playback)
+    frames(viewer_page, 2)
+    second = viewer_page.evaluate(_BB_PROBE_JS, "wheel")
+    marker_second = viewer_page.evaluate(_BB_PROBE_JS, "wheel_marker")
+
+    # The axle points at the camera at both instants...
+    for probe in (first, second):
+        assert probe["finite"] is True
+        assert np.allclose(probe["faceWorld"], probe["toCamera"], atol=1e-5), (
+            "the wheel's axle is not aimed at the camera"
+        )
+    # ...while the wheel keeps turning about it (the marker moved).
+    assert not np.allclose(marker_first["pos"], marker_second["pos"], atol=1e-3), (
+        "the wheel stopped spinning — the billboard overwrote its own rotation"
+    )
+
+
+@pytest.mark.browser
+def test_billboard_stable_while_animation_paused_browser(viewer_client, viewer_page):
+    """Paused animation + orbit is what makes a read-back implementation blow up.
+
+    `_applyFrame` only runs while playing, so nothing refreshes `obj.matrix`
+    between frames; a viewer that recovered R_own from the object would
+    integrate a fresh aim every frame into runaway rotation.
+    """
+    viewer_client.add_group("paused_wheel")
+    viewer_client.add_box(
+        "paused_marker", width=0.2, position=[1, 0, 0], parent="paused_wheel"
+    )
+    viewer_client.load_animation(_spin_animation("paused_wheel"), autoplay=False)
+    viewer_client.set_billboard("paused_wheel", mode="aim", face="+y")
+    viewer_client.set_camera(position=[8, 0, 0], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    early = viewer_page.evaluate(_BB_PROBE_JS, "paused_wheel")
+    frames(viewer_page, 40)
+    late = viewer_page.evaluate(_BB_PROBE_JS, "paused_wheel")
+
+    assert np.allclose(early["quat"], late["quat"], atol=1e-6), (
+        f"paused billboard drifted: {early['quat']} -> {late['quat']}"
+    )
+    assert np.allclose(late["faceWorld"], late["toCamera"], atol=1e-5)
+
+
+@pytest.mark.browser
+def test_billboard_pivot_holds_anchor_point_browser(viewer_client, viewer_page):
+    """A pivot keeps that local point fixed while the object swings about it."""
+    viewer_client.add_box("post", width=0.4, height=2.0, depth=0.4, position=[0, 0, 1])
+    # Pivot at the foot of the box, in its own local coordinates.
+    viewer_client.set_billboard("post", mode="aim", face="+z", pivot=[0, -1.0, 0])
+    settle(viewer_client)
+    frames(viewer_page)
+
+    anchor_js = """() => {
+        const v = window.threejsViewer;
+        const THREE = window.tjsv.THREE;
+        const o = v._objects.get('post');
+        o.updateWorldMatrix(true, false);
+        return new THREE.Vector3(0, -1, 0).applyMatrix4(o.matrixWorld).toArray();
+    }"""
+    anchors = []
+    for position in ([9, 0, 2], [0, 9, 2], [-7, -7, 5]):
+        viewer_client.set_camera(position=position, target=[0, 0, 1])
+        settle(viewer_client)
+        frames(viewer_page)
+        anchors.append(viewer_page.evaluate(anchor_js))
+
+    for later in anchors[1:]:
+        assert np.allclose(anchors[0], later, atol=1e-5), (
+            f"pivot point moved while re-aiming: {anchors[0]} -> {later}"
+        )
+
+
+@pytest.mark.browser
+def test_billboard_disable_restores_pose_browser(viewer_client, viewer_page):
+    """enabled=False restores the producer's pose exactly."""
+    viewer_client.add_box("revert", position=[1, 2, 3], rotation=[0.3, 0.4, 0.5])
+    settle(viewer_client)
+    frames(viewer_page)
+    before = viewer_page.evaluate(_BB_PROBE_JS, "revert")
+
+    viewer_client.set_billboard("revert", mode="aim", face="+y", pivot=[0, 0.5, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    during = viewer_page.evaluate(_BB_PROBE_JS, "revert")
+    assert not np.allclose(before["quat"], during["quat"], atol=1e-4), (
+        "the billboard never changed the pose, so restoring it proves nothing"
+    )
+
+    viewer_client.set_billboard("revert", enabled=False)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    after = viewer_page.evaluate(_BB_PROBE_JS, "revert")
+    assert np.allclose(before["quat"], after["quat"], atol=1e-6)
+    assert np.allclose(before["pos"], after["pos"], atol=1e-6)
+
+
+@pytest.mark.browser
+def test_billboard_nested_has_no_parent_lag_browser(viewer_client, viewer_page):
+    """A billboard under a billboard resolves in one frame, not two.
+
+    The child is registered FIRST on purpose: with plain insertion order it
+    would read its parent's previous-frame world quaternion and lag behind
+    whenever the camera moves.
+    """
+    viewer_client.add_group("outer")
+    viewer_client.add_billboard("inner", parent="outer", position=[0, 0, 1])
+    # Registered after the child, so insertion order is child-then-parent.
+    viewer_client.set_billboard("outer", mode="camera")
+    settle(viewer_client)
+    frames(viewer_page)
+
+    viewer_client.set_camera(position=[7, -5, 4], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 1)  # exactly one frame: a lag would still be visible
+
+    res = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const THREE = window.tjsv.THREE;
+            const o = v._objects.get('inner');
+            o.updateWorldMatrix(true, false);
+            return {
+                child: o.getWorldQuaternion(new THREE.Quaternion()).toArray(),
+                cam: v._camera.getWorldQuaternion(new THREE.Quaternion()).toArray(),
+            };
+        }"""
+    )
+    assert np.allclose(res["child"], res["cam"], atol=1e-5), (
+        "nested billboard lagged its billboard parent by a frame"
+    )
+
+
+@pytest.mark.browser
+def test_billboard_hinge_holds_axis_browser(viewer_client, viewer_page):
+    """A hinge billboard spins about its axis only, keeping it on hinge_world."""
+    viewer_client.add_box("hinged", position=[0, 0, 0])
+    viewer_client.set_billboard(
+        "hinged", mode="hinge", hinge="+y", hinge_world=[0, 0, 1], face="+z"
+    )
+    settle(viewer_client)
+
+    for position in ([9, 1, 2], [-4, 8, 6]):
+        viewer_client.set_camera(position=position, target=[0, 0, 0])
+        settle(viewer_client)
+        frames(viewer_page)
+        res = viewer_page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                const THREE = window.tjsv.THREE;
+                const o = v._objects.get('hinged');
+                o.updateWorldMatrix(true, false);
+                const q = o.getWorldQuaternion(new THREE.Quaternion());
+                return {
+                    hingeWorld: new THREE.Vector3(0, 1, 0).applyQuaternion(q).toArray(),
+                    faceWorld: new THREE.Vector3(0, 0, 1).applyQuaternion(q).toArray(),
+                    finite: o.matrixWorld.elements.every(Number.isFinite),
+                };
+            }"""
+        )
+        assert res["finite"] is True
+        # The local hinge stays pinned to the requested world direction...
+        assert np.allclose(res["hingeWorld"], [0, 0, 1], atol=1e-5)
+        # ...and the face turns toward the camera in the plane perpendicular
+        # to it (compare only the in-plane part, which is all 1 DOF can fix).
+        face = np.array(res["faceWorld"])[:2]
+        to_cam = np.array(position, dtype=float)[:2]
+        face /= np.linalg.norm(face)
+        to_cam /= np.linalg.norm(to_cam)
+        assert np.allclose(face, to_cam, atol=1e-4)
+
+
+@pytest.mark.browser
+def test_billboard_pinned_hinge_absorbs_own_rotation_browser(
+    viewer_client, viewer_page
+):
+    """`hinge` + `hinge_world` leaves the own rotation with nowhere to go.
+
+    Aligning the hinge onto `hinge_world` and then solving the spin to aim
+    `face` fixes every degree of freedom, so the pose is a function of
+    (hinge_world, face, camera) alone. Two objects with wildly different own
+    rotations must land on the same pose — the property the demo's "still"
+    donuts are showing.
+    """
+    for name, rotation in (("pinned_a", [0, 0, 0]), ("pinned_b", [0.9, 0.4, 1.3])):
+        viewer_client.add_box(name, position=[0, 0, 0], rotation=rotation)
+        viewer_client.set_billboard(
+            name, mode="hinge", hinge="+y", hinge_world=[0, 0, 1], face="+z"
+        )
+    viewer_client.set_camera(position=[6, -5, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    a = viewer_page.evaluate(_BB_PROBE_JS, "pinned_a")
+    b = viewer_page.evaluate(_BB_PROBE_JS, "pinned_b")
+    assert a is not None and b is not None
+    assert np.allclose(a["quat"], b["quat"], atol=1e-5), (
+        f"pinned hinge should not depend on the object's own rotation: "
+        f"{a['quat']} vs {b['quat']}"
+    )
+
+
+@pytest.mark.browser
+def test_billboard_degenerate_hinge_holds_pose_browser(viewer_client, viewer_page):
+    """face ∥ hinge cannot be aimed by a spin: hold a finite pose, don't NaN."""
+    viewer_client.add_box("degenerate", position=[0, 0, 0])
+    viewer_client.set_billboard("degenerate", mode="hinge", hinge="+z", face="+z")
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    res = viewer_page.evaluate(_BB_PROBE_JS, "degenerate")
+    assert res["finite"] is True
+    assert all(np.isfinite(res["quat"]))
 
 
 @pytest.mark.browser
