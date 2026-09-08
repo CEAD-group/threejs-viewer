@@ -9043,6 +9043,18 @@ export class ThreeJSViewer {
         this._sceneBoundsDirty = true;
     }
 
+    /**
+     * @param {string} id
+     * @param {THREE.Object3D} obj
+     * @param {boolean | undefined} [dataVisibility]
+     */
+    _applyInitialVisibility(id, obj, dataVisibility) {
+        if (dataVisibility === false) obj.visible = false;
+        else if (dataVisibility === true) obj.visible = true;
+        const baseline = this._baselineVisibility.get(id);
+        if (baseline !== undefined) obj.visible = baseline;
+    }
+
     // TODO(types): objData is a highly polymorphic add_object payload
     // (primitive | model | polyline | mesh | tube | group); tightening it
     // requires splitting the dispatch into per-kind helpers or a tagged-union
@@ -9105,12 +9117,7 @@ export class ThreeJSViewer {
         obj.name = id;
         obj.userData.id = id;
         this._applyTransform(obj, objData.transform);
-        if (objData.visible === false) obj.visible = false;
-        // A set_scene_visibility that arrived during the async load
-        // recorded a baseline with no object to apply to; honour it
-        // now so the request isn't silently dropped behind objData.visible.
-        const baseline = this._baselineVisibility.get(id);
-        if (baseline !== undefined) obj.visible = baseline;
+        this._applyInitialVisibility(id, obj, objData.visible);
         this._deleteObject(id, deleteOpts);
         this._addToParentOrScene(obj, parentId);
         this._registerObject(id, obj);
@@ -11074,7 +11081,7 @@ export class ThreeJSViewer {
                 group.name = data.id;
                 group.userData.id = data.id;
                 if (data.transform) this._applyTransform(group, data.transform);
-                if (data.visible === false) group.visible = false;
+                this._applyInitialVisibility(data.id, group, data.visible);
                 this._addToParentOrScene(group, data.parent);
                 this._registerObject(data.id, group);
                 break;
@@ -11361,6 +11368,7 @@ export class ThreeJSViewer {
                             model: blobUrl,
                             format: data.format || 'stl',
                             yUp: data.yUp === true,
+                            visible: data.visible,
                         }, data.parent, { preserveInflight: true });
                         if (obj) {
                             obj.userData.blobUrl = blobUrl;
@@ -11505,6 +11513,7 @@ export class ThreeJSViewer {
                             line.userData.pickPoints = pointData;
                         }
                         this._deleteObject(data.id, { preserveInflight: true });
+                        this._applyInitialVisibility(data.id, line, data.visible);
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
                         deferred.resolve();
@@ -11642,6 +11651,7 @@ export class ThreeJSViewer {
                         geometry.setDrawRange(0, numPoints);
 
                         this._deleteObject(data.id, { preserveInflight: true });
+                        this._applyInitialVisibility(data.id, points, data.visible);
                         this._addToParentOrScene(points, data.parent);
                         this._registerObject(data.id, points);
                         // Unlit point quads read flat without a depth cue —
@@ -11757,6 +11767,7 @@ export class ThreeJSViewer {
                             `Creating LOD point cloud ${data.id}: ${data.numPoints} points, ` +
                             `${nodes.count} nodes, maxLevel ${data.maxLevel}`);
                         this._deleteObject(data.id, { preserveInflight: true });
+                        this._applyInitialVisibility(data.id, group, data.visible);
                         this._addToParentOrScene(group, data.parent);
                         this._registerObject(data.id, group);
                         // Sculpt the streaming octree nodes with EDL from the
@@ -11946,6 +11957,7 @@ export class ThreeJSViewer {
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
                         this._deleteObject(data.id, { preserveInflight: true });
+                        this._applyInitialVisibility(data.id, mesh, data.visible);
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
@@ -12264,6 +12276,7 @@ export class ThreeJSViewer {
                         // _deleteObject queues for the old tubeLOD clobber the
                         // new tube's worker state (same tubeId).
                         this._deleteObject(data.id, { preserveInflight: true });
+                        this._applyInitialVisibility(data.id, mesh, data.visible);
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
@@ -12420,6 +12433,7 @@ export class ThreeJSViewer {
                         mesh.userData.isSweptTool = true;
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
                         this._deleteObject(data.id, { preserveInflight: true });
+                        this._applyInitialVisibility(data.id, mesh, data.visible);
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
                         if (data.transform) this._applyTransform(mesh, data.transform);
@@ -12853,7 +12867,7 @@ export class ThreeJSViewer {
                 grid.name = data.id;
                 grid.userData.id = data.id;
                 if (data.transform) this._applyTransform(grid, data.transform);
-                if (data.visible === false) grid.visible = false;
+                this._applyInitialVisibility(data.id, grid, data.visible);
                 this._deleteObject(data.id);
                 this._addToParentOrScene(grid, data.parent);
                 this._registerObject(data.id, grid);
@@ -12869,7 +12883,7 @@ export class ThreeJSViewer {
                 billboard.name = data.id;
                 billboard.userData.id = data.id;
                 if (data.transform) this._applyTransform(billboard, data.transform);
-                if (data.visible === false) billboard.visible = false;
+                this._applyInitialVisibility(data.id, billboard, data.visible);
                 this._deleteObject(data.id);
                 this._addToParentOrScene(billboard, data.parent);
                 this._registerObject(data.id, billboard);

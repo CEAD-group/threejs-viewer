@@ -639,6 +639,29 @@ def test_add_mesh_rgba_vertex_colors_browser(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_add_invisible_object_browser(viewer_client, viewer_page):
+    """Adding an object with visible=False sets its initial visibility to False in the scene."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("inv_mesh", positions, indices, visible=False)
+    viewer_client.add_box("inv_box", visible=False)
+    settle(viewer_client)
+    res = viewer_page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer._objects.get('inv_mesh');"
+        " const b = window.threejsViewer._objects.get('inv_box');"
+        " return {"
+        "   meshVisible: m ? m.visible : null,"
+        "   boxVisible: b ? b.visible : null,"
+        " };"
+        "}"
+    )
+    assert res is not None
+    assert res["meshVisible"] is False
+    assert res["boxVisible"] is False
+
+
+@pytest.mark.browser
 def test_add_points_appears_in_scene(viewer_client, viewer_page):
     """add_points creates a THREE.Points cloud in the browser scene graph."""
     pts = np.random.default_rng(0).random((500, 3)).astype(np.float32)

@@ -760,6 +760,91 @@ def test_append_points_after_delete_or_clear_raises(client):
         client.append_points("pc", pts)
 
 
+# === add_* visible=False tests ===
+
+
+def test_add_primitives_invisible(client):
+    client.add_box("box1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+    client.add_sphere("sph1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+    client.add_cylinder("cyl1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+    client.add_capsule("cap1", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+
+def test_add_grid_invisible(client):
+    client.add_grid("grid1", visible=False)
+    assert client._messages[-1]["visible"] is False
+
+
+def test_add_model_invisible(client):
+    client.add_model("mod1", "http://example.com/model.gltf", visible=False)
+    assert client._messages[-1]["visible"] is False
+    assert client._messages[-1]["object"]["visible"] is False
+
+
+def test_add_model_binary_invisible(client):
+    client.add_model_binary("mod_b", b"data", visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_polyline_invisible(client):
+    pts = np.zeros((2, 3), dtype=np.float32)
+    client.add_polyline("poly1", pts, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_mesh_invisible(client):
+    pos = np.zeros((3, 3), dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("mesh1", pos, idx, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_points_invisible(client):
+    pts = np.zeros((3, 3), dtype=np.float32)
+    client.add_points("pts1", pts, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_points_lod_invisible(client):
+    pts = np.zeros((10, 3), dtype=np.float32)
+    client.add_points("pts_lod", pts, lod=True, visible=False)
+    header = client._messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_parametric_tube_invisible(client):
+    spine = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    w = np.array([1, 1], dtype=np.float32)
+    h = np.array([1, 1], dtype=np.float32)
+    client.add_parametric_tube("tube1", spine, w, h, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
+def test_add_swept_tool_invisible(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    axes = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
+    prof = np.array([[0, 1], [1, 1]], dtype=np.float32)
+    client.add_swept_tool("st1", pos, axes, prof, visible=False)
+    header, _ = client._binary_messages[-1]
+    assert header["visible"] is False
+
+
 def test_append_points_rejects_lod_cloud(client):
     pts = np.random.default_rng(0).random((300, 3)).astype(np.float32)
     client.add_points("pc", pts, lod={"node_capacity": 100})

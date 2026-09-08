@@ -736,6 +736,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a box primitive to the scene."""
         params = {
@@ -749,7 +750,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "box", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "box",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_sphere(
         self,
@@ -763,6 +773,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a sphere primitive to the scene."""
         params = {"radius": radius, "color": color, "opacity": opacity}
@@ -770,7 +781,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "sphere", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "sphere",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_cylinder(
         self,
@@ -786,6 +806,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a cylinder primitive to the scene."""
         params = {
@@ -799,7 +820,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "cylinder", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "cylinder",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_capsule(
         self,
@@ -814,6 +844,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a capsule (pill) primitive to the scene."""
         params = {
@@ -826,7 +857,16 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
-        self._add_primitive(id, "capsule", params, position, rotation, scale, parent)
+        self._add_primitive(
+            id,
+            "capsule",
+            params,
+            position,
+            rotation,
+            scale,
+            parent,
+            visible=visible,
+        )
 
     def add_grid(
         self,
@@ -843,6 +883,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Add a shader floor grid: an anti-aliased, distance-faded grid plane.
 
@@ -921,6 +962,8 @@ class ViewerClient:
             msg["transform"] = transform
         if parent:
             msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
         self._send(msg)
 
     def add_billboard(
@@ -1015,6 +1058,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         y_up: bool = False,
+        visible: bool = True,
     ) -> None:
         """
         Add a 3D model to the scene.
@@ -1031,6 +1075,7 @@ class ViewerClient:
                   models to the Z-up viewer convention. Default False (no correction).
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
+            visible: Initial visibility
         """
         transform = {}
         if position:
@@ -1047,6 +1092,8 @@ class ViewerClient:
         }
         if y_up:
             obj_data["yUp"] = True
+        if not visible:
+            obj_data["visible"] = False
 
         msg = {
             "type": "add_object",
@@ -1055,6 +1102,8 @@ class ViewerClient:
         }
         if parent:
             msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
         self._send(msg)
 
     def _send_binary(self, header_dict: dict, payload: bytes) -> str:
@@ -1082,6 +1131,7 @@ class ViewerClient:
         matrix: Optional[List[float]] = None,
         parent: Optional[str] = None,
         y_up: bool = False,
+        visible: bool = True,
     ) -> None:
         """
         Add a 3D model to the scene by sending file bytes over WebSocket.
@@ -1099,6 +1149,7 @@ class ViewerClient:
                   models to the Z-up viewer convention. Default False (no correction).
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
+            visible: Initial visibility
         """
         if isinstance(path_or_bytes, bytes):
             mesh_bytes = path_or_bytes
@@ -1113,6 +1164,8 @@ class ViewerClient:
             header["parent"] = parent
         if y_up:
             header["yUp"] = True
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -1141,6 +1194,7 @@ class ViewerClient:
         fat: bool = True,
         pickable: bool = True,
         segments: bool = False,
+        visible: bool = True,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -1230,6 +1284,8 @@ class ViewerClient:
             header["segments"] = True
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         self._send_binary(header, raw_bytes)
 
     def add_mesh(
@@ -1248,6 +1304,7 @@ class ViewerClient:
         rotation: Optional[list] = None,
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
+        visible: bool = True,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -1327,6 +1384,8 @@ class ViewerClient:
         }
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -1355,6 +1414,7 @@ class ViewerClient:
         removal_times: Optional[np.ndarray] = None,
         lod: Optional[Union[bool, dict]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """
         Add a GPU point cloud (``THREE.Points``) using binary transfer.
@@ -1496,6 +1556,7 @@ class ViewerClient:
                 size_attenuation=size_attenuation,
                 parent=parent,
                 lod=lod,
+                visible=visible,
             )
             return
 
@@ -1523,6 +1584,8 @@ class ViewerClient:
             header["hasRemovalTimes"] = True
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         self._send_binary(header, raw_bytes)
         # Remember what append_points needs to keep a later chunk consistent
         # with this one (colour mode, and the colormap range frozen here).
@@ -1702,6 +1765,7 @@ class ViewerClient:
         size_attenuation: bool,
         parent: Optional[str],
         lod: Union[bool, dict],
+        visible: bool = True,
     ) -> None:
         """Build the sampled octree, register lazy node providers on the
         blob store, and send the add_points_lod header (see
@@ -1820,6 +1884,8 @@ class ViewerClient:
             header["hasRemovalTimes"] = True
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         self._send(header)
 
     def _release_points_lod(self, id: str) -> None:
@@ -1856,6 +1922,7 @@ class ViewerClient:
         bias_index_offset: int = 0,
         bias_index_total: Optional[int] = None,
         break_before: Optional[np.ndarray] = None,
+        visible: bool = True,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -2096,6 +2163,8 @@ class ViewerClient:
             ]
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -2148,6 +2217,7 @@ class ViewerClient:
         rotation: Optional[list] = None,
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
+        visible: bool = True,
     ) -> None:
         """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
 
@@ -2258,6 +2328,8 @@ class ViewerClient:
         }
         if parent:
             header["parent"] = parent
+        if not visible:
+            header["visible"] = False
         if matrix:
             header["transform"] = {"matrix": matrix}
         elif position or rotation or scale:
@@ -2321,6 +2393,7 @@ class ViewerClient:
         toolpath,
         travel: Optional[str] = None,
         travel_color: int = 0x666666,
+        visible: bool = True,
         **kwargs,
     ) -> None:
         """Add a Toolpath as one or more parametric tubes.
@@ -2365,6 +2438,7 @@ class ViewerClient:
         if travel not in (None, False, "line"):
             raise ValueError(f"travel must be None or 'line' (got {travel!r})")
         want_travel = travel == "line"
+        kwargs["visible"] = visible
         if "colors" not in kwargs:
             packed = toolpath.packed_colors
             if packed is not None:
@@ -2440,6 +2514,7 @@ class ViewerClient:
 
         # Multiple segments — create group + child tubes
         parent = kwargs.pop("parent", None)
+        visible_val = kwargs.get("visible", True)
         # Local-transform kwargs go on the GROUP (one transform node), not on
         # each child: children stay in local coordinates, so the beads AND
         # the travel line move together. Forwarding them per-child looked the
@@ -2451,7 +2526,7 @@ class ViewerClient:
             if (v := kwargs.pop(k, None)) is not None
         }
         matrix = kwargs.pop("matrix", None)
-        self.add_group(id, parent=parent, **xform)
+        self.add_group(id, parent=parent, visible=visible_val, **xform)
         if matrix is not None:
             self.set_matrix(id, matrix)
         colors = kwargs.pop("colors", None)
@@ -2510,6 +2585,7 @@ class ViewerClient:
                 fat=False,
                 segments=True,
                 parent=id,
+                visible=visible_val,
             )
             msg["travelId"] = travel_id
             msg["travelEndFracs"] = (
@@ -2558,6 +2634,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
+        visible: bool = True,
     ) -> None:
         """Internal method to add a primitive."""
         transform = {}
@@ -2579,6 +2656,9 @@ class ViewerClient:
         }
         if parent:
             msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
+            msg["object"]["visible"] = False
         self._send(msg)
 
     # === Transform Updates ===
