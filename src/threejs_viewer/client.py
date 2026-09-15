@@ -3041,9 +3041,10 @@ class ViewerClient:
             animate: Tween the reorientation smoothly (default). ``False``
                 jumps to the view immediately.
 
-        The same views are clickable in the browser: the corner gimbal's axis
-        bubbles snap to the six orthogonal views, the ISO corner button to the
-        isometric one. Works with both perspective and ortho cameras.
+        The six orthogonal views are also clickable in the browser (the corner
+        gimbal's axis bubbles); ``"iso"`` has no button and is reached through
+        this call or ``viewer.setView('iso')``. Works with both perspective
+        and ortho cameras.
         """
         if name not in _ALLOWED_VIEWS:
             raise ValueError(

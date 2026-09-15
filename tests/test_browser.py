@@ -2700,12 +2700,12 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
     assert abs(color["g"] - 1.0) < 1e-3, color
 
 
-# --- ISO / P / Home button stack (issue #190) ---
+# --- Orbit / P / Home button stack (issue #190) ---
 
 
 @pytest.mark.browser
 def test_view_buttons_stack_left_of_gimbal(viewer_client, viewer_page):
-    """ISO, P and Home sit in one vertical column left of the axis-bubble
+    """Orbit mode, P and Home sit in one vertical column left of the axis-bubble
     cluster, top to bottom, all the same size. Home used to be centred in
     the 128x128 ViewHelper square, in the middle of the six axis bubbles.
     The column may overlap the square's outer margin (the bubbles orbit its
@@ -2723,7 +2723,7 @@ def test_view_buttons_stack_left_of_gimbal(viewer_client, viewer_page):
             const dom = v._renderer.domElement.getBoundingClientRect();
             const dim = v._gizmoDim;
             return {
-                iso: rect('.tjsv-view-iso'),
+                orbit: rect('.tjsv-view-orbit'),
                 proj: rect('.tjsv-view-proj'),
                 home: rect('.tjsv-view-home'),
                 gimbal: {left: dom.right - dim, top: dom.bottom - dim,
@@ -2731,22 +2731,72 @@ def test_view_buttons_stack_left_of_gimbal(viewer_client, viewer_page):
             };
         }"""
     )
-    iso, proj, home, gimbal = r["iso"], r["proj"], r["home"], r["gimbal"]
-    for name, b in (("iso", iso), ("proj", proj), ("home", home)):
+    orbit, proj, home, gimbal = r["orbit"], r["proj"], r["home"], r["gimbal"]
+    for name, b in (("orbit", orbit), ("proj", proj), ("home", home)):
         assert abs(b["width"] - 28) < 1 and abs(b["height"] - 28) < 1, (name, b)
         clear_of_bubbles = gimbal["left"] + (gimbal["right"] - gimbal["left"]) / 4
         assert b["right"] <= clear_of_bubbles, f"{name} reaches the bubbles: {r}"
         assert b["bottom"] <= gimbal["bottom"] + 1, f"{name} below the gimbal: {r}"
-    # One column: same left edge, ordered ISO above P above Home, no overlap.
+    # One column: same left edge, ordered orbit above P above Home, no overlap.
     assert (
-        abs(iso["left"] - proj["left"]) < 1 and abs(proj["left"] - home["left"]) < 1
+        abs(orbit["left"] - proj["left"]) < 1 and abs(proj["left"] - home["left"]) < 1
     ), r
-    assert iso["bottom"] <= proj["top"] + 1, r
+    assert orbit["bottom"] <= proj["top"] + 1, r
     assert proj["bottom"] <= home["top"] + 1, r
     # Vertically centred on the gimbal square, level with the bubble cluster.
-    column_mid = (iso["top"] + home["bottom"]) / 2
+    column_mid = (orbit["top"] + home["bottom"]) / 2
     gimbal_mid = (gimbal["top"] + gimbal["bottom"]) / 2
     assert abs(column_mid - gimbal_mid) <= 2, (column_mid, gimbal_mid, r)
+
+
+@pytest.mark.browser
+def test_orbit_button_toggles_mode(viewer_client, viewer_page):
+    """The orbit-mode button at the top of the stack flips turntable <-> free
+    like the R key, and always shows the current mode (data-mode, `.free`
+    accent, tooltip, and which glyph is displayed). The R key drives the same
+    indicator, so a keyboard flip updates the button too."""
+    frames(viewer_page)
+
+    def snap():
+        return viewer_page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                const b = v.el.querySelector('.tjsv-view-orbit');
+                const shown = (sel) =>
+                    getComputedStyle(b.querySelector(sel)).display !== 'none';
+                return {
+                    mode: v._orbitMode,
+                    data: b.dataset.mode,
+                    free: b.classList.contains('free'),
+                    title: b.title,
+                    turntableGlyph: shown('.tjsv-orbit-glyph-turntable'),
+                    freeGlyph: shown('.tjsv-orbit-glyph-free'),
+                };
+            }"""
+        )
+
+    start = snap()
+    assert start["mode"] == start["data"]
+    assert start["free"] == (start["mode"] == "free")
+    assert start["turntableGlyph"] != start["freeGlyph"]
+
+    viewer_page.click(".tjsv-view-orbit")
+    after_click = snap()
+    assert after_click["mode"] != start["mode"]
+    assert after_click["data"] == after_click["mode"]
+    assert after_click["free"] == (after_click["mode"] == "free")
+    assert after_click["turntableGlyph"] == (after_click["mode"] == "turntable")
+    assert after_click["freeGlyph"] == (after_click["mode"] == "free")
+    assert after_click["title"] != start["title"]
+    expected_word = "Free" if after_click["mode"] == "free" else "Turntable"
+    assert after_click["title"].startswith(f"Orbit: {expected_word}")
+
+    _press_key(viewer_page, "KeyR")
+    after_key = snap()
+    assert after_key["mode"] == start["mode"]
+    assert after_key["data"] == start["data"]
+    assert after_key["free"] == start["free"]
+    assert after_key["title"] == start["title"]
 
 
 @pytest.mark.browser
@@ -5959,17 +6009,18 @@ def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
-    """The ISO corner button is a true isometric: orthographic projection down
-    the (1,-1,1) direction, snapped under the same auto-projection rule as the
-    axis bubbles (orbiting away returns to perspective). The old ortho toolbar
-    toggle stays removed."""
+def test_iso_snap_is_true_isometric(viewer_client, viewer_page):
+    """The iso snap is a true isometric: orthographic projection down the
+    (1,-1,1) direction, under the same auto-projection rule as the axis
+    bubbles (orbiting away returns to perspective). It has no button since the
+    orbit-mode toggle took its slot; `_snapOrthoAxisView('iso')` stays the
+    programmatic path. The old ortho toolbar toggle stays removed."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
         "() => {"
         " const v = window.threejsViewer;"
-        " v._viewIsoBtn.click();"
+        " v._snapOrthoAxisView('iso');"
         " const afterIso = { ortho: v._isOrtho, snap: v._gizmoAxisView };"
         " const orig = v._controls.isDragging;"
         " v._controls.isDragging = () => true;"
@@ -5981,7 +6032,7 @@ def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
         "}"
     )
     assert result["afterIso"] == {"ortho": True, "snap": "iso"}, (
-        "ISO must snap into an orthographic isometric"
+        "iso must snap into an orthographic isometric"
     )
     assert result["orthoAfterOrbit"] is False, "orbiting away returns to perspective"
     assert result["toolbarOrtho"] is False, "ortho toolbar toggle removed"

@@ -491,7 +491,7 @@
             text-align: center;
         }
 
-        /* ISO, P/O and Home form one vertical stack just LEFT of the gimbal bubbles,
+        /* Orbit mode, P/O and Home form one vertical stack just LEFT of the gimbal bubbles,
            ~15px off the cluster: close enough to read as one control group, outside
            the bubbles' orbit so they never collide. The column (16px to 112px)
            is centred on the 128px gimbal square, level with the bubble cluster.
@@ -499,7 +499,7 @@
            (set from JS). Home used to sit in
            the centre of the 128x128 ViewHelper area, in the middle of the six axis
            bubbles (issue #190). */
-        .threejs-viewer .tjsv-view-iso,
+        .threejs-viewer .tjsv-view-orbit,
         .threejs-viewer .tjsv-view-proj,
         .threejs-viewer .tjsv-view-home {
             position: absolute;
@@ -525,7 +525,7 @@
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
             z-index: 2;
         }
-        .threejs-viewer .tjsv-view-iso:hover,
+        .threejs-viewer .tjsv-view-orbit:hover,
         .threejs-viewer .tjsv-view-proj:hover,
         .threejs-viewer .tjsv-view-home:hover {
             background: rgba(60, 60, 60, 0.95);
@@ -533,17 +533,17 @@
             opacity: 1;
             transform: scale(1.06);
         }
-        .threejs-viewer .tjsv-view-iso:active,
+        .threejs-viewer .tjsv-view-orbit:active,
         .threejs-viewer .tjsv-view-proj:active,
         .threejs-viewer .tjsv-view-home:active {
             transform: scale(0.96);
         }
-        .threejs-viewer .tjsv-view-iso:focus,
+        .threejs-viewer .tjsv-view-orbit:focus,
         .threejs-viewer .tjsv-view-proj:focus,
         .threejs-viewer .tjsv-view-home:focus {
             outline: none;
         }
-        .threejs-viewer .tjsv-view-iso:focus-visible,
+        .threejs-viewer .tjsv-view-orbit:focus-visible,
         .threejs-viewer .tjsv-view-proj:focus-visible,
         .threejs-viewer .tjsv-view-home:focus-visible {
             outline: 2px solid #66b3ff;
@@ -586,7 +586,18 @@
             z-index: 11;
         }
 
-        /* Projection indicator/toggle: second item of the stack, below ISO. Shows
+        /* Orbit-mode indicator/toggle: top of the stack. Shows the CURRENT mode
+           (turntable disc glyph, or an accented free-orbit glyph); click toggles,
+           the same flip as the R key. */
+        .threejs-viewer .tjsv-view-orbit .tjsv-orbit-glyph-free { display: none; }
+        .threejs-viewer .tjsv-view-orbit.free .tjsv-orbit-glyph-free { display: block; }
+        .threejs-viewer .tjsv-view-orbit.free .tjsv-orbit-glyph-turntable { display: none; }
+        .threejs-viewer .tjsv-view-orbit.free {
+            background: rgba(70, 110, 160, 0.85);
+            color: white;
+            opacity: 1;
+        }
+        /* Projection indicator/toggle: second item of the stack, below orbit mode. Shows
            the CURRENT projection (P = perspective, O = orthographic); click toggles.
            A manual toggle is a deliberate choice: auto-projection never overrides it
            (only bubble-snap-entered ortho auto-exits on orbit). */
@@ -762,8 +773,20 @@ const HTML_TEMPLATE = `<div class="tjsv-toolbar">
     <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
 </div>
 
-<!-- ISO / P / Home stack, top to bottom, left of the view gimbal. -->
-<button class="tjsv-view-iso" title="Isometric view (orthographic) — orbit to return to perspective" aria-label="Isometric view">ISO</button>
+<!-- Orbit mode / P / Home stack, top to bottom, left of the view gimbal. -->
+<button class="tjsv-view-orbit" title="Orbit: Turntable (Z-up locked). Click for Free (R)" aria-label="Toggle orbit mode" data-mode="turntable">
+    <svg class="tjsv-orbit-glyph-turntable" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+        <ellipse cx="12" cy="14" rx="8" ry="3.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 14 V4 M9.5 15 L12.5 17.6 L9.5 20"
+              fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linejoin="round" stroke-linecap="round"/>
+    </svg>
+    <svg class="tjsv-orbit-glyph-free" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(-35 12 12)"
+                 fill="none" stroke="currentColor" stroke-width="2"/>
+    </svg>
+</button>
 <button class="tjsv-view-proj" title="Projection: perspective — click for orthographic (O)" aria-label="Toggle projection">P</button>
 <button class="tjsv-view-home" title="Reset view (F)" aria-label="Reset view">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
@@ -9450,7 +9473,7 @@ class ThreeJSViewer {
         });
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
-        this._viewIsoBtn = q('.tjsv-view-iso');
+        this._viewOrbitBtn = q('.tjsv-view-orbit');
         this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
@@ -10438,14 +10461,33 @@ class ThreeJSViewer {
         this._updateOrbitModeButton();
     }
 
+    /**
+     * Sync every orbit-mode indicator with `_orbitMode`: the toolbar chip
+     * and the stack button left of the gimbal (glyph, `.free` accent,
+     * tooltip). Called from `_setOrbitMode`, so the R key, either button and
+     * a programmatic switch all land here.
+     */
     _updateOrbitModeButton() {
-        if (!this._btnOrbitMode) return;
         const isFree = this._orbitMode === 'free';
-        this._btnOrbitMode.classList.toggle('active', isFree);
-        this._btnOrbitMode.textContent = '\u27F3 R';
-        this._btnOrbitMode.title = isFree
-            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
-            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
+        if (this._btnOrbitMode) {
+            this._btnOrbitMode.classList.toggle('active', isFree);
+            this._btnOrbitMode.textContent = '\u27F3 R';
+            this._btnOrbitMode.title = isFree
+                ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
+                : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
+        }
+        const btn = this._viewOrbitBtn;
+        if (btn) {
+            btn.classList.toggle('free', isFree);
+            btn.dataset.mode = this._orbitMode;
+            btn.title = isFree
+                ? 'Orbit: Free (no world-up lock). Click for Turntable (R)'
+                : 'Orbit: Turntable (Z-up locked). Click for Free (R)';
+        }
+    }
+
+    _toggleOrbitMode() {
+        this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
     }
 
     /** @param {boolean} toOrtho */
@@ -12209,9 +12251,7 @@ class ThreeJSViewer {
     _bindEvents() {
         // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        this._btnOrbitMode.addEventListener('click', () => {
-            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
-        });
+        this._btnOrbitMode.addEventListener('click', () => this._toggleOrbitMode());
 
         // Clip button
         this._btnClip.addEventListener('click', () => this._toggleClipPanel());
@@ -12292,23 +12332,18 @@ class ThreeJSViewer {
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
-        // Home button: bottom of the ISO / P / Home stack left of the gimbal; resets the view.
+        // Home button: bottom of the orbit / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
                 this.resetView();
                 this._viewHomeBtn.blur();
             });
         }
-        // ISO button: top of the ISO / P / Home stack left of the gimbal; snaps to the isometric
-        // view (the axis bubbles cover the six orthogonal views).
-        if (this._viewIsoBtn) {
-            this._viewIsoBtn.addEventListener('click', () => {
-                // A true isometric is orthographic by definition — ISO is a
-                // seventh snap under the auto-projection rule: it auto-enters
-                // ortho like the axis bubbles, and orbiting away returns to
-                // perspective (Thijs).
-                this._snapOrthoAxisView('iso');
-                this._viewIsoBtn.blur();
+        // Orbit-mode button: top of the stack; the same turntable <-> free flip as the R key.
+        if (this._viewOrbitBtn) {
+            this._viewOrbitBtn.addEventListener('click', () => {
+                this._toggleOrbitMode();
+                this._viewOrbitBtn.blur();
             });
         }
         // Projection indicator/toggle (P = perspective, O = ortho). A click is
@@ -12379,7 +12414,7 @@ class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
-                this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+                this._toggleOrbitMode();
                 return;
             }
             // KeyS toggles strand_collapse on every tube that has both buffers
@@ -14838,8 +14873,8 @@ class ThreeJSViewer {
      * framing) — with a short eased tween, and sets an axis-appropriate up
      * vector (top/bottom get +Y up so the view doesn't roll unpredictably).
      * Works with both the perspective and the orthographic camera. Also the
-     * implementation behind gimbal axis-bubble clicks, the ISO stack button,
-     * and the `set_view` WS message.
+     * implementation behind gimbal axis-bubble clicks and the `set_view` WS
+     * message ('iso' has no button; use setView or Python set_view).
      * @param {string} name
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
      */
@@ -15001,7 +15036,7 @@ class ThreeJSViewer {
 
     /**
      * Push the toolbar's current height into both the cache (hit-test +
-     * render shim) and the --tjsv-anim-lift CSS var (ISO / P / Home stack).
+     * render shim) and the --tjsv-anim-lift CSS var (orbit / P / Home stack).
      * display:none yields 0, which matches the "toolbar hidden" state.
      * Called on show/hide (no arg → reads offsetHeight to flush layout and
      * get the post-transition height synchronously) and from the
