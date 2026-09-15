@@ -6682,3 +6682,91 @@ def test_dblclick_frame_option_and_setter(viewer_client, viewer_page):
         "}"
     )
     assert flags == [True, False]
+
+
+@pytest.mark.browser
+def test_object_click_skips_hidden_ancestor(viewer_client, viewer_page):
+    """A tracked child under a group hidden with set_visible is unrendered,
+    so a click on it reports null; showing the group again reports the child.
+    The dblclick framing shares the hit test, so it must not frame it either."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('child')")
+    viewer_client.set_visible("grp", False)
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    # The child itself is still .visible === true; only its parent is hidden.
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('child').visible"
+    )
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] is None
+    assert (
+        viewer_page.evaluate(
+            f"() => window.threejsViewer._hitTrackedObject({proj['x']}, {proj['y']})"
+        )
+        is None
+    )
+
+    viewer_client.set_visible("grp", True)
+    settle(viewer_client)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: len(clicks) >= 2)
+    assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
+    """A pointercancel between press and release (a cancelled touch or pen)
+    clears the pending press, so the later pointerup is not a click."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    viewer_page.mouse.down()
+    assert viewer_page.evaluate("() => window.threejsViewer._objectClickDown !== null")
+    viewer_page.evaluate(
+        "() => window.dispatchEvent(new PointerEvent('pointercancel', {pointerId: 1}))"
+    )
+    assert viewer_page.evaluate("() => window.threejsViewer._objectClickDown === null")
+    viewer_page.mouse.up()
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4)
+
+
+@pytest.mark.browser
+def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
+    """destroy() removes the stored canvas pointerdown and window
+    pointerup/pointercancel handlers, so a destroyed instance never raycasts."""
+    removed = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const div = document.createElement('div');"
+        " div.style.cssText ="
+        "   'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        " document.body.appendChild(div);"
+        " const v2 = new V(div, { htmlTemplate: live._options.htmlTemplate,"
+        "   cubemapData: live._options.cubemapData, autoConnect: false });"
+        " const canvas = v2._renderer.domElement;"
+        " const seen = [];"
+        " const origWin = window.removeEventListener.bind(window);"
+        " const origCanvas = canvas.removeEventListener.bind(canvas);"
+        " window.removeEventListener = (t, fn, ...r) => {"
+        "   if (fn === v2._onObjectClickUp || fn === v2._onObjectClickCancel) seen.push('window:' + t);"
+        "   return origWin(t, fn, ...r); };"
+        " canvas.removeEventListener = (t, fn, ...r) => {"
+        "   if (fn === v2._onObjectClickDown) seen.push('canvas:' + t);"
+        "   return origCanvas(t, fn, ...r); };"
+        " try { v2.destroy(); } finally { window.removeEventListener = origWin; }"
+        " return seen.sort();"
+        "}"
+    )
+    assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]

@@ -8574,16 +8574,20 @@ export class ThreeJSViewer {
         // pointerup (registered later) and before `dblclick`, so a consumer
         // that also listens to dblclick can cache this pick instead of
         // re-raycasting into a moving camera.
+        // Handlers are stored so destroy() can remove them; a cancelled touch
+        // or pen press is dropped so a later pointerup cannot turn it into a click.
         this._objectClickDown = null;
-        this._renderer.domElement.addEventListener('pointerdown', (e) => {
+        this._onObjectClickDown = (e) => {
             this._objectClickDown = this._gizmoHandleHovered()
                 ? null
                 : { x: e.clientX, y: e.clientY, button: e.button, pointerId: e.pointerId };
-        });
-        window.addEventListener('pointerup', (e) => {
+        };
+        this._onObjectClickCancel = () => { this._objectClickDown = null; };
+        this._onObjectClickUp = (e) => {
             const down = this._objectClickDown;
             if (!down) return;
             this._objectClickDown = null;
+            if (this._destroyed) return;
             if (e.pointerId !== down.pointerId || e.button !== down.button) return;
             const wsOpen = !!this._ws && this._ws.readyState === WebSocket.OPEN;
             if (!this._objectClickHooks.length && !(this._objectClickEnabled && wsOpen)) return;
@@ -8612,7 +8616,10 @@ export class ThreeJSViewer {
                     try { cb(payload); } catch (err) { console.error('onObjectClick hook error', err); }
                 }
             }
-        });
+        };
+        this._renderer.domElement.addEventListener('pointerdown', this._onObjectClickDown);
+        window.addEventListener('pointerup', this._onObjectClickUp);
+        window.addEventListener('pointercancel', this._onObjectClickCancel);
 
         // Polyline point-picking (opt-in; enabled from Python via
         // set_polyline_picking). Hover shows a marker on the nearest line, a
@@ -14275,7 +14282,9 @@ export class ThreeJSViewer {
      * the nearest hit to its top-level tracked object. Shared by the dblclick
      * framing handler and the object-click event so both agree on what "the
      * object under the cursor" is. Unlike `pick()` this includes lines and
-     * point clouds and does not filter on hidden sub-nodes.
+     * point clouds. A tracked object under a hidden ancestor (a child of a
+     * group hidden with set_visibility) is skipped: three's raycaster does
+     * not check visibility, and unrendered content must not report a click.
      * @param {number} clientX @param {number} clientY
      * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
      */
@@ -14292,7 +14301,12 @@ export class ThreeJSViewer {
         /** @type {Map<THREE.Object3D, string>} */
         const ids = new Map();
         for (const [id, obj] of this._objects) {
-            if (obj && obj.visible) { candidates.push(obj); ids.set(obj, id); }
+            if (!obj) continue;
+            let shown = true;
+            for (let n = obj; n; n = n.parent) {
+                if (n.visible === false) { shown = false; break; }
+            }
+            if (shown) { candidates.push(obj); ids.set(obj, id); }
         }
         if (!candidates.length) return null;
         const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
@@ -14613,6 +14627,11 @@ export class ThreeJSViewer {
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
+        this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
+        window.removeEventListener('pointerup', this._onObjectClickUp);
+        window.removeEventListener('pointercancel', this._onObjectClickCancel);
+        this._objectClickDown = null;
+        this._objectClickHooks.length = 0;
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();
