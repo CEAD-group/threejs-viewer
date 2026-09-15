@@ -6690,3 +6690,152 @@ def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_pa
     assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
     assert wanted["s114"] == wanted["s444"], wanted
     assert wanted["s111"] < wanted["s444"], wanted
+_ZOOM_PROJECT_JS = """([x, y, z]) => {
+    const v = window.threejsViewer;
+    const THREE = window.tjsv.THREE;
+    const rect = v._renderer.domElement.getBoundingClientRect();
+    const cam = v._camera;
+    cam.updateMatrixWorld(true);
+    const ndc = new THREE.Vector3(x, y, z).project(cam);
+    return {
+        px: rect.left + ((ndc.x + 1) / 2) * rect.width,
+        py: rect.top + ((1 - ndc.y) / 2) * rect.height,
+        dist: cam.position.distanceTo(v._controls.target),
+        zoom: cam.zoom,
+        ortho: !!v._isOrtho,
+        target: v._controls.target.toArray(),
+    };
+}"""
+
+
+def _zoom_drift_at_cursor(page, world_point, delta_y, n_events):
+    """Put the mouse on `world_point`'s projection, wheel n times, and return
+    the pixel drift of that world point plus the before/after camera state.
+
+    Chromium rounds a synthetic wheel event's clientX/clientY to whole pixels
+    (a move to 791.39 arrives as 791), so the anchor sits up to 0.5 px off the
+    projected point and the drift after a 1.85x zoom lands around 0.5 px. The
+    1 px tolerance covers that; the exact-NDC test below shows the math itself
+    is exact to 1e-13 px.
+    """
+    before = page.evaluate(_ZOOM_PROJECT_JS, world_point)
+    page.mouse.move(before["px"], before["py"])
+    for _ in range(n_events):
+        page.mouse.wheel(0, delta_y)
+    frames(page, 3)
+    after = page.evaluate(_ZOOM_PROJECT_JS, world_point)
+    drift = math.hypot(after["px"] - before["px"], after["py"] - before["py"])
+    return drift, before, after
+
+
+@pytest.mark.browser
+def test_wheel_zoom_anchors_on_cursor_perspective_and_ortho(viewer_client, viewer_page):
+    """Issue #192: wheel zoom keeps the world point under the cursor at the
+    same screen pixel, in both projections, instead of converging on the orbit
+    target. The camera still moves (distance / zoom change), and the target
+    shifts with the camera so the ViewHelper centre (same Vector3) follows."""
+    viewer_client.add_box(
+        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
+    )
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    world_point = [1.5, 0.5, 0.0]
+
+    # Perspective: zoom in, then zoom out, cursor parked on the box.
+    drift_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
+    assert after["ortho"] is False
+    assert after["dist"] < before["dist"] * 0.8, "zoom in shortened the dolly"
+    assert drift_in < 1.0, f"perspective zoom-in drift {drift_in:.3f}px"
+    assert after["target"] != before["target"], "target rides along with the camera"
+    drift_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
+    assert after["dist"] > before["dist"] * 1.2
+    assert drift_out < 1.0, f"perspective zoom-out drift {drift_out:.3f}px"
+    # The screen centre (the old anchor) is not fixed anymore when the cursor
+    # is off-centre: the target projection should have moved.
+    print(f"perspective drift in={drift_in:.4f}px out={drift_out:.4f}px")
+
+    # Orthographic (manual O key path), same check on cam.zoom.
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page, 2)
+    drift_o_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
+    assert after["ortho"] is True
+    assert after["zoom"] > before["zoom"] * 1.2, "ortho zoom increased"
+    assert drift_o_in < 1.0, f"ortho zoom-in drift {drift_o_in:.3f}px"
+    drift_o_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
+    assert after["zoom"] < before["zoom"] * 0.8
+    assert drift_o_out < 1.0, f"ortho zoom-out drift {drift_o_out:.3f}px"
+    print(f"ortho drift in={drift_o_in:.4f}px out={drift_o_out:.4f}px")
+
+    # After the long zoom the ViewHelper centre is still the controls' target
+    # (same Vector3, mutated in place), so click-to-pivot and the gimbal agree.
+    same = viewer_page.evaluate(
+        "() => window.threejsViewer._viewHelper.center === window.threejsViewer._controls.target"
+    )
+    assert same is True
+
+
+@pytest.mark.browser
+def test_wheel_zoom_anchor_math_is_exact(viewer_client, viewer_page):
+    """Drive `_applyZoom` with the float NDC of a world point directly, so the
+    wheel event's integer pixel rounding is out of the picture: 12 steps in and
+    12 back out leave the point's projection where it was to sub-1e-6 px."""
+    viewer_client.add_box(
+        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
+    )
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    js = (
+        "([x, y, z]) => {"
+        " const v = window.threejsViewer; const THREE = window.tjsv.THREE;"
+        " const cam = v._camera; cam.updateMatrixWorld(true);"
+        " const rect = v._renderer.domElement.getBoundingClientRect();"
+        " const n0 = new THREE.Vector3(x, y, z).project(cam);"
+        " const d0 = cam.position.distanceTo(v._controls.target), z0 = cam.zoom;"
+        " const out = [];"
+        " for (const s of [1 / 0.95, 0.95]) {"
+        "   for (let i = 0; i < 12; i++) v._controls._applyZoom(s, n0.x, n0.y);"
+        "   cam.updateMatrixWorld(true);"
+        "   const n1 = new THREE.Vector3(x, y, z).project(cam);"
+        "   out.push(Math.hypot((n1.x - n0.x) / 2 * rect.width, (n1.y - n0.y) / 2 * rect.height));"
+        " }"
+        " return { drift: out, d0, d1: cam.position.distanceTo(v._controls.target),"
+        "          z0, z1: cam.zoom };"
+        "}"
+    )
+    persp = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
+    assert max(persp["drift"]) < 1e-6, persp
+    assert abs(persp["d1"] - persp["d0"]) < 1e-9, "in then out restores the distance"
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page, 2)
+    ortho = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
+    assert max(ortho["drift"]) < 1e-6, ortho
+    assert abs(ortho["z1"] - ortho["z0"]) < 1e-9 * ortho["z0"], (
+        "in then out restores the zoom"
+    )
+
+
+@pytest.mark.browser
+def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_page):
+    """With the cursor exactly on the orbit target the zoom degenerates to the
+    old about-target dolly: the target does not move at all."""
+    viewer_client.add_box("b", width=0.5, height=0.5, depth=0.5, position=[0, 0, 0])
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    drift, before, after = _zoom_drift_at_cursor(viewer_page, [0, 0, 0], -300, 4)
+    assert drift < 1.0
+    assert after["dist"] < before["dist"] * 0.8
+    assert max(abs(a - b) for a, b in zip(after["target"], before["target"])) < 1e-6
+    # Programmatic zoom without a cursor keeps the about-target behaviour.
+    moved = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const t0 = v._controls.target.toArray();"
+        " v._controls._applyZoom(1.5);"
+        " const t1 = v._controls.target.toArray();"
+        " return t0.some((c, i) => Math.abs(c - t1[i]) > 1e-9);"
+        "}"
+    )
+    assert moved is False
