@@ -121,6 +121,18 @@ class ViewerControls extends THREE.EventDispatcher {
     }
 
     /**
+     * True only during an orbit drag, never during a pan. Reads the
+     * `_dragMode` snapshot taken at pointerdown (set for a rotate drag,
+     * including the Alt-flipped mode, and cleared at pointerup) so the
+     * answer is fixed for the whole stroke. The auto-ortho exit after a
+     * gizmo snap gates on this: a pan keeps the axis-aligned view, so it
+     * must keep the orthographic projection too (issue #193).
+     */
+    isOrbiting() {
+        return this._state === STATE.ROTATE && this._dragMode !== null;
+    }
+
+    /**
      * Drop any pending damped rotation/pan inertia (the tail of a just-
      * finished drag). Programmatic camera moves (setView) call this so
      * residual deltas — which update() keeps bleeding into the camera every
