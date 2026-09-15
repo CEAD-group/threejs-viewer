@@ -421,6 +421,36 @@ def test_add_polyline_no_parent(client):
     assert "parent" not in header
 
 
+def test_add_polyline_no_transform(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_polyline("pl", pts)
+    header, _ = client._binary_messages[0]
+    assert "transform" not in header
+
+
+def test_add_polyline_with_position(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_polyline("pl", pts, position=[1, 2, 3], rotation=[0, 0, 0.5])
+    header, _ = client._binary_messages[0]
+    assert header["transform"] == {"position": [1, 2, 3], "rotation": [0, 0, 0.5]}
+
+
+def test_add_polyline_with_matrix(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1]
+    client.add_polyline("pl", pts, matrix=mat, position=[9, 9, 9])
+    header, _ = client._binary_messages[0]
+    assert header["transform"] == {"matrix": mat}
+
+
+def test_add_polyline_segments_with_transform(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_polyline("pl", pts, segments=True, position=[1, 2, 3])
+    header, _ = client._binary_messages[0]
+    assert header["segments"] is True
+    assert header["transform"] == {"position": [1, 2, 3]}
+
+
 def test_update_polyline_colors_rgb(client):
     rgb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
     client.update_polyline_colors("pl", rgb)
@@ -577,6 +607,29 @@ def test_add_points_size_attenuation_off(client):
     client.add_points("pc", pts, size_attenuation=False)
     header, _ = client._binary_messages[0]
     assert header["sizeAttenuation"] is False
+
+
+def test_add_points_no_transform(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points("pc", pts)
+    header, _ = client._binary_messages[0]
+    assert "transform" not in header
+
+
+def test_add_points_with_transform(client):
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    client.add_points("pc", pts, position=[1, 2, 3], scale=[2, 2, 2])
+    header, _ = client._binary_messages[0]
+    assert header["transform"] == {"position": [1, 2, 3], "scale": [2, 2, 2]}
+
+
+def test_add_points_lod_with_transform(client):
+    pts = np.random.default_rng(0).random((200, 3)).astype(np.float32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1]
+    client.add_points("pc", pts, lod={"node_capacity": 50}, matrix=mat)
+    msg = client._messages[-1]
+    assert msg["type"] == "add_points_lod"
+    assert msg["transform"] == {"matrix": mat}
 
 
 def test_add_points_rgb_colors(client):

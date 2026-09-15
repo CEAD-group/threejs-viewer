@@ -6487,3 +6487,105 @@ def test_set_highlight_style_switch_rebuilds_in_place(viewer_client, viewer_page
         " return !!(g && g.attributes.position && g.attributes.position.count > 0); }"
     )
     assert still_drawable
+
+
+_WORLD_POS_JS = """(id) => {
+    const o = window.threejsViewer.getObject(id);
+    if (!o) return null;
+    o.updateWorldMatrix(true, false);
+    const e = o.matrixWorld.elements;
+    return { local: o.position.toArray(), world: [e[12], e[13], e[14]] };
+}"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"fat": False}, {"segments": True}],
+    ids=["fat", "native", "segments"],
+)
+def test_add_polyline_applies_transform(viewer_client, viewer_page, kwargs):
+    """add_polyline_binary honours data.transform on all three line variants
+    (issue #194): the polyline lands at the requested pose, not the origin."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
+    viewer_client.add_polyline("pl", pts, position=[5, 6, 7], **kwargs)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got is not None
+    assert got["local"] == pytest.approx([5, 6, 7])
+    assert got["world"] == pytest.approx([5, 6, 7])
+
+
+@pytest.mark.browser
+def test_add_polyline_applies_matrix_under_parent(viewer_client, viewer_page):
+    """A matrix transform composes under a transformed parent group."""
+    viewer_client.add_group("g", position=[10, 0, 0])
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1]
+    viewer_client.add_polyline("pl", pts, parent="g", matrix=mat)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got["local"] == pytest.approx([1, 2, 3])
+    assert got["world"] == pytest.approx([11, 2, 3])
+
+
+@pytest.mark.browser
+def test_add_points_applies_transform(viewer_client, viewer_page):
+    """add_points_binary honours data.transform (same omission as #194)."""
+    pts = np.random.default_rng(1).random((100, 3)).astype(np.float32)
+    viewer_client.add_points("pc", pts, position=[3, 4, 5])
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pc")
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_add_points_lod_applies_transform(viewer_client, viewer_page):
+    """add_points_lod honours data.transform on the octree group."""
+    pts = np.random.default_rng(2).random((5000, 3)).astype(np.float32)
+    viewer_client.add_points(
+        "cloud", pts, lod={"node_capacity": 1000}, position=[3, 4, 5]
+    )
+    got = None
+    for _ in range(100):
+        time.sleep(0.05)
+        got = viewer_page.evaluate(_WORLD_POS_JS, "cloud")
+        if got is not None:
+            break
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_page):
+    """A LOD cloud scaled [1, 1, 4] must refine exactly like one scaled
+    [4, 4, 4]: the node-size estimate bounds the radius by the largest scale
+    component, so the stretched axis never stops refinement early. Under
+    ortho the estimate ignores camera position, so the wanted sets compare
+    exactly."""
+    pts = np.random.default_rng(5).random((20_000, 3)).astype(np.float32)
+    lod = {"node_capacity": 1000, "point_budget": 1_000_000, "refine_pixels": 100}
+    for cid, scale in (("s111", [1, 1, 1]), ("s114", [1, 1, 4]), ("s444", [4, 4, 4])):
+        viewer_client.add_points(cid, pts, lod=lod, scale=scale)
+    viewer_page.evaluate("() => window.threejsViewer._camController.switch(true)")
+    wanted = None
+    for _ in range(100):
+        time.sleep(0.05)
+        wanted = viewer_page.evaluate(
+            "() => {"
+            " const out = {};"
+            " for (const id of ['s111', 's114', 's444']) {"
+            "   const g = window.threejsViewer._objects.get(id);"
+            "   if (!g || !g.userData.pointsLOD) return null;"
+            "   out[id] = g.userData.pointsLOD.wanted.reduce((a, b) => a + b, 0);"
+            " }"
+            " return out;"
+            "}"
+        )
+        if wanted and wanted["s444"] > 1 and wanted["s114"] == wanted["s444"]:
+            break
+    assert wanted, "LOD clouds never appeared"
+    assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
+    assert wanted["s114"] == wanted["s444"], wanted
+    assert wanted["s111"] < wanted["s444"], wanted
