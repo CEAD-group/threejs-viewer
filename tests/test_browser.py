@@ -2788,13 +2788,13 @@ def test_view_gimbal_arms_and_bubbles_restyled(viewer_client, viewer_page):
             };
         }"""
     )
-    assert r["armScale"] == pytest.approx(1.3)
+    assert r["armScale"] == pytest.approx(1.0)
     assert r["baseScale"] == pytest.approx(1.12)
     assert len(r["armScales"]) == 3, r
     for sx, sy, sz in r["armScales"]:
-        assert (sx, sy, sz) == pytest.approx((1.3, 1.0, 1.0)), r
+        assert (sx, sy, sz) == pytest.approx((1.0, 1.0, 1.0)), r
     assert len(r["spriteDist"]) == 6, r
-    assert r["spriteDist"] == pytest.approx([1.3] * 6), r
+    assert r["spriteDist"] == pytest.approx([1.0] * 6), r
     assert r["spriteScale"] == pytest.approx([1.12] * 6), r
     # The bubble stays inside the helper's +-2 ortho frustum.
     assert max(abs(c) for c in r["projected"]) + 0.56 < 2, r

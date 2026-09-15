@@ -8474,12 +8474,11 @@ export class ThreeJSViewer {
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
         this._gizmoDim = 128;
-        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair and arms 30%
-        // longer than stock, so the cluster reads as arms with bubbles at the
-        // tips instead of bubbles overlapping the arms.
+        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair; arms and
+        // bubble distance at stock length (1.3 read as too long on review).
         this._gizmoBaseScale = 1.12;
         this._gizmoHoverScale = 1.4;
-        this._gizmoArmScale = 1.3;
+        this._gizmoArmScale = 1.0;
         this._gizmoHoverRaycaster = new THREE.Raycaster();
         this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
