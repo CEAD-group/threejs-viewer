@@ -1065,7 +1065,7 @@ function resolveToolbarVisible(options, urlParams) {
     const fromUrl = parseBoolOption(urlParams.get('toolbar'));
     if (fromUrl != null) return fromUrl;
     const fromOpt = parseBoolOption(options.toolbar);
-    return fromOpt != null ? fromOpt : false;
+    return fromOpt != null ? fromOpt : true;   // integration preview: menu shown by default
 }
 
 /**
