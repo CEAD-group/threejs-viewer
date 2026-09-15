@@ -3,9 +3,12 @@
 //
 // One implementation, two modes:
 //   - 'turntable' (default): yaw around world-Z, pitch around camera-local right.
-//                            Pitch is clamped so the view never flips through the pole.
+//                            Pitch is clamped so the view never flips through the pole;
+//                            a pitch away from the pole is always applied, so a drag
+//                            escapes a top/bottom view. Once forward is outside the
+//                            pole cone, camera.up is re-levelled to world +Z.
 //   - 'free':                yaw around camera-local up, pitch around camera-local right.
-//                            No world-up lock; horizon can tilt.
+//                            No world-up lock; horizon can tilt. Never auto-levelled.
 //
 // Click-to-pivot: a left-button pointerdown (no modifier) raycasts the registered
 // pickables. If a hit is found, `target` is moved to the hit point WITHOUT touching
@@ -393,20 +396,33 @@ class ViewerControls extends THREE.EventDispatcher {
         const offset = this._tmpV3.copy(cam.position).sub(this.target).applyQuaternion(q);
 
         if (activeMode === 'turntable') {
-            // Prospective forward after rotation = q * cam.quaternion * (0,0,-1).
-            const fwd = this._tmpV4.set(0, 0, -1)
-                .applyQuaternion(cam.quaternion)
-                .applyQuaternion(q);
+            const cosPole = Math.cos(POLE_EPS);
+            // Forward before and after: fwd = q * cam.quaternion * (0,0,-1).
+            const fwd = this._tmpV4.set(0, 0, -1).applyQuaternion(cam.quaternion);
+            const dotBefore = Math.abs(fwd.dot(this._worldZ));
+            fwd.applyQuaternion(q);
             const dotZ = Math.abs(fwd.dot(this._worldZ));
-            // If forward is within POLE_EPS of ±worldZ, reject the pitch component
-            // and re-apply only the yaw (reclaiming _tmpQ3 since q is no longer needed).
-            if (dotZ > Math.cos(POLE_EPS)) {
+            // Reject the pitch only when it lands inside the POLE_EPS cone AND
+            // brings forward closer to the pole than it already is (issue #202):
+            // a top/bottom view preset parks forward exactly on the pole, and a
+            // direction-blind cone test refused every mouse-sized pitch away
+            // from it, so the drag could only yaw. Yaw-only re-apply reclaims
+            // _tmpQ3 since q is no longer needed.
+            if (dotZ > cosPole && dotZ > dotBefore) {
                 const qYawOnly = this._tmpQ3.copy(qYaw);
                 offset.copy(cam.position).sub(this.target).applyQuaternion(qYawOnly);
                 cam.position.copy(this.target).add(offset);
                 cam.quaternion.premultiply(qYawOnly).normalize();
                 return;
             }
+            cam.position.copy(this.target).add(offset);
+            cam.quaternion.premultiply(q).normalize();
+            // Re-level once the orbit is outside the pole cone: the top/bottom
+            // presets set camera.up to +Y (world Z is parallel to the view
+            // there), and every later lookAt (framing, set_camera, setView)
+            // reads camera.up, which would come out rolled. Turntable only.
+            if (dotZ < cosPole) cam.up.copy(this._worldZ);
+            return;
         }
 
         cam.position.copy(this.target).add(offset);
