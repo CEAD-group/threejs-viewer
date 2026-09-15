@@ -6739,7 +6739,7 @@ _PROJECTION_STATE_JS = (
 )
 
 
-def _drag_canvas(page, button, steps=8, step_px=10):
+def _drag_canvas_button(page, button, steps=8, step_px=10):
     """Press ``button`` at the canvas centre and drag it rightwards."""
     c = page.evaluate(_CANVAS_CENTER_JS)
     page.mouse.move(c["x"], c["y"])
@@ -6762,7 +6762,7 @@ def test_pan_after_axis_snap_keeps_auto_ortho(viewer_client, viewer_page):
     before = viewer_page.evaluate(_PROJECTION_STATE_JS)
     assert before == {"ortho": True, "snap": "front", "auto": True}
 
-    _drag_canvas(viewer_page, "right")
+    _drag_canvas_button(viewer_page, "right")
     frames(viewer_page)
     after_pan = viewer_page.evaluate(_PROJECTION_STATE_JS)
     assert after_pan == {"ortho": True, "snap": "front", "auto": True}, (
@@ -6799,7 +6799,7 @@ def test_orbit_after_axis_snap_returns_to_perspective(viewer_client, viewer_page
         "auto": True,
     }
 
-    _drag_canvas(viewer_page, "left")
+    _drag_canvas_button(viewer_page, "left")
     frames(viewer_page)
     after_orbit = viewer_page.evaluate(_PROJECTION_STATE_JS)
     assert after_orbit == {"ortho": False, "snap": None, "auto": False}, (
@@ -6833,7 +6833,7 @@ def test_manual_ortho_survives_orbit_after_axis_snap(viewer_client, viewer_page)
         "auto": False,
     }
 
-    _drag_canvas(viewer_page, "left")
+    _drag_canvas_button(viewer_page, "left")
     frames(viewer_page)
     after_orbit = viewer_page.evaluate(_PROJECTION_STATE_JS)
     assert after_orbit == {"ortho": True, "snap": None, "auto": False}, (
