@@ -5630,7 +5630,9 @@ class MenuController {
             el.appendChild(st);
             if (it.shortcut) {
                 const kbd = document.createElement('kbd');
-                kbd.textContent = it.shortcut;
+                // Display only: the modifier word would not fit the 190px body.
+                kbd.textContent = it.shortcut.replace(/Shift\+/i, '\u21E7');
+                kbd.title = it.shortcut;
                 el.appendChild(kbd);
             }
             el.addEventListener('click', () => this._activate(m, rec));

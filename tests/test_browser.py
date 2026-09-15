@@ -5520,7 +5520,7 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
         ["Wireframe", "M"],
         ["Shading debug", "N"],
         ["Distance fog", "D"],
-        ["Eye-dome lighting", "Shift+D"],
+        ["Eye-dome lighting", "\u21e7D"],
         ["Frame all", "F"],
     ]
     # Camera tracking only shows once an animation with a track target exists.
