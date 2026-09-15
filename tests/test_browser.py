@@ -3894,6 +3894,35 @@ def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_move_gizmo_palette_matches_view_helper(viewer_client, viewer_page):
+    """The gizmo handles use three's ViewHelper axis colours (issue #191), so
+    the X / Y / Z arrows and the corner-gimbal bubbles agree on what each
+    axis looks like. Read off the lit arrow materials after a rendered
+    frame, so the per-frame restyle has already run."""
+    viewer_client.add_box("box")
+    settle(viewer_client)  # WS barrier: the box is registered before the attach
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
+    )
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const arrows = window.threejsViewer._transformGizmo.control
+                ._gizmo.gizmo.translate.children;
+            const hex = (name) => {
+                const o = arrows.find((c) => c.name === name && c.userData.__litArrow);
+                return o ? o.material.color.getHex() : null;
+            };
+            return { x: hex('X'), y: hex('Y'), z: hex('Z') };
+        }"""
+    )
+    # three r183 ViewHelper.js axis colours.
+    assert (r["x"], r["y"], r["z"]) == (0xFF4466, 0x88FF44, 0x4488FF), r
+
+
+@pytest.mark.browser
 def test_move_gizmo_mode_switch_and_disable(viewer_client, viewer_page):
     """setGizmoMode swaps to rotate; disable_move_gizmo detaches and hides it."""
     viewer_client.add_box("box")
