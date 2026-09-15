@@ -8945,7 +8945,7 @@ export class ThreeJSViewer {
         });
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
-        this._viewIsoBtn = q('.tjsv-view-iso');
+        this._viewOrbitBtn = q('.tjsv-view-orbit');
         this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
@@ -9978,7 +9978,28 @@ export class ThreeJSViewer {
         this._updateOrbitModeButton();
     }
 
-    _updateOrbitModeButton() { this._menus?.refresh(); }
+    /**
+     * Sync every orbit-mode indicator with `_orbitMode`: the viewer menu
+     * entry and the stack button left of the gimbal (glyph, `.free` accent,
+     * tooltip). Called from `_setOrbitMode`, so the R key, either control and
+     * a programmatic switch all land here.
+     */
+    _updateOrbitModeButton() {
+        this._menus?.refresh();
+        const isFree = this._orbitMode === 'free';
+        const btn = this._viewOrbitBtn;
+        if (btn) {
+            btn.classList.toggle('free', isFree);
+            btn.dataset.mode = this._orbitMode;
+            btn.title = isFree
+                ? 'Orbit: Free (no world-up lock). Click for Turntable (R)'
+                : 'Orbit: Turntable (Z-up locked). Click for Free (R)';
+        }
+    }
+
+    _toggleOrbitMode() {
+        this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+    }
 
     /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
@@ -11818,23 +11839,18 @@ export class ThreeJSViewer {
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
-        // Home button: bottom of the ISO / P / Home stack left of the gimbal; resets the view.
+        // Home button: bottom of the orbit / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
                 this.resetView();
                 this._viewHomeBtn.blur();
             });
         }
-        // ISO button: top of the ISO / P / Home stack left of the gimbal; snaps to the isometric
-        // view (the axis bubbles cover the six orthogonal views).
-        if (this._viewIsoBtn) {
-            this._viewIsoBtn.addEventListener('click', () => {
-                // A true isometric is orthographic by definition — ISO is a
-                // seventh snap under the auto-projection rule: it auto-enters
-                // ortho like the axis bubbles, and orbiting away returns to
-                // perspective (Thijs).
-                this._snapOrthoAxisView('iso');
-                this._viewIsoBtn.blur();
+        // Orbit-mode button: top of the stack; the same turntable <-> free flip as the R key.
+        if (this._viewOrbitBtn) {
+            this._viewOrbitBtn.addEventListener('click', () => {
+                this._toggleOrbitMode();
+                this._viewOrbitBtn.blur();
             });
         }
         // Projection indicator/toggle (P = perspective, O = ortho). A click is
@@ -11913,7 +11929,7 @@ export class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
-                this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+                this._toggleOrbitMode();
                 return;
             }
             // KeyS toggles strand_collapse on every tube that has both buffers
@@ -14401,8 +14417,8 @@ export class ThreeJSViewer {
      * framing) — with a short eased tween, and sets an axis-appropriate up
      * vector (top/bottom get +Y up so the view doesn't roll unpredictably).
      * Works with both the perspective and the orthographic camera. Also the
-     * implementation behind gimbal axis-bubble clicks, the ISO stack button,
-     * and the `set_view` WS message.
+     * implementation behind gimbal axis-bubble clicks and the `set_view` WS
+     * message ('iso' has no button; use setView or Python set_view).
      * @param {string} name
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
      */
@@ -14564,7 +14580,7 @@ export class ThreeJSViewer {
 
     /**
      * Push the toolbar's current height into both the cache (hit-test +
-     * render shim) and the --tjsv-anim-lift CSS var (ISO / P / Home stack).
+     * render shim) and the --tjsv-anim-lift CSS var (orbit / P / Home stack).
      * display:none yields 0, which matches the "toolbar hidden" state.
      * Called on show/hide (no arg → reads offsetHeight to flush layout and
      * get the post-transition height synchronously) and from the

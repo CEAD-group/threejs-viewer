@@ -125,8 +125,20 @@
     <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
 </div>
 
-<!-- ISO / P / Home stack, top to bottom, left of the view gimbal. -->
-<button class="tjsv-view-iso" title="Isometric view (orthographic) — orbit to return to perspective" aria-label="Isometric view">ISO</button>
+<!-- Orbit mode / P / Home stack, top to bottom, left of the view gimbal. -->
+<button class="tjsv-view-orbit" title="Orbit: Turntable (Z-up locked). Click for Free (R)" aria-label="Toggle orbit mode" data-mode="turntable">
+    <svg class="tjsv-orbit-glyph-turntable" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+        <ellipse cx="12" cy="14" rx="8" ry="3.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 14 V4 M9.5 15 L12.5 17.6 L9.5 20"
+              fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linejoin="round" stroke-linecap="round"/>
+    </svg>
+    <svg class="tjsv-orbit-glyph-free" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <ellipse cx="12" cy="12" rx="10" ry="3.5" transform="rotate(-35 12 12)"
+                 fill="none" stroke="currentColor" stroke-width="2"/>
+    </svg>
+</button>
 <button class="tjsv-view-proj" title="Projection: perspective — click for orthographic (O)" aria-label="Toggle projection">P</button>
 <button class="tjsv-view-home" title="Reset view (F)" aria-label="Reset view">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
