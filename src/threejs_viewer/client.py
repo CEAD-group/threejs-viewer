@@ -370,6 +370,22 @@ class _BlobServer(HTTPServer):
         self.blob_store = blob_store
 
 
+# Bind errors that mean "this machine has no usable IPv6", the only case in
+# which an IPv6 listener may be skipped. Anything else (EADDRINUSE, EACCES)
+# is a real failure: skipping it would start an IPv4-only client while the
+# browser may still resolve localhost to ::1.
+_IPV6_UNAVAILABLE_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EAFNOSUPPORT", "EADDRNOTAVAIL", "EPROTONOSUPPORT")
+    if hasattr(errno, name)
+)
+
+
+def _url_host(host: str) -> str:
+    """``host`` as it goes into a URL: IPv6 literals need brackets."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
 def _listen_sockets(host: str, port: int) -> List[socket.socket]:
     """Bind one listening socket per address ``host`` resolves to (issue #187).
 
@@ -379,8 +395,9 @@ def _listen_sockets(host: str, port: int) -> List[socket.socket]:
     not help (only the unspecified address ``::`` accepts both families), so
     the servers listen on every resolved address instead and the page keeps
     advertising ``host`` verbatim. IPv6 sockets are V6ONLY so the two
-    families never overlap on a wildcard host. An IPv6 address that fails to
-    bind (IPv6 disabled in the kernel or a container) is skipped. ``port=0``
+    families never overlap on a wildcard host. An IPv6 address is skipped
+    only when the error says IPv6 is unavailable (``_IPV6_UNAVAILABLE_ERRNOS``);
+    a port in use or a permission error raises like it always did. ``port=0``
     picks a free port on the first socket and reuses it for the rest,
     retrying when that port happens to be taken on another family.
     """
@@ -404,7 +421,7 @@ def _listen_sockets(host: str, port: int) -> List[socket.socket]:
                 if socks and port == 0 and exc.errno == errno.EADDRINUSE:
                     retry = True
                     break
-                if family == socket.AF_INET6:
+                if family == socket.AF_INET6 and exc.errno in _IPV6_UNAVAILABLE_ERRNOS:
                     log.warning(
                         "Not listening on [%s]:%s: %s", address, bound_port, exc
                     )
@@ -445,7 +462,10 @@ class ViewerClient:
 
         Args:
             host: Hostname the WebSocket / HTTP servers bind (every address
-                it resolves to) and the viewer page uses to reach them.
+                it resolves to) and the viewer page uses to reach them: it is
+                advertised verbatim in blob URLs and, when it is not
+                ``"localhost"``, passed to the viewer as the ``ws_host`` query
+                param so the WebSocket and the sidecar share one hostname.
             port: WebSocket port (HTTP blob sidecar listens on ``port + 1``).
             open_browser: Open the viewer in the system browser on ``connect()``.
             tone_mapping_exposure: Override the renderer's ``toneMappingExposure``
@@ -630,7 +650,8 @@ class ViewerClient:
     def viewer_url(self) -> str:
         """Full file:// URL to the viewer.
 
-        Always includes `ws_port`. Appends `tone_mapping`,
+        Always includes `ws_port`; adds `ws_host` when ``host`` is not
+        ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
         `ambient_intensity`, and/or `fov` query params when the caller passed
         explicit overrides —
@@ -638,6 +659,8 @@ class ViewerClient:
         win over the panel's localStorage on reload).
         """
         params: list[tuple[str, str]] = [("ws_port", str(self.port))]
+        if self.host != "localhost":
+            params.append(("ws_host", _url_host(self.host)))
         if self.tone_mapping is not None:
             params.append(("tone_mapping", self.tone_mapping))
         if self.tone_mapping_exposure is not None:
@@ -663,29 +686,40 @@ class ViewerClient:
         """
         ws_logger = logging.getLogger("websockets.server")
         ws_logger.setLevel(logging.CRITICAL)
+        # Sockets bound but not yet owned by a running server; closed on the
+        # error path so a failure halfway through leaks no listener.
+        pending: List[socket.socket] = []
         try:
-            http_socks = _listen_sockets(
+            pending = _listen_sockets(
                 self.host, self.port + 1 if http_port is None else http_port
             )
-            self._http_port = http_socks[0].getsockname()[1]
-            for sock in http_socks:
-                server = _BlobServer(sock, self._blob_store)
-                self._http_servers.append(server)
+            self._http_port = pending[0].getsockname()[1]
+            while pending:
+                server = _BlobServer(pending[0], self._blob_store)
                 # shutdown() blocks one poll interval per server; keep it short
                 # so disconnect() stays fast with several listeners.
                 threading.Thread(
                     target=server.serve_forever, args=(0.05,), daemon=True
                 ).start()
-            for sock in _listen_sockets(self.host, self.port):
+                # Listed only once its thread runs: HTTPServer.shutdown() waits
+                # for serve_forever to be entered, so an unstarted server in the
+                # list would deadlock disconnect().
+                self._http_servers.append(server)
+                pending.pop(0)
+            pending = _listen_sockets(self.host, self.port)
+            while pending:
                 server = sync_serve(
                     self._handle_connection,
-                    sock=sock,
+                    sock=pending[0],
                     max_size=256 * 1024 * 1024,
                     logger=ws_logger,
                 )
                 self._ws_servers.append(server)
+                pending.pop(0)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
-        except OSError:
+        except Exception:
+            for sock in pending:
+                sock.close()
             self.disconnect()
             raise
 
@@ -1368,7 +1402,9 @@ class ViewerClient:
         """
         blob_key = f"/blob_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = payload
-        header_dict["blob_url"] = f"http://{self.host}:{self._http_port}{blob_key}"
+        header_dict["blob_url"] = (
+            f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
+        )
         self._send(header_dict)
         return blob_key
 
@@ -2113,7 +2149,7 @@ class ViewerClient:
             self._blob_store[f"{key_base}/{i}"] = functools.partial(node_payload, i)
         self._points_lod[id] = key_base
 
-        base_url = f"http://{self.host}:{self._http_port}{key_base}"
+        base_url = f"http://{_url_host(self.host)}:{self._http_port}{key_base}"
         header = {
             "type": "add_points_lod",
             "id": id,
@@ -4109,7 +4145,7 @@ class ViewerClient:
             del self._blob_store[k]
         blob_key = f"/animation_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = binary_payload
-        blob_url = f"http://{self.host}:{self._http_port}{blob_key}"
+        blob_url = f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
 
         # Binary-channel animations skip reconnect replay — storing hundreds of MB
         # of typed arrays for re-send isn't worthwhile; the user re-runs the script.

@@ -6480,6 +6480,29 @@ def test_set_highlight_style_switch_rebuilds_in_place(viewer_client, viewer_page
     assert still_drawable
 
 
+# --- ws_host: WebSocket and sidecar on one non-default hostname (issue #187) ---
+
+
+@pytest.mark.browser
+def test_ws_host_param_routes_websocket_and_blobs_to_one_host(page):
+    """``ViewerClient(host="127.0.0.1")`` must connect the WebSocket to that
+    host (via ``ws_host``) and fetch blobs from it, not from localhost."""
+    client = _start_client(host="127.0.0.1")
+    try:
+        page.goto(client.viewer_url, timeout=90_000)
+        assert client._connected_event.wait(timeout=60)
+        assert page.evaluate("() => window.threejsViewer._wsUrl") == (
+            f"ws://127.0.0.1:{client.port}"
+        )
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        client.add_mesh("wh", positions, indices)
+        settle(client)
+        assert "wh" in client.query_scene()["objects"]
+    finally:
+        client.disconnect()
+
+
 # --- Firefox smoke test: sidecar fetch from a file:// page (issue #187) ---
 
 

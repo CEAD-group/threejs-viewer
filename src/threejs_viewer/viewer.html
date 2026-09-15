@@ -1354,7 +1354,7 @@ const CLIP_AXIS_NORMALS = {
 /**
  * @typedef {Object} ThreeJSViewerOptions
  * @property {string} htmlTemplate                        HTML template string for UI controls (required — constructor throws without it)
- * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://localhost:${port}` where port comes from the `ws_port` query param, `wsPort`, or 5666
+ * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://${host}:${port}` where host comes from the `ws_host` query param (default `localhost`) and port from the `ws_port` query param, `wsPort`, or 5666
  * @property {number} [wsPort]                            WebSocket port used when `wsUrl` is not provided (default 5666)
  * @property {boolean} [autoConnect]                      Auto-connect on construction (default true)
  * @property {Object<string, string>} [cubemapData]       Map of face name -> base64 JPEG
@@ -9195,7 +9195,11 @@ class ThreeJSViewer {
             this._wsUrl = options.wsUrl;
         } else {
             const port = options.wsPort || parseInt(urlParams.get('ws_port')) || 5666;
-            this._wsUrl = `ws://localhost:${port}`;
+            // ws_host is set by ViewerClient(host=...) so the WebSocket and the
+            // blob sidecar share one hostname (Firefox refuses cross-host
+            // sidecar fetches from a file:// page, issue #187).
+            const host = urlParams.get('ws_host') || 'localhost';
+            this._wsUrl = `ws://${host}:${port}`;
         }
 
         // Resolve lighting defaults. Precedence: URL param > options > localStorage > hard default.
