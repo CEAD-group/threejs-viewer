@@ -3799,7 +3799,7 @@ def test_move_gizmo_palette_matches_view_helper(viewer_client, viewer_page):
     axis looks like. Read off the lit arrow materials after a rendered
     frame, so the per-frame restyle has already run."""
     viewer_client.add_box("box")
-    time.sleep(0.2)
+    settle(viewer_client)  # WS barrier: the box is registered before the attach
     viewer_client.enable_move_gizmo("box")
     _wait_for(
         viewer_page,
