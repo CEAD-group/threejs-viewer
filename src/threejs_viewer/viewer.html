@@ -6355,6 +6355,9 @@ class CameraController {
             v._orthoCamera.bottom = -ORTHO_FRUSTUM;
             v._orthoCamera.position.copy(v._perspCamera.position);
             v._orthoCamera.quaternion.copy(v._perspCamera.quaternion);
+            // Hand over up too, so a turntable re-level lands on whichever
+            // camera is active next (issue #202).
+            v._orthoCamera.up.copy(v._perspCamera.up);
             v._orthoCamera.updateProjectionMatrix();
             v._camera = v._orthoCamera;
         } else {
@@ -6363,6 +6366,7 @@ class CameraController {
             const dir = v._orthoCamera.position.clone().sub(tgt).normalize();
             v._perspCamera.position.copy(tgt).addScaledVector(dir, dist);
             v._perspCamera.quaternion.copy(v._orthoCamera.quaternion);
+            v._perspCamera.up.copy(v._orthoCamera.up);
             v._perspCamera.aspect = aspect;
             v._perspCamera.updateProjectionMatrix();
             v._camera = v._perspCamera;

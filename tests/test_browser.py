@@ -5014,6 +5014,34 @@ def test_turntable_drag_toward_pole_never_flips(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_camera_switch_hands_over_up_for_relevel(viewer_client, viewer_page):
+    """`_switchCamera` copies `up` along with position and quaternion, so the
+    turntable re-level lands on whichever camera is active next. A perspective
+    `setView('top')` leaves +Y on the persp camera; the gimbal top click enters
+    ortho, and the drag auto-returns to perspective, which must then carry the
+    re-levelled +Z rather than the stale +Y."""
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v._controls.setMode('turntable');"
+        " v.setView('top', { animate: false }); v._gizmoAxisClick('top'); }"
+    )
+    _wait_view_tween_done(viewer_page)
+    before = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert before["ortho"] is True
+    persp_up = viewer_page.evaluate(
+        "() => { const u = window.threejsViewer._perspCamera.up; return [u.x, u.y, u.z]; }"
+    )
+    assert persp_up == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+
+    _drag_canvas(viewer_page, 0, 10)
+    after = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert after["ortho"] is False
+    assert abs(after["fwd"][2]) < _COS_POLE_EPS - 0.01, after
+    assert after["up"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6), after
+
+
+@pytest.mark.browser
 def test_free_mode_drag_keeps_camera_up(viewer_client, viewer_page):
     """Free mode is untouched by the turntable re-level: after a top snap and a
     vertical drag, camera.up keeps the preset's +Y instead of being reset to
