@@ -11850,6 +11850,9 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
+                        // Same ordering as add_mesh_binary: the pose lands
+                        // after registration so a pending re-parent sees it.
+                        if (data.transform) this._applyTransform(line, data.transform);
                         deferred.resolve();
                     } catch (e) {
                         this._reportLoadFailure(e, 'polyline',
@@ -11991,6 +11994,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(points, data.parent);
                         this._registerObject(data.id, points);
+                        if (data.transform) this._applyTransform(points, data.transform);
                         // Unlit point quads read flat without a depth cue —
                         // switch EDL on the first time a cloud appears (unless
                         // the user pinned it).
@@ -12110,6 +12114,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(group, data.parent);
                         this._registerObject(data.id, group);
+                        if (data.transform) this._applyTransform(group, data.transform);
                         // Sculpt the streaming octree nodes with EDL from the
                         // first frame (unless the user pinned the EDL state).
                         this._depthCue.maybeAutoEnableEdl();
