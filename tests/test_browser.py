@@ -5,16 +5,13 @@ import json
 import math
 import socket
 import struct
-import threading
 import time
-from http.server import HTTPServer
 
 import numpy as np
 import pytest
 
 from conftest import frames, settle
 from threejs_viewer import Animation, Frame, ViewerClient
-from threejs_viewer.client import _BlobHandler
 
 
 @pytest.mark.browser
@@ -2926,13 +2923,7 @@ def _start_client(**kwargs):
     """
     port = _free_port()
     client = ViewerClient(port=port, open_browser=False, **kwargs)
-    client._http_port = port + 1
-    http_server = HTTPServer((client.host, client._http_port), _BlobHandler)
-    http_server.blob_store = client._blob_store
-    client._http_server = http_server
-    threading.Thread(target=http_server.serve_forever, daemon=True).start()
-    client._server_thread = threading.Thread(target=client._run_server, daemon=True)
-    client._server_thread.start()
+    client._start_servers(http_port=0)
     return client
 
 
@@ -7265,3 +7256,86 @@ def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
         "}"
     )
     assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]
+# --- ws_host: WebSocket and sidecar on one non-default hostname (issue #187) ---
+
+
+@pytest.mark.browser
+def test_ws_host_param_routes_websocket_and_blobs_to_one_host(page):
+    """``ViewerClient(host="127.0.0.1")`` must connect the WebSocket to that
+    host (via ``ws_host``) and fetch blobs from it, not from localhost."""
+    client = _start_client(host="127.0.0.1")
+    try:
+        page.goto(client.viewer_url, timeout=90_000)
+        assert client._connected_event.wait(timeout=60)
+        assert page.evaluate("() => window.threejsViewer._wsUrl") == (
+            f"ws://127.0.0.1:{client.port}"
+        )
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        client.add_mesh("wh", positions, indices)
+        settle(client)
+        assert "wh" in client.query_scene()["objects"]
+    finally:
+        client.disconnect()
+
+
+# --- Firefox smoke test: sidecar fetch from a file:// page (issue #187) ---
+
+
+@pytest.mark.browser
+def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
+    """One binary asset must land under Firefox from a file:// viewer page.
+
+    Firefox treats a blob URL on a different host than the page's WebSocket
+    host as a cross-origin request and refuses it (#185 advertised
+    127.0.0.1 while the page used localhost). Chromium allows that, so the
+    Chromium-only suite never saw it; this test keeps the one-hostname
+    contract honest in the browser that enforces it.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    try:
+        # Headless Firefox on a GPU-less Linux runner refuses to create a WebGL
+        # context (the viewer constructor then throws before connect() runs);
+        # allow software rendering so it has a chance.
+        browser = playwright.firefox.launch(
+            firefox_user_prefs={
+                "webgl.force-enabled": True,
+                "webgl.forbid-software": False,
+                "gfx.webrender.software": True,
+            }
+        )
+    except PlaywrightError as exc:
+        pytest.skip(f"Firefox not installed for Playwright: {exc}")
+    try:
+        page = browser.new_page()
+        has_webgl2 = page.evaluate(
+            "() => !!document.createElement('canvas').getContext('webgl2')"
+        )
+        if not has_webgl2:
+            pytest.skip("Playwright Firefox cannot create a WebGL2 context here")
+        # Firefox has no devtools in the CI log; keep its console for the
+        # failure message so a non-connecting page explains itself.
+        log = []
+        page.on("console", lambda m: log.append(f"console[{m.type}]: {m.text}"))
+        page.on("pageerror", lambda e: log.append(f"pageerror: {e}"))
+        page.on(
+            "requestfailed", lambda r: log.append(f"requestfailed: {r.url} {r.failure}")
+        )
+        viewer_path = viewer_client.viewer_path.resolve()
+        page.goto(
+            f"{viewer_path.as_uri()}?ws_port={viewer_client.port}", timeout=90_000
+        )
+        assert viewer_client._connected_event.wait(timeout=120), (
+            "Firefox did not connect to the WebSocket server; page log:\n"
+            + "\n".join(log[-40:])
+        )
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        viewer_client.add_mesh("ff_mesh", positions, indices)
+        settle(viewer_client)
+        objects = viewer_client.query_scene()["objects"]
+        assert "ff_mesh" in objects, f"mesh did not load in Firefox: {sorted(objects)}"
+        assert objects["ff_mesh"]["type"] == "Mesh"
+    finally:
+        browser.close()

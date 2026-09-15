@@ -89,7 +89,7 @@ jobs:
         run: uv sync --locked --group browser-test
 
       - name: Install Playwright browsers
-        run: uv run playwright install --with-deps chromium
+        run: uv run playwright install --with-deps chromium firefox
 
       - name: Run browser tests
         run: uv run pytest -m browser -v

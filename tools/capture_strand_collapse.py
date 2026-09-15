@@ -11,8 +11,6 @@ are obvious, and writes a PNG to OUTPUT.
 import base64
 import socket
 import sys
-import threading
-from http.server import HTTPServer
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from threejs_viewer import ViewerClient  # noqa: E402
-from threejs_viewer.client import _BlobHandler  # noqa: E402
 
 # Same data as repro_min.py / tests/test_parametric_tube.py.
 _SPINE_W_H_B64 = (
@@ -119,12 +116,7 @@ def capture(
     port = _free_port()
     client = ViewerClient(port=port, open_browser=False)
 
-    client._http_port = port + 1
-    http_server = HTTPServer((client.host, client._http_port), _BlobHandler)
-    http_server.blob_store = client._blob_store
-    client._http_server = http_server
-    threading.Thread(target=http_server.serve_forever, daemon=True).start()
-    threading.Thread(target=client._run_server, daemon=True).start()
+    client._start_servers(http_port=0)
 
     spine, widths, heights = _decode_bead()
 
