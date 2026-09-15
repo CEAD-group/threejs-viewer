@@ -12,10 +12,8 @@ Panels emitted (same camera framing so they overlay):
 
 import socket
 import sys
-import threading
 import time
 import math
-from http.server import HTTPServer
 from pathlib import Path
 import numpy as np
 
@@ -25,7 +23,6 @@ OUT = Path(__file__).parent / "out"
 OUT.mkdir(exist_ok=True)
 from playwright.sync_api import sync_playwright  # noqa: E402
 from threejs_viewer import ViewerClient  # noqa: E402
-from threejs_viewer.client import _BlobHandler  # noqa: E402
 
 W0, H0 = 8.0, 3.0
 W_VAR = 0.18  # smooth width swing, fraction of W0 (peak-to-mean)
@@ -139,11 +136,7 @@ JS_WIRE = """(m)=>{const v=window.threejsViewer;let g=0;while(v._shading.wirefra
 
 
 def _serve(c):
-    h = HTTPServer((c.host, c._http_port), _BlobHandler)
-    h.blob_store = c._blob_store
-    c._http_server = h
-    threading.Thread(target=h.serve_forever, daemon=True).start()
-    threading.Thread(target=c._run_server, daemon=True).start()
+    c._start_servers(http_port=0)
 
 
 def _cam(pg, sp, lo, hi):
@@ -158,7 +151,6 @@ def run_input(R, tag):
     """Panel showing just the input data as a polyline (the spine)."""
     port = free()
     c = ViewerClient(port=port, open_browser=False)
-    c._http_port = free()
     _serve(c)
     sp, lo, hi = build(R=R)
     with sync_playwright() as p:
@@ -185,7 +177,6 @@ def run_input(R, tag):
 def run(R, sc, tag, wire=2):
     port = free()
     c = ViewerClient(port=port, open_browser=False)
-    c._http_port = free()
     _serve(c)
     sp, lo, hi = build(R=R)
     w, ht = widths_for(sp, lo, hi)
