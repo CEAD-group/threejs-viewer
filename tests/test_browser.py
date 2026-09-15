@@ -6555,3 +6555,37 @@ def test_add_points_lod_applies_transform(viewer_client, viewer_page):
             break
     assert got is not None
     assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_page):
+    """A LOD cloud scaled [1, 1, 4] must refine exactly like one scaled
+    [4, 4, 4]: the node-size estimate bounds the radius by the largest scale
+    component, so the stretched axis never stops refinement early. Under
+    ortho the estimate ignores camera position, so the wanted sets compare
+    exactly."""
+    pts = np.random.default_rng(5).random((20_000, 3)).astype(np.float32)
+    lod = {"node_capacity": 1000, "point_budget": 1_000_000, "refine_pixels": 100}
+    for cid, scale in (("s111", [1, 1, 1]), ("s114", [1, 1, 4]), ("s444", [4, 4, 4])):
+        viewer_client.add_points(cid, pts, lod=lod, scale=scale)
+    viewer_page.evaluate("() => window.threejsViewer._camController.switch(true)")
+    wanted = None
+    for _ in range(100):
+        time.sleep(0.05)
+        wanted = viewer_page.evaluate(
+            "() => {"
+            " const out = {};"
+            " for (const id of ['s111', 's114', 's444']) {"
+            "   const g = window.threejsViewer._objects.get(id);"
+            "   if (!g || !g.userData.pointsLOD) return null;"
+            "   out[id] = g.userData.pointsLOD.wanted.reduce((a, b) => a + b, 0);"
+            " }"
+            " return out;"
+            "}"
+        )
+        if wanted and wanted["s444"] > 1 and wanted["s114"] == wanted["s444"]:
+            break
+    assert wanted, "LOD clouds never appeared"
+    assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
+    assert wanted["s114"] == wanted["s444"], wanted
+    assert wanted["s111"] < wanted["s444"], wanted

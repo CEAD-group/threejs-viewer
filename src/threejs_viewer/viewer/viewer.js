@@ -186,8 +186,7 @@ function refreshRefs(refs, ids, map) {
 }
 
 // Scratch objects for the points-LOD traversal. Module-scope to avoid per-frame alloc.
-const _lodInvMat = new THREE.Matrix4();
-const _lodCamLocal = new THREE.Vector3();
+const _lodNodeWorld = new THREE.Vector3();
 const _lodScaleVec = new THREE.Vector3();
 const _lodBoundsBox = new THREE.Box3();
 
@@ -9761,12 +9760,13 @@ export class ThreeJSViewer {
         const cam = /** @type {any} */ (this._camera);
         const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
 
-        // Camera position in cloud-local space; group world scale (assumed
-        // uniform) folds into the ortho path only — in the perspective
-        // ratio r/dist it cancels.
-        _lodInvMat.copy(group.matrixWorld).invert();
-        _lodCamLocal.copy(cam.position).applyMatrix4(_lodInvMat);
-        const worldScale = _lodScaleVec.setFromMatrixScale(group.matrixWorld).x;
+        // Node size is estimated in world space. The group may carry a
+        // non-uniform scale (add_points scale=[1, 1, 100]), so the node
+        // radius is bounded by its largest scale component: a smaller
+        // estimate would stop refinement early on the stretched axis.
+        const mw = group.matrixWorld;
+        const sv = _lodScaleVec.setFromMatrixScale(mw);
+        const worldScale = Math.max(sv.x, sv.y, sv.z);
         const isPersp = !!cam.isPerspectiveCamera;
         const projFactor = isPersp
             ? canvasH / (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)))
@@ -9774,12 +9774,12 @@ export class ThreeJSViewer {
 
         /** @param {number} i */
         const pxOf = (i) => {
-            const r = nodes.halfs[i] * SQRT3;
-            if (!isPersp) return 2 * r * worldScale * projFactor;
-            const dx = _lodCamLocal.x - nodes.centers[3 * i];
-            const dy = _lodCamLocal.y - nodes.centers[3 * i + 1];
-            const dz = _lodCamLocal.z - nodes.centers[3 * i + 2];
-            const dist = Math.max(1e-9, Math.sqrt(dx * dx + dy * dy + dz * dz));
+            const r = nodes.halfs[i] * SQRT3 * worldScale;
+            if (!isPersp) return 2 * r * projFactor;
+            _lodNodeWorld.set(
+                nodes.centers[3 * i], nodes.centers[3 * i + 1], nodes.centers[3 * i + 2],
+            ).applyMatrix4(mw);
+            const dist = Math.max(1e-9, _lodNodeWorld.distanceTo(cam.position));
             return (2 * r / dist) * projFactor;
         };
 
