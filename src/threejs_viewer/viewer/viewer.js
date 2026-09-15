@@ -124,6 +124,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
+ * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  */
 
 /**
@@ -970,6 +971,11 @@ async function fetchArrayBuffer(url, what, signal) {
 // here. A fetch-stage failure on a load that still looks live is therefore
 // re-checked after this grace before it is reported loudly.
 const SUPERSEDED_FETCH_GRACE_MS = 500;
+
+// Pointer travel (px) between pointerdown and pointerup past which a release is
+// an orbit/pan drag, not a click. Shared by object click (issue #178), gizmo
+// click-select, and polyline picking so every click path agrees on the gesture.
+const CLICK_DRAG_MAX_PX = 5;
 
 // Abort-tracking key for the (id-less) animation blob fetch. A Symbol rather
 // than a reserved string: _loadAborts is a Map, which takes any key type, and
@@ -7049,7 +7055,7 @@ class PolylinePickController {
         this._downValid = false;
         if (!this.enabled) return;
         // A drag (the pointer travelled) is an orbit/pan, not a pick.
-        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > 5) return;
+        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > CLICK_DRAG_MAX_PX) return;
         // Re-pick at the release position rather than trusting stale hover state.
         const pick = this._pickAt(e.clientX, e.clientY);
         if (pick) {
@@ -7858,7 +7864,7 @@ class TransformGizmoController {
         // A handle drag was the gesture, not a select-click — consume it.
         if (this._interacted) { this._interacted = false; return; }
         if (this.control.dragging || this.control.axis != null) return;
-        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > 5) return;   // a drag = orbit
+        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > CLICK_DRAG_MAX_PX) return;   // a drag = orbit
         const hit = this._pickObject(e.clientX, e.clientY);
         if (hit) this.attach(hit.object, hit.id);
     }
@@ -8121,6 +8127,13 @@ export class ThreeJSViewer {
         // claimed the type.
         /** @type {Array<(data: any) => void>} */
         this._unknownMessageHooks = [];
+        // Object click (issue #178): JS hooks plus the WS-send switch set by
+        // Python's enable_object_click(). The pointerup handler raycasts only
+        // when one of them wants the result, so an idle viewer pays nothing.
+        this._objectClickHooks = [];
+        this._objectClickEnabled = false;
+        // Double-click framing (issue #177): off for embedders that own dblclick.
+        this._dblclickFrame = options.dblclickFrame !== false;
 
         // Embedder asset-load hooks (issue #163). Binary payloads (models,
         // meshes, polylines, tubes, point-cloud nodes, animations) are
@@ -8544,29 +8557,71 @@ export class ThreeJSViewer {
             }
         });
         // Double-click an object to frame it; double-click empty space to reset.
-        this._dblclickRaycaster = new THREE.Raycaster();
-        this._dblclickRaycaster.params.Line.threshold = 0.05;
-        this._dblclickRaycaster.params.Points.threshold = 0.05;
+        // Gated by the dblclickFrame option (issue #177) so an embedder can own
+        // dblclick for selection without a camera jump on every select.
+        this._objectClickRaycaster = new THREE.Raycaster();
+        this._objectClickRaycaster.params.Line.threshold = 0.05;
+        this._objectClickRaycaster.params.Points.threshold = 0.05;
         this._renderer.domElement.addEventListener('dblclick', (e) => {
-            const rect = this._renderer.domElement.getBoundingClientRect();
-            const ndc = new THREE.Vector2(
-                ((e.clientX - rect.left) / rect.width) * 2 - 1,
-                -((e.clientY - rect.top) / rect.height) * 2 + 1,
-            );
-            this._dblclickRaycaster.setFromCamera(ndc, this._camera);
-            const candidates = [];
-            for (const obj of this._objects.values()) {
-                if (obj && obj.visible) candidates.push(obj);
-            }
-            const hits = this._dblclickRaycaster.intersectObjects(candidates, true);
-            if (!hits.length) { this.resetView(); return; }
-            // Walk up to the top-level object the user added (a value of _objects).
-            const objSet = new Set(this._objects.values());
-            let target = hits[0].object;
-            while (target && !objSet.has(target)) target = target.parent;
-            if (!target) { this.resetView(); return; }
-            this.frameObject(target);
+            if (!this._dblclickFrame) return;
+            const hit = this._hitTrackedObject(e.clientX, e.clientY);
+            if (hit) this.frameObject(hit.object); else this.resetView();
         });
+        // Single-click object pick (issue #178). Fires on pointerup rather than
+        // `click` so the button is known and a right-click reports too. A press
+        // that lands on a TransformControls handle is not a click candidate
+        // (the gizmo owns that gesture), and neither is a release after the
+        // pointer travelled (an orbit/pan) or one that lands on a handle or a
+        // view-gimbal bubble. Runs before the gizmo controller's own window
+        // pointerup (registered later) and before `dblclick`, so a consumer
+        // that also listens to dblclick can cache this pick instead of
+        // re-raycasting into a moving camera.
+        // Handlers are stored so destroy() can remove them; a cancelled touch
+        // or pen press is dropped so a later pointerup cannot turn it into a click.
+        this._objectClickDown = null;
+        this._onObjectClickDown = (e) => {
+            this._objectClickDown = this._gizmoHandleHovered()
+                ? null
+                : { x: e.clientX, y: e.clientY, button: e.button, pointerId: e.pointerId };
+        };
+        this._onObjectClickCancel = () => { this._objectClickDown = null; };
+        this._onObjectClickUp = (e) => {
+            const down = this._objectClickDown;
+            if (!down) return;
+            this._objectClickDown = null;
+            if (this._destroyed) return;
+            if (e.pointerId !== down.pointerId || e.button !== down.button) return;
+            const wsOpen = !!this._ws && this._ws.readyState === WebSocket.OPEN;
+            if (!this._objectClickHooks.length && !(this._objectClickEnabled && wsOpen)) return;
+            if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_DRAG_MAX_PX) return;
+            if (this._gizmoHandleHovered() || this._gizmoHitTest(e).hit) return;
+            const hit = this._hitTrackedObject(e.clientX, e.clientY);
+            const modifiers = { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey };
+            if (this._objectClickEnabled && wsOpen) {
+                this._ws.send(JSON.stringify({
+                    type: 'object_clicked',
+                    id: hit ? hit.id : null,
+                    point: hit ? [hit.point.x, hit.point.y, hit.point.z] : null,
+                    button: e.button,
+                    modifiers,
+                }));
+            }
+            if (this._objectClickHooks.length) {
+                const payload = {
+                    id: hit ? hit.id : null,
+                    point: hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null,
+                    button: e.button,
+                    modifiers,
+                    object3D: hit ? hit.object : null,
+                };
+                for (const cb of [...this._objectClickHooks]) {
+                    try { cb(payload); } catch (err) { console.error('onObjectClick hook error', err); }
+                }
+            }
+        };
+        this._renderer.domElement.addEventListener('pointerdown', this._onObjectClickDown);
+        window.addEventListener('pointerup', this._onObjectClickUp);
+        window.addEventListener('pointercancel', this._onObjectClickCancel);
 
         // Polyline point-picking (opt-in; enabled from Python via
         // set_polyline_picking). Hover shows a marker on the nearest line, a
@@ -13172,6 +13227,9 @@ export class ThreeJSViewer {
                 this._depthCue.setEdl(data.enabled !== false, opts);
                 break;
             }
+            case 'set_object_click':
+                this.setObjectClickEnabled(!!data.enabled);
+                break;
             case 'set_polyline_picking':
                 if (data.enabled) {
                     this._polylinePick.enable({
@@ -14183,6 +14241,102 @@ export class ThreeJSViewer {
         };
     }
 
+    // ========== Object click / dblclick framing (issues #177, #178) ==========
+
+    /**
+     * Turn the built-in double-click behaviour (frame the hit object, reset
+     * the view on a miss) on or off at runtime. Same switch as the
+     * `dblclickFrame` constructor option.
+     * @param {boolean} enabled
+     */
+    setDblclickFrame(enabled) { this._dblclickFrame = !!enabled; }
+
+    /**
+     * Register a hook fired on a stationary single click on the canvas
+     * (pointer travel under `CLICK_DRAG_MAX_PX`, release not on a gizmo
+     * handle or a view-gimbal bubble). Payload: `{id, point, button,
+     * modifiers, object3D}`. `id` is the top-level tracked id of the nearest
+     * hit (a GLTF sub-mesh resolves to its model's id) and `point` its
+     * world-space hit `{x,y,z}`; both are `null` for a click on empty space,
+     * which is reported too so a consumer can deselect on it. `button` is
+     * the `PointerEvent.button` (0 left, 1 middle, 2 right) and `modifiers`
+     * is `{shift, ctrl, alt, meta}`. The raycast is the double-click one
+     * (visible top-level objects, lines and points included) and runs only
+     * while a hook is registered or Python has enabled the WS event.
+     * @param {(p: {id: string|null, point: {x:number,y:number,z:number}|null, button: number, modifiers: {shift:boolean,ctrl:boolean,alt:boolean,meta:boolean}, object3D: THREE.Object3D|null}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onObjectClick(cb) {
+        this._objectClickHooks.push(cb);
+        return () => {
+            const i = this._objectClickHooks.indexOf(cb);
+            if (i >= 0) this._objectClickHooks.splice(i, 1);
+        };
+    }
+
+    /**
+     * Enable/disable the `object_clicked` WebSocket event (the switch behind
+     * Python's `enable_object_click()` / `set_object_click` message). JS hooks
+     * registered with `onObjectClick` fire regardless of this flag.
+     * @param {boolean} enabled
+     */
+    setObjectClickEnabled(enabled) { this._objectClickEnabled = !!enabled; }
+
+    /**
+     * True while any move/rotate gizmo handle is hovered or dragged, so a
+     * press or release there is the gizmo's gesture rather than a click.
+     * @returns {boolean}
+     */
+    _gizmoHandleHovered() {
+        const tg = this._transformGizmo;
+        if (!tg || !tg.enabled) return false;
+        for (const g of tg._allGizmos()) {
+            if (g.control.dragging || g.control.axis != null) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Raycast the visible tracked objects from a viewport position and resolve
+     * the nearest hit to its top-level tracked object. Shared by the dblclick
+     * framing handler and the object-click event so both agree on what "the
+     * object under the cursor" is. Unlike `pick()` this includes lines and
+     * point clouds. A tracked object under a hidden ancestor (a child of a
+     * group hidden with set_visibility) is skipped: three's raycaster does
+     * not check visibility, and unrendered content must not report a click.
+     * @param {number} clientX @param {number} clientY
+     * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
+     */
+    _hitTrackedObject(clientX, clientY) {
+        const rect = this._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const ndc = new THREE.Vector2(
+            ((clientX - rect.left) / rect.width) * 2 - 1,
+            -((clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        this._objectClickRaycaster.setFromCamera(ndc, this._camera);
+        /** @type {THREE.Object3D[]} */
+        const candidates = [];
+        /** @type {Map<THREE.Object3D, string>} */
+        const ids = new Map();
+        for (const [id, obj] of this._objects) {
+            if (!obj) continue;
+            let shown = true;
+            for (let n = obj; n; n = n.parent) {
+                if (n.visible === false) { shown = false; break; }
+            }
+            if (shown) { candidates.push(obj); ids.set(obj, id); }
+        }
+        if (!candidates.length) return null;
+        const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
+        if (!hits.length) return null;
+        // Walk up to the top-level object the user added (a value of _objects).
+        let target = hits[0].object;
+        while (target && !ids.has(target)) target = target.parent;
+        if (!target) return null;
+        return { object: target, id: /** @type {string} */ (ids.get(target)), point: hits[0].point };
+    }
+
     /**
      * Register a hook fired on every asset-fetch start and every fetch
      * completion, with the same snapshot `getLoadState()` returns
@@ -14492,6 +14646,11 @@ export class ThreeJSViewer {
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
+        this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
+        window.removeEventListener('pointerup', this._onObjectClickUp);
+        window.removeEventListener('pointercancel', this._onObjectClickCancel);
+        this._objectClickDown = null;
+        this._objectClickHooks.length = 0;
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();
