@@ -7377,6 +7377,8 @@ def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_pa
     assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
     assert wanted["s114"] == wanted["s444"], wanted
     assert wanted["s111"] < wanted["s444"], wanted
+
+
 _ZOOM_PROJECT_JS = """([x, y, z]) => {
     const v = window.threejsViewer;
     const THREE = window.tjsv.THREE;
@@ -7526,6 +7528,8 @@ def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_pa
         "}"
     )
     assert moved is False
+
+
 # Object click (issue #178) and dblclick framing switch (issue #177).
 
 
@@ -7807,6 +7811,8 @@ def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
         "}"
     )
     assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]
+
+
 # --- ws_host: WebSocket and sidecar on one non-default hostname (issue #187) ---
 
 
