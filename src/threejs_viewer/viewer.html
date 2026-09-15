@@ -30,74 +30,59 @@
             --tjsv-text-dim: #999;
             --tjsv-text-faint: #666;
             --tjsv-primary: #0066cc;
+            --tjsv-primary-hi: #0077e6;
             --tjsv-radius: 4px;
             --tjsv-font-size: 12px;
         }
 
         /* ---- Menus ----
-           Three hosts: the top-right bar of dropdown buttons (.tjsv-menubar), the
-           stack of always-open panels below it (.tjsv-overlay-tr), and the top-left
-           row of inline bars (.tjsv-overlay-tl). Every menu root is built by
-           MenuController; the viewer's own options menu is the first dropdown. */
-        .threejs-viewer .tjsv-menubar {
+           ribweaver's rail, verbatim: each menu is a vertical tab folded against the
+           right edge; clicking it slides the body out. Tabs stack top to bottom
+           (MenuController._layoutRail measures each tab). */
+        .threejs-viewer .tjsv-rail {
             position: absolute;
-            top: 10px;
-            right: 10px;
-            display: flex;
-            justify-content: flex-end;
-            align-items: flex-start;
-            gap: 6px;
-            user-select: none;
-            z-index: 8;
-        }
-        .threejs-viewer .tjsv-overlay-tr {
-            position: absolute;
-            top: 44px;
-            right: 10px;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 6px;
-            user-select: none;
-            z-index: 7;
+            inset: 0;
             pointer-events: none;
-        }
-        .threejs-viewer .tjsv-overlay-tr > * { pointer-events: auto; }
-        .threejs-viewer .tjsv-overlay-tl {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 6px;
             user-select: none;
             z-index: 7;
         }
-        .threejs-viewer .tjsv-menu-root { position: relative; }
-        .threejs-viewer .tjsv-menu-root[hidden] { display: none; }
-
-        /* Dropdown button */
-        .threejs-viewer .tjsv-menu-btn {
-            background: var(--tjsv-float-bg);
-            border: 1px solid var(--tjsv-border);
-            color: var(--tjsv-text-dim);
-            height: 28px;
-            padding: 0 8px;
-            border-radius: var(--tjsv-radius);
+        .threejs-viewer .tjsv-rail-panel {
+            position: absolute;
+            top: var(--tjsv-rail-top, 16px);
+            right: 0;
+            display: flex;
+            align-items: flex-start;
+            transform: translateX(var(--tjsv-body-w, 190px));
+            transition: transform 0.18s ease;
+            pointer-events: none;   /* children re-enable; the gap stays click-through */
+        }
+        .threejs-viewer .tjsv-rail-panel.open { transform: translateX(0); }
+        .threejs-viewer .tjsv-rail-panel[hidden] { display: none; }
+        .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn {
+            pointer-events: auto;
+            flex: 0 0 auto;
+            align-self: flex-start;
+            padding: 8px 3px;
+            margin: 0;
             cursor: pointer;
             font: inherit;
-            font-size: 13px;
+            font-size: 11px;
+            color: var(--tjsv-text);
+            background: rgba(34, 34, 34, 0.9);
+            border: 1px solid var(--tjsv-border);
+            border-right: none;
+            border-radius: 4px 0 0 4px;
+            backdrop-filter: blur(2px);
             display: flex;
+            flex-direction: column;
             align-items: center;
             gap: 6px;
-            backdrop-filter: blur(2px);
-            transition: background 0.15s, color 0.15s;
         }
-        .threejs-viewer .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); color: var(--tjsv-text); }
-        .threejs-viewer .tjsv-menu-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+        .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); }
+        .threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
         .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
         .threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
+        .threejs-viewer .tjsv-menu-btn-label { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.06em; }
         .threejs-viewer .tjsv-status-dot {
             width: 8px;
             height: 8px;
@@ -110,82 +95,94 @@
         .threejs-viewer .tjsv-status-dot.disconnected { background: #cc3333; }
         /* Embedder-set neutral state (setStatus / autoConnect:false — no backend expected) */
         .threejs-viewer .tjsv-status-dot.neutral { background: #8a8a8a; }
-
-        /* Body: the dropdown and the pinned panel share it */
-        .threejs-viewer .tjsv-menu {
-            min-width: 200px;
+        .threejs-viewer .tjsv-rail-panel > .tjsv-menu {
+            pointer-events: auto;
+            width: var(--tjsv-body-w, 190px);
             box-sizing: border-box;
-            background: var(--tjsv-float-bg);
-            border: 1px solid var(--tjsv-border);
-            border-radius: var(--tjsv-radius);
-            padding: 4px;
-            backdrop-filter: blur(3px);
-            display: flex;
-            flex-direction: column;
-            color: var(--tjsv-text);
-            font-size: var(--tjsv-font-size);
-        }
-        .threejs-viewer .tjsv-menu-dropdown > .tjsv-menu {
-            position: absolute;
-            top: 34px;
-            right: 0;
-            z-index: 10;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-            max-height: calc(100vh - 60px);
+            max-height: calc(100% - 8px);
             overflow-y: auto;
+            background: rgba(30, 30, 30, 0.94);
+            border: 1px solid var(--tjsv-border);
+            border-right: none;
+            /* Square top-left (flush against the tab it opens beside); bottom-left rounded. */
+            border-radius: 0 0 0 4px;
+            backdrop-filter: blur(3px);
+            /* Extra right padding: a stacked tab below can overlap an open body's
+               right edge, so rows keep clear of it. */
+            padding: 6px 26px 8px 8px;
+            color: var(--tjsv-text);
+            font-size: 12px;
         }
-        .threejs-viewer .tjsv-menu[hidden] { display: none; }
         .threejs-viewer .tjsv-menu-status {
             color: var(--tjsv-text-dim);
             font-family: monospace;
             font-size: 11px;
-            padding: 4px 8px 6px;
+            margin: 2px 0 5px;
             border-bottom: 1px solid var(--tjsv-border);
-            margin-bottom: 4px;
+            padding-bottom: 3px;
             white-space: nowrap;
         }
-        .threejs-viewer .tjsv-menu-title,
+        .threejs-viewer .tjsv-menu-title {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--tjsv-text-dim);
+            margin: 2px 0 5px;
+            border-bottom: 1px solid var(--tjsv-border);
+            padding-bottom: 3px;
+        }
         .threejs-viewer .tjsv-menu-caption {
             font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--tjsv-text-dim);
-            padding: 4px 8px 3px;
-            white-space: nowrap;
+            margin: 6px 0 2px;
         }
-        .threejs-viewer .tjsv-menu-title { border-bottom: 1px solid var(--tjsv-border); margin-bottom: 4px; }
-        .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 4px 0; }
-        .threejs-viewer .tjsv-menu-custom { padding: 4px 8px; }
+        .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 6px 0; }
+        .threejs-viewer .tjsv-menu-custom { margin: 2px 0; }
 
-        /* Rows: buttons, toggles, eyes */
+        /* Rows: toggles and eyes (np-item) */
         .threejs-viewer .tjsv-menu-item {
-            background: none;
-            border: 1px solid transparent;
-            color: var(--tjsv-text);
-            height: 28px;
-            padding: 0 8px;
-            border-radius: var(--tjsv-radius);
-            cursor: pointer;
-            font: inherit;
-            font-size: var(--tjsv-font-size);
             display: flex;
             align-items: center;
-            gap: 8px;
-            text-align: left;
-            white-space: nowrap;
+            gap: 7px;
             width: 100%;
             box-sizing: border-box;
-            transition: background 0.15s, color 0.15s;
+            padding: 4px 5px;
+            margin: 1px 0;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            background: none;
+            color: var(--tjsv-text);
+            font: inherit;
+            font-size: 12px;
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
         }
-        .threejs-viewer .tjsv-menu-item:hover:not(.disabled) { background: var(--tjsv-panel-3); color: #fff; }
+        .threejs-viewer .tjsv-menu-item:hover:not(.disabled) { background: var(--tjsv-panel-3); }
         .threejs-viewer .tjsv-menu-item.disabled { color: var(--tjsv-text-faint); cursor: default; }
         .threejs-viewer .tjsv-menu-item[hidden] { display: none; }
         .threejs-viewer .tjsv-menu-item.off .tjsv-menu-label { color: var(--tjsv-text-dim); }
         .threejs-viewer .tjsv-menu-item:focus { outline: none; }
         .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: -2px; }
+        .threejs-viewer .tjsv-menu-label { flex: 1; }
+        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
+        .threejs-viewer .tjsv-menu kbd {
+            font-family: monospace;
+            font-size: 10px;
+            color: var(--tjsv-text-dim);
+            background: var(--tjsv-panel-2);
+            border: 1px solid var(--tjsv-border);
+            border-radius: 3px;
+            padding: 0 4px;
+            min-width: 12px;
+            text-align: center;
+        }
+        /* Eye mark (toggle--display) */
         .threejs-viewer .tjsv-menu-mark {
-            width: 14px;
-            height: 14px;
+            width: 16px;
+            height: 16px;
             flex-shrink: 0;
             display: flex;
             align-items: center;
@@ -193,37 +190,69 @@
             color: var(--tjsv-text-faint);
         }
         .threejs-viewer .tjsv-menu-mark svg { width: 15px; height: 15px; display: block; }
-        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark { color: var(--tjsv-primary); }
-        /* Buttons and toggles: a dot mark when active; eyes draw their own glyph */
-        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark:empty::before {
-            content: '';
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: var(--tjsv-primary);
+        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark { color: var(--tjsv-primary-hi); }
+        /* Pill mark (default toggle) */
+        .threejs-viewer .tjsv-toggle-track {
+            position: relative;
+            flex: 0 0 auto;
+            width: 26px;
+            height: 15px;
+            border-radius: 8px;
+            background: var(--tjsv-panel-3);
+            border: 1px solid var(--tjsv-border);
+            transition: background 0.15s ease, border-color 0.15s ease;
         }
-        .threejs-viewer .tjsv-menu-label { flex: 1; }
-        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
-        .threejs-viewer .tjsv-menu-item kbd {
-            font-family: monospace;
-            font-size: 11px;
-            color: var(--tjsv-text-dim);
+        .threejs-viewer .tjsv-toggle-thumb {
+            position: absolute;
+            top: 1.5px;
+            left: 1.5px;
+            width: 11px;
+            height: 11px;
+            border-radius: 50%;
+            background: var(--tjsv-text-dim);
+            transition: transform 0.15s ease, background 0.15s ease;
+        }
+        .threejs-viewer .tjsv-menu-item.active .tjsv-toggle-track { background: var(--tjsv-primary); border-color: var(--tjsv-primary); }
+        .threejs-viewer .tjsv-menu-item.active .tjsv-toggle-thumb { transform: translateX(11px); background: #fff; }
+        .threejs-viewer .tjsv-menu-item.disabled .tjsv-toggle-track { opacity: 0.4; }
+
+        /* Actions (np-action): a full-width button */
+        .threejs-viewer .tjsv-menu-action {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            width: 100%;
+            box-sizing: border-box;
+            margin: 2px 0;
+            padding: 4px 8px;
+            font: inherit;
+            font-size: 12px;
+            color: var(--tjsv-text);
             background: var(--tjsv-panel-2);
             border: 1px solid var(--tjsv-border);
             border-radius: 3px;
-            padding: 1px 5px;
-            min-width: 14px;
-            text-align: center;
+            cursor: pointer;
+            transition: background 0.1s, border-color 0.1s;
+            white-space: nowrap;
         }
+        .threejs-viewer .tjsv-menu-action:hover:not(:disabled) { background: var(--tjsv-panel-3); }
+        .threejs-viewer .tjsv-menu-action:disabled { opacity: 0.4; cursor: not-allowed; }
+        .threejs-viewer .tjsv-menu-action.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+        .threejs-viewer .tjsv-menu-action.active kbd,
+        .threejs-viewer .tjsv-menu-action.active .tjsv-menu-state { color: #fff; opacity: 0.8; }
+        .threejs-viewer .tjsv-menu-action[hidden] { display: none; }
+        .threejs-viewer .tjsv-menu-action .tjsv-menu-label { flex: 1; text-align: center; }
+        .threejs-viewer .tjsv-menu-action:focus { outline: none; }
+        .threejs-viewer .tjsv-menu-action:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
 
         /* Rows with a control: select, segmented */
         .threejs-viewer .tjsv-menu-row {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 2px 8px;
-            min-height: 28px;
-            box-sizing: border-box;
+            gap: 6px;
+            padding: 3px 5px;
+            margin: 1px 0;
             white-space: nowrap;
         }
         .threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 11px; }
@@ -237,14 +266,17 @@
             font: inherit;
             font-size: 11px;
             padding: 2px 4px;
-            min-width: 90px;
+            min-width: 0;
+            flex: 1;
         }
-        .threejs-viewer .tjsv-segmented { display: flex; gap: 0; }
+        .threejs-viewer .tjsv-menu-select:focus { outline: none; border-color: var(--tjsv-primary); }
+        .threejs-viewer .tjsv-segmented { display: flex; flex: 1; gap: 0; min-width: 0; }
         .threejs-viewer .tjsv-seg-btn {
+            flex: 1;
             background: var(--tjsv-panel-2);
             border: 1px solid var(--tjsv-border);
             color: var(--tjsv-text-dim);
-            padding: 2px 8px;
+            padding: 2px 6px;
             font: inherit;
             font-size: 11px;
             cursor: pointer;
@@ -255,34 +287,6 @@
         .threejs-viewer .tjsv-seg-btn:last-child { border-radius: 0 3px 3px 0; }
         .threejs-viewer .tjsv-seg-btn:hover:not(:disabled) { color: var(--tjsv-text); }
         .threejs-viewer .tjsv-seg-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
-
-        /* Bar mode: the items inline as one segmented cluster */
-        .threejs-viewer .tjsv-menu-bar-items {
-            display: flex;
-            align-items: center;
-            gap: 0;
-            background: var(--tjsv-float-bg);
-            border: 1px solid var(--tjsv-border);
-            border-radius: var(--tjsv-radius);
-            padding: 2px;
-            backdrop-filter: blur(2px);
-            color: var(--tjsv-text);
-            font-size: 11px;
-        }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item {
-            width: auto;
-            height: 24px;
-            padding: 0 8px;
-            gap: 6px;
-            font-size: 11px;
-        }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active { background: var(--tjsv-primary); color: #fff; }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active .tjsv-menu-mark { color: #fff; }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active .tjsv-menu-mark:empty::before { background: #fff; }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-mark:empty { display: none; }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-divider { width: 1px; height: 18px; margin: 0 4px; }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-caption { padding: 0 6px; }
-        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-row { padding: 0 4px; min-height: 24px; }
 
         /* Animation Controls */
         .threejs-viewer .tjsv-animation-controls {
@@ -840,12 +844,9 @@ const DRACO_DECODER_DATA = {
 };
 
 const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds every menu into these,
-     including the viewer's own options menu: the top-right bar of dropdown
-     buttons, the stack of pinned panels below it, and the top-left row of
-     inline bars. -->
-<div class="tjsv-menubar tjsv-toolbar"></div>
-<div class="tjsv-overlay-tr"></div>
-<div class="tjsv-overlay-tl"></div>
+     including the viewer's own options menu: a rail of vertical tabs folded
+     against the right edge whose bodies slide out on click. -->
+<div class="tjsv-rail tjsv-toolbar"></div>
 
 <div class="tjsv-clipping-panel">
     <h3>Clipping Plane <button class="tjsv-clip-close" title="Close (C)">&times;</button></h3>
@@ -6808,11 +6809,13 @@ class CameraController {
 // controller owns DOM, styling, placement, open/close, persistence, eye
 // visibility and shortcut display; the caller owns content and callbacks.
 //
-// MENU  { id, label, icon, title, placement: 'top-right'|'top-left',
-//         mode: 'dropdown'|'panel'|'bar', items: [ITEM…], storageKey, hidden }
-//   dropdown: a button in the top bar with a drop-down body (the default)
-//   panel:    the body is always open, stacked below the bar (a legend)
-//   bar:      the items render inline as one row of buttons (Move|Rotate|Snap)
+// MENU  { id, label, title, mode: 'dropdown'|'panel', items: [ITEM…],
+//         storageKey, bodyWidth, hidden }
+//   Every menu is a vertical tab on the right-edge rail whose body slides
+//   out on click (ribweaver's N-panel). `dropdown` (the default) starts
+//   folded and closes on an outside click; `panel` starts open and stays
+//   open across outside clicks (a legend). `bodyWidth` (CSS length,
+//   default 190px) sizes the body.
 //
 // ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'label'|'divider'|'custom',
 //         id, label, hint, shortcut, bindKey, state, active, checked, value,
@@ -6842,10 +6845,9 @@ class CameraController {
  * }} MenuItemSpec */
 
 /** @typedef {{
- *   id: string, label?: string, icon?: string, title?: string,
- *   placement?: 'top-right'|'top-left', mode?: 'dropdown'|'panel'|'bar',
+ *   id: string, label?: string, title?: string, mode?: 'dropdown'|'panel',
  *   items?: MenuItemSpec[], storageKey?: string, hidden?: boolean,
- *   builtin?: boolean,
+ *   bodyWidth?: string, builtin?: boolean,
  * }} MenuSpec */
 
 const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'label', 'divider', 'custom']);
@@ -6884,13 +6886,16 @@ function normalizeOptions(options) {
     return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
 }
 
-const EYE_ON_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/></svg>';
-const EYE_OFF_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" stroke-dasharray="2 2"/><path d="M3 13L13 3"/></svg>';
+// ribweaver's eye / dashed-eye glyphs (toggle_switch.js), verbatim.
+const EYE_ON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+const RAIL_BASE_TOP = 16;
+const RAIL_GAP = 6;
 
 class MenuController {
     /**
      * @param {ThreeJSViewer} viewer
-     * @param {{bar: HTMLElement, panels: HTMLElement, barLeft: HTMLElement}} hosts
+     * @param {{rail: HTMLElement}} hosts
      */
     constructor(viewer, hosts) {
         this._viewer = viewer;
@@ -6906,6 +6911,7 @@ class MenuController {
             for (const m of this._menus.values()) {
                 if (m.spec.mode === 'dropdown' && m.open && !m.root.contains(t)) this._setOpen(m, false);
             }
+            // A panel-mode menu stays open across outside clicks.
         };
         document.addEventListener('pointerdown', this._onDocPointerDown);
     }
@@ -6937,11 +6943,10 @@ class MenuController {
     add(spec) {
         if (!spec || !spec.id) throw new Error('addMenu: spec.id is required');
         if (this._menus.has(spec.id)) this.remove(spec.id);
-        const mode = spec.mode || 'dropdown';
-        const placement = spec.placement || 'top-right';
+        const mode = spec.mode === 'panel' ? 'panel' : 'dropdown';
         /** @type {any} */
         const m = {
-            spec: { ...spec, mode, placement, items: (spec.items || []).map(it => ({ ...it })) },
+            spec: { ...spec, mode, items: (spec.items || []).map(it => ({ ...it })) },
             open: false, root: null, button: null, body: null,
             /** @type {Map<string, any>} */ items: new Map(),
             state: /** @type {Record<string, any>} */ ({}),
@@ -6954,6 +6959,8 @@ class MenuController {
         m.handle = this._makeHandle(m);
         this.applyEyes(m);
         this.refresh(m);
+        if (mode === 'panel') this._setOpen(m, true);
+        this._layoutRail();
         return m.handle;
     }
 
@@ -6963,7 +6970,22 @@ class MenuController {
         if (!m) return false;
         m.root.remove();
         this._menus.delete(id);
+        this._layoutRail();
         return true;
+    }
+
+    /**
+     * Stack the rail tabs top to bottom: each visible tab sits RAIL_GAP below
+     * the previous one. Measured, because a vertical tab's height follows its
+     * label. Runs after add/remove/setHidden.
+     */
+    _layoutRail() {
+        let top = RAIL_BASE_TOP;
+        for (const m of this._menus.values()) {
+            if (m.root.hidden) continue;
+            m.root.style.setProperty('--tjsv-rail-top', `${top}px`);
+            top += m.button.getBoundingClientRect().height + RAIL_GAP;
+        }
     }
 
     /** @param {any} m */
@@ -6977,7 +6999,11 @@ class MenuController {
             isOpen: () => m.open,
             refresh: () => self.refresh(m),
             remove: () => self.remove(m.spec.id),
-            setHidden: /** @param {boolean} h */ (h) => { m.spec.hidden = !!h; m.root.hidden = !!h; if (h) self._setOpen(m, false); },
+            setHidden: /** @param {boolean} h */ (h) => {
+                m.spec.hidden = !!h; m.root.hidden = !!h;
+                if (h) self._setOpen(m, false);
+                self._layoutRail();
+            },
             /** @param {string} itemId @param {Partial<MenuItemSpec>} patch */
             setItem: (itemId, patch) => self.setItem(m, itemId, patch),
             /** @param {string} itemId */
@@ -6997,46 +7023,37 @@ class MenuController {
     _build(m) {
         const spec = m.spec;
         const root = document.createElement('div');
-        root.className = `tjsv-menu-root tjsv-menu-${spec.mode}`;
+        root.className = 'tjsv-menu-root tjsv-rail-panel';
         root.dataset.menu = spec.id;
         if (spec.hidden) root.hidden = true;
+        if (spec.bodyWidth) root.style.setProperty('--tjsv-body-w', spec.bodyWidth);
         m.root = root;
 
         const body = document.createElement('div');
-        body.className = spec.mode === 'bar' ? 'tjsv-menu-bar-items' : 'tjsv-menu';
+        body.className = 'tjsv-menu';
         m.body = body;
 
-        if (spec.mode === 'dropdown') {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
-            btn.title = spec.title || spec.label || '';
-            btn.setAttribute('aria-haspopup', 'true');
-            btn.setAttribute('aria-expanded', 'false');
-            btn.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
-                + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.icon || spec.label || '')}</span>`;
-            btn.addEventListener('click', () => this._setOpen(m, !m.open));
-            m.button = btn;
-            root.appendChild(btn);
-            body.hidden = true;
-            if (spec.builtin) {
-                const status = document.createElement('div');
-                status.className = 'tjsv-menu-status tjsv-status-text';
-                status.textContent = 'Disconnected';
-                body.appendChild(status);
-            }
-        } else if (spec.mode === 'panel' && spec.label) {
-            const title = document.createElement('div');
-            title.className = 'tjsv-menu-title';
-            title.textContent = spec.label;
-            body.appendChild(title);
+        // The rail tab: a vertical label, plus the status dot on the viewer's
+        // own menu.
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
+        tab.title = spec.title || spec.label || '';
+        tab.setAttribute('aria-expanded', 'false');
+        tab.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
+            + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
+        tab.addEventListener('click', (e) => { e.stopPropagation(); this._setOpen(m, !m.open); });
+        m.button = tab;
+        root.appendChild(tab);
+        if (spec.builtin) {
+            const status = document.createElement('div');
+            status.className = 'tjsv-menu-status tjsv-status-text';
+            status.textContent = 'Disconnected';
+            body.appendChild(status);
         }
         for (const it of spec.items) this._buildItem(m, it);
         root.appendChild(body);
-
-        const host = spec.placement === 'top-left' ? this._hosts.barLeft
-            : spec.mode === 'panel' ? this._hosts.panels : this._hosts.bar;
-        host.appendChild(root);
+        this._hosts.rail.appendChild(root);
     }
 
     /** @param {any} m @param {MenuItemSpec} it */
@@ -7099,19 +7116,26 @@ class MenuController {
             if (it.label) el.appendChild(lab);
             el.appendChild(seg);
         } else {
-            // button | toggle | eye — one row: [mark] label … state [kbd]
+            // button: a full-width action; toggle | eye: a row [mark] label … state [kbd]
             el = document.createElement('button');
             el.type = 'button';
-            el.className = 'tjsv-menu-item';
-            const mark = document.createElement('span');
-            mark.className = 'tjsv-menu-mark';
-            if (type === 'eye') mark.innerHTML = EYE_ON_SVG;
+            el.className = type === 'button' ? 'tjsv-menu-action' : 'tjsv-menu-item';
             const lab = document.createElement('span');
             lab.className = 'tjsv-menu-label';
             lab.textContent = it.label || '';
             const st = document.createElement('span');
             st.className = 'tjsv-menu-state';
-            el.appendChild(mark);
+            if (type === 'eye') {
+                const mark = document.createElement('span');
+                mark.className = 'tjsv-menu-mark';
+                mark.innerHTML = EYE_ON_SVG;
+                el.appendChild(mark);
+            } else if (type === 'toggle') {
+                const track = document.createElement('span');
+                track.className = 'tjsv-toggle-track';
+                track.innerHTML = '<span class="tjsv-toggle-thumb"></span>';
+                el.appendChild(track);
+            }
             el.appendChild(lab);
             el.appendChild(st);
             if (it.shortcut) {
@@ -7342,14 +7366,12 @@ class MenuController {
 
     /** @param {any} m @param {boolean} open */
     _setOpen(m, open) {
-        if (m.spec.mode !== 'dropdown') return;
         const want = !!open && !m.spec.hidden;
         if (want) {
             for (const o of this._menus.values()) if (o !== m) this._setOpen(o, false);
         }
         m.open = want;
-        m.body.hidden = !want;
-        m.button.classList.toggle('active', want);
+        m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
         if (want) this.refresh(m);
     }
@@ -10334,15 +10356,13 @@ class ThreeJSViewer {
      * viewer state through function-valued `active`/`state`/`hidden`.
      */
     _initMenus() {
-        this._menus = new MenuController(this, {
-            bar: this._menuBarEl, panels: this._menuPanelsEl, barLeft: this._menuBarLeftEl,
-        });
+        this._menus = new MenuController(this, { rail: this._menuRailEl });
         // Keys the viewer's own keydown handler consumes; a client menu may
         // display them but not bind them.
         this._menus.reserveKeys(['C', 'E', 'R', 'T', 'O', 'M', 'N', 'D', 'Shift+D', 'F', 'S', 'V', 'Home']);
         const v = this;
         this._menus.add({
-            id: 'viewer', builtin: true, icon: '\u2630', title: 'Viewer menu', hidden: true,
+            id: 'viewer', builtin: true, label: 'Viewer', title: 'Viewer options', hidden: true,
             items: [
                 { id: 'clip', label: 'Clipping plane', shortcut: 'C',
                   active: () => !!v._clipEnabled, onClick: () => v._toggleClipPanel() },
@@ -10384,9 +10404,7 @@ class ThreeJSViewer {
     _cacheElements() {
         /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
-        this._menuBarEl = q('.tjsv-menubar');
-        this._menuPanelsEl = q('.tjsv-overlay-tr');
-        this._menuBarLeftEl = q('.tjsv-overlay-tl');
+        this._menuRailEl = q('.tjsv-rail');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._lightingPanelEl = q('.tjsv-lighting-panel');
         this._lightingExposureSlider = q('.tjsv-lighting-exposure');

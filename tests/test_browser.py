@@ -5804,7 +5804,7 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
     settle(viewer_client)
     page.locator(".tjsv-btn-menu").click()
     items = page.evaluate(
-        "() => [...document.querySelectorAll('[data-menu=viewer] .tjsv-menu-item')]"
+        "() => [...document.querySelectorAll('[data-menu=viewer] .tjsv-menu-action')]"
         "  .filter(b => !b.hidden)"
         "  .map(b => [b.querySelector('.tjsv-menu-label').textContent,"
         "             b.querySelector('kbd').textContent])"
@@ -5902,9 +5902,9 @@ def test_add_menu_dropdown_items_and_callbacks(viewer_client, viewer_page):
         " ]});"
         " v.onMenuAction(a => window.__log.push('action:' + a.item + ':' + a.type + ':' + a.value));"
         " const root = m.el;"
-        " return {inBar: root.parentElement.classList.contains('tjsv-menubar'),"
+        " return {inBar: root.parentElement.classList.contains('tjsv-rail'),"
         "         btnText: root.querySelector('.tjsv-menu-btn').textContent.trim(),"
-        "         hidden: root.querySelector('.tjsv-menu').hidden,"
+        "         hidden: !root.classList.contains('open'),"
         "         kbd: root.querySelector('[data-item=go] kbd').textContent,"
         "         custom: root.querySelector('[data-item=legend]').textContent,"
         "         segActive: root.querySelector('[data-item=side] .tjsv-seg-btn.active').dataset.value};"
@@ -6061,34 +6061,51 @@ def test_add_menu_eye_match_apply_and_veto(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_add_menu_panel_and_bar_modes(viewer_client, viewer_page):
-    """`panel` stacks an always-open body below the top-right bar; `bar`
-    renders the items inline at top-left."""
+def test_add_menu_rail_stacks_and_panel_mode(viewer_client, viewer_page):
+    """Every menu is a tab on the right-edge rail, stacked top to bottom; a
+    `panel` menu starts open and survives an outside click, a dropdown does not."""
     page = viewer_page
     result = page.evaluate(
         "() => {"
         " const v = window.threejsViewer;"
-        " const p = v.addMenu({id: 'legend', label: 'Colour', mode: 'panel',"
+        " const p = v.addMenu({id: 'legend', label: 'Colour', mode: 'panel', bodyWidth: '220px',"
         "   items: [{type: 'select', id: 'mode', label: 'By', options: ['a', 'b']}]});"
-        " const b = v.addMenu({id: 'gz', mode: 'bar', placement: 'top-left',"
+        " const d = v.addMenu({id: 'gz', label: 'Gizmo',"
         "   items: [{type: 'toggle', id: 'move', label: 'Move'}, {type: 'toggle', id: 'rot', label: 'Rotate'}]});"
-        " return {panelHost: p.el.parentElement.className, panelTitle: p.el.querySelector('.tjsv-menu-title').textContent,"
-        "         panelVisible: !p.el.querySelector('.tjsv-menu').hidden, panelBtn: !!p.el.querySelector('.tjsv-menu-btn'),"
-        "         barHost: b.el.parentElement.className, barItems: b.el.querySelectorAll('.tjsv-menu-item').length};"
+        " const top = el => parseFloat(getComputedStyle(el).top);"
+        " return {host: p.el.parentElement.className, tab: p.el.querySelector('.tjsv-menu-btn-label').textContent,"
+        "         panelOpen: p.isOpen() && p.el.classList.contains('open'),"
+        "         width: getComputedStyle(p.el.querySelector('.tjsv-menu')).width,"
+        "         stacked: top(d.el) > top(p.el) + p.el.querySelector('.tjsv-menu-btn').getBoundingClientRect().height,"
+        "         items: d.el.querySelectorAll('.tjsv-menu-item').length};"
         "}"
     )
     assert result == {
-        "panelHost": "tjsv-overlay-tr",
-        "panelTitle": "Colour",
-        "panelVisible": True,
-        "panelBtn": False,
-        "barHost": "tjsv-overlay-tl",
-        "barItems": 2,
+        "host": "tjsv-rail tjsv-toolbar",
+        "tab": "Colour",
+        "panelOpen": True,
+        "width": "220px",
+        "stacked": True,
+        "items": 2,
     }
+    page.locator("[data-menu=gz] .tjsv-menu-btn").click()
+    assert page.evaluate("() => window.threejsViewer.getMenu('gz').isOpen()") is True
     page.locator("[data-menu=gz] [data-item=move]").click()
     assert (
         page.evaluate("() => window.threejsViewer.getMenu('gz').getValue('move')")
         is True
+    )
+    # Opening one tab folds the others (one open at a time), an outside click
+    # folds a dropdown, and a panel re-opened by its tab survives that click.
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('legend').isOpen()") is False
+    )
+    page.mouse.click(400, 300)
+    assert page.evaluate("() => window.threejsViewer.getMenu('gz').isOpen()") is False
+    page.locator("[data-menu=legend] .tjsv-menu-btn").click()
+    page.mouse.click(400, 300)
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('legend').isOpen()") is True
     )
 
 

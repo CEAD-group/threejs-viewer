@@ -35,10 +35,14 @@ visibility and shortcut display. The client owns items and callbacks.
 - `viewer.addMenu(spec)` (JS) and `ViewerClient.add_menu(...)` (Python).
   The built-in options menu is the first caller of the same code path, so it
   cannot drift from client menus.
-- One visual idiom, not two: a top-right bar of dropdown buttons. A menu that
-  must stay open (a legend) uses `mode: 'panel'` and stacks below the bar.
-  Segmented clusters use `mode: 'bar'` and go top-left. The slide-out rail
-  is retired.
+- One visual idiom: ribweaver's N-panel rail, verbatim. Every menu is a
+  vertical tab folded against the right edge whose body slides out on click;
+  tabs stack, one is open at a time. A menu that must stay open (a legend)
+  uses `mode: 'panel'`, which starts open and survives outside clicks. The
+  top-right control stacks and the top-left segmented clusters are retired:
+  their items become rail menus too. (First cut had a top-right dropdown bar
+  and a top-left bar mode; Thijs asked for the rail style exactly and for
+  the top-left cluster to go away under it, 2026-09-15.)
 - Eye items are re-applied from `_registerObject`, the viewer's single
   registration choke point, so a hidden layer stays hidden when its objects
   are re-pushed or stream in later. The timer hack goes away.
@@ -50,8 +54,8 @@ visibility and shortcut display. The client owns items and callbacks.
 
 ## Shapes
 
-Menu: `{id, label, icon, title, placement: 'top-right'|'top-left',
-mode: 'dropdown'|'panel'|'bar', items, storageKey, hidden}`.
+Menu: `{id, label, title, mode: 'dropdown'|'panel', items, storageKey,
+bodyWidth, hidden}`.
 
 Item: `{type: 'button'|'toggle'|'eye'|'select'|'segmented'|'label'|'divider'|'custom',
 id, label, hint, shortcut, bindKey, state, active, checked, value, options,

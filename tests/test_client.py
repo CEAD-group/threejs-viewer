@@ -659,7 +659,6 @@ def test_add_menu_validates_and_records_for_reconnect():
     "kwargs, match",
     [
         ({"id": "viewer", "items": []}, "built-in menu id"),
-        ({"id": "m", "items": [], "placement": "bottom"}, "placement must be"),
         ({"id": "m", "items": [], "mode": "rail"}, "mode must be"),
         ({"id": "m", "items": [{"type": "toggle"}]}, "needs an 'id'"),
         ({"id": "m", "items": [{"type": "slider", "id": "x"}]}, "item type must be"),
