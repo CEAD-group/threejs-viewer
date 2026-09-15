@@ -85,5 +85,5 @@ browser-test = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "browser: integration tests requiring Playwright (headless Chromium)",
+    "browser: integration tests requiring Playwright (headless Chromium, plus one Firefox smoke test)",
 ]

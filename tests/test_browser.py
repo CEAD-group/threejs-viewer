@@ -5,16 +5,13 @@ import json
 import math
 import socket
 import struct
-import threading
 import time
-from http.server import HTTPServer
 
 import numpy as np
 import pytest
 
 from conftest import frames, settle
 from threejs_viewer import Animation, Frame, ViewerClient
-from threejs_viewer.client import _BlobHandler
 
 
 @pytest.mark.browser
@@ -2700,6 +2697,157 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
     assert abs(color["g"] - 1.0) < 1e-3, color
 
 
+# --- Orbit / P / Home button stack (issue #190) ---
+
+
+@pytest.mark.browser
+def test_view_buttons_stack_left_of_gimbal(viewer_client, viewer_page):
+    """Orbit mode, P and Home sit in one vertical column left of the axis-bubble
+    cluster, top to bottom, all the same size. Home used to be centred in
+    the 128x128 ViewHelper square, in the middle of the six axis bubbles.
+    The column may overlap the square's outer margin (the bubbles orbit its
+    centre), so the guard is the square's left quarter, not its edge."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const rect = (sel) => {
+                const b = v.el.querySelector(sel).getBoundingClientRect();
+                return {left: b.left, right: b.right, top: b.top,
+                        bottom: b.bottom, width: b.width, height: b.height};
+            };
+            const dom = v._renderer.domElement.getBoundingClientRect();
+            const dim = v._gizmoDim;
+            return {
+                orbit: rect('.tjsv-view-orbit'),
+                proj: rect('.tjsv-view-proj'),
+                home: rect('.tjsv-view-home'),
+                gimbal: {left: dom.right - dim, top: dom.bottom - dim,
+                         right: dom.right, bottom: dom.bottom},
+            };
+        }"""
+    )
+    orbit, proj, home, gimbal = r["orbit"], r["proj"], r["home"], r["gimbal"]
+    for name, b in (("orbit", orbit), ("proj", proj), ("home", home)):
+        assert abs(b["width"] - 28) < 1 and abs(b["height"] - 28) < 1, (name, b)
+        clear_of_bubbles = gimbal["left"] + (gimbal["right"] - gimbal["left"]) / 4
+        assert b["right"] <= clear_of_bubbles, f"{name} reaches the bubbles: {r}"
+        assert b["bottom"] <= gimbal["bottom"] + 1, f"{name} below the gimbal: {r}"
+    # One column: same left edge, ordered orbit above P above Home, no overlap.
+    assert (
+        abs(orbit["left"] - proj["left"]) < 1 and abs(proj["left"] - home["left"]) < 1
+    ), r
+    assert orbit["bottom"] <= proj["top"] + 1, r
+    assert proj["bottom"] <= home["top"] + 1, r
+    # Vertically centred on the gimbal square, level with the bubble cluster.
+    column_mid = (orbit["top"] + home["bottom"]) / 2
+    gimbal_mid = (gimbal["top"] + gimbal["bottom"]) / 2
+    assert abs(column_mid - gimbal_mid) <= 2, (column_mid, gimbal_mid, r)
+
+
+@pytest.mark.browser
+def test_orbit_button_toggles_mode(viewer_client, viewer_page):
+    """The orbit-mode button at the top of the stack flips turntable <-> free
+    like the R key, and always shows the current mode (data-mode, `.free`
+    accent, tooltip, and which glyph is displayed). The R key drives the same
+    indicator, so a keyboard flip updates the button too."""
+    frames(viewer_page)
+
+    def snap():
+        return viewer_page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                const b = v.el.querySelector('.tjsv-view-orbit');
+                const shown = (sel) =>
+                    getComputedStyle(b.querySelector(sel)).display !== 'none';
+                return {
+                    mode: v._orbitMode,
+                    data: b.dataset.mode,
+                    free: b.classList.contains('free'),
+                    title: b.title,
+                    turntableGlyph: shown('.tjsv-orbit-glyph-turntable'),
+                    freeGlyph: shown('.tjsv-orbit-glyph-free'),
+                };
+            }"""
+        )
+
+    start = snap()
+    assert start["mode"] == start["data"]
+    assert start["free"] == (start["mode"] == "free")
+    assert start["turntableGlyph"] != start["freeGlyph"]
+
+    viewer_page.click(".tjsv-view-orbit")
+    after_click = snap()
+    assert after_click["mode"] != start["mode"]
+    assert after_click["data"] == after_click["mode"]
+    assert after_click["free"] == (after_click["mode"] == "free")
+    assert after_click["turntableGlyph"] == (after_click["mode"] == "turntable")
+    assert after_click["freeGlyph"] == (after_click["mode"] == "free")
+    assert after_click["title"] != start["title"]
+    expected_word = "Free" if after_click["mode"] == "free" else "Turntable"
+    assert after_click["title"].startswith(f"Orbit: {expected_word}")
+
+    _press_key(viewer_page, "KeyR")
+    after_key = snap()
+    assert after_key["mode"] == start["mode"]
+    assert after_key["data"] == start["data"]
+    assert after_key["free"] == start["free"]
+    assert after_key["title"] == start["title"]
+
+
+@pytest.mark.browser
+def test_view_gimbal_arms_and_bubbles_restyled(viewer_client, viewer_page):
+    """_configureViewHelper stretches the three arm meshes by _gizmoArmScale,
+    moves the six bubble sprites out to the arm tips and shrinks them to
+    _gizmoBaseScale. The click hit-test raycasts the live sprites, so a
+    synthetic pointer at a bubble's projected screen position must still
+    resolve that bubble after the restyle."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const h = v._viewHelper;
+            const arms = h.children.filter(
+                (c) => c.isMesh && !(c.userData && c.userData.type));
+            const sprites = h.userData.interactiveSprites;
+            // Project the posX bubble the way ViewHelper.render does: the
+            // helper's quaternion is the inverse camera rotation, and the
+            // stock ortho camera spans -2..2 over the dim x dim viewport.
+            const s = sprites.find((o) => o.userData.type === 'posX');
+            const p = s.position.clone().applyQuaternion(h.quaternion);
+            const dom = v._renderer.domElement.getBoundingClientRect();
+            const dim = v._gizmoDim;
+            const lift = v._gizmoLiftCss();
+            const clientX = dom.right - dim + ((p.x + 2) / 4) * dim;
+            const clientY = dom.bottom - dim - lift + ((2 - p.y) / 4) * dim;
+            const hit = v._gizmoHitTest({clientX, clientY});
+            return {
+                armScales: arms.map((a) => [a.scale.x, a.scale.y, a.scale.z]),
+                spriteDist: sprites.map((o) => o.position.length()),
+                spriteScale: sprites.map((o) => o.scale.x),
+                armScale: v._gizmoArmScale,
+                baseScale: v._gizmoBaseScale,
+                insideRect: hit.insideRect,
+                hitType: hit.hit ? hit.hit.userData.type : null,
+                projected: [p.x, p.y],
+            };
+        }"""
+    )
+    assert r["armScale"] == pytest.approx(1.0)
+    assert r["baseScale"] == pytest.approx(1.12)
+    assert len(r["armScales"]) == 3, r
+    for sx, sy, sz in r["armScales"]:
+        assert (sx, sy, sz) == pytest.approx((1.0, 1.0, 1.0)), r
+    assert len(r["spriteDist"]) == 6, r
+    assert r["spriteDist"] == pytest.approx([1.0] * 6), r
+    assert r["spriteScale"] == pytest.approx([1.12] * 6), r
+    # The bubble stays inside the helper's +-2 ortho frustum.
+    assert max(abs(c) for c in r["projected"]) + 0.56 < 2, r
+    assert r["insideRect"] and r["hitType"] == "posX", r
+
+
 # --- ViewHelper setViewport shim regression ---
 
 
@@ -2825,13 +2973,7 @@ def _start_client(**kwargs):
     """
     port = _free_port()
     client = ViewerClient(port=port, open_browser=False, **kwargs)
-    client._http_port = port + 1
-    http_server = HTTPServer((client.host, client._http_port), _BlobHandler)
-    http_server.blob_store = client._blob_store
-    client._http_server = http_server
-    threading.Thread(target=http_server.serve_forever, daemon=True).start()
-    client._server_thread = threading.Thread(target=client._run_server, daemon=True)
-    client._server_thread.start()
+    client._start_servers(http_port=0)
     return client
 
 
@@ -3790,6 +3932,35 @@ def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
 
     assert x1 > x0 + 0.1, f"box did not move in +X ({x0} -> {x1})"
     assert moves[-1]["id"] == "box"
+
+
+@pytest.mark.browser
+def test_move_gizmo_palette_matches_view_helper(viewer_client, viewer_page):
+    """The gizmo handles use three's ViewHelper axis colours (issue #191), so
+    the X / Y / Z arrows and the corner-gimbal bubbles agree on what each
+    axis looks like. Read off the lit arrow materials after a rendered
+    frame, so the per-frame restyle has already run."""
+    viewer_client.add_box("box")
+    settle(viewer_client)  # WS barrier: the box is registered before the attach
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
+    )
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const arrows = window.threejsViewer._transformGizmo.control
+                ._gizmo.gizmo.translate.children;
+            const hex = (name) => {
+                const o = arrows.find((c) => c.name === name && c.userData.__litArrow);
+                return o ? o.material.color.getHex() : null;
+            };
+            return { x: hex('X'), y: hex('Y'), z: hex('Z') };
+        }"""
+    )
+    # three r183 ViewHelper.js axis colours.
+    assert (r["x"], r["y"], r["z"]) == (0xFF4466, 0x88FF44, 0x4488FF), r
 
 
 @pytest.mark.browser
@@ -6034,29 +6205,30 @@ def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
-    """The ISO corner button is a true isometric: orthographic projection down
-    the (1,-1,1) direction, snapped under the same auto-projection rule as the
-    axis bubbles (orbiting away returns to perspective). The old ortho toolbar
-    toggle stays removed."""
+def test_iso_snap_is_true_isometric(viewer_client, viewer_page):
+    """The iso snap is a true isometric: orthographic projection down the
+    (1,-1,1) direction, under the same auto-projection rule as the axis
+    bubbles (orbiting away returns to perspective). It has no button since the
+    orbit-mode toggle took its slot; `_snapOrthoAxisView('iso')` stays the
+    programmatic path. The old ortho toolbar toggle stays removed."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
         "() => {"
         " const v = window.threejsViewer;"
-        " v._viewIsoBtn.click();"
+        " v._snapOrthoAxisView('iso');"
         " const afterIso = { ortho: v._isOrtho, snap: v._gizmoAxisView };"
-        " const orig = v._controls.isDragging;"
-        " v._controls.isDragging = () => true;"
+        " const orig = v._controls.isOrbiting;"
+        " v._controls.isOrbiting = () => true;"
         " v._controls.dispatchEvent({ type: 'change' });"
-        " v._controls.isDragging = orig;"
+        " v._controls.isOrbiting = orig;"
         " const orthoAfterOrbit = v._isOrtho;"
         " const toolbarOrtho = !!document.querySelector('.tjsv-btn-ortho');"
         " return { afterIso, orthoAfterOrbit, toolbarOrtho };"
         "}"
     )
     assert result["afterIso"] == {"ortho": True, "snap": "iso"}, (
-        "ISO must snap into an orthographic isometric"
+        "iso must snap into an orthographic isometric"
     )
     assert result["orthoAfterOrbit"] is False, "orbiting away returns to perspective"
     assert result["toolbarOrtho"] is False, "ortho toolbar toggle removed"
@@ -6072,10 +6244,10 @@ def test_auto_projection_orbit_returns_to_perspective(viewer_client, viewer_page
         "() => {"
         " const v = window.threejsViewer;"
         " const fakeDrag = () => {"
-        "   const orig = v._controls.isDragging;"
-        "   v._controls.isDragging = () => true;"
+        "   const orig = v._controls.isOrbiting;"
+        "   v._controls.isOrbiting = () => true;"
         "   v._controls.dispatchEvent({ type: 'change' });"
-        "   v._controls.isDragging = orig;"
+        "   v._controls.isOrbiting = orig;"
         " };"
         " v._gizmoAxisClick('top');"  # auto-enters ortho
         " const orthoSnapped = v._isOrtho;"
@@ -6125,7 +6297,7 @@ def test_projection_button_indicates_and_toggles(viewer_client, viewer_page):
 def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page):
     """The gizmo axis snap is preserved through a plain click-to-pivot (a
     controls 'change' fired while not dragging) so a re-click still flips, but
-    an actual orbit/pan drag ('change' while dragging) clears it (#514)."""
+    an actual orbit drag ('change' while orbiting) clears it (#514)."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
@@ -6141,11 +6313,12 @@ def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page
         " v._gizmoAxisClick('front');"  # snap preserved -> flip
         " const afterReclick = v._gizmoAxisView;"
         " v._gizmoAxisClick('front');"  # from 'back' -> 'front'
-        # orbit drag: controls emit 'change' while dragging (state != NONE).
-        " c._state = 1;"
+        # orbit drag: controls emit 'change' while in the ROTATE state with the
+        # pointerdown mode snapshot taken.
+        " c._state = 1; c._dragMode = c.mode;"
         " c.dispatchEvent({ type: 'change' });"
         " const afterOrbit = v._gizmoAxisView;"
-        " c._state = 0;"
+        " c._state = 0; c._dragMode = null;"
         " v._gizmoAxisClick('front');"  # snap cleared -> fresh, no flip
         " const afterFreshClick = v._gizmoAxisView;"
         " return { snapped, afterPivot, afterReclick, afterOrbit,"
@@ -6158,6 +6331,121 @@ def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page
     assert result["afterOrbit"] is None, "an orbit drag clears the snap"
     assert result["afterFreshClick"] == "front", (
         "a fresh click after an orbit does not flip"
+    )
+
+
+_CANVAS_CENTER_JS = (
+    "() => { const r = window.threejsViewer._renderer.domElement"
+    ".getBoundingClientRect();"
+    " return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }"
+)
+
+_PROJECTION_STATE_JS = (
+    "() => { const v = window.threejsViewer;"
+    " return { ortho: v._isOrtho, snap: v._gizmoAxisView,"
+    "   auto: v._orthoAutoEntered }; }"
+)
+
+
+def _drag_canvas_button(page, button, steps=8, step_px=10):
+    """Press ``button`` at the canvas centre and drag it rightwards."""
+    c = page.evaluate(_CANVAS_CENTER_JS)
+    page.mouse.move(c["x"], c["y"])
+    page.mouse.down(button=button)
+    for i in range(1, steps + 1):
+        page.mouse.move(c["x"] + i * step_px, c["y"])
+    page.mouse.up(button=button)
+
+
+@pytest.mark.browser
+def test_pan_after_axis_snap_keeps_auto_ortho(viewer_client, viewer_page):
+    """A right-button pan drag after a bubble snap from perspective keeps the
+    orthographic projection and the axis snap, so the view stays axis-aligned
+    and a re-click of the same bubble still flips (#193). A wheel zoom keeps
+    both as well."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    viewer_page.evaluate("() => window.threejsViewer._snapOrthoAxisView('front')")
+    frames(viewer_page)
+    before = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert before == {"ortho": True, "snap": "front", "auto": True}
+
+    _drag_canvas_button(viewer_page, "right")
+    frames(viewer_page)
+    after_pan = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_pan == {"ortho": True, "snap": "front", "auto": True}, (
+        "a pan must keep the auto-entered ortho and the axis snap"
+    )
+
+    c = viewer_page.evaluate(_CANVAS_CENTER_JS)
+    viewer_page.mouse.move(c["x"], c["y"])
+    viewer_page.mouse.wheel(0, 200)
+    frames(viewer_page)
+    after_wheel = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_wheel == {"ortho": True, "snap": "front", "auto": True}, (
+        "a wheel zoom must keep the auto-entered ortho and the axis snap"
+    )
+
+    flipped = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v._gizmoAxisClick('front');"
+        " return v._gizmoAxisView; }"
+    )
+    assert flipped == "back", "the snap survived the pan, so a re-click flips"
+
+
+@pytest.mark.browser
+def test_orbit_after_axis_snap_returns_to_perspective(viewer_client, viewer_page):
+    """A left-button orbit drag after a bubble snap from perspective returns
+    to perspective and clears the axis snap (#193)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    viewer_page.evaluate("() => window.threejsViewer._snapOrthoAxisView('front')")
+    frames(viewer_page)
+    assert viewer_page.evaluate(_PROJECTION_STATE_JS) == {
+        "ortho": True,
+        "snap": "front",
+        "auto": True,
+    }
+
+    _drag_canvas_button(viewer_page, "left")
+    frames(viewer_page)
+    after_orbit = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_orbit == {"ortho": False, "snap": None, "auto": False}, (
+        "an orbit must return to perspective and clear the axis snap"
+    )
+
+
+@pytest.mark.browser
+def test_manual_ortho_survives_orbit_after_axis_snap(viewer_client, viewer_page):
+    """A manual `O` ortho is never auto-exited: a bubble snap taken while
+    already in manual ortho followed by an orbit drag stays orthographic (the
+    projection the user had before the snap), though the snap itself clears."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    # The viewer binds its shortcuts on the container, so dispatch there.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.container.dispatchEvent(new KeyboardEvent("
+        "'keydown', { key: 'o', code: 'KeyO', bubbles: true }))"
+    )
+    frames(viewer_page)
+    assert viewer_page.evaluate(_PROJECTION_STATE_JS) == {
+        "ortho": True,
+        "snap": None,
+        "auto": False,
+    }
+    viewer_page.evaluate("() => window.threejsViewer._snapOrthoAxisView('front')")
+    frames(viewer_page)
+    assert viewer_page.evaluate(_PROJECTION_STATE_JS) == {
+        "ortho": True,
+        "snap": "front",
+        "auto": False,
+    }
+
+    _drag_canvas_button(viewer_page, "left")
+    frames(viewer_page)
+    after_orbit = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_orbit == {"ortho": True, "snap": None, "auto": False}, (
+        "a manual ortho stays ortho through an orbit; only the snap clears"
     )
 
 
@@ -6663,3 +6951,624 @@ def test_set_highlight_style_switch_rebuilds_in_place(viewer_client, viewer_page
         " return !!(g && g.attributes.position && g.attributes.position.count > 0); }"
     )
     assert still_drawable
+
+
+# --- ws_host: WebSocket and sidecar on one non-default hostname (issue #187) ---
+
+
+@pytest.mark.browser
+def test_ws_host_param_routes_websocket_and_blobs_to_one_host(page):
+    """``ViewerClient(host="127.0.0.1")`` must connect the WebSocket to that
+    host (via ``ws_host``) and fetch blobs from it, not from localhost."""
+    client = _start_client(host="127.0.0.1")
+    try:
+        page.goto(client.viewer_url, timeout=90_000)
+        assert client._connected_event.wait(timeout=60)
+        assert page.evaluate("() => window.threejsViewer._wsUrl") == (
+            f"ws://127.0.0.1:{client.port}"
+        )
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        client.add_mesh("wh", positions, indices)
+        settle(client)
+        assert "wh" in client.query_scene()["objects"]
+    finally:
+        client.disconnect()
+
+
+# --- Firefox smoke test: sidecar fetch from a file:// page (issue #187) ---
+
+
+@pytest.mark.browser
+def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
+    """One binary asset must land under Firefox from a file:// viewer page.
+
+    Firefox treats a blob URL on a different host than the page's WebSocket
+    host as a cross-origin request and refuses it (#185 advertised
+    127.0.0.1 while the page used localhost). Chromium allows that, so the
+    Chromium-only suite never saw it; this test keeps the one-hostname
+    contract honest in the browser that enforces it.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    try:
+        # Headless Firefox on a GPU-less Linux runner refuses to create a WebGL
+        # context (the viewer constructor then throws before connect() runs);
+        # allow software rendering so it has a chance.
+        browser = playwright.firefox.launch(
+            firefox_user_prefs={
+                "webgl.force-enabled": True,
+                "webgl.forbid-software": False,
+                "gfx.webrender.software": True,
+            }
+        )
+    except PlaywrightError as exc:
+        pytest.skip(f"Firefox not installed for Playwright: {exc}")
+    try:
+        page = browser.new_page()
+        has_webgl2 = page.evaluate(
+            "() => !!document.createElement('canvas').getContext('webgl2')"
+        )
+        if not has_webgl2:
+            pytest.skip("Playwright Firefox cannot create a WebGL2 context here")
+        # Firefox has no devtools in the CI log; keep its console for the
+        # failure message so a non-connecting page explains itself.
+        log = []
+        page.on("console", lambda m: log.append(f"console[{m.type}]: {m.text}"))
+        page.on("pageerror", lambda e: log.append(f"pageerror: {e}"))
+        page.on(
+            "requestfailed", lambda r: log.append(f"requestfailed: {r.url} {r.failure}")
+        )
+        viewer_path = viewer_client.viewer_path.resolve()
+        page.goto(
+            f"{viewer_path.as_uri()}?ws_port={viewer_client.port}", timeout=90_000
+        )
+        assert viewer_client._connected_event.wait(timeout=120), (
+            "Firefox did not connect to the WebSocket server; page log:\n"
+            + "\n".join(log[-40:])
+        )
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        viewer_client.add_mesh("ff_mesh", positions, indices)
+        settle(viewer_client)
+        objects = viewer_client.query_scene()["objects"]
+        assert "ff_mesh" in objects, f"mesh did not load in Firefox: {sorted(objects)}"
+        assert objects["ff_mesh"]["type"] == "Mesh"
+    finally:
+        browser.close()
+
+
+# Object click (issue #178) and dblclick framing switch (issue #177).
+
+
+def _object_click_setup(viewer_client, viewer_page):
+    """Box at the origin under a top-down camera; returns its screen centre."""
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    return viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+
+
+@pytest.mark.browser
+def test_object_click_reports_id_to_python_and_js_hook(viewer_client, viewer_page):
+    """A stationary click on an object reaches Python as object_clicked with
+    the top-level id, the hit point and the button, and fires the JS hook."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    # Nothing is enabled yet, so the pointerup path skips the raycast.
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer._objectClickEnabled") is False
+    )
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.evaluate(
+        "() => { window.__clicks = [];"
+        " window.threejsViewer.onObjectClick((p) => window.__clicks.push("
+        "   {id: p.id, button: p.button, hasObj: !!p.object3D})); }"
+    )
+
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: len(clicks) >= 1), "no object_clicked reached Python"
+    c = clicks[-1]
+    assert c["id"] == "box"
+    assert c["button"] == 0
+    assert c["modifiers"] == {
+        "shift": False,
+        "ctrl": False,
+        "alt": False,
+        "meta": False,
+    }
+    # Top-down camera: the ray hits the box's +Z face (unit box, top at z=0.5).
+    assert abs(c["point"][0]) < 0.1 and abs(c["point"][1]) < 0.1, c["point"]
+    assert abs(c["point"][2] - 0.5) < 1e-3, c["point"]
+
+    # Right-click reports button 2; shift-click carries the modifier.
+    viewer_page.mouse.click(proj["x"], proj["y"], button="right")
+    assert _wait_until(lambda: len(clicks) >= 2)
+    assert clicks[-1]["id"] == "box" and clicks[-1]["button"] == 2
+    viewer_page.keyboard.down("Shift")
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    viewer_page.keyboard.up("Shift")
+    assert _wait_until(lambda: len(clicks) >= 3)
+    assert clicks[-1]["modifiers"]["shift"] is True
+
+    js = viewer_page.evaluate("() => window.__clicks")
+    assert [j["id"] for j in js] == ["box", "box", "box"]
+    assert [j["button"] for j in js] == [0, 2, 0]
+    assert all(j["hasObj"] for j in js)
+
+
+@pytest.mark.browser
+def test_object_click_drag_is_not_a_click(viewer_client, viewer_page):
+    """A 20 px drag between pointerdown and pointerup (an orbit) reports
+    nothing; a stationary click afterwards still does."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    cx, cy = proj["x"], proj["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    for i in range(1, 5):
+        viewer_page.mouse.move(cx + i * 5, cy)
+    viewer_page.mouse.up()
+    # The drag orbited the camera; give the WS a moment to prove silence.
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4)
+
+    # Positive control on the same setup: reset the camera the drag moved,
+    # re-project the box, and a stationary click reports it.
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] == "box"
+
+
+@pytest.mark.browser
+def test_object_click_empty_space_reports_null(viewer_client, viewer_page):
+    """A click that hits nothing reports id None and point None, so a
+    consumer can deselect on it."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    w = viewer_page.evaluate(
+        "() => window.threejsViewer._renderer.domElement.clientWidth"
+    )
+    # Well clear of the unit box (a few hundred px at this camera distance)
+    # and away from the bottom-right view gimbal.
+    viewer_page.mouse.click(proj["x"] - 0.3 * w, proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1] == {
+        "id": None,
+        "point": None,
+        "button": 0,
+        "modifiers": {"shift": False, "ctrl": False, "alt": False, "meta": False},
+    }
+
+
+@pytest.mark.browser
+def test_object_click_not_on_gizmo_handle(viewer_client, viewer_page):
+    """With a move gizmo attached, a press on one of its handles is the
+    gizmo's gesture and never reports as an object click; click-select still
+    works alongside the object-click event without double effects."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    viewer_client.enable_move_gizmo()
+    _wait_for(viewer_page, "() => window.threejsViewer._transformGizmo.enabled")
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    # Click-select attaches the gizmo, and the same click reports to Python.
+    viewer_page.mouse.click(proj["x"] - 15, proj["y"] + 15)
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo.objectId === 'box'"
+    )
+    assert _wait_until(lambda: len(clicks) == 1)
+    assert clicks[0]["id"] == "box"
+
+    # Hover the gizmo centre until TransformControls reports an axis, then
+    # click there: the press lands on a handle, so no object click fires.
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    frames(viewer_page, 2)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.control.axis != null",
+    )
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    assert not _wait_until(lambda: len(clicks) > 1, timeout=0.4)
+
+
+@pytest.mark.browser
+def test_dblclick_frame_option_and_setter(viewer_client, viewer_page):
+    """dblclickFrame:false leaves the camera untouched on a double-click
+    (issue #177); the default still frames, and the runtime setter flips it."""
+    viewer_client.add_box("box", position=[3.0, 0.0, 0.0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const w = v._renderer.domElement.clientWidth,"
+        "       h = v._renderer.domElement.clientHeight;"
+        " const ndc = v._camera.position.clone().set(3,0,0).project(v._camera);"
+        " return { x: (ndc.x*0.5+0.5)*w, y: (-ndc.y*0.5+0.5)*h }; }"
+    )
+    cam = "() => window.threejsViewer._camera.position.toArray()"
+
+    viewer_page.evaluate("() => window.threejsViewer.setDblclickFrame(false)")
+    before = viewer_page.evaluate(cam)
+    viewer_page.mouse.dblclick(proj["x"], proj["y"])
+    frames(viewer_page, 5)
+    assert viewer_page.evaluate(cam) == before
+
+    viewer_page.evaluate("() => window.threejsViewer.setDblclickFrame(true)")
+    viewer_page.mouse.dblclick(proj["x"], proj["y"])
+    _wait_for(
+        viewer_page,
+        "() => { const p = window.threejsViewer._camera.position.toArray();"
+        f" return p.some((c, i) => Math.abs(c - {json.dumps(before)}[i]) > 1e-3); }}",
+    )
+
+    # The constructor option lands on the instance without a runtime call.
+    flags = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const mk = (opts) => {"
+        "   const div = document.createElement('div');"
+        "   div.style.cssText ="
+        "     'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        "   document.body.appendChild(div);"
+        "   return new V(div, { htmlTemplate: live._options.htmlTemplate,"
+        "     cubemapData: live._options.cubemapData, autoConnect: false, ...opts });"
+        " };"
+        " return [mk({})._dblclickFrame, mk({dblclickFrame: false})._dblclickFrame];"
+        "}"
+    )
+    assert flags == [True, False]
+
+
+@pytest.mark.browser
+def test_object_click_skips_hidden_ancestor(viewer_client, viewer_page):
+    """A tracked child under a group hidden with set_visible is unrendered,
+    so a click on it reports null; showing the group again reports the child.
+    The dblclick framing shares the hit test, so it must not frame it either."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('child')")
+    viewer_client.set_visible("grp", False)
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    # The child itself is still .visible === true; only its parent is hidden.
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('child').visible"
+    )
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] is None
+    assert (
+        viewer_page.evaluate(
+            f"() => window.threejsViewer._hitTrackedObject({proj['x']}, {proj['y']})"
+        )
+        is None
+    )
+
+    viewer_client.set_visible("grp", True)
+    settle(viewer_client)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: len(clicks) >= 2)
+    assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
+    """A pointercancel between press and release (a cancelled touch or pen)
+    clears the pending press, so the later pointerup is not a click."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    viewer_page.mouse.down()
+    assert viewer_page.evaluate("() => window.threejsViewer._objectClickDown !== null")
+    viewer_page.evaluate(
+        "() => window.dispatchEvent(new PointerEvent('pointercancel', {pointerId: 1}))"
+    )
+    assert viewer_page.evaluate("() => window.threejsViewer._objectClickDown === null")
+    viewer_page.mouse.up()
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4)
+
+
+@pytest.mark.browser
+def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
+    """destroy() removes the stored canvas pointerdown and window
+    pointerup/pointercancel handlers, so a destroyed instance never raycasts."""
+    removed = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const div = document.createElement('div');"
+        " div.style.cssText ="
+        "   'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        " document.body.appendChild(div);"
+        " const v2 = new V(div, { htmlTemplate: live._options.htmlTemplate,"
+        "   cubemapData: live._options.cubemapData, autoConnect: false });"
+        " const canvas = v2._renderer.domElement;"
+        " const seen = [];"
+        " const origWin = window.removeEventListener.bind(window);"
+        " const origCanvas = canvas.removeEventListener.bind(canvas);"
+        " window.removeEventListener = (t, fn, ...r) => {"
+        "   if (fn === v2._onObjectClickUp || fn === v2._onObjectClickCancel) seen.push('window:' + t);"
+        "   return origWin(t, fn, ...r); };"
+        " canvas.removeEventListener = (t, fn, ...r) => {"
+        "   if (fn === v2._onObjectClickDown) seen.push('canvas:' + t);"
+        "   return origCanvas(t, fn, ...r); };"
+        " try { v2.destroy(); } finally { window.removeEventListener = origWin; }"
+        " return seen.sort();"
+        "}"
+    )
+    assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]
+
+
+_ZOOM_PROJECT_JS = """([x, y, z]) => {
+    const v = window.threejsViewer;
+    const THREE = window.tjsv.THREE;
+    const rect = v._renderer.domElement.getBoundingClientRect();
+    const cam = v._camera;
+    cam.updateMatrixWorld(true);
+    const ndc = new THREE.Vector3(x, y, z).project(cam);
+    return {
+        px: rect.left + ((ndc.x + 1) / 2) * rect.width,
+        py: rect.top + ((1 - ndc.y) / 2) * rect.height,
+        dist: cam.position.distanceTo(v._controls.target),
+        zoom: cam.zoom,
+        ortho: !!v._isOrtho,
+        target: v._controls.target.toArray(),
+    };
+}"""
+
+
+def _zoom_drift_at_cursor(page, world_point, delta_y, n_events):
+    """Put the mouse on `world_point`'s projection, wheel n times, and return
+    the pixel drift of that world point plus the before/after camera state.
+
+    Chromium rounds a synthetic wheel event's clientX/clientY to whole pixels
+    (a move to 791.39 arrives as 791), so the anchor sits up to 0.5 px off the
+    projected point and the drift after a 1.85x zoom lands around 0.5 px. The
+    1 px tolerance covers that; the exact-NDC test below shows the math itself
+    is exact to 1e-13 px.
+    """
+    before = page.evaluate(_ZOOM_PROJECT_JS, world_point)
+    page.mouse.move(before["px"], before["py"])
+    for _ in range(n_events):
+        page.mouse.wheel(0, delta_y)
+    frames(page, 3)
+    after = page.evaluate(_ZOOM_PROJECT_JS, world_point)
+    drift = math.hypot(after["px"] - before["px"], after["py"] - before["py"])
+    return drift, before, after
+
+
+@pytest.mark.browser
+def test_wheel_zoom_anchors_on_cursor_perspective_and_ortho(viewer_client, viewer_page):
+    """Issue #192: wheel zoom keeps the world point under the cursor at the
+    same screen pixel, in both projections, instead of converging on the orbit
+    target. The camera still moves (distance / zoom change), and the target
+    shifts with the camera so the ViewHelper centre (same Vector3) follows."""
+    viewer_client.add_box(
+        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
+    )
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    world_point = [1.5, 0.5, 0.0]
+
+    # Perspective: zoom in, then zoom out, cursor parked on the box.
+    drift_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
+    assert after["ortho"] is False
+    assert after["dist"] < before["dist"] * 0.8, "zoom in shortened the dolly"
+    assert drift_in < 1.0, f"perspective zoom-in drift {drift_in:.3f}px"
+    assert after["target"] != before["target"], "target rides along with the camera"
+    drift_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
+    assert after["dist"] > before["dist"] * 1.2
+    assert drift_out < 1.0, f"perspective zoom-out drift {drift_out:.3f}px"
+    # The screen centre (the old anchor) is not fixed anymore when the cursor
+    # is off-centre: the target projection should have moved.
+    print(f"perspective drift in={drift_in:.4f}px out={drift_out:.4f}px")
+
+    # Orthographic (manual O key path), same check on cam.zoom.
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page, 2)
+    drift_o_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
+    assert after["ortho"] is True
+    assert after["zoom"] > before["zoom"] * 1.2, "ortho zoom increased"
+    assert drift_o_in < 1.0, f"ortho zoom-in drift {drift_o_in:.3f}px"
+    drift_o_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
+    assert after["zoom"] < before["zoom"] * 0.8
+    assert drift_o_out < 1.0, f"ortho zoom-out drift {drift_o_out:.3f}px"
+    print(f"ortho drift in={drift_o_in:.4f}px out={drift_o_out:.4f}px")
+
+    # After the long zoom the ViewHelper centre is still the controls' target
+    # (same Vector3, mutated in place), so click-to-pivot and the gimbal agree.
+    same = viewer_page.evaluate(
+        "() => window.threejsViewer._viewHelper.center === window.threejsViewer._controls.target"
+    )
+    assert same is True
+
+
+@pytest.mark.browser
+def test_wheel_zoom_anchor_math_is_exact(viewer_client, viewer_page):
+    """Drive `_applyZoom` with the float NDC of a world point directly, so the
+    wheel event's integer pixel rounding is out of the picture: 12 steps in and
+    12 back out leave the point's projection where it was to sub-1e-6 px."""
+    viewer_client.add_box(
+        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
+    )
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    js = (
+        "([x, y, z]) => {"
+        " const v = window.threejsViewer; const THREE = window.tjsv.THREE;"
+        " const cam = v._camera; cam.updateMatrixWorld(true);"
+        " const rect = v._renderer.domElement.getBoundingClientRect();"
+        " const n0 = new THREE.Vector3(x, y, z).project(cam);"
+        " const d0 = cam.position.distanceTo(v._controls.target), z0 = cam.zoom;"
+        " const out = [];"
+        " for (const s of [1 / 0.95, 0.95]) {"
+        "   for (let i = 0; i < 12; i++) v._controls._applyZoom(s, n0.x, n0.y);"
+        "   cam.updateMatrixWorld(true);"
+        "   const n1 = new THREE.Vector3(x, y, z).project(cam);"
+        "   out.push(Math.hypot((n1.x - n0.x) / 2 * rect.width, (n1.y - n0.y) / 2 * rect.height));"
+        " }"
+        " return { drift: out, d0, d1: cam.position.distanceTo(v._controls.target),"
+        "          z0, z1: cam.zoom };"
+        "}"
+    )
+    persp = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
+    assert max(persp["drift"]) < 1e-6, persp
+    assert abs(persp["d1"] - persp["d0"]) < 1e-9, "in then out restores the distance"
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page, 2)
+    ortho = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
+    assert max(ortho["drift"]) < 1e-6, ortho
+    assert abs(ortho["z1"] - ortho["z0"]) < 1e-9 * ortho["z0"], (
+        "in then out restores the zoom"
+    )
+
+
+@pytest.mark.browser
+def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_page):
+    """With the cursor exactly on the orbit target the zoom degenerates to the
+    old about-target dolly: the target does not move at all."""
+    viewer_client.add_box("b", width=0.5, height=0.5, depth=0.5, position=[0, 0, 0])
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    drift, before, after = _zoom_drift_at_cursor(viewer_page, [0, 0, 0], -300, 4)
+    assert drift < 1.0
+    assert after["dist"] < before["dist"] * 0.8
+    assert max(abs(a - b) for a, b in zip(after["target"], before["target"])) < 1e-6
+    # Programmatic zoom without a cursor keeps the about-target behaviour.
+    moved = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const t0 = v._controls.target.toArray();"
+        " v._controls._applyZoom(1.5);"
+        " const t1 = v._controls.target.toArray();"
+        " return t0.some((c, i) => Math.abs(c - t1[i]) > 1e-9);"
+        "}"
+    )
+    assert moved is False
+
+
+_WORLD_POS_JS = """(id) => {
+    const o = window.threejsViewer.getObject(id);
+    if (!o) return null;
+    o.updateWorldMatrix(true, false);
+    const e = o.matrixWorld.elements;
+    return { local: o.position.toArray(), world: [e[12], e[13], e[14]] };
+}"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"fat": False}, {"segments": True}],
+    ids=["fat", "native", "segments"],
+)
+def test_add_polyline_applies_transform(viewer_client, viewer_page, kwargs):
+    """add_polyline_binary honours data.transform on all three line variants
+    (issue #194): the polyline lands at the requested pose, not the origin."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
+    viewer_client.add_polyline("pl", pts, position=[5, 6, 7], **kwargs)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got is not None
+    assert got["local"] == pytest.approx([5, 6, 7])
+    assert got["world"] == pytest.approx([5, 6, 7])
+
+
+@pytest.mark.browser
+def test_add_polyline_applies_matrix_under_parent(viewer_client, viewer_page):
+    """A matrix transform composes under a transformed parent group."""
+    viewer_client.add_group("g", position=[10, 0, 0])
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1]
+    viewer_client.add_polyline("pl", pts, parent="g", matrix=mat)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got["local"] == pytest.approx([1, 2, 3])
+    assert got["world"] == pytest.approx([11, 2, 3])
+
+
+@pytest.mark.browser
+def test_add_points_applies_transform(viewer_client, viewer_page):
+    """add_points_binary honours data.transform (same omission as #194)."""
+    pts = np.random.default_rng(1).random((100, 3)).astype(np.float32)
+    viewer_client.add_points("pc", pts, position=[3, 4, 5])
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pc")
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_add_points_lod_applies_transform(viewer_client, viewer_page):
+    """add_points_lod honours data.transform on the octree group."""
+    pts = np.random.default_rng(2).random((5000, 3)).astype(np.float32)
+    viewer_client.add_points(
+        "cloud", pts, lod={"node_capacity": 1000}, position=[3, 4, 5]
+    )
+    got = None
+    for _ in range(100):
+        time.sleep(0.05)
+        got = viewer_page.evaluate(_WORLD_POS_JS, "cloud")
+        if got is not None:
+            break
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_page):
+    """A LOD cloud scaled [1, 1, 4] must refine exactly like one scaled
+    [4, 4, 4]: the node-size estimate bounds the radius by the largest scale
+    component, so the stretched axis never stops refinement early. Under
+    ortho the estimate ignores camera position, so the wanted sets compare
+    exactly."""
+    pts = np.random.default_rng(5).random((20_000, 3)).astype(np.float32)
+    lod = {"node_capacity": 1000, "point_budget": 1_000_000, "refine_pixels": 100}
+    for cid, scale in (("s111", [1, 1, 1]), ("s114", [1, 1, 4]), ("s444", [4, 4, 4])):
+        viewer_client.add_points(cid, pts, lod=lod, scale=scale)
+    viewer_page.evaluate("() => window.threejsViewer._camController.switch(true)")
+    wanted = None
+    for _ in range(100):
+        time.sleep(0.05)
+        wanted = viewer_page.evaluate(
+            "() => {"
+            " const out = {};"
+            " for (const id of ['s111', 's114', 's444']) {"
+            "   const g = window.threejsViewer._objects.get(id);"
+            "   if (!g || !g.userData.pointsLOD) return null;"
+            "   out[id] = g.userData.pointsLOD.wanted.reduce((a, b) => a + b, 0);"
+            " }"
+            " return out;"
+            "}"
+        )
+        if wanted and wanted["s444"] > 1 and wanted["s114"] == wanted["s444"]:
+            break
+    assert wanted, "LOD clouds never appeared"
+    assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
+    assert wanted["s114"] == wanted["s444"], wanted
+    assert wanted["s111"] < wanted["s444"], wanted

@@ -15,10 +15,8 @@ WebGL buffer (no PNG-decode dependency). Add scenes/approaches freely.
 
 import socket
 import sys
-import threading
 import time
 import math
-from http.server import HTTPServer
 from pathlib import Path
 import numpy as np
 
@@ -28,7 +26,6 @@ OUT = Path(__file__).parent / "out"
 OUT.mkdir(exist_ok=True)
 from playwright.sync_api import sync_playwright  # noqa: E402
 from threejs_viewer import ViewerClient  # noqa: E402
-from threejs_viewer.client import _BlobHandler  # noqa: E402
 from zigzag_rounded import build as build_zigzag, widths_for, JS_CAM, JS_WIRE, W0  # noqa: E402
 
 VIEW = {"width": 1200, "height": 900}
@@ -362,12 +359,7 @@ def free():
 def main():
     port = free()
     c = ViewerClient(port=port, open_browser=False)
-    c._http_port = free()
-    h = HTTPServer((c.host, c._http_port), _BlobHandler)
-    h.blob_store = c._blob_store
-    c._http_server = h
-    threading.Thread(target=h.serve_forever, daemon=True).start()
-    threading.Thread(target=c._run_server, daemon=True).start()
+    c._start_servers(http_port=0)
 
     results = {}
     with sync_playwright() as p:
