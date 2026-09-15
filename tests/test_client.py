@@ -1,10 +1,15 @@
 """Tests for ViewerClient."""
 
+import json
 import math
+import socket
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import pytest
+from websockets.sync.client import connect as ws_connect
 
 from threejs_viewer import Animation, Frame, ViewerClient
 
@@ -408,6 +413,111 @@ class TestVersion:
         from threejs_viewer.client import _is_dev_version
 
         assert not _is_dev_version(version)
+
+
+# --- Sidecar reachability over both loopback families (issue #187) ---
+
+
+def _ipv6_loopback_available() -> bool:
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+@pytest.fixture()
+def bound_client():
+    """A client with its servers bound on OS-chosen ports, no browser."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        ws_port = s.getsockname()[1]
+    client = ViewerClient(port=ws_port, open_browser=False)
+    client._start_servers(http_port=0)
+    try:
+        yield client
+    finally:
+        client.disconnect()
+
+
+def _fetch(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        assert resp.status == 200
+        return resp.read()
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "[::1]"])
+def test_servers_reachable_on_both_loopback_families(bound_client, address):
+    """``localhost`` may resolve to ::1 in the browser; both families must serve.
+
+    The WebSocket half opens a real connection with the ``websockets`` sync
+    client, which runs the same handshake the browser does.
+    """
+    if address == "[::1]" and not _ipv6_loopback_available():
+        pytest.skip("no IPv6 loopback on this machine")
+    payload = b"\x01\x02\x03\x04"
+    bound_client._blob_store["/blob_test"] = payload
+    assert _fetch(f"http://{address}:{bound_client._http_port}/blob_test") == payload
+    # A real WebSocket handshake, so a regression in serve(sock=...) shows up
+    # here and not only in the browser suite.
+    with ws_connect(f"ws://{address}:{bound_client.port}", open_timeout=5):
+        assert bound_client._connected_event.wait(timeout=5)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "viewer.example", "::1"])
+def test_blob_url_host_is_the_configured_host(host):
+    """Blob URLs advertise ``host`` verbatim: one hostname in the page, or a
+    file:// viewer page in Firefox refuses the sidecar fetch as cross-origin."""
+    client = ViewerClient(host=host, port=5666, open_browser=False)
+    client._ws = _CaptureWS()
+    client.add_mesh(
+        "m",
+        np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+        np.array([[0, 1, 2]], dtype=np.uint32),
+    )
+    url = client._ws.messages[-1]["blob_url"]
+    assert urlparse(url).hostname == host
+    assert urlparse(url).port == 5667
+
+
+def test_viewer_url_carries_ws_host_when_not_localhost():
+    """The viewer defaults to ws://localhost; any other host rides along as
+    ``ws_host`` so the WebSocket and the blob sidecar share one hostname."""
+    assert "ws_host" not in _params(ViewerClient(port=1234).viewer_url)
+    params = _params(ViewerClient(host="127.0.0.1", port=1234).viewer_url)
+    assert params["ws_host"] == ["127.0.0.1"]
+    assert _params(ViewerClient(host="::1", port=1).viewer_url)["ws_host"] == ["[::1]"]
+
+
+class _CaptureWS:
+    def __init__(self):
+        self.messages = []
+
+    def send(self, text):
+        self.messages.append(json.loads(text))
+
+
+def test_listen_sockets_raises_when_ipv6_port_is_taken():
+    """A port in use on ::1 is a real failure, not a reason to go IPv4-only:
+    the browser may still resolve localhost to ::1 and get nothing."""
+    if not _ipv6_loopback_available():
+        pytest.skip("no IPv6 loopback on this machine")
+    from threejs_viewer.client import _listen_sockets
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as taken:
+        taken.bind(("::1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        with pytest.raises(OSError):
+            _listen_sockets("localhost", port)
+    # Nothing is left bound on the IPv4 side either.
+    socks = _listen_sockets("localhost", port)
+    assert {s.family for s in socks} == {socket.AF_INET, socket.AF_INET6}
+    for s in socks:
+        s.close()
 
 
 def test_enable_object_click_payload():

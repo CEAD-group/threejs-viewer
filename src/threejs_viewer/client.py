@@ -5,11 +5,13 @@ A lightweight client for controlling the Three.js viewer from Python/Jupyter.
 Runs a WebSocket server that the browser connects to directly.
 """
 
+import errno
 import functools
 import json
 import logging
 import math
 import numbers
+import socket
 import threading
 import time
 import urllib.parse
@@ -374,6 +376,93 @@ class _BlobHandler(BaseHTTPRequestHandler):
         pass  # Suppress HTTP request logging
 
 
+class _BlobServer(HTTPServer):
+    """HTTPServer over a socket bound by :func:`_listen_sockets`.
+
+    ``HTTPServer`` binds exactly one address itself; taking a pre-bound
+    socket lets the sidecar run one instance per address ``host`` resolves
+    to, all serving the same blob store.
+    """
+
+    def __init__(self, sock: socket.socket, blob_store: dict):
+        super().__init__(sock.getsockname()[:2], _BlobHandler, bind_and_activate=False)
+        # TCPServer.__init__ opened an unbound AF_INET socket; swap in ours.
+        self.socket.close()
+        self.socket = sock
+        self.server_address = sock.getsockname()
+        self.blob_store = blob_store
+
+
+# Bind errors that mean "this machine has no usable IPv6", the only case in
+# which an IPv6 listener may be skipped. Anything else (EADDRINUSE, EACCES)
+# is a real failure: skipping it would start an IPv4-only client while the
+# browser may still resolve localhost to ::1.
+_IPV6_UNAVAILABLE_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EAFNOSUPPORT", "EADDRNOTAVAIL", "EPROTONOSUPPORT")
+    if hasattr(errno, name)
+)
+
+
+def _url_host(host: str) -> str:
+    """``host`` as it goes into a URL: IPv6 literals need brackets."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
+def _listen_sockets(host: str, port: int) -> List[socket.socket]:
+    """Bind one listening socket per address ``host`` resolves to (issue #187).
+
+    ``localhost`` resolves to both 127.0.0.1 and ::1 on most machines and the
+    browser may pick either, so a single IPv4 listener leaves every request
+    over ::1 failing with a connection error. Binding ``::1`` dual-stack does
+    not help (only the unspecified address ``::`` accepts both families), so
+    the servers listen on every resolved address instead and the page keeps
+    advertising ``host`` verbatim. IPv6 sockets are V6ONLY so the two
+    families never overlap on a wildcard host. An IPv6 address is skipped
+    only when the error says IPv6 is unavailable (``_IPV6_UNAVAILABLE_ERRNOS``);
+    a port in use or a permission error raises like it always did. ``port=0``
+    picks a free port on the first socket and reuses it for the rest,
+    retrying when that port happens to be taken on another family.
+    """
+    infos = socket.getaddrinfo(
+        host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+    )
+    addresses: List[tuple] = []
+    for family, _, _, _, sockaddr in infos:
+        if (family, sockaddr[:2]) not in addresses:
+            addresses.append((family, sockaddr[:2]))
+    log = logging.getLogger(__name__)
+    for _attempt in range(8):
+        socks: List[socket.socket] = []
+        retry = False
+        error: Optional[OSError] = None
+        for family, (address, _) in addresses:
+            bound_port = socks[0].getsockname()[1] if socks else port
+            try:
+                socks.append(socket.create_server((address, bound_port), family=family))
+            except OSError as exc:
+                if socks and port == 0 and exc.errno == errno.EADDRINUSE:
+                    retry = True
+                    break
+                if family == socket.AF_INET6 and exc.errno in _IPV6_UNAVAILABLE_ERRNOS:
+                    log.warning(
+                        "Not listening on [%s]:%s: %s", address, bound_port, exc
+                    )
+                    error = exc
+                    continue
+                for sock in socks:
+                    sock.close()
+                raise
+        if retry:
+            for sock in socks:
+                sock.close()
+            continue
+        if not socks:
+            raise error or OSError(f"no address to bind for host {host!r}")
+        return socks
+    raise OSError(f"could not bind a free port on every address of {host!r}")
+
+
 class ViewerClient:
     """
     Synchronous client for controlling the Three.js viewer.
@@ -395,7 +484,11 @@ class ViewerClient:
         """Create a viewer client.
 
         Args:
-            host: Interface to bind the WebSocket / HTTP servers to.
+            host: Hostname the WebSocket / HTTP servers bind (every address
+                it resolves to) and the viewer page uses to reach them: it is
+                advertised verbatim in blob URLs and, when it is not
+                ``"localhost"``, passed to the viewer as the ``ws_host`` query
+                param so the WebSocket and the sidecar share one hostname.
             port: WebSocket port (HTTP blob sidecar listens on ``port + 1``).
             open_browser: Open the viewer in the system browser on ``connect()``.
             tone_mapping_exposure: Override the renderer's ``toneMappingExposure``
@@ -432,13 +525,6 @@ class ViewerClient:
         URL param > ``ThreeJSViewer`` option > hard default.
         """
         self.host = host
-        # Blob URLs must use the SAME hostname the page uses to reach the WS
-        # server. Rewriting "localhost" to "127.0.0.1" here (#185) makes
-        # Firefox refuse every sidecar fetch from a file:// viewer page:
-        # "CORS request did not succeed", status (null), while the very same
-        # page reaches http://localhost:<ws_port>/ fine. Chromium allows it,
-        # which is why the browser suite never saw it.
-        self._http_host = host
         self.port = port
         self.open_browser = open_browser
         # Lighting overrides — forwarded to the viewer via query string on launch.
@@ -478,19 +564,20 @@ class ViewerClient:
         # Perspective camera FOV (degrees). `None` means "use the viewer default".
         self.fov = _validate_fov(fov)
         self._ws = None
-        self._server = None
-        self._server_thread = None
+        # One WebSocket server and one blob sidecar per address ``host``
+        # resolves to (issue #187); both lists are filled by _start_servers.
+        self._ws_servers: list = []
+        self._http_servers: List[_BlobServer] = []
         self._connected_event = threading.Event()
         self._assets_loaded_event = threading.Event()
         self._pending_responses: Dict[str, threading.Event] = {}
         self._responses: Dict[str, dict] = {}
         self._send_lock = threading.Lock()
         self._current_animation = None  # Stored for re-sending on reconnect
-        self._http_server = None
         self._blob_store: Dict[str, bytes] = {}
-        # HTTP sidecar port; connect() re-derives the same value when it
-        # actually binds the server. Set here too so URL construction (e.g.
-        # add_points lod headers) works before/without connect().
+        # HTTP sidecar port; _start_servers overwrites it with the port it
+        # actually bound. Set here too so URL construction (e.g. add_points
+        # lod headers) works before/without connect().
         self._http_port = port + 1
         # LOD point clouds: id -> blob-store key prefix (hierarchy + lazy
         # per-node payload providers live under it). Released on replace,
@@ -544,15 +631,7 @@ class ViewerClient:
         """
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        # Start HTTP server for fast binary transfers
-        self._http_port = self.port + 1
-        http_server = HTTPServer((self.host, self._http_port), _BlobHandler)
-        http_server.blob_store = self._blob_store
-        self._http_server = http_server
-        threading.Thread(target=http_server.serve_forever, daemon=True).start()
-
-        self._server_thread = threading.Thread(target=self._run_server, daemon=True)
-        self._server_thread.start()
+        self._start_servers()
 
         print(f"Waiting for viewer to connect on ws://{self.host}:{self.port} ...")
         deadline = time.monotonic() + timeout
@@ -600,7 +679,8 @@ class ViewerClient:
     def viewer_url(self) -> str:
         """Full file:// URL to the viewer.
 
-        Always includes `ws_port`. Appends `tone_mapping`,
+        Always includes `ws_port`; adds `ws_host` when ``host`` is not
+        ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
         `ambient_intensity`, and/or `fov` query params when the caller passed
         explicit overrides —
@@ -608,6 +688,8 @@ class ViewerClient:
         win over the panel's localStorage on reload).
         """
         params: list[tuple[str, str]] = [("ws_port", str(self.port))]
+        if self.host != "localhost":
+            params.append(("ws_host", _url_host(self.host)))
         if self.tone_mapping is not None:
             params.append(("tone_mapping", self.tone_mapping))
         if self.tone_mapping_exposure is not None:
@@ -624,19 +706,51 @@ class ViewerClient:
             params.append(("fov", str(self.fov)))
         return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
-    def _run_server(self):
-        """Run the WebSocket server in a background thread."""
+    def _start_servers(self, http_port: Optional[int] = None) -> None:
+        """Bind the WebSocket server and the HTTP blob sidecar.
+
+        Both listen on every address ``host`` resolves to (issue #187). The
+        sidecar port defaults to ``port + 1``; tests pass ``0`` to let the OS
+        pick a free one, and blob URLs embed whatever was actually bound.
+        """
         ws_logger = logging.getLogger("websockets.server")
         ws_logger.setLevel(logging.CRITICAL)
-        with sync_serve(
-            self._handle_connection,
-            self.host,
-            self.port,
-            max_size=256 * 1024 * 1024,
-            logger=ws_logger,
-        ) as server:
-            self._server = server
-            server.serve_forever()
+        # Sockets bound but not yet owned by a running server; closed on the
+        # error path so a failure halfway through leaks no listener.
+        pending: List[socket.socket] = []
+        try:
+            pending = _listen_sockets(
+                self.host, self.port + 1 if http_port is None else http_port
+            )
+            self._http_port = pending[0].getsockname()[1]
+            while pending:
+                server = _BlobServer(pending[0], self._blob_store)
+                # shutdown() blocks one poll interval per server; keep it short
+                # so disconnect() stays fast with several listeners.
+                threading.Thread(
+                    target=server.serve_forever, args=(0.05,), daemon=True
+                ).start()
+                # Listed only once its thread runs: HTTPServer.shutdown() waits
+                # for serve_forever to be entered, so an unstarted server in the
+                # list would deadlock disconnect().
+                self._http_servers.append(server)
+                pending.pop(0)
+            pending = _listen_sockets(self.host, self.port)
+            while pending:
+                server = sync_serve(
+                    self._handle_connection,
+                    sock=pending[0],
+                    max_size=256 * 1024 * 1024,
+                    logger=ws_logger,
+                )
+                self._ws_servers.append(server)
+                pending.pop(0)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+        except Exception:
+            for sock in pending:
+                sock.close()
+            self.disconnect()
+            raise
 
     def _handle_connection(self, websocket):
         """Handle incoming WebSocket connection from browser."""
@@ -777,13 +891,13 @@ class ViewerClient:
 
     def disconnect(self):
         """Disconnect and stop server."""
-        if self._http_server:
-            self._http_server.shutdown()
-            self._http_server.server_close()
-            self._http_server = None
-        if self._server:
-            self._server.shutdown()
-            self._server = None
+        for server in self._http_servers:
+            server.shutdown()
+            server.server_close()
+        self._http_servers = []
+        for server in self._ws_servers:
+            server.shutdown()
+        self._ws_servers = []
         self._ws = None
 
     def __enter__(self):
@@ -1327,7 +1441,7 @@ class ViewerClient:
         blob_key = f"/blob_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = payload
         header_dict["blob_url"] = (
-            f"http://{self._http_host}:{self._http_port}{blob_key}"
+            f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
         )
         self._send(header_dict)
         return blob_key
@@ -2081,7 +2195,7 @@ class ViewerClient:
             self._blob_store[f"{key_base}/{i}"] = functools.partial(node_payload, i)
         self._points_lod[id] = key_base
 
-        base_url = f"http://{self._http_host}:{self._http_port}{key_base}"
+        base_url = f"http://{_url_host(self.host)}:{self._http_port}{key_base}"
         header = {
             "type": "add_points_lod",
             "id": id,
@@ -4148,7 +4262,7 @@ class ViewerClient:
             del self._blob_store[k]
         blob_key = f"/animation_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = binary_payload
-        blob_url = f"http://{self._http_host}:{self._http_port}{blob_key}"
+        blob_url = f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
 
         # Binary-channel animations skip reconnect replay — storing hundreds of MB
         # of typed arrays for re-send isn't worthwhile; the user re-runs the script.

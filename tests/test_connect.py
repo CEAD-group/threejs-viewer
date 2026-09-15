@@ -91,8 +91,8 @@ def test_timeout_cleans_up_servers():
     client = ViewerClient(port=_free_port(), open_browser=False)
     err = _connect_and_catch(client, timeout=0.2)
     assert isinstance(err, TimeoutError)
-    assert client._http_server is None
-    assert client._server is None
+    assert client._http_servers == []
+    assert client._ws_servers == []
 
 
 def test_timeout_respects_deadline():

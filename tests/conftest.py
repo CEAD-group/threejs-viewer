@@ -1,7 +1,6 @@
 """Shared fixtures for threejs-viewer tests."""
 
 import socket
-import threading
 import time
 
 import pytest
@@ -45,19 +44,7 @@ def viewer_client():
     """
     port = _free_port()
     client = ViewerClient(port=port, open_browser=False)
-
-    from http.server import HTTPServer
-
-    from threejs_viewer.client import _BlobHandler
-
-    http_server = HTTPServer((client.host, 0), _BlobHandler)
-    client._http_port = http_server.server_address[1]
-    http_server.blob_store = client._blob_store
-    client._http_server = http_server
-    threading.Thread(target=http_server.serve_forever, daemon=True).start()
-
-    client._server_thread = threading.Thread(target=client._run_server, daemon=True)
-    client._server_thread.start()
+    client._start_servers(http_port=0)
 
     yield client
 
