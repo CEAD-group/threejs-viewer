@@ -42,8 +42,9 @@ visibility and shortcut display. The client owns items and callbacks.
 - Eye items are re-applied from `_registerObject`, the viewer's single
   registration choke point, so a hidden layer stays hidden when its objects
   are re-pushed or stream in later. The timer hack goes away.
-- Every item can show a shortcut chip; `bindKey` also binds it, unless the
-  key is one the viewer's own handler consumes (refused with a warning).
+- User-defined keyboard shortcuts: an item's `shortcut` is shown as a chip
+  and bound (`bindKey: false` for chip only), unless the key is one the
+  viewer's own handler consumes (refused with a warning).
 - Styling follows ribweaver's overlay palette, exposed as `--tjsv-*` tokens
   on `.threejs-viewer` so ribweaver can override by setting variables.
 

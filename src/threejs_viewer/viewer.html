@@ -6755,15 +6755,20 @@ class CameraController {
 //         options: [{value, label}], ids, prefix, disabled, hidden,
 //         onClick(item), onChange(value, item), render(el, item) }
 //   `state`, `active`, `checked`, `value`, `hidden` and `disabled` may be
-//   functions; refresh() re-evaluates them. `eye` items own every tracked
+//   functions; refresh() re-evaluates them. A `shortcut` ("G", "Shift+G")
+//   is shown as a key chip AND bound (user-defined keyboard shortcuts) unless
+//   `bindKey: false`; keys the viewer itself uses are refused with a warning. `eye` items own every tracked
 //   object whose id is in `ids` or starts with `prefix` and flip its
 //   `.visible`; a menu `storageKey` persists toggle/eye/select/segmented
-//   values in localStorage under that key.
+//   values in localStorage under that key. An eye may instead supply
+//   `match(objId)` (custom ownership) and/or `apply(on)` (custom show/hide,
+//   replacing the object walk) for layers that are not plain id shapes.
 
 /** @typedef {{
  *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
  *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
  *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
+ *   match?: (objId: string) => boolean, apply?: (on: boolean, item: MenuItemSpec) => void,
  *   disabled?: any, hidden?: any,
  *   onClick?: (item: MenuItemSpec) => void,
  *   onChange?: (value: any, item: MenuItemSpec) => void,
@@ -6911,6 +6916,12 @@ class MenuController {
             setItem: (itemId, patch) => self.setItem(m, itemId, patch),
             /** @param {string} itemId */
             getValue: (itemId) => self._valueOf(m, m.items.get(itemId)?.spec),
+            applyEyes: () => self.applyEyes(m),
+            /** @param {string} itemId */
+            applyEye: (itemId) => {
+                const rec = m.items.get(itemId);
+                if (rec && (rec.spec.type || '') === 'eye') self._applyEye(rec.spec, !!self._valueOf(m, rec.spec));
+            },
         };
     }
 
@@ -7047,7 +7058,10 @@ class MenuController {
         if (it.id) el.dataset.item = it.id;
         if (it.hint) el.title = it.hint;
         rec.el = el;
-        if (it.bindKey && it.shortcut) {
+        // A client item's shortcut is bound unless it opts out; the built-in
+        // menu's keys are handled by the viewer's own keydown switch.
+        const bind = it.shortcut && (it.bindKey !== undefined ? !!it.bindKey : !m.spec.builtin);
+        if (bind) {
             const norm = normalizeShortcut(it.shortcut);
             if (this._reservedKeys.has(norm)) {
                 console.warn(`addMenu: shortcut '${it.shortcut}' on '${m.spec.id}/${it.id}' is a viewer key; not bound`);
@@ -7207,6 +7221,7 @@ class MenuController {
 
     /** @param {MenuItemSpec} it @param {string} objId */
     _eyeOwns(it, objId) {
+        if (typeof it.match === 'function') return !!it.match(objId);
         if (it.ids && it.ids.includes(objId)) return true;
         if (it.prefix && objId.startsWith(it.prefix)) return true;
         return false;
@@ -7214,6 +7229,7 @@ class MenuController {
 
     /** @param {MenuItemSpec} it @param {boolean} on */
     _applyEye(it, on) {
+        if (typeof it.apply === 'function') { it.apply(on, it); return; }
         for (const [objId, obj] of this._viewer._objects) {
             if (obj && this._eyeOwns(it, objId)) obj.visible = on;
         }

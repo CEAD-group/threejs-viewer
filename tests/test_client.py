@@ -451,7 +451,7 @@ def test_add_menu_validates_and_records_for_reconnect():
         items=[
             {"type": "label", "label": "Scene"},
             {"type": "eye", "id": "boxes", "label": "Boxes", "prefix": "box_"},
-            {"id": "go", "label": "Go", "shortcut": "G", "bind_key": True},
+            {"id": "go", "label": "Go", "shortcut": "G", "bind_key": False},
             {"type": "select", "id": "size", "options": ["s", "m"], "value": "m"},
         ],
     )
@@ -463,7 +463,7 @@ def test_add_menu_validates_and_records_for_reconnect():
         "id": "go",
         "label": "Go",
         "shortcut": "G",
-        "bindKey": True,
+        "bindKey": False,
     }
     assert menu["items"][3]["options"] == [{"value": "s"}, {"value": "m"}]
     assert client._menus["demo"] is sent[0]

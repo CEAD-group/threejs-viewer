@@ -3138,10 +3138,12 @@ class ViewerClient:
                 ``"toggle"``, ``"eye"``, ``"select"``, ``"segmented"``,
                 ``"label"``, ``"divider"`` (default ``"button"``). Every
                 interactive item needs an ``id``. Common keys: ``label``,
-                ``hint`` (tooltip), ``shortcut`` (shown as a key chip, e.g.
-                ``"G"`` or ``"Shift+G"``), ``bind_key`` (also bind that key;
+                ``hint`` (tooltip), ``shortcut`` (a user-defined keyboard
+                shortcut such as ``"G"`` or ``"Shift+G"``: shown as a key chip
+                and bound in the viewer, so pressing it triggers the item;
                 keys the viewer itself uses are refused with a console
-                warning), ``disabled``, ``state`` (small grey text).
+                warning; pass ``bind_key=False`` to only show the chip),
+                ``disabled``, ``state`` (small grey text).
                 ``toggle`` takes ``checked``; ``eye`` takes ``ids`` and/or
                 ``prefix`` naming the viewer objects it shows/hides
                 (``checked`` defaults to ``True``); ``select`` and
@@ -3218,8 +3220,8 @@ class ViewerClient:
         ):
             if key in item:
                 out[key] = item[key]
-        if item.get("bind_key"):
-            out["bindKey"] = True
+        if "bind_key" in item:
+            out["bindKey"] = bool(item["bind_key"])
         if "options" in item:
             out["options"] = [
                 o if isinstance(o, dict) else {"value": o} for o in item["options"]
