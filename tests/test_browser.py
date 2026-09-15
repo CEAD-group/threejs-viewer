@@ -5478,6 +5478,99 @@ def test_embedder_overlays(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_toolbar_hidden_by_default_and_client_toggle(viewer_client, viewer_page):
+    """The top-left menu button is hidden on a bare open; the Python client
+    shows it with set_toolbar_visible and hides it again (closing the menu)."""
+    page = viewer_page
+    assert page.evaluate("() => window.threejsViewer._toolbarEl.hidden") is True
+    assert page.evaluate("() => window.threejsViewer.isToolbarVisible()") is False
+
+    viewer_client.set_toolbar_visible(True)
+    settle(viewer_client)
+    assert page.evaluate("() => window.threejsViewer._toolbarEl.hidden") is False
+    assert page.locator(".tjsv-btn-menu").is_visible()
+
+    page.locator(".tjsv-btn-menu").click()
+    assert page.evaluate("() => window.threejsViewer._menuOpen") is True
+    viewer_client.set_toolbar_visible(False)
+    settle(viewer_client)
+    assert page.evaluate("() => window.threejsViewer._toolbarEl.hidden") is True
+    assert page.evaluate("() => window.threejsViewer._menuOpen") is False
+
+
+@pytest.mark.browser
+def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
+    """The menu lists every advanced option with its shortcut key; an item
+    click runs the same action as the key, and the state labels follow."""
+    page = viewer_page
+    viewer_client.set_toolbar_visible(True)
+    settle(viewer_client)
+    page.locator(".tjsv-btn-menu").click()
+    items = page.evaluate(
+        "() => [...document.querySelectorAll('.tjsv-menu-item')]"
+        "  .filter(b => b.style.display !== 'none')"
+        "  .map(b => [b.querySelector('.tjsv-menu-label').textContent,"
+        "             b.querySelector('kbd').textContent])"
+    )
+    assert items == [
+        ["Clipping plane", "C"],
+        ["Lighting", "E"],
+        ["Orbit mode", "R"],
+        ["Projection", "O"],
+        ["Wireframe", "M"],
+        ["Shading debug", "N"],
+        ["Distance fog", "D"],
+        ["Eye-dome lighting", "Shift+D"],
+        ["Frame all", "F"],
+    ]
+    # Camera tracking only shows once an animation with a track target exists.
+    assert (
+        page.evaluate("() => document.querySelector('.tjsv-btn-track').style.display")
+        == "none"
+    )
+
+    page.locator(".tjsv-btn-wireframe").click()
+    state = page.evaluate(
+        "() => ({mode: window.threejsViewer._shading.wireframeMode,"
+        "        active: document.querySelector('.tjsv-btn-wireframe')"
+        "                  .classList.contains('active'),"
+        "        label: document.querySelector('.tjsv-btn-wireframe .tjsv-menu-state')"
+        "                  .textContent,"
+        "        open: window.threejsViewer._menuOpen})"
+    )
+    assert state == {"mode": 1, "active": True, "label": "wire", "open": True}
+
+    # A pointerdown outside the toolbar closes the menu.
+    page.mouse.click(400, 300)
+    assert page.evaluate("() => window.threejsViewer._menuOpen") is False
+
+
+@pytest.mark.browser
+def test_toolbar_option_and_url_param(viewer_client, viewer_page):
+    """`toolbar: true` as a constructor option shows the menu button on a
+    fresh viewer, mirroring the `toolbar=true` URL param the Python kwarg sends."""
+    result = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const mk = (opts) => {"
+        "   const div = document.createElement('div');"
+        "   div.style.cssText ="
+        "     'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        "   document.body.appendChild(div);"
+        "   const v = new V(div, Object.assign({"
+        "     htmlTemplate: live._options.htmlTemplate,"
+        "     cubemapData: live._options.cubemapData,"
+        "     autoConnect: false }, opts));"
+        "   return v._toolbarEl.hidden;"
+        " };"
+        " return {plain: mk({}), opt: mk({toolbar: true}), off: mk({toolbar: 'false'})};"
+        "}"
+    )
+    assert result == {"plain": True, "opt": False, "off": True}
+
+
+@pytest.mark.browser
 def test_status_chip_neutral_default_and_set_status(viewer_client, viewer_page):
     """autoConnect:false defaults the status chip to a neutral 'Local data'
     instead of 'Waiting for Python...' (issue #78); setStatus lets the

@@ -110,6 +110,37 @@ def test_viewer_url_with_fov():
     assert params["fov"] == ["35.0"]
 
 
+def test_viewer_url_default_omits_toolbar():
+    """No toolbar kwarg → no toolbar param (viewer default: hidden)."""
+    client = ViewerClient()
+    assert "toolbar" not in _params(client.viewer_url)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_viewer_url_with_toolbar(flag):
+    client = ViewerClient(toolbar=flag)
+    params = _params(client.viewer_url)
+    assert params["toolbar"] == ["true" if flag else "false"]
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1])
+def test_viewer_client_rejects_non_bool_toolbar(bad):
+    with pytest.raises(ValueError, match="toolbar must be a bool or None"):
+        ViewerClient(toolbar=bad)
+
+
+def test_set_toolbar_visible_records_state_for_reconnect():
+    """The runtime toggle is retained so a browser refresh replays it."""
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.set_toolbar_visible(True)
+    assert sent == [{"type": "set_toolbar", "visible": True}]
+    assert client._toolbar_visible == {"type": "set_toolbar", "visible": True}
+    client.set_toolbar_visible(False)
+    assert client._toolbar_visible == {"type": "set_toolbar", "visible": False}
+
+
 def test_viewer_client_rejects_invalid_tone_mapping():
     with pytest.raises(ValueError, match="tone_mapping must be one of"):
         ViewerClient(tone_mapping="bogus")

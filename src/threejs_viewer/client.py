@@ -368,6 +368,7 @@ class ViewerClient:
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
         fov: Optional[float] = None,
+        toolbar: Optional[bool] = None,
     ):
         """Create a viewer client.
 
@@ -395,8 +396,15 @@ class ViewerClient:
                 CAD-like; wider values exaggerate perspective. Must be finite
                 and within the open interval ``(0, 180)``; other values raise
                 ``ValueError``.
+            toolbar: Show the viewer's top-left menu button on launch (default
+                ``False``: the viewer opens with no chrome besides the view
+                gimbal). The menu lists the advanced options (clipping,
+                lighting, orbit mode, projection, wireframe, shading debug,
+                depth cues, framing) with their keyboard shortcuts, which
+                keep working either way. Toggle at runtime with
+                :meth:`set_toolbar_visible`.
 
-        The lighting kwargs and ``fov`` are forwarded to the viewer as
+        The lighting kwargs, ``fov`` and ``toolbar`` are forwarded to the viewer as
         snake-case query parameters on ``viewer_url``. They act as authoritative
         initial values — the lighting ones win over any value the user
         previously persisted via the in-browser Lighting panel. Leave them as
@@ -454,6 +462,12 @@ class ViewerClient:
             self.tone_mapping = None
         # Perspective camera FOV (degrees). `None` means "use the viewer default".
         self.fov = _validate_fov(fov)
+        if toolbar is not None and not isinstance(toolbar, bool):
+            raise ValueError(f"toolbar must be a bool or None, got {toolbar!r}")
+        self.toolbar = toolbar
+        # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
+        # reconnect so a browser refresh keeps the menu the script asked for.
+        self._toolbar_visible: Optional[dict] = None
         self._ws = None
         self._server = None
         self._server_thread = None
@@ -573,7 +587,7 @@ class ViewerClient:
 
         Always includes `ws_port`. Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
-        `ambient_intensity`, and/or `fov` query params when the caller passed
+        `ambient_intensity`, `fov`, and/or `toolbar` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
@@ -593,6 +607,8 @@ class ViewerClient:
             params.append(("ambient_intensity", str(self.ambient_intensity)))
         if self.fov is not None:
             params.append(("fov", str(self.fov)))
+        if self.toolbar is not None:
+            params.append(("toolbar", "true" if self.toolbar else "false"))
         return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
     def _run_server(self):
@@ -626,6 +642,14 @@ class ViewerClient:
                         }
                     )
                 )
+            except Exception:
+                pass
+
+        # Re-apply a runtime toolbar toggle (the launch kwarg rides the URL
+        # and survives a refresh on its own).
+        if self._toolbar_visible is not None:
+            try:
+                websocket.send(json.dumps(self._toolbar_visible))
             except Exception:
                 pass
 
@@ -3053,6 +3077,20 @@ class ViewerClient:
         if not animate:
             msg["animate"] = False
         self._send(msg)
+
+    def set_toolbar_visible(self, visible: bool = True) -> None:
+        """Show or hide the viewer's top-left menu button.
+
+        The viewer opens without it unless ``ViewerClient(toolbar=True)`` was
+        passed. The menu lists the advanced options with their keyboard
+        shortcuts (clipping plane ``C``, lighting ``E``, orbit mode ``R``,
+        camera tracking ``T``, projection ``O``, wireframe ``M``, shading
+        debug ``N``, distance fog ``D``, eye-dome lighting ``Shift+D``, frame
+        all ``F``); the shortcuts work whether or not the menu is shown.
+        Re-sent on reconnect so a browser refresh keeps the requested state.
+        """
+        self._toolbar_visible = {"type": "set_toolbar", "visible": bool(visible)}
+        self._send(self._toolbar_visible)
 
     def set_points_time(self, id: str, time: float) -> None:
         """Set the time-window scrub time for a point cloud.
