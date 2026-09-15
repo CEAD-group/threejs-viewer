@@ -5315,13 +5315,15 @@ class CameraController {
 //   `.visible`; a menu `storageKey` persists toggle/eye/select/segmented
 //   values in localStorage under that key. An eye may instead supply
 //   `match(objId)` (custom ownership) and/or `apply(on)` (custom show/hide,
-//   replacing the object walk) for layers that are not plain id shapes.
+//   replacing the object walk) for layers that are not plain id shapes;
+//   an `apply` that returns `false` vetoes the flip (the row reverts and
+//   onChange does not fire).
 
 /** @typedef {{
  *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
  *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
  *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
- *   match?: (objId: string) => boolean, apply?: (on: boolean, item: MenuItemSpec) => void,
+ *   match?: (objId: string) => boolean, apply?: (on: boolean, item: MenuItemSpec) => (boolean|void),
  *   disabled?: any, hidden?: any,
  *   onClick?: (item: MenuItemSpec) => void,
  *   onChange?: (value: any, item: MenuItemSpec) => void,
@@ -5668,9 +5670,15 @@ class MenuController {
     _commit(m, rec, value) {
         const it = rec.spec;
         if (evalProp(it.disabled, it)) return;
+        const prev = it.id ? m.state[it.id] : undefined;
         if (it.id) m.state[it.id] = value;
+        if ((it.type || '') === 'eye' && !this._applyEye(it, !!value)) {
+            // Vetoed by the eye's apply hook: restore and repaint.
+            if (it.id) { if (prev === undefined) delete m.state[it.id]; else m.state[it.id] = prev; }
+            this.refresh(m);
+            return;
+        }
         this._persist(m);
-        if ((it.type || '') === 'eye') this._applyEye(it, !!value);
         if (typeof it.onChange === 'function') it.onChange(value, it);
         this._emit(m, it, value);
         this.refresh(m);
@@ -5782,10 +5790,11 @@ class MenuController {
 
     /** @param {MenuItemSpec} it @param {boolean} on */
     _applyEye(it, on) {
-        if (typeof it.apply === 'function') { it.apply(on, it); return; }
+        if (typeof it.apply === 'function') return it.apply(on, it) !== false;
         for (const [objId, obj] of this._viewer._objects) {
             if (obj && this._eyeOwns(it, objId)) obj.visible = on;
         }
+        return true;
     }
 
     /**

@@ -5726,6 +5726,44 @@ def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_add_menu_eye_match_apply_and_veto(viewer_client, viewer_page):
+    """An eye may own objects through `match` and show/hide through `apply`;
+    an `apply` returning false vetoes the flip and the row reverts."""
+    page = viewer_page
+    viewer_client.add_box("ws_1_base", 1, 1, 1)
+    viewer_client.add_box("ws_1_reach", 1, 1, 1)
+    settle(viewer_client)
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer; window.__applied = [];"
+        " const m = v.addMenu({id: 'e', label: 'E', items: ["
+        "   {type: 'eye', id: 'base', label: 'Base', match: id => /_base$/.test(id)},"
+        "   {type: 'eye', id: 'tcp', label: 'TCP', ids: [], apply: on => { window.__applied.push(on); }},"
+        "   {type: 'eye', id: 'locked', label: 'Locked', ids: [], apply: () => false,"
+        "    onChange: () => window.__applied.push('never')},"
+        " ]});"
+        " m.setItem('base', {checked: false});"
+        " m.setItem('tcp', {checked: false});"
+        " const r = m.el;"
+        " r.querySelector('.tjsv-menu-btn').click();"
+        " r.querySelector('[data-item=locked]').click();"
+        " return {base: v.getObject('ws_1_base').visible, reach: v.getObject('ws_1_reach').visible,"
+        "         hiding: v.hidingEyeFor('ws_1_base'), applied: window.__applied,"
+        "         locked: m.getValue('locked'),"
+        "         lockedRow: r.querySelector('[data-item=locked]').classList.contains('active')};"
+        "}"
+    )
+    assert result == {
+        "base": False,
+        "reach": True,
+        "hiding": "Base",
+        "applied": [True, False],
+        "locked": True,
+        "lockedRow": True,
+    }
+
+
+@pytest.mark.browser
 def test_add_menu_panel_and_bar_modes(viewer_client, viewer_page):
     """`panel` stacks an always-open body below the top-right bar; `bar`
     renders the items inline at top-left."""
