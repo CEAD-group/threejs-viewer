@@ -43,8 +43,7 @@ _ALLOWED_HIGHLIGHT_STYLES = frozenset({"silhouette", "edges"})
 _ALLOWED_MENU_ITEM_TYPES = frozenset(
     {"button", "toggle", "eye", "select", "segmented", "label", "divider"}
 )
-_ALLOWED_MENU_PLACEMENTS = frozenset({"top-right", "top-left"})
-_ALLOWED_MENU_MODES = frozenset({"dropdown", "panel", "bar"})
+_ALLOWED_MENU_MODES = frozenset({"dropdown", "panel"})
 
 _ALLOWED_VIEWS = frozenset(
     {"top", "bottom", "front", "back", "left", "right", "iso", "home"}
@@ -3119,11 +3118,10 @@ class ViewerClient:
         id: str,
         items: List[dict],
         label: Optional[str] = None,
-        icon: Optional[str] = None,
-        placement: str = "top-right",
         mode: str = "dropdown",
         storage_key: Optional[str] = None,
         title: Optional[str] = None,
+        body_width: Optional[str] = None,
     ) -> None:
         """Add a menu to the viewer whose contents you define.
 
@@ -3149,43 +3147,32 @@ class ViewerClient:
                 (``checked`` defaults to ``True``); ``select`` and
                 ``segmented`` take ``options`` (a list of values or of
                 ``{"value", "label"}`` dicts) and ``value``.
-            label: Menu title. For a dropdown it is the button text unless
-                ``icon`` is given; for a panel it is the caption.
-            icon: Short button text for a dropdown (an emoji or glyph).
-            placement: ``"top-right"`` (default) or ``"top-left"``.
-            mode: ``"dropdown"`` (a button with a drop-down body, default),
-                ``"panel"`` (always open, stacked below the top-right bar) or
-                ``"bar"`` (the items inline as one row of buttons).
+            label: The tab text. Every menu is a vertical tab folded against
+                the viewer's right edge; clicking it slides the body out.
+            mode: ``"dropdown"`` (default: starts folded, an outside click
+                folds it back) or ``"panel"`` (starts open and stays open
+                across outside clicks, for a legend).
             storage_key: Persist toggle/eye/select/segmented values in the
                 browser's localStorage under this key.
-            title: Tooltip on the dropdown button.
+            title: Tooltip on the tab.
+            body_width: CSS width of the body (default ``"190px"``).
 
         Menus are re-added on reconnect with their latest item state.
         """
         if id == "viewer":
             raise ValueError("'viewer' is the built-in menu id")
-        if placement not in _ALLOWED_MENU_PLACEMENTS:
-            raise ValueError(
-                f"placement must be one of {sorted(_ALLOWED_MENU_PLACEMENTS)} "
-                f"(got {placement!r})"
-            )
         if mode not in _ALLOWED_MENU_MODES:
             raise ValueError(
                 f"mode must be one of {sorted(_ALLOWED_MENU_MODES)} (got {mode!r})"
             )
         wire_items = [self._validate_menu_item(it) for it in items]
-        menu: dict = {
-            "id": id,
-            "placement": placement,
-            "mode": mode,
-            "items": wire_items,
-        }
+        menu: dict = {"id": id, "mode": mode, "items": wire_items}
         if label is not None:
             menu["label"] = label
-        if icon is not None:
-            menu["icon"] = icon
         if title is not None:
             menu["title"] = title
+        if body_width is not None:
+            menu["bodyWidth"] = body_width
         if storage_key is not None:
             menu["storageKey"] = storage_key
         msg = {"type": "add_menu", "menu": menu}

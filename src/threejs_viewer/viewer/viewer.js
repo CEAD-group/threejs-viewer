@@ -5297,11 +5297,13 @@ class CameraController {
 // controller owns DOM, styling, placement, open/close, persistence, eye
 // visibility and shortcut display; the caller owns content and callbacks.
 //
-// MENU  { id, label, icon, title, placement: 'top-right'|'top-left',
-//         mode: 'dropdown'|'panel'|'bar', items: [ITEM…], storageKey, hidden }
-//   dropdown: a button in the top bar with a drop-down body (the default)
-//   panel:    the body is always open, stacked below the bar (a legend)
-//   bar:      the items render inline as one row of buttons (Move|Rotate|Snap)
+// MENU  { id, label, title, mode: 'dropdown'|'panel', items: [ITEM…],
+//         storageKey, bodyWidth, hidden }
+//   Every menu is a vertical tab on the right-edge rail whose body slides
+//   out on click (ribweaver's N-panel). `dropdown` (the default) starts
+//   folded and closes on an outside click; `panel` starts open and stays
+//   open across outside clicks (a legend). `bodyWidth` (CSS length,
+//   default 190px) sizes the body.
 //
 // ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'label'|'divider'|'custom',
 //         id, label, hint, shortcut, bindKey, state, active, checked, value,
@@ -5331,10 +5333,9 @@ class CameraController {
  * }} MenuItemSpec */
 
 /** @typedef {{
- *   id: string, label?: string, icon?: string, title?: string,
- *   placement?: 'top-right'|'top-left', mode?: 'dropdown'|'panel'|'bar',
+ *   id: string, label?: string, title?: string, mode?: 'dropdown'|'panel',
  *   items?: MenuItemSpec[], storageKey?: string, hidden?: boolean,
- *   builtin?: boolean,
+ *   bodyWidth?: string, builtin?: boolean,
  * }} MenuSpec */
 
 const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'label', 'divider', 'custom']);
@@ -5373,13 +5374,16 @@ function normalizeOptions(options) {
     return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
 }
 
-const EYE_ON_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/></svg>';
-const EYE_OFF_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" stroke-dasharray="2 2"/><path d="M3 13L13 3"/></svg>';
+// ribweaver's eye / dashed-eye glyphs (toggle_switch.js), verbatim.
+const EYE_ON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+const RAIL_BASE_TOP = 16;
+const RAIL_GAP = 6;
 
 class MenuController {
     /**
      * @param {ThreeJSViewer} viewer
-     * @param {{bar: HTMLElement, panels: HTMLElement, barLeft: HTMLElement}} hosts
+     * @param {{rail: HTMLElement}} hosts
      */
     constructor(viewer, hosts) {
         this._viewer = viewer;
@@ -5395,6 +5399,7 @@ class MenuController {
             for (const m of this._menus.values()) {
                 if (m.spec.mode === 'dropdown' && m.open && !m.root.contains(t)) this._setOpen(m, false);
             }
+            // A panel-mode menu stays open across outside clicks.
         };
         document.addEventListener('pointerdown', this._onDocPointerDown);
     }
@@ -5426,11 +5431,10 @@ class MenuController {
     add(spec) {
         if (!spec || !spec.id) throw new Error('addMenu: spec.id is required');
         if (this._menus.has(spec.id)) this.remove(spec.id);
-        const mode = spec.mode || 'dropdown';
-        const placement = spec.placement || 'top-right';
+        const mode = spec.mode === 'panel' ? 'panel' : 'dropdown';
         /** @type {any} */
         const m = {
-            spec: { ...spec, mode, placement, items: (spec.items || []).map(it => ({ ...it })) },
+            spec: { ...spec, mode, items: (spec.items || []).map(it => ({ ...it })) },
             open: false, root: null, button: null, body: null,
             /** @type {Map<string, any>} */ items: new Map(),
             state: /** @type {Record<string, any>} */ ({}),
@@ -5443,6 +5447,8 @@ class MenuController {
         m.handle = this._makeHandle(m);
         this.applyEyes(m);
         this.refresh(m);
+        if (mode === 'panel') this._setOpen(m, true);
+        this._layoutRail();
         return m.handle;
     }
 
@@ -5452,7 +5458,22 @@ class MenuController {
         if (!m) return false;
         m.root.remove();
         this._menus.delete(id);
+        this._layoutRail();
         return true;
+    }
+
+    /**
+     * Stack the rail tabs top to bottom: each visible tab sits RAIL_GAP below
+     * the previous one. Measured, because a vertical tab's height follows its
+     * label. Runs after add/remove/setHidden.
+     */
+    _layoutRail() {
+        let top = RAIL_BASE_TOP;
+        for (const m of this._menus.values()) {
+            if (m.root.hidden) continue;
+            m.root.style.setProperty('--tjsv-rail-top', `${top}px`);
+            top += m.button.getBoundingClientRect().height + RAIL_GAP;
+        }
     }
 
     /** @param {any} m */
@@ -5466,7 +5487,11 @@ class MenuController {
             isOpen: () => m.open,
             refresh: () => self.refresh(m),
             remove: () => self.remove(m.spec.id),
-            setHidden: /** @param {boolean} h */ (h) => { m.spec.hidden = !!h; m.root.hidden = !!h; if (h) self._setOpen(m, false); },
+            setHidden: /** @param {boolean} h */ (h) => {
+                m.spec.hidden = !!h; m.root.hidden = !!h;
+                if (h) self._setOpen(m, false);
+                self._layoutRail();
+            },
             /** @param {string} itemId @param {Partial<MenuItemSpec>} patch */
             setItem: (itemId, patch) => self.setItem(m, itemId, patch),
             /** @param {string} itemId */
@@ -5486,46 +5511,37 @@ class MenuController {
     _build(m) {
         const spec = m.spec;
         const root = document.createElement('div');
-        root.className = `tjsv-menu-root tjsv-menu-${spec.mode}`;
+        root.className = 'tjsv-menu-root tjsv-rail-panel';
         root.dataset.menu = spec.id;
         if (spec.hidden) root.hidden = true;
+        if (spec.bodyWidth) root.style.setProperty('--tjsv-body-w', spec.bodyWidth);
         m.root = root;
 
         const body = document.createElement('div');
-        body.className = spec.mode === 'bar' ? 'tjsv-menu-bar-items' : 'tjsv-menu';
+        body.className = 'tjsv-menu';
         m.body = body;
 
-        if (spec.mode === 'dropdown') {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
-            btn.title = spec.title || spec.label || '';
-            btn.setAttribute('aria-haspopup', 'true');
-            btn.setAttribute('aria-expanded', 'false');
-            btn.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
-                + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.icon || spec.label || '')}</span>`;
-            btn.addEventListener('click', () => this._setOpen(m, !m.open));
-            m.button = btn;
-            root.appendChild(btn);
-            body.hidden = true;
-            if (spec.builtin) {
-                const status = document.createElement('div');
-                status.className = 'tjsv-menu-status tjsv-status-text';
-                status.textContent = 'Disconnected';
-                body.appendChild(status);
-            }
-        } else if (spec.mode === 'panel' && spec.label) {
-            const title = document.createElement('div');
-            title.className = 'tjsv-menu-title';
-            title.textContent = spec.label;
-            body.appendChild(title);
+        // The rail tab: a vertical label, plus the status dot on the viewer's
+        // own menu.
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
+        tab.title = spec.title || spec.label || '';
+        tab.setAttribute('aria-expanded', 'false');
+        tab.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
+            + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
+        tab.addEventListener('click', (e) => { e.stopPropagation(); this._setOpen(m, !m.open); });
+        m.button = tab;
+        root.appendChild(tab);
+        if (spec.builtin) {
+            const status = document.createElement('div');
+            status.className = 'tjsv-menu-status tjsv-status-text';
+            status.textContent = 'Disconnected';
+            body.appendChild(status);
         }
         for (const it of spec.items) this._buildItem(m, it);
         root.appendChild(body);
-
-        const host = spec.placement === 'top-left' ? this._hosts.barLeft
-            : spec.mode === 'panel' ? this._hosts.panels : this._hosts.bar;
-        host.appendChild(root);
+        this._hosts.rail.appendChild(root);
     }
 
     /** @param {any} m @param {MenuItemSpec} it */
@@ -5588,19 +5604,26 @@ class MenuController {
             if (it.label) el.appendChild(lab);
             el.appendChild(seg);
         } else {
-            // button | toggle | eye — one row: [mark] label … state [kbd]
+            // button: a full-width action; toggle | eye: a row [mark] label … state [kbd]
             el = document.createElement('button');
             el.type = 'button';
-            el.className = 'tjsv-menu-item';
-            const mark = document.createElement('span');
-            mark.className = 'tjsv-menu-mark';
-            if (type === 'eye') mark.innerHTML = EYE_ON_SVG;
+            el.className = type === 'button' ? 'tjsv-menu-action' : 'tjsv-menu-item';
             const lab = document.createElement('span');
             lab.className = 'tjsv-menu-label';
             lab.textContent = it.label || '';
             const st = document.createElement('span');
             st.className = 'tjsv-menu-state';
-            el.appendChild(mark);
+            if (type === 'eye') {
+                const mark = document.createElement('span');
+                mark.className = 'tjsv-menu-mark';
+                mark.innerHTML = EYE_ON_SVG;
+                el.appendChild(mark);
+            } else if (type === 'toggle') {
+                const track = document.createElement('span');
+                track.className = 'tjsv-toggle-track';
+                track.innerHTML = '<span class="tjsv-toggle-thumb"></span>';
+                el.appendChild(track);
+            }
             el.appendChild(lab);
             el.appendChild(st);
             if (it.shortcut) {
@@ -5831,14 +5854,12 @@ class MenuController {
 
     /** @param {any} m @param {boolean} open */
     _setOpen(m, open) {
-        if (m.spec.mode !== 'dropdown') return;
         const want = !!open && !m.spec.hidden;
         if (want) {
             for (const o of this._menus.values()) if (o !== m) this._setOpen(o, false);
         }
         m.open = want;
-        m.body.hidden = !want;
-        m.button.classList.toggle('active', want);
+        m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
         if (want) this.refresh(m);
     }
@@ -8810,15 +8831,13 @@ export class ThreeJSViewer {
      * viewer state through function-valued `active`/`state`/`hidden`.
      */
     _initMenus() {
-        this._menus = new MenuController(this, {
-            bar: this._menuBarEl, panels: this._menuPanelsEl, barLeft: this._menuBarLeftEl,
-        });
+        this._menus = new MenuController(this, { rail: this._menuRailEl });
         // Keys the viewer's own keydown handler consumes; a client menu may
         // display them but not bind them.
         this._menus.reserveKeys(['C', 'E', 'R', 'T', 'O', 'M', 'N', 'D', 'Shift+D', 'F', 'S', 'V', 'Home']);
         const v = this;
         this._menus.add({
-            id: 'viewer', builtin: true, icon: '\u2630', title: 'Viewer menu', hidden: true,
+            id: 'viewer', builtin: true, label: 'Viewer', title: 'Viewer options', hidden: true,
             items: [
                 { id: 'clip', label: 'Clipping plane', shortcut: 'C',
                   active: () => !!v._clipEnabled, onClick: () => v._toggleClipPanel() },
@@ -8860,9 +8879,7 @@ export class ThreeJSViewer {
     _cacheElements() {
         /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
-        this._menuBarEl = q('.tjsv-menubar');
-        this._menuPanelsEl = q('.tjsv-overlay-tr');
-        this._menuBarLeftEl = q('.tjsv-overlay-tl');
+        this._menuRailEl = q('.tjsv-rail');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._lightingPanelEl = q('.tjsv-lighting-panel');
         this._lightingExposureSlider = q('.tjsv-lighting-exposure');
