@@ -6501,12 +6501,21 @@ def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
         pytest.skip(f"Firefox not installed for Playwright: {exc}")
     try:
         page = browser.new_page()
+        # Firefox has no devtools in the CI log; keep its console for the
+        # failure message so a non-connecting page explains itself.
+        log = []
+        page.on("console", lambda m: log.append(f"console[{m.type}]: {m.text}"))
+        page.on("pageerror", lambda e: log.append(f"pageerror: {e}"))
+        page.on(
+            "requestfailed", lambda r: log.append(f"requestfailed: {r.url} {r.failure}")
+        )
         viewer_path = viewer_client.viewer_path.resolve()
         page.goto(
             f"{viewer_path.as_uri()}?ws_port={viewer_client.port}", timeout=90_000
         )
         assert viewer_client._connected_event.wait(timeout=120), (
-            "Firefox did not connect to the WebSocket server"
+            "Firefox did not connect to the WebSocket server; page log:\n"
+            + "\n".join(log[-40:])
         )
         positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
         indices = np.array([[0, 1, 2]], dtype=np.uint32)
