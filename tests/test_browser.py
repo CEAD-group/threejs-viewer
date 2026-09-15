@@ -6670,6 +6670,289 @@ def test_set_highlight_style_switch_rebuilds_in_place(viewer_client, viewer_page
     assert still_drawable
 
 
+# Object click (issue #178) and dblclick framing switch (issue #177).
+
+
+def _object_click_setup(viewer_client, viewer_page):
+    """Box at the origin under a top-down camera; returns its screen centre."""
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    return viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+
+
+@pytest.mark.browser
+def test_object_click_reports_id_to_python_and_js_hook(viewer_client, viewer_page):
+    """A stationary click on an object reaches Python as object_clicked with
+    the top-level id, the hit point and the button, and fires the JS hook."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    # Nothing is enabled yet, so the pointerup path skips the raycast.
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer._objectClickEnabled") is False
+    )
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.evaluate(
+        "() => { window.__clicks = [];"
+        " window.threejsViewer.onObjectClick((p) => window.__clicks.push("
+        "   {id: p.id, button: p.button, hasObj: !!p.object3D})); }"
+    )
+
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: len(clicks) >= 1), "no object_clicked reached Python"
+    c = clicks[-1]
+    assert c["id"] == "box"
+    assert c["button"] == 0
+    assert c["modifiers"] == {
+        "shift": False,
+        "ctrl": False,
+        "alt": False,
+        "meta": False,
+    }
+    # Top-down camera: the ray hits the box's +Z face (unit box, top at z=0.5).
+    assert abs(c["point"][0]) < 0.1 and abs(c["point"][1]) < 0.1, c["point"]
+    assert abs(c["point"][2] - 0.5) < 1e-3, c["point"]
+
+    # Right-click reports button 2; shift-click carries the modifier.
+    viewer_page.mouse.click(proj["x"], proj["y"], button="right")
+    assert _wait_until(lambda: len(clicks) >= 2)
+    assert clicks[-1]["id"] == "box" and clicks[-1]["button"] == 2
+    viewer_page.keyboard.down("Shift")
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    viewer_page.keyboard.up("Shift")
+    assert _wait_until(lambda: len(clicks) >= 3)
+    assert clicks[-1]["modifiers"]["shift"] is True
+
+    js = viewer_page.evaluate("() => window.__clicks")
+    assert [j["id"] for j in js] == ["box", "box", "box"]
+    assert [j["button"] for j in js] == [0, 2, 0]
+    assert all(j["hasObj"] for j in js)
+
+
+@pytest.mark.browser
+def test_object_click_drag_is_not_a_click(viewer_client, viewer_page):
+    """A 20 px drag between pointerdown and pointerup (an orbit) reports
+    nothing; a stationary click afterwards still does."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    cx, cy = proj["x"], proj["y"]
+    viewer_page.mouse.move(cx, cy)
+    viewer_page.mouse.down()
+    for i in range(1, 5):
+        viewer_page.mouse.move(cx + i * 5, cy)
+    viewer_page.mouse.up()
+    # The drag orbited the camera; give the WS a moment to prove silence.
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4)
+
+    # Positive control on the same setup: reset the camera the drag moved,
+    # re-project the box, and a stationary click reports it.
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] == "box"
+
+
+@pytest.mark.browser
+def test_object_click_empty_space_reports_null(viewer_client, viewer_page):
+    """A click that hits nothing reports id None and point None, so a
+    consumer can deselect on it."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    w = viewer_page.evaluate(
+        "() => window.threejsViewer._renderer.domElement.clientWidth"
+    )
+    # Well clear of the unit box (a few hundred px at this camera distance)
+    # and away from the bottom-right view gimbal.
+    viewer_page.mouse.click(proj["x"] - 0.3 * w, proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1] == {
+        "id": None,
+        "point": None,
+        "button": 0,
+        "modifiers": {"shift": False, "ctrl": False, "alt": False, "meta": False},
+    }
+
+
+@pytest.mark.browser
+def test_object_click_not_on_gizmo_handle(viewer_client, viewer_page):
+    """With a move gizmo attached, a press on one of its handles is the
+    gizmo's gesture and never reports as an object click; click-select still
+    works alongside the object-click event without double effects."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    viewer_client.enable_move_gizmo()
+    _wait_for(viewer_page, "() => window.threejsViewer._transformGizmo.enabled")
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    # Click-select attaches the gizmo, and the same click reports to Python.
+    viewer_page.mouse.click(proj["x"] - 15, proj["y"] + 15)
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo.objectId === 'box'"
+    )
+    assert _wait_until(lambda: len(clicks) == 1)
+    assert clicks[0]["id"] == "box"
+
+    # Hover the gizmo centre until TransformControls reports an axis, then
+    # click there: the press lands on a handle, so no object click fires.
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    frames(viewer_page, 2)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.control.axis != null",
+    )
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    assert not _wait_until(lambda: len(clicks) > 1, timeout=0.4)
+
+
+@pytest.mark.browser
+def test_dblclick_frame_option_and_setter(viewer_client, viewer_page):
+    """dblclickFrame:false leaves the camera untouched on a double-click
+    (issue #177); the default still frames, and the runtime setter flips it."""
+    viewer_client.add_box("box", position=[3.0, 0.0, 0.0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const w = v._renderer.domElement.clientWidth,"
+        "       h = v._renderer.domElement.clientHeight;"
+        " const ndc = v._camera.position.clone().set(3,0,0).project(v._camera);"
+        " return { x: (ndc.x*0.5+0.5)*w, y: (-ndc.y*0.5+0.5)*h }; }"
+    )
+    cam = "() => window.threejsViewer._camera.position.toArray()"
+
+    viewer_page.evaluate("() => window.threejsViewer.setDblclickFrame(false)")
+    before = viewer_page.evaluate(cam)
+    viewer_page.mouse.dblclick(proj["x"], proj["y"])
+    frames(viewer_page, 5)
+    assert viewer_page.evaluate(cam) == before
+
+    viewer_page.evaluate("() => window.threejsViewer.setDblclickFrame(true)")
+    viewer_page.mouse.dblclick(proj["x"], proj["y"])
+    _wait_for(
+        viewer_page,
+        "() => { const p = window.threejsViewer._camera.position.toArray();"
+        f" return p.some((c, i) => Math.abs(c - {json.dumps(before)}[i]) > 1e-3); }}",
+    )
+
+    # The constructor option lands on the instance without a runtime call.
+    flags = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const mk = (opts) => {"
+        "   const div = document.createElement('div');"
+        "   div.style.cssText ="
+        "     'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        "   document.body.appendChild(div);"
+        "   return new V(div, { htmlTemplate: live._options.htmlTemplate,"
+        "     cubemapData: live._options.cubemapData, autoConnect: false, ...opts });"
+        " };"
+        " return [mk({})._dblclickFrame, mk({dblclickFrame: false})._dblclickFrame];"
+        "}"
+    )
+    assert flags == [True, False]
+
+
+@pytest.mark.browser
+def test_object_click_skips_hidden_ancestor(viewer_client, viewer_page):
+    """A tracked child under a group hidden with set_visible is unrendered,
+    so a click on it reports null; showing the group again reports the child.
+    The dblclick framing shares the hit test, so it must not frame it either."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('child')")
+    viewer_client.set_visible("grp", False)
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+
+    # The child itself is still .visible === true; only its parent is hidden.
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('child').visible"
+    )
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] is None
+    assert (
+        viewer_page.evaluate(
+            f"() => window.threejsViewer._hitTrackedObject({proj['x']}, {proj['y']})"
+        )
+        is None
+    )
+
+    viewer_client.set_visible("grp", True)
+    settle(viewer_client)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: len(clicks) >= 2)
+    assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
+    """A pointercancel between press and release (a cancelled touch or pen)
+    clears the pending press, so the later pointerup is not a click."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    viewer_page.mouse.down()
+    assert viewer_page.evaluate("() => window.threejsViewer._objectClickDown !== null")
+    viewer_page.evaluate(
+        "() => window.dispatchEvent(new PointerEvent('pointercancel', {pointerId: 1}))"
+    )
+    assert viewer_page.evaluate("() => window.threejsViewer._objectClickDown === null")
+    viewer_page.mouse.up()
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4)
+
+
+@pytest.mark.browser
+def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
+    """destroy() removes the stored canvas pointerdown and window
+    pointerup/pointercancel handlers, so a destroyed instance never raycasts."""
+    removed = viewer_page.evaluate(
+        "() => {"
+        " const live = window.threejsViewer;"
+        " const V = live.constructor;"
+        " const div = document.createElement('div');"
+        " div.style.cssText ="
+        "   'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        " document.body.appendChild(div);"
+        " const v2 = new V(div, { htmlTemplate: live._options.htmlTemplate,"
+        "   cubemapData: live._options.cubemapData, autoConnect: false });"
+        " const canvas = v2._renderer.domElement;"
+        " const seen = [];"
+        " const origWin = window.removeEventListener.bind(window);"
+        " const origCanvas = canvas.removeEventListener.bind(canvas);"
+        " window.removeEventListener = (t, fn, ...r) => {"
+        "   if (fn === v2._onObjectClickUp || fn === v2._onObjectClickCancel) seen.push('window:' + t);"
+        "   return origWin(t, fn, ...r); };"
+        " canvas.removeEventListener = (t, fn, ...r) => {"
+        "   if (fn === v2._onObjectClickDown) seen.push('canvas:' + t);"
+        "   return origCanvas(t, fn, ...r); };"
+        " try { v2.destroy(); } finally { window.removeEventListener = origWin; }"
+        " return seen.sort();"
+        "}"
+    )
+    assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]
+
+
 _ZOOM_PROJECT_JS = """([x, y, z]) => {
     const v = window.threejsViewer;
     const THREE = window.tjsv.THREE;
