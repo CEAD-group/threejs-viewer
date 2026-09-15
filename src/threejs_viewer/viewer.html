@@ -493,8 +493,10 @@
 
         /* ISO, P/O and Home form one vertical stack just LEFT of the gimbal bubbles,
            ~15px off the cluster: close enough to read as one control group, outside
-           the bubbles' orbit so they never collide. All three shift up with the
-           animation toolbar via --tjsv-anim-lift (set from JS). Home used to sit in
+           the bubbles' orbit so they never collide. The column (16px to 112px)
+           is centred on the 128px gimbal square, level with the bubble cluster.
+           All three shift up with the animation toolbar via --tjsv-anim-lift
+           (set from JS). Home used to sit in
            the centre of the 128x128 ViewHelper area, in the middle of the six axis
            bubbles (issue #190). */
         .threejs-viewer .tjsv-view-iso,
@@ -502,7 +504,7 @@
         .threejs-viewer .tjsv-view-home {
             position: absolute;
             right: 115px;
-            bottom: calc(72px + var(--tjsv-anim-lift, 0px));
+            bottom: calc(84px + var(--tjsv-anim-lift, 0px));
             width: 28px;
             height: 28px;
             padding: 0;
@@ -589,12 +591,12 @@
            A manual toggle is a deliberate choice: auto-projection never overrides it
            (only bubble-snap-entered ortho auto-exits on orbit). */
         .threejs-viewer .tjsv-view-proj {
-            bottom: calc(38px + var(--tjsv-anim-lift, 0px));
+            bottom: calc(50px + var(--tjsv-anim-lift, 0px));
             font-size: 11px;
         }
         /* Home (reset view): third item of the stack, below P. */
         .threejs-viewer .tjsv-view-home {
-            bottom: calc(4px + var(--tjsv-anim-lift, 0px));
+            bottom: calc(16px + var(--tjsv-anim-lift, 0px));
         }
         .threejs-viewer .tjsv-view-proj.ortho {
             background: rgba(70, 110, 160, 0.85);
@@ -9683,8 +9685,12 @@ class ThreeJSViewer {
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
         this._gizmoDim = 128;
-        this._gizmoBaseScale = 1.4;
-        this._gizmoHoverScale = 1.75;
+        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair and arms 30%
+        // longer than stock, so the cluster reads as arms with bubbles at the
+        // tips instead of bubbles overlapping the arms.
+        this._gizmoBaseScale = 1.12;
+        this._gizmoHoverScale = 1.4;
+        this._gizmoArmScale = 1.3;
         this._gizmoHoverRaycaster = new THREE.Raycaster();
         this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
@@ -14798,17 +14804,28 @@ class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
-     * Enlarge the ViewHelper's axis sprites so they have a bigger hit target
-     * and a more visible cue. Baseline opacity is captured for the hover
-     * restore. Called once per ViewHelper instance — the helper is re-created
-     * on every perspective/ortho swap.
+     * Restyle the stock ViewHelper after construction: the axis sprites get
+     * the viewer's bubble size (a bigger hit target and a clearer cue than
+     * stock) and are pushed out along their axis, and the three arm meshes are
+     * stretched along their own length by _gizmoArmScale. The arms share one
+     * x-oriented cylinder that each mesh rotates into place, so a local
+     * scale.x stretches every arm along itself. Baseline opacity is captured
+     * for the hover restore. _gizmoHitTest raycasts the live sprites through
+     * a mirror of the helper's ortho camera, so it follows these edits.
+     * Called once per ViewHelper instance (re-created on every persp/ortho
+     * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
         for (const child of helper.children) {
-            if (!child.userData || !child.userData.type) continue;
+            if (!child.userData || !child.userData.type) {
+                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                continue;
+            }
             child.scale.setScalar(this._gizmoBaseScale);
+            // Stock sprites sit on the unit axis; keep them at the arm tips.
+            child.position.normalize().multiplyScalar(this._gizmoArmScale);
             child.userData.baseOpacity = child.material.opacity;
             sprites.push(child);
         }

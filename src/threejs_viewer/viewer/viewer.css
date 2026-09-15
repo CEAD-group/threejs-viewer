@@ -482,8 +482,10 @@
 
 /* ISO, P/O and Home form one vertical stack just LEFT of the gimbal bubbles,
    ~15px off the cluster: close enough to read as one control group, outside
-   the bubbles' orbit so they never collide. All three shift up with the
-   animation toolbar via --tjsv-anim-lift (set from JS). Home used to sit in
+   the bubbles' orbit so they never collide. The column (16px to 112px)
+   is centred on the 128px gimbal square, level with the bubble cluster.
+   All three shift up with the animation toolbar via --tjsv-anim-lift
+   (set from JS). Home used to sit in
    the centre of the 128x128 ViewHelper area, in the middle of the six axis
    bubbles (issue #190). */
 .threejs-viewer .tjsv-view-iso,
@@ -491,7 +493,7 @@
 .threejs-viewer .tjsv-view-home {
     position: absolute;
     right: 115px;
-    bottom: calc(72px + var(--tjsv-anim-lift, 0px));
+    bottom: calc(84px + var(--tjsv-anim-lift, 0px));
     width: 28px;
     height: 28px;
     padding: 0;
@@ -578,12 +580,12 @@
    A manual toggle is a deliberate choice: auto-projection never overrides it
    (only bubble-snap-entered ortho auto-exits on orbit). */
 .threejs-viewer .tjsv-view-proj {
-    bottom: calc(38px + var(--tjsv-anim-lift, 0px));
+    bottom: calc(50px + var(--tjsv-anim-lift, 0px));
     font-size: 11px;
 }
 /* Home (reset view): third item of the stack, below P. */
 .threejs-viewer .tjsv-view-home {
-    bottom: calc(4px + var(--tjsv-anim-lift, 0px));
+    bottom: calc(16px + var(--tjsv-anim-lift, 0px));
 }
 .threejs-viewer .tjsv-view-proj.ortho {
     background: rgba(70, 110, 160, 0.85);

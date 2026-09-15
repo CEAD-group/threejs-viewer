@@ -8474,8 +8474,12 @@ export class ThreeJSViewer {
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
         this._gizmoDim = 128;
-        this._gizmoBaseScale = 1.4;
-        this._gizmoHoverScale = 1.75;
+        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair and arms 30%
+        // longer than stock, so the cluster reads as arms with bubbles at the
+        // tips instead of bubbles overlapping the arms.
+        this._gizmoBaseScale = 1.12;
+        this._gizmoHoverScale = 1.4;
+        this._gizmoArmScale = 1.3;
         this._gizmoHoverRaycaster = new THREE.Raycaster();
         this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
@@ -13589,17 +13593,28 @@ export class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
-     * Enlarge the ViewHelper's axis sprites so they have a bigger hit target
-     * and a more visible cue. Baseline opacity is captured for the hover
-     * restore. Called once per ViewHelper instance — the helper is re-created
-     * on every perspective/ortho swap.
+     * Restyle the stock ViewHelper after construction: the axis sprites get
+     * the viewer's bubble size (a bigger hit target and a clearer cue than
+     * stock) and are pushed out along their axis, and the three arm meshes are
+     * stretched along their own length by _gizmoArmScale. The arms share one
+     * x-oriented cylinder that each mesh rotates into place, so a local
+     * scale.x stretches every arm along itself. Baseline opacity is captured
+     * for the hover restore. _gizmoHitTest raycasts the live sprites through
+     * a mirror of the helper's ortho camera, so it follows these edits.
+     * Called once per ViewHelper instance (re-created on every persp/ortho
+     * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
         for (const child of helper.children) {
-            if (!child.userData || !child.userData.type) continue;
+            if (!child.userData || !child.userData.type) {
+                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                continue;
+            }
             child.scale.setScalar(this._gizmoBaseScale);
+            // Stock sprites sit on the unit axis; keep them at the arm tips.
+            child.position.normalize().multiplyScalar(this._gizmoArmScale);
             child.userData.baseOpacity = child.material.opacity;
             sprites.push(child);
         }
