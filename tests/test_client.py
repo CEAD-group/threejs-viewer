@@ -1,9 +1,13 @@
 """Tests for ViewerClient."""
 
+import json
 import math
+import socket
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import pytest
 
 from threejs_viewer import Animation, Frame, ViewerClient
@@ -408,3 +412,76 @@ class TestVersion:
         from threejs_viewer.client import _is_dev_version
 
         assert not _is_dev_version(version)
+
+
+# --- Sidecar reachability over both loopback families (issue #187) ---
+
+
+def _ipv6_loopback_available() -> bool:
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+@pytest.fixture()
+def bound_client():
+    """A client with its servers bound on OS-chosen ports, no browser."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        ws_port = s.getsockname()[1]
+    client = ViewerClient(port=ws_port, open_browser=False)
+    client._start_servers(http_port=0)
+    try:
+        yield client
+    finally:
+        client.disconnect()
+
+
+def _fetch(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        assert resp.status == 200
+        return resp.read()
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "[::1]"])
+def test_servers_reachable_on_both_loopback_families(bound_client, address):
+    """``localhost`` may resolve to ::1 in the browser; both families must serve.
+
+    The WebSocket half is checked with a plain TCP connect, which is all the
+    browser needs to get past the connection error this fix removes.
+    """
+    if address == "[::1]" and not _ipv6_loopback_available():
+        pytest.skip("no IPv6 loopback on this machine")
+    payload = b"\x01\x02\x03\x04"
+    bound_client._blob_store["/blob_test"] = payload
+    assert _fetch(f"http://{address}:{bound_client._http_port}/blob_test") == payload
+    with socket.create_connection((address.strip("[]"), bound_client.port), timeout=5):
+        pass
+
+
+def test_blob_url_host_is_the_configured_host():
+    """Blob URLs advertise ``host`` verbatim: one hostname in the page, or a
+    file:// viewer page in Firefox refuses the sidecar fetch as cross-origin."""
+    for host in ("localhost", "127.0.0.1", "viewer.example"):
+        client = ViewerClient(host=host, port=5666, open_browser=False)
+        client._ws = _CaptureWS()
+        client.add_mesh(
+            "m",
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+            np.array([[0, 1, 2]], dtype=np.uint32),
+        )
+        url = client._ws.messages[-1]["blob_url"]
+        assert urlparse(url).hostname == host.lower()
+
+
+class _CaptureWS:
+    def __init__(self):
+        self.messages = []
+
+    def send(self, text):
+        self.messages.append(json.loads(text))
