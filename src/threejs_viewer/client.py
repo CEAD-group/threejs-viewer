@@ -491,6 +491,12 @@ class ViewerClient:
         # reconnect so picking survives a browser refresh).
         self._pick_callbacks: List = []
         self._polyline_picking: Optional[dict] = None
+        # Object click (issue #178): callbacks for ``object_clicked`` messages
+        # and the enable state, re-sent on reconnect like polyline picking. The
+        # viewer only raycasts a click while this is enabled, so a producer that
+        # never listens never pays for it.
+        self._click_callbacks: List = []
+        self._object_click: Optional[dict] = None
         # Move/rotate gizmo: callbacks invoked when the user drags an object in
         # the viewer, and the desired enable state (re-sent on reconnect so the
         # gizmo survives a browser refresh).
@@ -637,6 +643,13 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-enable the object-click event if it was on (same reasoning).
+        if self._object_click is not None:
+            try:
+                websocket.send(json.dumps(self._object_click))
+            except Exception:
+                pass
+
         # Re-enable the move/rotate gizmo if it was on (same reasoning).
         if self._move_gizmo is not None:
             try:
@@ -671,6 +684,8 @@ class ViewerClient:
                         self._assets_loaded_event.set()
                     elif msg_type == "polyline_pick":
                         self._dispatch_polyline_pick(data)
+                    elif msg_type == "object_clicked":
+                        self._dispatch_object_click(data)
                     elif msg_type == "transform_gizmo":
                         self._dispatch_object_move(data)
                     else:
@@ -3521,6 +3536,90 @@ class ViewerClient:
                 cb(pick)
             except Exception:
                 logging.getLogger(__name__).exception("Error in polyline pick callback")
+
+    # === Object click ===
+
+    def enable_object_click(self) -> None:
+        """Enable the ``object_clicked`` event: a stationary single click on
+        the canvas reports the object under the cursor back to Python.
+
+        Each click is delivered to every callback registered with
+        :meth:`on_object_click` as a dict with keys:
+
+        - ``id``: the top-level id of the clicked object (a sub-mesh of a
+          loaded model resolves to the model's id), or ``None`` for a click
+          on empty space. Empty-space clicks are reported so a consumer can
+          deselect on them.
+        - ``point``: ``[x, y, z]`` world-space hit point, or ``None`` on an
+          empty-space click.
+        - ``button``: the mouse button (``0`` left, ``1`` middle, ``2``
+          right), so a right-click context menu can be built on it.
+        - ``modifiers``: ``{"shift", "ctrl", "alt", "meta"}`` booleans held
+          at release, for shift-click multi-select.
+
+        The viewer owns the gesture: a release after the pointer travelled
+        more than a few pixels (an orbit or pan), a press or release on a
+        move-gizmo handle, or a click on a view-gimbal bubble does not
+        report. Both halves of a double-click do report; the built-in
+        double-click framing is separately switchable with the viewer's
+        ``dblclickFrame`` option. The hit test is the same raycast the
+        double-click framing uses (visible top-level objects, lines and
+        point clouds included), and it runs only while this is enabled, so
+        nothing is raycast for a producer that never listens. The enabled
+        state is re-sent automatically if the browser reconnects.
+        """
+        self._object_click = {"type": "set_object_click", "enabled": True}
+        # Send now if connected; otherwise the connect handler replays it.
+        if self._ws is not None:
+            self._send(self._object_click)
+
+    def disable_object_click(self) -> None:
+        """Turn off the ``object_clicked`` event. Registered callbacks are left
+        in place; :meth:`enable_object_click` resumes delivery."""
+        self._object_click = None
+        if self._ws is not None:
+            self._send({"type": "set_object_click", "enabled": False})
+
+    def on_object_click(self, callback) -> None:
+        """Register a callback invoked on every single click on the canvas,
+        and enable the event if it isn't already.
+
+        The callback receives a single dict argument (see
+        :meth:`enable_object_click` for its keys). It runs on the client's
+        WebSocket receive thread, so keep it short; it is safe to call other
+        viewer methods (e.g. :meth:`set_highlight`) from within it.
+
+        Args:
+            callback: A callable ``callback(click: dict) -> None``.
+
+        Example::
+
+            def on_click(click):
+                if click["id"] is not None:
+                    v.set_highlight(click["id"], True)
+
+            v.on_object_click(on_click)
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._click_callbacks.append(callback)
+        if self._object_click is None:
+            self.enable_object_click()
+
+    def _dispatch_object_click(self, data: dict) -> None:
+        """Deliver an incoming ``object_clicked`` message to registered callbacks."""
+        click = {
+            "id": data.get("id"),
+            "point": data.get("point"),
+            "button": data.get("button", 0),
+            "modifiers": data.get("modifiers")
+            or {"shift": False, "ctrl": False, "alt": False, "meta": False},
+        }
+        for cb in list(self._click_callbacks):
+            try:
+                cb(click)
+            except Exception:
+                logging.getLogger(__name__).exception("Error in object click callback")
 
     # === Move / rotate gizmo ===
 

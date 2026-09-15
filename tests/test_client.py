@@ -408,3 +408,67 @@ class TestVersion:
         from threejs_viewer.client import _is_dev_version
 
         assert not _is_dev_version(version)
+
+
+def test_enable_object_click_payload():
+    """enable_object_click stores the replayable enable message (issue #178)."""
+    client = ViewerClient()
+    assert client._object_click is None
+    client.enable_object_click()
+    assert client._object_click == {"type": "set_object_click", "enabled": True}
+    client.disable_object_click()
+    assert client._object_click is None
+
+
+def test_on_object_click_enables_and_dispatches():
+    """Registering a callback enables the event and receives clicks, including
+    the null-id empty-space click and a payload without modifiers."""
+    client = ViewerClient()
+    got = []
+    client.on_object_click(got.append)
+    assert client._object_click is not None and client._object_click["enabled"]
+    client._dispatch_object_click(
+        {
+            "type": "object_clicked",
+            "id": "box",
+            "point": [1.0, 2.0, 3.0],
+            "button": 2,
+            "modifiers": {"shift": True, "ctrl": False, "alt": False, "meta": False},
+        }
+    )
+    client._dispatch_object_click({"type": "object_clicked", "id": None, "point": None})
+    assert got == [
+        {
+            "id": "box",
+            "point": [1.0, 2.0, 3.0],
+            "button": 2,
+            "modifiers": {"shift": True, "ctrl": False, "alt": False, "meta": False},
+        },
+        {
+            "id": None,
+            "point": None,
+            "button": 0,
+            "modifiers": {"shift": False, "ctrl": False, "alt": False, "meta": False},
+        },
+    ]
+
+
+def test_on_object_click_rejects_non_callable():
+    client = ViewerClient()
+    with pytest.raises(TypeError):
+        client.on_object_click(42)
+    assert client._object_click is None
+
+
+def test_object_click_callback_error_does_not_break_dispatch():
+    """A raising callback is logged and the remaining callbacks still run."""
+    client = ViewerClient()
+    got = []
+
+    def bad(_click):
+        raise RuntimeError("boom")
+
+    client.on_object_click(bad)
+    client.on_object_click(got.append)
+    client._dispatch_object_click({"id": "a", "point": [0, 0, 0], "button": 0})
+    assert [c["id"] for c in got] == ["a"]
