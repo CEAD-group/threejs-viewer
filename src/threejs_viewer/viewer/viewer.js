@@ -125,7 +125,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
- * @property {boolean} [toolbar]                          Show the top-left menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
+ * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
  */
 
 /**
@@ -14578,7 +14578,7 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Show or hide the top-left menu button (the `tjsv-toolbar`). Hidden by
+     * Show or hide the top-right menu button (the `tjsv-toolbar`). Hidden by
      * default so a bare viewer has no chrome besides the gimbal; the Python
      * side flips it with `set_toolbar_visible()` (WS `set_toolbar`) or the
      * `toolbar=` launch kwarg. Hiding also closes an open menu. Keyboard
