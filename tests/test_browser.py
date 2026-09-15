@@ -6496,11 +6496,25 @@ def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
     from playwright.sync_api import Error as PlaywrightError
 
     try:
-        browser = playwright.firefox.launch()
+        # Headless Firefox on a GPU-less Linux runner refuses to create a WebGL
+        # context (the viewer constructor then throws before connect() runs);
+        # allow software rendering so it has a chance.
+        browser = playwright.firefox.launch(
+            firefox_user_prefs={
+                "webgl.force-enabled": True,
+                "webgl.forbid-software": False,
+                "gfx.webrender.software": True,
+            }
+        )
     except PlaywrightError as exc:
         pytest.skip(f"Firefox not installed for Playwright: {exc}")
     try:
         page = browser.new_page()
+        has_webgl2 = page.evaluate(
+            "() => !!document.createElement('canvas').getContext('webgl2')"
+        )
+        if not has_webgl2:
+            pytest.skip("Playwright Firefox cannot create a WebGL2 context here")
         # Firefox has no devtools in the CI log; keep its console for the
         # failure message so a non-connecting page explains itself.
         log = []
