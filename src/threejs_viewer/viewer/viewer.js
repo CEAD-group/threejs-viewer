@@ -5521,15 +5521,17 @@ class MenuController {
         body.className = 'tjsv-menu';
         m.body = body;
 
-        // The rail tab: a vertical label, plus the status dot on the viewer's
-        // own menu.
+        // The rail tab: a vertical label. The viewer's own menu is the top
+        // tab and shows only the connection-status dot.
         const tab = document.createElement('button');
         tab.type = 'button';
         tab.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
         tab.title = spec.title || spec.label || '';
         tab.setAttribute('aria-expanded', 'false');
-        tab.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
-            + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
+        tab.setAttribute('aria-label', spec.label || spec.id);
+        tab.innerHTML = spec.builtin
+            ? '<span class="tjsv-status-dot disconnected"></span>'
+            : `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
         tab.addEventListener('click', (e) => { e.stopPropagation(); this._setOpen(m, !m.open); });
         m.button = tab;
         root.appendChild(tab);
@@ -8837,7 +8839,7 @@ export class ThreeJSViewer {
         this._menus.reserveKeys(['C', 'E', 'R', 'T', 'O', 'M', 'N', 'D', 'Shift+D', 'F', 'S', 'V', 'Home']);
         const v = this;
         this._menus.add({
-            id: 'viewer', builtin: true, label: 'Viewer', title: 'Viewer options', hidden: true,
+            id: 'viewer', builtin: true, label: 'Viewer', title: 'Viewer options (connection status)', hidden: true,
             items: [
                 { id: 'clip', label: 'Clipping plane', shortcut: 'C',
                   active: () => !!v._clipEnabled, onClick: () => v._toggleClipPanel() },
