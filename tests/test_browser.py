@@ -5058,6 +5058,182 @@ def test_set_view_cancels_drag_inertia(viewer_client, viewer_page):
     assert deltas == [0, 0, 0, 0]
 
 
+_ORBIT_STATE_JS = (
+    "() => {"
+    " const v = window.threejsViewer;"
+    " const c = v._controls;"
+    " const f = v._camera.getWorldDirection(v._camera.position.clone());"
+    " const u = v._camera.up;"
+    " return { fwd: [f.x, f.y, f.z], up: [u.x, u.y, u.z], mode: c.mode,"
+    "          ortho: v._isOrtho, dragging: c.isDragging(),"
+    "          tweening: !!v._viewTween,"
+    "          pending: Math.abs(c._rotDeltaTheta) + Math.abs(c._rotDeltaPhi) };"
+    "}"
+)
+_COS_POLE_EPS = math.cos(math.radians(5.0))
+
+
+def _drag_canvas(page, dx, dy, steps=20):
+    """Real left-button pointer drag across the viewer canvas: press at the
+    canvas centre, move by `steps` increments of (dx, dy) screen pixels,
+    release, then wait for the damped orbit inertia to drain so the camera
+    pose is final."""
+    cx, cy = page.evaluate(
+        "() => { const r = window.threejsViewer._renderer.domElement"
+        ".getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }"
+    )
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    for i in range(1, steps + 1):
+        page.mouse.move(cx + i * dx, cy + i * dy)
+    page.mouse.up()
+
+    def drained():
+        s = page.evaluate(_ORBIT_STATE_JS)
+        return not s["dragging"] and not s["tweening"] and s["pending"] == 0
+
+    assert _wait_until(drained), "orbit inertia never drained"
+
+
+def _wait_view_tween_done(page):
+    assert _wait_until(
+        lambda: not page.evaluate("() => !!window.threejsViewer._viewTween")
+    )
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("view", ["top", "bottom"])
+def test_turntable_drag_leaves_pole_after_axis_view(viewer_client, viewer_page, view):
+    """Issue #202: after a top/bottom view snap the forward vector sits exactly
+    on the pole, and every mouse-sized pitch step used to be refused because it
+    landed inside the 5 degree pole cone, so a vertical left-drag only yawed.
+    A pitch that moves away from the pole is now always applied, and once the
+    orbit leaves the cone the turntable re-levels camera.up to world +Z (the
+    view preset set it to +Y, which every later lookAt would read as a roll)."""
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "(view) => { const v = window.threejsViewer; v._controls.setMode('turntable');"
+        " v.setView(view, { animate: false }); }",
+        view,
+    )
+    frames(viewer_page)
+    before = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert abs(before["fwd"][2]) == pytest.approx(1.0, abs=1e-6)
+    assert before["up"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+
+    _drag_canvas(viewer_page, 0, -10)  # 200 px vertical drag
+    after = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert abs(after["fwd"][2]) < _COS_POLE_EPS - 0.01, (
+        f"forward stayed on the pole after a vertical drag: {after}"
+    )
+    assert after["up"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6), (
+        f"turntable did not re-level camera.up after leaving the pole: {after}"
+    )
+
+
+@pytest.mark.browser
+def test_turntable_drag_leaves_pole_after_gizmo_top_click(viewer_client, viewer_page):
+    """The same escape through the gimbal bubble path: `_gizmoAxisClick('top')`
+    auto-enters ortho, and a real vertical drag both pitches the view off the
+    pole and returns to perspective (auto-projection)."""
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v._controls.setMode('turntable');"
+        " v._gizmoAxisClick('top'); }"
+    )
+    _wait_view_tween_done(viewer_page)
+    before = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert before["ortho"] is True
+    assert abs(before["fwd"][2]) == pytest.approx(1.0, abs=1e-6)
+
+    _drag_canvas(viewer_page, 0, 10)
+    after = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert after["ortho"] is False, (
+        "orbiting away from the snap should return to perspective"
+    )
+    assert abs(after["fwd"][2]) < _COS_POLE_EPS - 0.01, after
+    assert after["up"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6), after
+
+
+@pytest.mark.browser
+def test_turntable_drag_toward_pole_never_flips(viewer_client, viewer_page):
+    """The pole clamp is preserved: from an oblique view a hard vertical drag
+    in either direction lands the forward vector at the cone boundary at most
+    (|fwd.z| <= cos(5 deg)) and the camera never flips through the pole: its
+    own up axis keeps a positive world-Z component, so the view is never
+    upside down."""
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    for direction in (-1, 1):
+        viewer_page.evaluate(
+            "() => { const v = window.threejsViewer; v._controls.setMode('turntable');"
+            " v.setCameraPose({ position: [6, -6, 3], target: [0, 0, 0], up: [0, 0, 1] }); }"
+        )
+        frames(viewer_page)
+        # 40 x 15 px = 600 px, far more than the ~150 px needed to reach the pole.
+        _drag_canvas(viewer_page, 0, 15 * direction, steps=40)
+        after = viewer_page.evaluate(_ORBIT_STATE_JS)
+        assert abs(after["fwd"][2]) <= _COS_POLE_EPS + 1e-6, (direction, after)
+        assert after["up"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+        cam_up_z = viewer_page.evaluate(
+            "() => { const c = window.threejsViewer._camera;"
+            " return c.up.clone().set(0, 1, 0).applyQuaternion(c.quaternion).z; }"
+        )
+        assert cam_up_z > 0.05, (direction, after, cam_up_z)
+
+
+@pytest.mark.browser
+def test_camera_switch_hands_over_up_for_relevel(viewer_client, viewer_page):
+    """`_switchCamera` copies `up` along with position and quaternion, so the
+    turntable re-level lands on whichever camera is active next. A perspective
+    `setView('top')` leaves +Y on the persp camera; the gimbal top click enters
+    ortho, and the drag auto-returns to perspective, which must then carry the
+    re-levelled +Z rather than the stale +Y."""
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v._controls.setMode('turntable');"
+        " v.setView('top', { animate: false }); v._gizmoAxisClick('top'); }"
+    )
+    _wait_view_tween_done(viewer_page)
+    before = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert before["ortho"] is True
+    persp_up = viewer_page.evaluate(
+        "() => { const u = window.threejsViewer._perspCamera.up; return [u.x, u.y, u.z]; }"
+    )
+    assert persp_up == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+
+    _drag_canvas(viewer_page, 0, 10)
+    after = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert after["ortho"] is False
+    assert abs(after["fwd"][2]) < _COS_POLE_EPS - 0.01, after
+    assert after["up"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6), after
+
+
+@pytest.mark.browser
+def test_free_mode_drag_keeps_camera_up(viewer_client, viewer_page):
+    """Free mode is untouched by the turntable re-level: after a top snap and a
+    vertical drag, camera.up keeps the preset's +Y instead of being reset to
+    world +Z. Free mode yaws about camera-up and the horizon may roll; that is
+    the intended behaviour, not a regression."""
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v._controls.setMode('free');"
+        " v.setView('top', { animate: false }); }"
+    )
+    frames(viewer_page)
+    _drag_canvas(viewer_page, 0, -10)
+    after = viewer_page.evaluate(_ORBIT_STATE_JS)
+    assert after["mode"] == "free"
+    assert abs(after["fwd"][2]) < _COS_POLE_EPS - 0.01, after
+    assert after["up"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-6), (
+        f"free mode must not force camera.up to world +Z: {after}"
+    )
+
+
 @pytest.mark.browser
 def test_edl_auto_enables_on_points_and_pin_wins(viewer_client, viewer_page):
     """EDL switches on automatically when the first point cloud is added,
