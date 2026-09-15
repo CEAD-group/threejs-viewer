@@ -5,11 +5,13 @@ A lightweight client for controlling the Three.js viewer from Python/Jupyter.
 Runs a WebSocket server that the browser connects to directly.
 """
 
+import errno
 import functools
 import json
 import logging
 import math
 import numbers
+import socket
 import threading
 import time
 import urllib.parse
@@ -167,6 +169,29 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
 # NaN comparisons in GLSL are undefined and would make points flicker in or
 # out arbitrarily per driver.
 _TIME_UNBOUNDED = float(np.finfo(np.float32).max)
+
+
+def _transform_header(
+    position: Optional[List[float]],
+    rotation: Optional[List[float]],
+    scale: Optional[List[float]],
+    matrix: Optional[List[float]],
+) -> Optional[dict]:
+    """Build the ``transform`` header field shared by the binary add_* methods.
+
+    ``matrix`` wins over the loose form; returns ``None`` when nothing was
+    given so the header stays byte-identical to an untransformed add.
+    """
+    if matrix:
+        return {"matrix": matrix}
+    transform = {}
+    if position:
+        transform["position"] = position
+    if rotation:
+        transform["rotation"] = rotation
+    if scale:
+        transform["scale"] = scale
+    return transform or None
 
 
 def _sanitize_point_times(values, name: str, n_points: int, nan_to: float):
@@ -351,6 +376,93 @@ class _BlobHandler(BaseHTTPRequestHandler):
         pass  # Suppress HTTP request logging
 
 
+class _BlobServer(HTTPServer):
+    """HTTPServer over a socket bound by :func:`_listen_sockets`.
+
+    ``HTTPServer`` binds exactly one address itself; taking a pre-bound
+    socket lets the sidecar run one instance per address ``host`` resolves
+    to, all serving the same blob store.
+    """
+
+    def __init__(self, sock: socket.socket, blob_store: dict):
+        super().__init__(sock.getsockname()[:2], _BlobHandler, bind_and_activate=False)
+        # TCPServer.__init__ opened an unbound AF_INET socket; swap in ours.
+        self.socket.close()
+        self.socket = sock
+        self.server_address = sock.getsockname()
+        self.blob_store = blob_store
+
+
+# Bind errors that mean "this machine has no usable IPv6", the only case in
+# which an IPv6 listener may be skipped. Anything else (EADDRINUSE, EACCES)
+# is a real failure: skipping it would start an IPv4-only client while the
+# browser may still resolve localhost to ::1.
+_IPV6_UNAVAILABLE_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EAFNOSUPPORT", "EADDRNOTAVAIL", "EPROTONOSUPPORT")
+    if hasattr(errno, name)
+)
+
+
+def _url_host(host: str) -> str:
+    """``host`` as it goes into a URL: IPv6 literals need brackets."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
+def _listen_sockets(host: str, port: int) -> List[socket.socket]:
+    """Bind one listening socket per address ``host`` resolves to (issue #187).
+
+    ``localhost`` resolves to both 127.0.0.1 and ::1 on most machines and the
+    browser may pick either, so a single IPv4 listener leaves every request
+    over ::1 failing with a connection error. Binding ``::1`` dual-stack does
+    not help (only the unspecified address ``::`` accepts both families), so
+    the servers listen on every resolved address instead and the page keeps
+    advertising ``host`` verbatim. IPv6 sockets are V6ONLY so the two
+    families never overlap on a wildcard host. An IPv6 address is skipped
+    only when the error says IPv6 is unavailable (``_IPV6_UNAVAILABLE_ERRNOS``);
+    a port in use or a permission error raises like it always did. ``port=0``
+    picks a free port on the first socket and reuses it for the rest,
+    retrying when that port happens to be taken on another family.
+    """
+    infos = socket.getaddrinfo(
+        host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+    )
+    addresses: List[tuple] = []
+    for family, _, _, _, sockaddr in infos:
+        if (family, sockaddr[:2]) not in addresses:
+            addresses.append((family, sockaddr[:2]))
+    log = logging.getLogger(__name__)
+    for _attempt in range(8):
+        socks: List[socket.socket] = []
+        retry = False
+        error: Optional[OSError] = None
+        for family, (address, _) in addresses:
+            bound_port = socks[0].getsockname()[1] if socks else port
+            try:
+                socks.append(socket.create_server((address, bound_port), family=family))
+            except OSError as exc:
+                if socks and port == 0 and exc.errno == errno.EADDRINUSE:
+                    retry = True
+                    break
+                if family == socket.AF_INET6 and exc.errno in _IPV6_UNAVAILABLE_ERRNOS:
+                    log.warning(
+                        "Not listening on [%s]:%s: %s", address, bound_port, exc
+                    )
+                    error = exc
+                    continue
+                for sock in socks:
+                    sock.close()
+                raise
+        if retry:
+            for sock in socks:
+                sock.close()
+            continue
+        if not socks:
+            raise error or OSError(f"no address to bind for host {host!r}")
+        return socks
+    raise OSError(f"could not bind a free port on every address of {host!r}")
+
+
 class ViewerClient:
     """
     Synchronous client for controlling the Three.js viewer.
@@ -373,7 +485,11 @@ class ViewerClient:
         """Create a viewer client.
 
         Args:
-            host: Interface to bind the WebSocket / HTTP servers to.
+            host: Hostname the WebSocket / HTTP servers bind (every address
+                it resolves to) and the viewer page uses to reach them: it is
+                advertised verbatim in blob URLs and, when it is not
+                ``"localhost"``, passed to the viewer as the ``ws_host`` query
+                param so the WebSocket and the sidecar share one hostname.
             port: WebSocket port (HTTP blob sidecar listens on ``port + 1``).
             open_browser: Open the viewer in the system browser on ``connect()``.
             tone_mapping_exposure: Override the renderer's ``toneMappingExposure``
@@ -417,13 +533,6 @@ class ViewerClient:
         URL param > ``ThreeJSViewer`` option > hard default.
         """
         self.host = host
-        # Blob URLs must use the SAME hostname the page uses to reach the WS
-        # server. Rewriting "localhost" to "127.0.0.1" here (#185) makes
-        # Firefox refuse every sidecar fetch from a file:// viewer page:
-        # "CORS request did not succeed", status (null), while the very same
-        # page reaches http://localhost:<ws_port>/ fine. Chromium allows it,
-        # which is why the browser suite never saw it.
-        self._http_host = host
         self.port = port
         self.open_browser = open_browser
         # Lighting overrides — forwarded to the viewer via query string on launch.
@@ -469,19 +578,20 @@ class ViewerClient:
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
         self._ws = None
-        self._server = None
-        self._server_thread = None
+        # One WebSocket server and one blob sidecar per address ``host``
+        # resolves to (issue #187); both lists are filled by _start_servers.
+        self._ws_servers: list = []
+        self._http_servers: List[_BlobServer] = []
         self._connected_event = threading.Event()
         self._assets_loaded_event = threading.Event()
         self._pending_responses: Dict[str, threading.Event] = {}
         self._responses: Dict[str, dict] = {}
         self._send_lock = threading.Lock()
         self._current_animation = None  # Stored for re-sending on reconnect
-        self._http_server = None
         self._blob_store: Dict[str, bytes] = {}
-        # HTTP sidecar port; connect() re-derives the same value when it
-        # actually binds the server. Set here too so URL construction (e.g.
-        # add_points lod headers) works before/without connect().
+        # HTTP sidecar port; _start_servers overwrites it with the port it
+        # actually bound. Set here too so URL construction (e.g. add_points
+        # lod headers) works before/without connect().
         self._http_port = port + 1
         # LOD point clouds: id -> blob-store key prefix (hierarchy + lazy
         # per-node payload providers live under it). Released on replace,
@@ -505,6 +615,12 @@ class ViewerClient:
         # reconnect so picking survives a browser refresh).
         self._pick_callbacks: List = []
         self._polyline_picking: Optional[dict] = None
+        # Object click (issue #178): callbacks for ``object_clicked`` messages
+        # and the enable state, re-sent on reconnect like polyline picking. The
+        # viewer only raycasts a click while this is enabled, so a producer that
+        # never listens never pays for it.
+        self._click_callbacks: List = []
+        self._object_click: Optional[dict] = None
         # Move/rotate gizmo: callbacks invoked when the user drags an object in
         # the viewer, and the desired enable state (re-sent on reconnect so the
         # gizmo survives a browser refresh).
@@ -529,15 +645,7 @@ class ViewerClient:
         """
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        # Start HTTP server for fast binary transfers
-        self._http_port = self.port + 1
-        http_server = HTTPServer((self.host, self._http_port), _BlobHandler)
-        http_server.blob_store = self._blob_store
-        self._http_server = http_server
-        threading.Thread(target=http_server.serve_forever, daemon=True).start()
-
-        self._server_thread = threading.Thread(target=self._run_server, daemon=True)
-        self._server_thread.start()
+        self._start_servers()
 
         print(f"Waiting for viewer to connect on ws://{self.host}:{self.port} ...")
         deadline = time.monotonic() + timeout
@@ -585,7 +693,8 @@ class ViewerClient:
     def viewer_url(self) -> str:
         """Full file:// URL to the viewer.
 
-        Always includes `ws_port`. Appends `tone_mapping`,
+        Always includes `ws_port`; adds `ws_host` when ``host`` is not
+        ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
         `ambient_intensity`, `fov`, and/or `toolbar` query params when the caller passed
         explicit overrides —
@@ -593,6 +702,8 @@ class ViewerClient:
         win over the panel's localStorage on reload).
         """
         params: list[tuple[str, str]] = [("ws_port", str(self.port))]
+        if self.host != "localhost":
+            params.append(("ws_host", _url_host(self.host)))
         if self.tone_mapping is not None:
             params.append(("tone_mapping", self.tone_mapping))
         if self.tone_mapping_exposure is not None:
@@ -611,19 +722,51 @@ class ViewerClient:
             params.append(("toolbar", "true" if self.toolbar else "false"))
         return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
-    def _run_server(self):
-        """Run the WebSocket server in a background thread."""
+    def _start_servers(self, http_port: Optional[int] = None) -> None:
+        """Bind the WebSocket server and the HTTP blob sidecar.
+
+        Both listen on every address ``host`` resolves to (issue #187). The
+        sidecar port defaults to ``port + 1``; tests pass ``0`` to let the OS
+        pick a free one, and blob URLs embed whatever was actually bound.
+        """
         ws_logger = logging.getLogger("websockets.server")
         ws_logger.setLevel(logging.CRITICAL)
-        with sync_serve(
-            self._handle_connection,
-            self.host,
-            self.port,
-            max_size=256 * 1024 * 1024,
-            logger=ws_logger,
-        ) as server:
-            self._server = server
-            server.serve_forever()
+        # Sockets bound but not yet owned by a running server; closed on the
+        # error path so a failure halfway through leaks no listener.
+        pending: List[socket.socket] = []
+        try:
+            pending = _listen_sockets(
+                self.host, self.port + 1 if http_port is None else http_port
+            )
+            self._http_port = pending[0].getsockname()[1]
+            while pending:
+                server = _BlobServer(pending[0], self._blob_store)
+                # shutdown() blocks one poll interval per server; keep it short
+                # so disconnect() stays fast with several listeners.
+                threading.Thread(
+                    target=server.serve_forever, args=(0.05,), daemon=True
+                ).start()
+                # Listed only once its thread runs: HTTPServer.shutdown() waits
+                # for serve_forever to be entered, so an unstarted server in the
+                # list would deadlock disconnect().
+                self._http_servers.append(server)
+                pending.pop(0)
+            pending = _listen_sockets(self.host, self.port)
+            while pending:
+                server = sync_serve(
+                    self._handle_connection,
+                    sock=pending[0],
+                    max_size=256 * 1024 * 1024,
+                    logger=ws_logger,
+                )
+                self._ws_servers.append(server)
+                pending.pop(0)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+        except Exception:
+            for sock in pending:
+                sock.close()
+            self.disconnect()
+            raise
 
     def _handle_connection(self, websocket):
         """Handle incoming WebSocket connection from browser."""
@@ -661,6 +804,13 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-enable the object-click event if it was on (same reasoning).
+        if self._object_click is not None:
+            try:
+                websocket.send(json.dumps(self._object_click))
+            except Exception:
+                pass
+
         # Re-enable the move/rotate gizmo if it was on (same reasoning).
         if self._move_gizmo is not None:
             try:
@@ -695,6 +845,8 @@ class ViewerClient:
                         self._assets_loaded_event.set()
                     elif msg_type == "polyline_pick":
                         self._dispatch_polyline_pick(data)
+                    elif msg_type == "object_clicked":
+                        self._dispatch_object_click(data)
                     elif msg_type == "transform_gizmo":
                         self._dispatch_object_move(data)
                     else:
@@ -763,13 +915,13 @@ class ViewerClient:
 
     def disconnect(self):
         """Disconnect and stop server."""
-        if self._http_server:
-            self._http_server.shutdown()
-            self._http_server.server_close()
-            self._http_server = None
-        if self._server:
-            self._server.shutdown()
-            self._server = None
+        for server in self._http_servers:
+            server.shutdown()
+            server.server_close()
+        self._http_servers = []
+        for server in self._ws_servers:
+            server.shutdown()
+        self._ws_servers = []
         self._ws = None
 
     def __enter__(self):
@@ -1313,7 +1465,7 @@ class ViewerClient:
         blob_key = f"/blob_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = payload
         header_dict["blob_url"] = (
-            f"http://{self._http_host}:{self._http_port}{blob_key}"
+            f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
         )
         self._send(header_dict)
         return blob_key
@@ -1364,16 +1516,8 @@ class ViewerClient:
             header["yUp"] = True
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
 
         self._send_binary(header, mesh_bytes)
@@ -1393,6 +1537,10 @@ class ViewerClient:
         pickable: bool = True,
         segments: bool = False,
         visible: bool = True,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -1433,6 +1581,10 @@ class ViewerClient:
                 per-vertex ``colors`` and ``set_draw_range`` (leading
                 ``frac*N`` points ⇒ whole edges) work as usual. Segment
                 soups have no arc length, so the object is never pickable.
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
@@ -1484,6 +1636,9 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
+            header["transform"] = transform
         self._send_binary(header, raw_bytes)
 
     def add_mesh(
@@ -1584,16 +1739,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
@@ -1613,6 +1760,10 @@ class ViewerClient:
         lod: Optional[Union[bool, dict]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
     ) -> None:
         """
         Add a GPU point cloud (``THREE.Points``) using binary transfer.
@@ -1689,6 +1840,10 @@ class ViewerClient:
                 ``docs/points-lod-grid-api.md`` — and the builder skips its
                 quantise and sort stages (~55-60% of the build).
             parent: Optional parent group id.
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
 
         Reveal a cloud progressively (e.g. a cheap material-removal animation)
         with :meth:`set_draw_range` or the ``draw_ranges`` animation channel —
@@ -1755,6 +1910,7 @@ class ViewerClient:
                 parent=parent,
                 lod=lod,
                 visible=visible,
+                transform=_transform_header(position, rotation, scale, matrix),
             )
             return
 
@@ -1784,6 +1940,9 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
+            header["transform"] = transform
         self._send_binary(header, raw_bytes)
         # Remember what append_points needs to keep a later chunk consistent
         # with this one (colour mode, and the colormap range frozen here).
@@ -1964,6 +2123,7 @@ class ViewerClient:
         parent: Optional[str],
         lod: Union[bool, dict],
         visible: bool = True,
+        transform: Optional[dict] = None,
     ) -> None:
         """Build the sampled octree, register lazy node providers on the
         blob store, and send the add_points_lod header (see
@@ -2059,7 +2219,7 @@ class ViewerClient:
             self._blob_store[f"{key_base}/{i}"] = functools.partial(node_payload, i)
         self._points_lod[id] = key_base
 
-        base_url = f"http://{self._http_host}:{self._http_port}{key_base}"
+        base_url = f"http://{_url_host(self.host)}:{self._http_port}{key_base}"
         header = {
             "type": "add_points_lod",
             "id": id,
@@ -2084,6 +2244,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        if transform:
+            header["transform"] = transform
         self._send(header)
 
     def _release_points_lod(self, id: str) -> None:
@@ -2363,16 +2525,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
@@ -2528,16 +2682,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
@@ -3065,9 +3211,10 @@ class ViewerClient:
             animate: Tween the reorientation smoothly (default). ``False``
                 jumps to the view immediately.
 
-        The same views are clickable in the browser: the corner gimbal's axis
-        bubbles snap to the six orthogonal views, the ISO corner button to the
-        isometric one. Works with both perspective and ortho cameras.
+        The six orthogonal views are also clickable in the browser (the corner
+        gimbal's axis bubbles); ``"iso"`` has no button and is reached through
+        this call or ``viewer.setView('iso')``. Works with both perspective
+        and ortho cameras.
         """
         if name not in _ALLOWED_VIEWS:
             raise ValueError(
@@ -3559,6 +3706,90 @@ class ViewerClient:
                 cb(pick)
             except Exception:
                 logging.getLogger(__name__).exception("Error in polyline pick callback")
+
+    # === Object click ===
+
+    def enable_object_click(self) -> None:
+        """Enable the ``object_clicked`` event: a stationary single click on
+        the canvas reports the object under the cursor back to Python.
+
+        Each click is delivered to every callback registered with
+        :meth:`on_object_click` as a dict with keys:
+
+        - ``id``: the top-level id of the clicked object (a sub-mesh of a
+          loaded model resolves to the model's id), or ``None`` for a click
+          on empty space. Empty-space clicks are reported so a consumer can
+          deselect on them.
+        - ``point``: ``[x, y, z]`` world-space hit point, or ``None`` on an
+          empty-space click.
+        - ``button``: the mouse button (``0`` left, ``1`` middle, ``2``
+          right), so a right-click context menu can be built on it.
+        - ``modifiers``: ``{"shift", "ctrl", "alt", "meta"}`` booleans held
+          at release, for shift-click multi-select.
+
+        The viewer owns the gesture: a release after the pointer travelled
+        more than a few pixels (an orbit or pan), a press or release on a
+        move-gizmo handle, or a click on a view-gimbal bubble does not
+        report. Both halves of a double-click do report; the built-in
+        double-click framing is separately switchable with the viewer's
+        ``dblclickFrame`` option. The hit test is the same raycast the
+        double-click framing uses (visible top-level objects, lines and
+        point clouds included), and it runs only while this is enabled, so
+        nothing is raycast for a producer that never listens. The enabled
+        state is re-sent automatically if the browser reconnects.
+        """
+        self._object_click = {"type": "set_object_click", "enabled": True}
+        # Send now if connected; otherwise the connect handler replays it.
+        if self._ws is not None:
+            self._send(self._object_click)
+
+    def disable_object_click(self) -> None:
+        """Turn off the ``object_clicked`` event. Registered callbacks are left
+        in place; :meth:`enable_object_click` resumes delivery."""
+        self._object_click = None
+        if self._ws is not None:
+            self._send({"type": "set_object_click", "enabled": False})
+
+    def on_object_click(self, callback) -> None:
+        """Register a callback invoked on every single click on the canvas,
+        and enable the event if it isn't already.
+
+        The callback receives a single dict argument (see
+        :meth:`enable_object_click` for its keys). It runs on the client's
+        WebSocket receive thread, so keep it short; it is safe to call other
+        viewer methods (e.g. :meth:`set_highlight`) from within it.
+
+        Args:
+            callback: A callable ``callback(click: dict) -> None``.
+
+        Example::
+
+            def on_click(click):
+                if click["id"] is not None:
+                    v.set_highlight(click["id"], True)
+
+            v.on_object_click(on_click)
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._click_callbacks.append(callback)
+        if self._object_click is None:
+            self.enable_object_click()
+
+    def _dispatch_object_click(self, data: dict) -> None:
+        """Deliver an incoming ``object_clicked`` message to registered callbacks."""
+        click = {
+            "id": data.get("id"),
+            "point": data.get("point"),
+            "button": data.get("button", 0),
+            "modifiers": data.get("modifiers")
+            or {"shift": False, "ctrl": False, "alt": False, "meta": False},
+        }
+        for cb in list(self._click_callbacks):
+            try:
+                cb(click)
+            except Exception:
+                logging.getLogger(__name__).exception("Error in object click callback")
 
     # === Move / rotate gizmo ===
 
@@ -4069,7 +4300,7 @@ class ViewerClient:
             del self._blob_store[k]
         blob_key = f"/animation_{uuid.uuid4().hex}"
         self._blob_store[blob_key] = binary_payload
-        blob_url = f"http://{self._http_host}:{self._http_port}{blob_key}"
+        blob_url = f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
 
         # Binary-channel animations skip reconnect replay — storing hundreds of MB
         # of typed arrays for re-send isn't worthwhile; the user re-runs the script.

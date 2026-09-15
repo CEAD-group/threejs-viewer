@@ -114,7 +114,7 @@ const CLIP_AXIS_NORMALS = {
 /**
  * @typedef {Object} ThreeJSViewerOptions
  * @property {string} htmlTemplate                        HTML template string for UI controls (required — constructor throws without it)
- * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://localhost:${port}` where port comes from the `ws_port` query param, `wsPort`, or 5666
+ * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://${host}:${port}` where host comes from the `ws_host` query param (default `localhost`) and port from the `ws_port` query param, `wsPort`, or 5666
  * @property {number} [wsPort]                            WebSocket port used when `wsUrl` is not provided (default 5666)
  * @property {boolean} [autoConnect]                      Auto-connect on construction (default true)
  * @property {Object<string, string>} [cubemapData]       Map of face name -> base64 JPEG
@@ -125,6 +125,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
+ * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  */
 
 /**
@@ -187,8 +188,7 @@ function refreshRefs(refs, ids, map) {
 }
 
 // Scratch objects for the points-LOD traversal. Module-scope to avoid per-frame alloc.
-const _lodInvMat = new THREE.Matrix4();
-const _lodCamLocal = new THREE.Vector3();
+const _lodNodeWorld = new THREE.Vector3();
 const _lodScaleVec = new THREE.Vector3();
 const _lodBoundsBox = new THREE.Box3();
 
@@ -972,6 +972,11 @@ async function fetchArrayBuffer(url, what, signal) {
 // here. A fetch-stage failure on a load that still looks live is therefore
 // re-checked after this grace before it is reported loudly.
 const SUPERSEDED_FETCH_GRACE_MS = 500;
+
+// Pointer travel (px) between pointerdown and pointerup past which a release is
+// an orbit/pan drag, not a click. Shared by object click (issue #178), gizmo
+// click-select, and polyline picking so every click path agrees on the gesture.
+const CLICK_DRAG_MAX_PX = 5;
 
 // Abort-tracking key for the (id-less) animation blob fetch. A Symbol rather
 // than a reserved string: _loadAborts is a Map, which takes any key type, and
@@ -5132,6 +5137,9 @@ class CameraController {
             v._orthoCamera.bottom = -ORTHO_FRUSTUM;
             v._orthoCamera.position.copy(v._perspCamera.position);
             v._orthoCamera.quaternion.copy(v._perspCamera.quaternion);
+            // Hand over up too, so a turntable re-level lands on whichever
+            // camera is active next (issue #202).
+            v._orthoCamera.up.copy(v._perspCamera.up);
             v._orthoCamera.updateProjectionMatrix();
             v._camera = v._orthoCamera;
         } else {
@@ -5140,6 +5148,7 @@ class CameraController {
             const dir = v._orthoCamera.position.clone().sub(tgt).normalize();
             v._perspCamera.position.copy(tgt).addScaledVector(dir, dist);
             v._perspCamera.quaternion.copy(v._orthoCamera.quaternion);
+            v._perspCamera.up.copy(v._orthoCamera.up);
             v._perspCamera.aspect = aspect;
             v._perspCamera.updateProjectionMatrix();
             v._camera = v._perspCamera;
@@ -7083,7 +7092,7 @@ class PolylinePickController {
         this._downValid = false;
         if (!this.enabled) return;
         // A drag (the pointer travelled) is an orbit/pan, not a pick.
-        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > 5) return;
+        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > CLICK_DRAG_MAX_PX) return;
         // Re-pick at the release position rather than trusting stale hover state.
         const pick = this._pickAt(e.clientX, e.clientY);
         if (pick) {
@@ -7192,7 +7201,9 @@ class PolylinePickController {
 // Lives in the scene like the pivot / pick markers; never enters _objects, so it
 // can't be picked or cleared and survives `clear`.
 
-const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
+// Axis colours match three's ViewHelper bubbles in the corner gimbal, so the
+// handles and the gimbal agree on what X / Y / Z look like (issue #191).
+const GIZMO_PALETTE = { x: 0xff4466, y: 0x88ff44, z: 0x4488ff, n: 0xcfd3da };
 const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
 const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
 const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
@@ -7892,7 +7903,7 @@ class TransformGizmoController {
         // A handle drag was the gesture, not a select-click — consume it.
         if (this._interacted) { this._interacted = false; return; }
         if (this.control.dragging || this.control.axis != null) return;
-        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > 5) return;   // a drag = orbit
+        if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > CLICK_DRAG_MAX_PX) return;   // a drag = orbit
         const hit = this._pickObject(e.clientX, e.clientY);
         if (hit) this.attach(hit.object, hit.id);
     }
@@ -7988,7 +7999,11 @@ export class ThreeJSViewer {
             this._wsUrl = options.wsUrl;
         } else {
             const port = options.wsPort || parseInt(urlParams.get('ws_port')) || 5666;
-            this._wsUrl = `ws://localhost:${port}`;
+            // ws_host is set by ViewerClient(host=...) so the WebSocket and the
+            // blob sidecar share one hostname (Firefox refuses cross-host
+            // sidecar fetches from a file:// page, issue #187).
+            const host = urlParams.get('ws_host') || 'localhost';
+            this._wsUrl = `ws://${host}:${port}`;
         }
 
         // Resolve lighting defaults. Precedence: URL param > options > localStorage > hard default.
@@ -8159,6 +8174,13 @@ export class ThreeJSViewer {
         // claimed the type.
         /** @type {Array<(data: any) => void>} */
         this._unknownMessageHooks = [];
+        // Object click (issue #178): JS hooks plus the WS-send switch set by
+        // Python's enable_object_click(). The pointerup handler raycasts only
+        // when one of them wants the result, so an idle viewer pays nothing.
+        this._objectClickHooks = [];
+        this._objectClickEnabled = false;
+        // Double-click framing (issue #177): off for embedders that own dblclick.
+        this._dblclickFrame = options.dblclickFrame !== false;
 
         // Embedder asset-load hooks (issue #163). Binary payloads (models,
         // meshes, polylines, tubes, point-cloud nodes, animations) are
@@ -8286,7 +8308,7 @@ export class ThreeJSViewer {
         });
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
-        this._viewIsoBtn = q('.tjsv-view-iso');
+        this._viewOrbitBtn = q('.tjsv-view-orbit');
         this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
@@ -8375,15 +8397,17 @@ export class ThreeJSViewer {
         });
         this._controls.addEventListener('change', () => {
             this._lodDirty = true;
-            // An orbit/pan drag breaks the clean axis snap, so a later re-click
-            // of a bubble starts fresh (no accidental flip). Gate on isDragging()
-            // so a plain click-to-pivot — which fires 'change' but keeps the
-            // camera looking straight down the snapped axis — preserves the snap.
+            // An orbit drag breaks the clean axis snap, so a later re-click
+            // of a bubble starts fresh (no accidental flip). Gate on isOrbiting()
+            // rather than isDragging() (issue #193): a pan, a wheel zoom, and a
+            // plain click-to-pivot all fire 'change' but keep the camera looking
+            // straight down the snapped axis, so they preserve both the snap
+            // (a re-click still flips) and the projection.
             // Auto-projection: if the snap had auto-entered ortho, orbiting away
             // is exactly the moment ortho stops being what you want — return to
             // perspective (Blender's "auto perspective"). A manual `O` ortho
             // (_orthoAutoEntered false) is never auto-exited.
-            if (this._controls.isDragging() && this._gizmoAxisView) {
+            if (this._controls.isOrbiting() && this._gizmoAxisView) {
                 this._gizmoAxisView = null;
                 if (this._orthoAutoEntered) this._switchCamera(false);
             }
@@ -8521,8 +8545,11 @@ export class ThreeJSViewer {
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
         this._gizmoDim = 128;
-        this._gizmoBaseScale = 1.4;
-        this._gizmoHoverScale = 1.75;
+        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair; arms and
+        // bubble distance at stock length (1.3 read as too long on review).
+        this._gizmoBaseScale = 1.12;
+        this._gizmoHoverScale = 1.4;
+        this._gizmoArmScale = 1.0;
         this._gizmoHoverRaycaster = new THREE.Raycaster();
         this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
@@ -8530,7 +8557,8 @@ export class ThreeJSViewer {
         this._gizmoHovered = null;
         // The axis view the gizmo is currently snapped to (issue #514). Set when
         // an axis bubble click switches to that ortho view; cleared when the
-        // user orbits or leaves ortho. Re-clicking the same bubble flips it.
+        // user orbits or leaves ortho (a pan keeps it). Re-clicking the same
+        // bubble flips it.
         /** @type {string | null} */
         this._gizmoAxisView = null;
         // True while the current ortho projection was entered BY a bubble
@@ -8589,29 +8617,71 @@ export class ThreeJSViewer {
             }
         });
         // Double-click an object to frame it; double-click empty space to reset.
-        this._dblclickRaycaster = new THREE.Raycaster();
-        this._dblclickRaycaster.params.Line.threshold = 0.05;
-        this._dblclickRaycaster.params.Points.threshold = 0.05;
+        // Gated by the dblclickFrame option (issue #177) so an embedder can own
+        // dblclick for selection without a camera jump on every select.
+        this._objectClickRaycaster = new THREE.Raycaster();
+        this._objectClickRaycaster.params.Line.threshold = 0.05;
+        this._objectClickRaycaster.params.Points.threshold = 0.05;
         this._renderer.domElement.addEventListener('dblclick', (e) => {
-            const rect = this._renderer.domElement.getBoundingClientRect();
-            const ndc = new THREE.Vector2(
-                ((e.clientX - rect.left) / rect.width) * 2 - 1,
-                -((e.clientY - rect.top) / rect.height) * 2 + 1,
-            );
-            this._dblclickRaycaster.setFromCamera(ndc, this._camera);
-            const candidates = [];
-            for (const obj of this._objects.values()) {
-                if (obj && obj.visible) candidates.push(obj);
-            }
-            const hits = this._dblclickRaycaster.intersectObjects(candidates, true);
-            if (!hits.length) { this.resetView(); return; }
-            // Walk up to the top-level object the user added (a value of _objects).
-            const objSet = new Set(this._objects.values());
-            let target = hits[0].object;
-            while (target && !objSet.has(target)) target = target.parent;
-            if (!target) { this.resetView(); return; }
-            this.frameObject(target);
+            if (!this._dblclickFrame) return;
+            const hit = this._hitTrackedObject(e.clientX, e.clientY);
+            if (hit) this.frameObject(hit.object); else this.resetView();
         });
+        // Single-click object pick (issue #178). Fires on pointerup rather than
+        // `click` so the button is known and a right-click reports too. A press
+        // that lands on a TransformControls handle is not a click candidate
+        // (the gizmo owns that gesture), and neither is a release after the
+        // pointer travelled (an orbit/pan) or one that lands on a handle or a
+        // view-gimbal bubble. Runs before the gizmo controller's own window
+        // pointerup (registered later) and before `dblclick`, so a consumer
+        // that also listens to dblclick can cache this pick instead of
+        // re-raycasting into a moving camera.
+        // Handlers are stored so destroy() can remove them; a cancelled touch
+        // or pen press is dropped so a later pointerup cannot turn it into a click.
+        this._objectClickDown = null;
+        this._onObjectClickDown = (e) => {
+            this._objectClickDown = this._gizmoHandleHovered()
+                ? null
+                : { x: e.clientX, y: e.clientY, button: e.button, pointerId: e.pointerId };
+        };
+        this._onObjectClickCancel = () => { this._objectClickDown = null; };
+        this._onObjectClickUp = (e) => {
+            const down = this._objectClickDown;
+            if (!down) return;
+            this._objectClickDown = null;
+            if (this._destroyed) return;
+            if (e.pointerId !== down.pointerId || e.button !== down.button) return;
+            const wsOpen = !!this._ws && this._ws.readyState === WebSocket.OPEN;
+            if (!this._objectClickHooks.length && !(this._objectClickEnabled && wsOpen)) return;
+            if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_DRAG_MAX_PX) return;
+            if (this._gizmoHandleHovered() || this._gizmoHitTest(e).hit) return;
+            const hit = this._hitTrackedObject(e.clientX, e.clientY);
+            const modifiers = { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey };
+            if (this._objectClickEnabled && wsOpen) {
+                this._ws.send(JSON.stringify({
+                    type: 'object_clicked',
+                    id: hit ? hit.id : null,
+                    point: hit ? [hit.point.x, hit.point.y, hit.point.z] : null,
+                    button: e.button,
+                    modifiers,
+                }));
+            }
+            if (this._objectClickHooks.length) {
+                const payload = {
+                    id: hit ? hit.id : null,
+                    point: hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null,
+                    button: e.button,
+                    modifiers,
+                    object3D: hit ? hit.object : null,
+                };
+                for (const cb of [...this._objectClickHooks]) {
+                    try { cb(payload); } catch (err) { console.error('onObjectClick hook error', err); }
+                }
+            }
+        };
+        this._renderer.domElement.addEventListener('pointerdown', this._onObjectClickDown);
+        window.addEventListener('pointerup', this._onObjectClickUp);
+        window.addEventListener('pointercancel', this._onObjectClickCancel);
 
         // Polyline point-picking (opt-in; enabled from Python via
         // set_polyline_picking). Hover shows a marker on the nearest line, a
@@ -9274,14 +9344,31 @@ export class ThreeJSViewer {
         this._updateOrbitModeButton();
     }
 
+    /**
+     * Sync every orbit-mode indicator with `_orbitMode`: the toolbar chip
+     * and the stack button left of the gimbal (glyph, `.free` accent,
+     * tooltip). Called from `_setOrbitMode`, so the R key, either button and
+     * a programmatic switch all land here.
+     */
     _updateOrbitModeButton() {
-        if (!this._btnOrbitMode) return;
         const isFree = this._orbitMode === 'free';
         this._btnOrbitMode.classList.toggle('active', isFree);
         setMenuState(this._btnOrbitMode, isFree ? 'free' : 'turntable');
         this._btnOrbitMode.title = isFree
             ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
             : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
+        const btn = this._viewOrbitBtn;
+        if (btn) {
+            btn.classList.toggle('free', isFree);
+            btn.dataset.mode = this._orbitMode;
+            btn.title = isFree
+                ? 'Orbit: Free (no world-up lock). Click for Turntable (R)'
+                : 'Orbit: Turntable (Z-up locked). Click for Free (R)';
+        }
+    }
+
+    _toggleOrbitMode() {
+        this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
     }
 
     /** @param {boolean} toOrtho */
@@ -9811,12 +9898,13 @@ export class ThreeJSViewer {
         const cam = /** @type {any} */ (this._camera);
         const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
 
-        // Camera position in cloud-local space; group world scale (assumed
-        // uniform) folds into the ortho path only — in the perspective
-        // ratio r/dist it cancels.
-        _lodInvMat.copy(group.matrixWorld).invert();
-        _lodCamLocal.copy(cam.position).applyMatrix4(_lodInvMat);
-        const worldScale = _lodScaleVec.setFromMatrixScale(group.matrixWorld).x;
+        // Node size is estimated in world space. The group may carry a
+        // non-uniform scale (add_points scale=[1, 1, 100]), so the node
+        // radius is bounded by its largest scale component: a smaller
+        // estimate would stop refinement early on the stretched axis.
+        const mw = group.matrixWorld;
+        const sv = _lodScaleVec.setFromMatrixScale(mw);
+        const worldScale = Math.max(sv.x, sv.y, sv.z);
         const isPersp = !!cam.isPerspectiveCamera;
         const projFactor = isPersp
             ? canvasH / (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)))
@@ -9824,12 +9912,12 @@ export class ThreeJSViewer {
 
         /** @param {number} i */
         const pxOf = (i) => {
-            const r = nodes.halfs[i] * SQRT3;
-            if (!isPersp) return 2 * r * worldScale * projFactor;
-            const dx = _lodCamLocal.x - nodes.centers[3 * i];
-            const dy = _lodCamLocal.y - nodes.centers[3 * i + 1];
-            const dz = _lodCamLocal.z - nodes.centers[3 * i + 2];
-            const dist = Math.max(1e-9, Math.sqrt(dx * dx + dy * dy + dz * dz));
+            const r = nodes.halfs[i] * SQRT3 * worldScale;
+            if (!isPersp) return 2 * r * projFactor;
+            _lodNodeWorld.set(
+                nodes.centers[3 * i], nodes.centers[3 * i + 1], nodes.centers[3 * i + 2],
+            ).applyMatrix4(mw);
+            const dist = Math.max(1e-9, _lodNodeWorld.distanceTo(cam.position));
             return (2 * r / dist) * projFactor;
         };
 
@@ -11056,8 +11144,7 @@ export class ThreeJSViewer {
         });
         // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        item(this._btnOrbitMode, () =>
-            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable'));
+        item(this._btnOrbitMode, () => this._toggleOrbitMode());
         item(this._btnClip, () => this._toggleClipPanel());
         item(this._btnProjection, () => this._switchCamera(!this._isOrtho));
         item(this._btnWireframe, () => this._shading.cycleWireframe());
@@ -11152,23 +11239,18 @@ export class ThreeJSViewer {
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
-        // Home button: sits centered in the ViewHelper area and resets the view.
+        // Home button: bottom of the orbit / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
                 this.resetView();
                 this._viewHomeBtn.blur();
             });
         }
-        // ISO button: corner of the ViewHelper area; snaps to the isometric
-        // view (the axis bubbles cover the six orthogonal views).
-        if (this._viewIsoBtn) {
-            this._viewIsoBtn.addEventListener('click', () => {
-                // A true isometric is orthographic by definition — ISO is a
-                // seventh snap under the auto-projection rule: it auto-enters
-                // ortho like the axis bubbles, and orbiting away returns to
-                // perspective (Thijs).
-                this._snapOrthoAxisView('iso');
-                this._viewIsoBtn.blur();
+        // Orbit-mode button: top of the stack; the same turntable <-> free flip as the R key.
+        if (this._viewOrbitBtn) {
+            this._viewOrbitBtn.addEventListener('click', () => {
+                this._toggleOrbitMode();
+                this._viewOrbitBtn.blur();
             });
         }
         // Projection indicator/toggle (P = perspective, O = ortho). A click is
@@ -11245,7 +11327,7 @@ export class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
-                this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+                this._toggleOrbitMode();
                 return;
             }
             // KeyS toggles strand_collapse on every tube that has both buffers
@@ -11930,6 +12012,9 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
+                        // Same ordering as add_mesh_binary: the pose lands
+                        // after registration so a pending re-parent sees it.
+                        if (data.transform) this._applyTransform(line, data.transform);
                         deferred.resolve();
                     } catch (e) {
                         this._reportLoadFailure(e, 'polyline',
@@ -12071,6 +12156,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(points, data.parent);
                         this._registerObject(data.id, points);
+                        if (data.transform) this._applyTransform(points, data.transform);
                         // Unlit point quads read flat without a depth cue —
                         // switch EDL on the first time a cloud appears (unless
                         // the user pinned it).
@@ -12190,6 +12276,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(group, data.parent);
                         this._registerObject(data.id, group);
+                        if (data.transform) this._applyTransform(group, data.transform);
                         // Sculpt the streaming octree nodes with EDL from the
                         // first frame (unless the user pinned the EDL state).
                         this._depthCue.maybeAutoEnableEdl();
@@ -13247,6 +13334,9 @@ export class ThreeJSViewer {
                 this._depthCue.setEdl(data.enabled !== false, opts);
                 break;
             }
+            case 'set_object_click':
+                this.setObjectClickEnabled(!!data.enabled);
+                break;
             case 'set_polyline_picking':
                 if (data.enabled) {
                     this._polylinePick.enable({
@@ -13672,17 +13762,28 @@ export class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
-     * Enlarge the ViewHelper's axis sprites so they have a bigger hit target
-     * and a more visible cue. Baseline opacity is captured for the hover
-     * restore. Called once per ViewHelper instance — the helper is re-created
-     * on every perspective/ortho swap.
+     * Restyle the stock ViewHelper after construction: the axis sprites get
+     * the viewer's bubble size (a bigger hit target and a clearer cue than
+     * stock) and are pushed out along their axis, and the three arm meshes are
+     * stretched along their own length by _gizmoArmScale. The arms share one
+     * x-oriented cylinder that each mesh rotates into place, so a local
+     * scale.x stretches every arm along itself. Baseline opacity is captured
+     * for the hover restore. _gizmoHitTest raycasts the live sprites through
+     * a mirror of the helper's ortho camera, so it follows these edits.
+     * Called once per ViewHelper instance (re-created on every persp/ortho
+     * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
         for (const child of helper.children) {
-            if (!child.userData || !child.userData.type) continue;
+            if (!child.userData || !child.userData.type) {
+                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                continue;
+            }
             child.scale.setScalar(this._gizmoBaseScale);
+            // Stock sprites sit on the unit axis; keep them at the arm tips.
+            child.position.normalize().multiplyScalar(this._gizmoArmScale);
             child.userData.baseOpacity = child.material.opacity;
             sprites.push(child);
         }
@@ -13696,8 +13797,8 @@ export class ThreeJSViewer {
      * framing) — with a short eased tween, and sets an axis-appropriate up
      * vector (top/bottom get +Y up so the view doesn't roll unpredictably).
      * Works with both the perspective and the orthographic camera. Also the
-     * implementation behind gimbal axis-bubble clicks, the ISO corner button,
-     * and the `set_view` WS message.
+     * implementation behind gimbal axis-bubble clicks and the `set_view` WS
+     * message ('iso' has no button; use setView or Python set_view).
      * @param {string} name
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
      */
@@ -13859,7 +13960,7 @@ export class ThreeJSViewer {
 
     /**
      * Push the toolbar's current height into both the cache (hit-test +
-     * render shim) and the --tjsv-anim-lift CSS var (Home button).
+     * render shim) and the --tjsv-anim-lift CSS var (orbit / P / Home stack).
      * display:none yields 0, which matches the "toolbar hidden" state.
      * Called on show/hide (no arg → reads offsetHeight to flush layout and
      * get the post-transition height synchronously) and from the
@@ -14247,6 +14348,102 @@ export class ThreeJSViewer {
         };
     }
 
+    // ========== Object click / dblclick framing (issues #177, #178) ==========
+
+    /**
+     * Turn the built-in double-click behaviour (frame the hit object, reset
+     * the view on a miss) on or off at runtime. Same switch as the
+     * `dblclickFrame` constructor option.
+     * @param {boolean} enabled
+     */
+    setDblclickFrame(enabled) { this._dblclickFrame = !!enabled; }
+
+    /**
+     * Register a hook fired on a stationary single click on the canvas
+     * (pointer travel under `CLICK_DRAG_MAX_PX`, release not on a gizmo
+     * handle or a view-gimbal bubble). Payload: `{id, point, button,
+     * modifiers, object3D}`. `id` is the top-level tracked id of the nearest
+     * hit (a GLTF sub-mesh resolves to its model's id) and `point` its
+     * world-space hit `{x,y,z}`; both are `null` for a click on empty space,
+     * which is reported too so a consumer can deselect on it. `button` is
+     * the `PointerEvent.button` (0 left, 1 middle, 2 right) and `modifiers`
+     * is `{shift, ctrl, alt, meta}`. The raycast is the double-click one
+     * (visible top-level objects, lines and points included) and runs only
+     * while a hook is registered or Python has enabled the WS event.
+     * @param {(p: {id: string|null, point: {x:number,y:number,z:number}|null, button: number, modifiers: {shift:boolean,ctrl:boolean,alt:boolean,meta:boolean}, object3D: THREE.Object3D|null}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onObjectClick(cb) {
+        this._objectClickHooks.push(cb);
+        return () => {
+            const i = this._objectClickHooks.indexOf(cb);
+            if (i >= 0) this._objectClickHooks.splice(i, 1);
+        };
+    }
+
+    /**
+     * Enable/disable the `object_clicked` WebSocket event (the switch behind
+     * Python's `enable_object_click()` / `set_object_click` message). JS hooks
+     * registered with `onObjectClick` fire regardless of this flag.
+     * @param {boolean} enabled
+     */
+    setObjectClickEnabled(enabled) { this._objectClickEnabled = !!enabled; }
+
+    /**
+     * True while any move/rotate gizmo handle is hovered or dragged, so a
+     * press or release there is the gizmo's gesture rather than a click.
+     * @returns {boolean}
+     */
+    _gizmoHandleHovered() {
+        const tg = this._transformGizmo;
+        if (!tg || !tg.enabled) return false;
+        for (const g of tg._allGizmos()) {
+            if (g.control.dragging || g.control.axis != null) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Raycast the visible tracked objects from a viewport position and resolve
+     * the nearest hit to its top-level tracked object. Shared by the dblclick
+     * framing handler and the object-click event so both agree on what "the
+     * object under the cursor" is. Unlike `pick()` this includes lines and
+     * point clouds. A tracked object under a hidden ancestor (a child of a
+     * group hidden with set_visibility) is skipped: three's raycaster does
+     * not check visibility, and unrendered content must not report a click.
+     * @param {number} clientX @param {number} clientY
+     * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
+     */
+    _hitTrackedObject(clientX, clientY) {
+        const rect = this._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const ndc = new THREE.Vector2(
+            ((clientX - rect.left) / rect.width) * 2 - 1,
+            -((clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        this._objectClickRaycaster.setFromCamera(ndc, this._camera);
+        /** @type {THREE.Object3D[]} */
+        const candidates = [];
+        /** @type {Map<THREE.Object3D, string>} */
+        const ids = new Map();
+        for (const [id, obj] of this._objects) {
+            if (!obj) continue;
+            let shown = true;
+            for (let n = obj; n; n = n.parent) {
+                if (n.visible === false) { shown = false; break; }
+            }
+            if (shown) { candidates.push(obj); ids.set(obj, id); }
+        }
+        if (!candidates.length) return null;
+        const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
+        if (!hits.length) return null;
+        // Walk up to the top-level object the user added (a value of _objects).
+        let target = hits[0].object;
+        while (target && !ids.has(target)) target = target.parent;
+        if (!target) return null;
+        return { object: target, id: /** @type {string} */ (ids.get(target)), point: hits[0].point };
+    }
+
     /**
      * Register a hook fired on every asset-fetch start and every fetch
      * completion, with the same snapshot `getLoadState()` returns
@@ -14603,6 +14800,11 @@ export class ThreeJSViewer {
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
         document.removeEventListener('pointerdown', this._onDocPointerDown);
+        this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
+        window.removeEventListener('pointerup', this._onObjectClickUp);
+        window.removeEventListener('pointercancel', this._onObjectClickCancel);
+        this._objectClickDown = null;
+        this._objectClickHooks.length = 0;
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();

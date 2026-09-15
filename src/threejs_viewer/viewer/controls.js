@@ -3,9 +3,12 @@
 //
 // One implementation, two modes:
 //   - 'turntable' (default): yaw around world-Z, pitch around camera-local right.
-//                            Pitch is clamped so the view never flips through the pole.
+//                            Pitch is clamped so the view never flips through the pole;
+//                            a pitch away from the pole is always applied, so a drag
+//                            escapes a top/bottom view. Once forward is outside the
+//                            pole cone, camera.up is re-levelled to world +Z.
 //   - 'free':                yaw around camera-local up, pitch around camera-local right.
-//                            No world-up lock; horizon can tilt.
+//                            No world-up lock; horizon can tilt. Never auto-levelled.
 //
 // Click-to-pivot: a left-button pointerdown (no modifier) raycasts the registered
 // pickables. If a hit is found, `target` is moved to the hit point WITHOUT touching
@@ -13,8 +16,10 @@
 // shift; subsequent left-drag orbits exactly around the new pivot.
 //
 // Pan (right-drag or shift+left-drag): translates camera + target together in screen
-// space. Wheel: dollies camera toward/away from target (perspective) or scales zoom
-// (orthographic). Rotation and pan have a brief exponential damping on release.
+// space. Wheel: dollies camera toward/away from the point under the cursor
+// (perspective) or scales zoom about the cursor (orthographic), shifting `target`
+// along with the camera so the world point under the cursor keeps its screen
+// position. Rotation and pan have a brief exponential damping on release.
 //
 // Public API used by the viewer:
 //   ctrl.target           — persistent THREE.Vector3 (read/write, copy/set/add OK)
@@ -118,6 +123,18 @@ class ViewerControls extends THREE.EventDispatcher {
 
     isDragging() {
         return this._state !== STATE.NONE;
+    }
+
+    /**
+     * True only during an orbit drag, never during a pan. Reads the
+     * `_dragMode` snapshot taken at pointerdown (set for a rotate drag,
+     * including the Alt-flipped mode, and cleared at pointerup) so the
+     * answer is fixed for the whole stroke. The auto-ortho exit after a
+     * gizmo snap gates on this: a pan keeps the axis-aligned view, so it
+     * must keep the orthographic projection too (issue #193).
+     */
+    isOrbiting() {
+        return this._state === STATE.ROTATE && this._dragMode !== null;
     }
 
     /**
@@ -282,7 +299,12 @@ class ViewerControls extends THREE.EventDispatcher {
         e.preventDefault();
         // Positive deltaY = scroll down = zoom out; scale >1 zooms in (dist/scale)
         const scale = Math.pow(ZOOM_SCALE_PER_WHEEL, e.deltaY / 100);
-        this._applyZoom(scale);
+        // Zoom about the cursor (issue #192): the world point under the pointer
+        // keeps its screen position instead of everything converging on target.
+        const rect = this.domElement.getBoundingClientRect();
+        const ndcX = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+        const ndcY = -((e.clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1;
+        this._applyZoom(scale, ndcX, ndcY);
         this.dispatchEvent(_changeEvent);
     }
 
@@ -393,20 +415,33 @@ class ViewerControls extends THREE.EventDispatcher {
         const offset = this._tmpV3.copy(cam.position).sub(this.target).applyQuaternion(q);
 
         if (activeMode === 'turntable') {
-            // Prospective forward after rotation = q * cam.quaternion * (0,0,-1).
-            const fwd = this._tmpV4.set(0, 0, -1)
-                .applyQuaternion(cam.quaternion)
-                .applyQuaternion(q);
+            const cosPole = Math.cos(POLE_EPS);
+            // Forward before and after: fwd = q * cam.quaternion * (0,0,-1).
+            const fwd = this._tmpV4.set(0, 0, -1).applyQuaternion(cam.quaternion);
+            const dotBefore = Math.abs(fwd.dot(this._worldZ));
+            fwd.applyQuaternion(q);
             const dotZ = Math.abs(fwd.dot(this._worldZ));
-            // If forward is within POLE_EPS of ±worldZ, reject the pitch component
-            // and re-apply only the yaw (reclaiming _tmpQ3 since q is no longer needed).
-            if (dotZ > Math.cos(POLE_EPS)) {
+            // Reject the pitch only when it lands inside the POLE_EPS cone AND
+            // brings forward closer to the pole than it already is (issue #202):
+            // a top/bottom view preset parks forward exactly on the pole, and a
+            // direction-blind cone test refused every mouse-sized pitch away
+            // from it, so the drag could only yaw. Yaw-only re-apply reclaims
+            // _tmpQ3 since q is no longer needed.
+            if (dotZ > cosPole && dotZ > dotBefore) {
                 const qYawOnly = this._tmpQ3.copy(qYaw);
                 offset.copy(cam.position).sub(this.target).applyQuaternion(qYawOnly);
                 cam.position.copy(this.target).add(offset);
                 cam.quaternion.premultiply(qYawOnly).normalize();
                 return;
             }
+            cam.position.copy(this.target).add(offset);
+            cam.quaternion.premultiply(q).normalize();
+            // Re-level once the orbit is outside the pole cone: the top/bottom
+            // presets set camera.up to +Y (world Z is parallel to the view
+            // there), and every later lookAt (framing, set_camera, setView)
+            // reads camera.up, which would come out rolled. Turntable only.
+            if (dotZ < cosPole) cam.up.copy(this._worldZ);
+            return;
         }
 
         cam.position.copy(this.target).add(offset);
@@ -422,17 +457,66 @@ class ViewerControls extends THREE.EventDispatcher {
         this.target.add(delta);
     }
 
-    _applyZoom(scale) {
+    /**
+     * Zoom by `scale` (>1 zooms in). With an NDC cursor position the zoom is
+     * anchored on the world point under the cursor: perspective dollies both
+     * camera and target toward the cursor ray's point on the view plane at
+     * target depth, ortho rescales then translates so that point keeps its
+     * screen position. Without a cursor (programmatic callers) the zoom stays
+     * about `target`, which is also what a cursor exactly on target yields.
+     * @param {number} scale
+     * @param {number} [ndcX]
+     * @param {number} [ndcY]
+     */
+    _applyZoom(scale, ndcX, ndcY) {
         const cam = this.camera;
+        const hasCursor = Number.isFinite(ndcX) && Number.isFinite(ndcY);
         if (cam.isPerspectiveCamera) {
             const offset = this._tmpV1.copy(cam.position).sub(this.target);
             const dist = offset.length();
             const newDist = THREE.MathUtils.clamp(dist / scale, MIN_DISTANCE, MAX_DISTANCE);
-            offset.setLength(newDist);
-            cam.position.copy(this.target).add(offset);
+            if (!hasCursor) {
+                offset.setLength(newDist);
+                cam.position.copy(this.target).add(offset);
+                return;
+            }
+            // The clamped distance decides the effective scale, so MIN/MAX
+            // distance still hold when anchoring on the cursor.
+            const k = dist > 0 ? 1 - newDist / dist : 0;
+            if (k === 0) return;
+            const fwd = this._tmpV2.set(0, 0, -1).applyQuaternion(cam.quaternion);
+            // Built from the projection inverse + live quaternion rather than
+            // unproject(): matrixWorld only refreshes at render time, so it is
+            // stale for the second of two wheel events in one frame.
+            const ray = this._tmpV3.set(ndcX, ndcY, 0.5)
+                .applyMatrix4(cam.projectionMatrixInverse)
+                .normalize()
+                .applyQuaternion(cam.quaternion);
+            const rayDotFwd = ray.dot(fwd);
+            if (Math.abs(rayDotFwd) < 1e-6) return;
+            // Cursor ray hit on the view-parallel plane through target.
+            const depth = -offset.dot(fwd);
+            const anchor = this._tmpV4.copy(cam.position).addScaledVector(ray, depth / rayDotFwd);
+            // Camera and target lerp toward the anchor by the same fraction:
+            // the offset shrinks to newDist and the anchor stays on the ray.
+            cam.position.lerp(anchor, k);
+            this.target.lerp(anchor, k);
         } else if (cam.isOrthographicCamera) {
+            const oldZoom = cam.zoom;
             cam.zoom = THREE.MathUtils.clamp(cam.zoom * scale, MIN_ZOOM, MAX_ZOOM);
             cam.updateProjectionMatrix();
+            if (!hasCursor || cam.zoom === oldZoom) return;
+            // Cursor offset from the optical axis in unzoomed frustum units;
+            // the world point there moves by the change in 1/zoom, so shift
+            // the camera (and target) by the same amount to cancel it.
+            const fx = cam.left + ((ndcX + 1) / 2) * (cam.right - cam.left);
+            const fy = cam.bottom + ((ndcY + 1) / 2) * (cam.top - cam.bottom);
+            const dInv = 1 / oldZoom - 1 / cam.zoom;
+            const right = this._tmpV1.set(1, 0, 0).applyQuaternion(cam.quaternion);
+            const up = this._tmpV2.set(0, 1, 0).applyQuaternion(cam.quaternion);
+            const delta = this._tmpV3.copy(right).multiplyScalar(fx * dInv).addScaledVector(up, fy * dInv);
+            cam.position.add(delta);
+            this.target.add(delta);
         }
     }
 }

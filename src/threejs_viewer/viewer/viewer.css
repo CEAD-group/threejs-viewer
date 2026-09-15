@@ -528,57 +528,20 @@
     text-align: center;
 }
 
-/* Home button — centered inside the 128×128 ViewHelper area, shifts up
-   with the animation toolbar via --tjsv-anim-lift (set from JS). */
+/* Orbit mode, P/O and Home form one vertical stack just LEFT of the gimbal bubbles,
+   ~15px off the cluster: close enough to read as one control group, outside
+   the bubbles' orbit so they never collide. The column (16px to 112px)
+   is centred on the 128px gimbal square, level with the bubble cluster.
+   All three shift up with the animation toolbar via --tjsv-anim-lift
+   (set from JS). Home used to sit in
+   the centre of the 128x128 ViewHelper area, in the middle of the six axis
+   bubbles (issue #190). */
+.threejs-viewer .tjsv-view-orbit,
+.threejs-viewer .tjsv-view-proj,
 .threejs-viewer .tjsv-view-home {
     position: absolute;
-    right: 46px;
-    bottom: calc(46px + var(--tjsv-anim-lift, 0px));
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border-radius: 50%;
-    background: rgba(30, 30, 30, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    color: #ddd;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    user-select: none;
-    opacity: 0.75;
-    transition: background 0.15s, color 0.15s, opacity 0.15s, transform 0.15s;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-    z-index: 2;
-}
-.threejs-viewer .tjsv-view-home:hover {
-    background: rgba(60, 60, 60, 0.95);
-    color: white;
-    opacity: 1;
-    transform: scale(1.06);
-}
-.threejs-viewer .tjsv-view-home:active {
-    transform: scale(0.96);
-}
-.threejs-viewer .tjsv-view-home:focus {
-    outline: none;
-}
-.threejs-viewer .tjsv-view-home:focus-visible {
-    outline: 2px solid #66b3ff;
-    outline-offset: 2px;
-}
-
-/* ISO button — top-left corner of the 128×128 ViewHelper area (the six axis
-   bubbles cover the orthogonal views; this covers the isometric one). Shares
-   the Home button look and the --tjsv-anim-lift shift. */
-/* ISO + P/O live in a vertical stack just LEFT of the gimbal bubbles,
-   ~15px off the cluster (Thijs) — close enough to read as one control
-   group, outside the bubbles' orbit so they never collide. */
-.threejs-viewer .tjsv-view-iso,
-.threejs-viewer .tjsv-view-proj {
-    position: absolute;
     right: 115px;
-    bottom: calc(72px + var(--tjsv-anim-lift, 0px));
+    bottom: calc(84px + var(--tjsv-anim-lift, 0px));
     width: 28px;
     height: 28px;
     padding: 0;
@@ -599,23 +562,27 @@
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
     z-index: 2;
 }
-.threejs-viewer .tjsv-view-iso:hover,
-.threejs-viewer .tjsv-view-proj:hover {
+.threejs-viewer .tjsv-view-orbit:hover,
+.threejs-viewer .tjsv-view-proj:hover,
+.threejs-viewer .tjsv-view-home:hover {
     background: rgba(60, 60, 60, 0.95);
     color: white;
     opacity: 1;
     transform: scale(1.06);
 }
-.threejs-viewer .tjsv-view-iso:active,
-.threejs-viewer .tjsv-view-proj:active {
+.threejs-viewer .tjsv-view-orbit:active,
+.threejs-viewer .tjsv-view-proj:active,
+.threejs-viewer .tjsv-view-home:active {
     transform: scale(0.96);
 }
-.threejs-viewer .tjsv-view-iso:focus,
-.threejs-viewer .tjsv-view-proj:focus {
+.threejs-viewer .tjsv-view-orbit:focus,
+.threejs-viewer .tjsv-view-proj:focus,
+.threejs-viewer .tjsv-view-home:focus {
     outline: none;
 }
-.threejs-viewer .tjsv-view-iso:focus-visible,
-.threejs-viewer .tjsv-view-proj:focus-visible {
+.threejs-viewer .tjsv-view-orbit:focus-visible,
+.threejs-viewer .tjsv-view-proj:focus-visible,
+.threejs-viewer .tjsv-view-home:focus-visible {
     outline: 2px solid #66b3ff;
     outline-offset: 2px;
 }
@@ -656,13 +623,28 @@
     z-index: 11;
 }
 
-/* Projection indicator/toggle — top-right corner of the gimbal area. Shows
+/* Orbit-mode indicator/toggle: top of the stack. Shows the CURRENT mode
+   (turntable disc glyph, or an accented free-orbit glyph); click toggles,
+   the same flip as the R key. */
+.threejs-viewer .tjsv-view-orbit .tjsv-orbit-glyph-free { display: none; }
+.threejs-viewer .tjsv-view-orbit.free .tjsv-orbit-glyph-free { display: block; }
+.threejs-viewer .tjsv-view-orbit.free .tjsv-orbit-glyph-turntable { display: none; }
+.threejs-viewer .tjsv-view-orbit.free {
+    background: rgba(70, 110, 160, 0.85);
+    color: white;
+    opacity: 1;
+}
+/* Projection indicator/toggle: second item of the stack, below orbit mode. Shows
    the CURRENT projection (P = perspective, O = orthographic); click toggles.
    A manual toggle is a deliberate choice: auto-projection never overrides it
    (only bubble-snap-entered ortho auto-exits on orbit). */
 .threejs-viewer .tjsv-view-proj {
-    bottom: calc(38px + var(--tjsv-anim-lift, 0px));
+    bottom: calc(50px + var(--tjsv-anim-lift, 0px));
     font-size: 11px;
+}
+/* Home (reset view): third item of the stack, below P. */
+.threejs-viewer .tjsv-view-home {
+    bottom: calc(16px + var(--tjsv-anim-lift, 0px));
 }
 .threejs-viewer .tjsv-view-proj.ortho {
     background: rgba(70, 110, 160, 0.85);
