@@ -6951,6 +6951,8 @@ def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
         "}"
     )
     assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]
+
+
 _ZOOM_PROJECT_JS = """([x, y, z]) => {
     const v = window.threejsViewer;
     const THREE = window.tjsv.THREE;
