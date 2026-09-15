@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.0.52
+
+### Client-defined menus and the viewer's own options menu (#204, #205)
+
+- **One menu mechanism for the viewer and its embedders.** `viewer.addMenu(spec)` in JS and `ViewerClient.add_menu(id, items, ...)` in Python add a menu whose items and callbacks the caller owns while the viewer owns DOM, styling, placement, open/close, persistence, eye visibility and shortcut display. Item types: `button`, `toggle`, `eye`, `select`, `segmented`, `label`, `divider` and (JS only) `custom`; `state`/`active`/`checked`/`value`/`hidden`/`disabled` may be functions, re-evaluated by `refresh()`. Interactions come back to Python as `menu_action` messages to `on_menu_action` callbacks; `update_menu_item` patches an item in place; `remove_menu` drops a menu. Stored menus are replayed on reconnect. Decision record in `plans/client-menus.md`, example in `examples/35_client_menu.py`.
+- **The look is ribweaver's N-panel rail.** Every menu is a vertical tab folded against the viewer's right edge whose body slides out on click; tabs stack top to bottom, one open at a time, an outside click or `Escape` folds a dropdown, and `mode: 'panel'` starts open and survives outside clicks (a legend). The colours and metrics are exposed as `--tjsv-*` custom properties on the container so an embedder can restyle. There is no top bar and no top-left button cluster any more.
+- **Eyes** own every tracked object whose id is listed, starts with a prefix, or passes a `match` function; they flip `.visible` (or run a custom `apply`, which may veto the flip), persist under `storageKey`, and are re-applied from `_registerObject` so a hidden layer stays hidden when objects are re-pushed or stream in later.
+- **User-defined keyboard shortcuts.** An item's `shortcut` (`"G"`, `"Shift+G"`) is shown as a key chip and, on a client menu, bound unless `bindKey: false`; keys the viewer's own handler consumes are refused with one console warning. Chips show `Shift+` as the shift glyph so a long label still fits the rail body.
+- **The viewer's own options are a menu too**, the top tab, labelled only by the connection-status dot: Clipping plane `C`, Lighting `E`, Orbit mode `R`, Camera tracking `T`, Projection `O`, Wireframe `M`, Shading debug `N`, Distance fog `D`, Eye-dome lighting `Shift+D`, Frame all `F`, each showing its current state. It is **hidden by default** (URL `toolbar=true` > `ThreeJSViewer({toolbar: true})` > hidden); `ViewerClient(toolbar=True)` rides the viewer URL and `set_toolbar_visible(bool)` is replayed on reconnect. Keyboard shortcuts work either way.
+
+### Gimbal, orbit and zoom (#196, #197, #199, #203, #200)
+
+- **View-button stack left of the gimbal: orbit mode, projection, Home** (#196, #190). The Home button used to sit in the centre of the six axis bubbles. It is now the bottom item of a column left of the gimbal, under an orbit-mode toggle (turntable or free, synced with the `R` key) and the P/O projection toggle. The ISO button is gone; `set_view("iso")` still works programmatically.
+- **Zoom about the mouse cursor** (#197, #192). The world point under the pointer keeps its screen position during a wheel zoom, under both cameras. Camera and orbit target move together, so the distance clamps and a later orbit behave exactly as before; a programmatic zoom with no cursor still zooms about the target.
+- **Turntable orbit escapes the pole after a top or bottom view** (#203, #202). The pole guard now compares the pitch direction: a pitch away from the pole is always applied, even from exactly the pole, while arriving at the pole is still clamped and never flips through. Once forward leaves the pole cone, `camera.up` is re-levelled to world +Z, and the persp/ortho switch hands `camera.up` over so a snapped view survives a projection change.
+- **A pan after a gimbal snap keeps auto-ortho** (#199, #193). Only an orbit drag (`ViewerControls.isOrbiting()`) clears the axis snap and returns to perspective; a pan, a wheel zoom or a click-to-pivot keeps the orthographic plan view, so a re-click of the same bubble still flips to the opposite side.
+- **The transform and clip gizmos use the gimbal's axis colours** (#200, #191), so the handles, the clip plane gizmos and the corner bubbles agree on what each axis looks like.
+
+### Native object click (#198)
+
+- **`on_object_click(callback)`** in Python and `viewer.onObjectClick(cb)` in JS report a single click on a tracked object as `{id, point, button, modifiers}`, resolved to the top-level tracked id (a GLTF sub-mesh reports its model) and skipping objects under a hidden ancestor. An empty-space click is reported with `id: null` so a consumer can deselect. The viewer owns drag suppression, so an orbit never counts as a click; the enable state is replayed on reconnect. `ThreeJSViewer({dblclickFrame: false})` turns off the double-click framing for embedders that own the double click.
+
+### Transforms on polylines and point clouds (#195)
+
+- **`add_polyline` and `add_points` accept `position`/`rotation`/`scale`/`matrix`** like `add_mesh`, and the viewer applies the header transform in the polyline, flat point-cloud and octree-LOD add handlers, which previously ignored it. The header construction is one shared helper on the Python side; the wire format is unchanged and an untransformed add still omits the key.
+
+### Servers bind on every address the host resolves to (#201)
+
+- **The WebSocket server and the blob sidecar bind one listener per address `localhost` resolves to** (`127.0.0.1` and `::1`), so a browser that resolves `localhost` to IPv6 no longer fails every binary fetch, and the advertised URLs carry `host` verbatim, which keeps a `file://` viewer page same-origin in Firefox. Bind errors surface in `connect()`, a half-started client cleans up its listeners, and `http_port=0` still picks a free port.
+
 ## 0.0.51
 
 ### Orient to viewer: billboards as a per-object property (#185, #186, #188)
