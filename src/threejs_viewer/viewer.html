@@ -180,6 +180,8 @@
             padding: 0 4px;
             min-width: 12px;
             text-align: center;
+            flex-shrink: 0;
+            white-space: nowrap;
         }
         /* Eye mark (toggle--display) */
         .threejs-viewer .tjsv-menu-mark {
@@ -244,7 +246,7 @@
         .threejs-viewer .tjsv-menu-action.active kbd,
         .threejs-viewer .tjsv-menu-action.active .tjsv-menu-state { color: #fff; opacity: 0.8; }
         .threejs-viewer .tjsv-menu-action[hidden] { display: none; }
-        .threejs-viewer .tjsv-menu-action .tjsv-menu-label { flex: 1; text-align: center; }
+        .threejs-viewer .tjsv-menu-action .tjsv-menu-label { flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; }
         .threejs-viewer .tjsv-menu-action:focus { outline: none; }
         .threejs-viewer .tjsv-menu-action:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
 
@@ -7167,7 +7169,9 @@ class MenuController {
             el.appendChild(st);
             if (it.shortcut) {
                 const kbd = document.createElement('kbd');
-                kbd.textContent = it.shortcut;
+                // Display only: the modifier word would not fit the 190px body.
+                kbd.textContent = it.shortcut.replace(/Shift\+/i, '\u21E7');
+                kbd.title = it.shortcut;
                 el.appendChild(kbd);
             }
             el.addEventListener('click', () => this._activate(m, rec));
