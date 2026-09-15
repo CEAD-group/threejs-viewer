@@ -6819,6 +6819,8 @@ def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_pa
         "}"
     )
     assert moved is False
+
+
 _WORLD_POS_JS = """(id) => {
     const o = window.threejsViewer.getObject(id);
     if (!o) return null;
