@@ -187,8 +187,7 @@ function refreshRefs(refs, ids, map) {
 }
 
 // Scratch objects for the points-LOD traversal. Module-scope to avoid per-frame alloc.
-const _lodInvMat = new THREE.Matrix4();
-const _lodCamLocal = new THREE.Vector3();
+const _lodNodeWorld = new THREE.Vector3();
 const _lodScaleVec = new THREE.Vector3();
 const _lodBoundsBox = new THREE.Box3();
 
@@ -7165,7 +7164,9 @@ class PolylinePickController {
 // Lives in the scene like the pivot / pick markers; never enters _objects, so it
 // can't be picked or cleared and survives `clear`.
 
-const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
+// Axis colours match three's ViewHelper bubbles in the corner gimbal, so the
+// handles and the gimbal agree on what X / Y / Z look like (issue #191).
+const GIZMO_PALETTE = { x: 0xff4466, y: 0x88ff44, z: 0x4488ff, n: 0xcfd3da };
 const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
 const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
 const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
@@ -8252,7 +8253,7 @@ export class ThreeJSViewer {
         });
         this._animLiftObserver.observe(this._animControlsEl);
         this._viewHomeBtn = q('.tjsv-view-home');
-        this._viewIsoBtn = q('.tjsv-view-iso');
+        this._viewOrbitBtn = q('.tjsv-view-orbit');
         this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
@@ -8487,8 +8488,11 @@ export class ThreeJSViewer {
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
         this._gizmoDim = 128;
-        this._gizmoBaseScale = 1.4;
-        this._gizmoHoverScale = 1.75;
+        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair; arms and
+        // bubble distance at stock length (1.3 read as too long on review).
+        this._gizmoBaseScale = 1.12;
+        this._gizmoHoverScale = 1.4;
+        this._gizmoArmScale = 1.0;
         this._gizmoHoverRaycaster = new THREE.Raycaster();
         this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
@@ -9279,14 +9283,33 @@ export class ThreeJSViewer {
         this._updateOrbitModeButton();
     }
 
+    /**
+     * Sync every orbit-mode indicator with `_orbitMode`: the toolbar chip
+     * and the stack button left of the gimbal (glyph, `.free` accent,
+     * tooltip). Called from `_setOrbitMode`, so the R key, either button and
+     * a programmatic switch all land here.
+     */
     _updateOrbitModeButton() {
-        if (!this._btnOrbitMode) return;
         const isFree = this._orbitMode === 'free';
-        this._btnOrbitMode.classList.toggle('active', isFree);
-        this._btnOrbitMode.textContent = '\u27F3 R';
-        this._btnOrbitMode.title = isFree
-            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
-            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
+        if (this._btnOrbitMode) {
+            this._btnOrbitMode.classList.toggle('active', isFree);
+            this._btnOrbitMode.textContent = '\u27F3 R';
+            this._btnOrbitMode.title = isFree
+                ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
+                : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
+        }
+        const btn = this._viewOrbitBtn;
+        if (btn) {
+            btn.classList.toggle('free', isFree);
+            btn.dataset.mode = this._orbitMode;
+            btn.title = isFree
+                ? 'Orbit: Free (no world-up lock). Click for Turntable (R)'
+                : 'Orbit: Turntable (Z-up locked). Click for Free (R)';
+        }
+    }
+
+    _toggleOrbitMode() {
+        this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
     }
 
     /** @param {boolean} toOrtho */
@@ -9816,12 +9839,13 @@ export class ThreeJSViewer {
         const cam = /** @type {any} */ (this._camera);
         const canvasH = Math.max(1, this._renderer.domElement.clientHeight);
 
-        // Camera position in cloud-local space; group world scale (assumed
-        // uniform) folds into the ortho path only — in the perspective
-        // ratio r/dist it cancels.
-        _lodInvMat.copy(group.matrixWorld).invert();
-        _lodCamLocal.copy(cam.position).applyMatrix4(_lodInvMat);
-        const worldScale = _lodScaleVec.setFromMatrixScale(group.matrixWorld).x;
+        // Node size is estimated in world space. The group may carry a
+        // non-uniform scale (add_points scale=[1, 1, 100]), so the node
+        // radius is bounded by its largest scale component: a smaller
+        // estimate would stop refinement early on the stretched axis.
+        const mw = group.matrixWorld;
+        const sv = _lodScaleVec.setFromMatrixScale(mw);
+        const worldScale = Math.max(sv.x, sv.y, sv.z);
         const isPersp = !!cam.isPerspectiveCamera;
         const projFactor = isPersp
             ? canvasH / (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)))
@@ -9829,12 +9853,12 @@ export class ThreeJSViewer {
 
         /** @param {number} i */
         const pxOf = (i) => {
-            const r = nodes.halfs[i] * SQRT3;
-            if (!isPersp) return 2 * r * worldScale * projFactor;
-            const dx = _lodCamLocal.x - nodes.centers[3 * i];
-            const dy = _lodCamLocal.y - nodes.centers[3 * i + 1];
-            const dz = _lodCamLocal.z - nodes.centers[3 * i + 2];
-            const dist = Math.max(1e-9, Math.sqrt(dx * dx + dy * dy + dz * dz));
+            const r = nodes.halfs[i] * SQRT3 * worldScale;
+            if (!isPersp) return 2 * r * projFactor;
+            _lodNodeWorld.set(
+                nodes.centers[3 * i], nodes.centers[3 * i + 1], nodes.centers[3 * i + 2],
+            ).applyMatrix4(mw);
+            const dist = Math.max(1e-9, _lodNodeWorld.distanceTo(cam.position));
             return (2 * r / dist) * projFactor;
         };
 
@@ -11050,9 +11074,7 @@ export class ThreeJSViewer {
     _bindEvents() {
         // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        this._btnOrbitMode.addEventListener('click', () => {
-            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
-        });
+        this._btnOrbitMode.addEventListener('click', () => this._toggleOrbitMode());
 
         // Clip button
         this._btnClip.addEventListener('click', () => this._toggleClipPanel());
@@ -11133,23 +11155,18 @@ export class ThreeJSViewer {
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
-        // Home button: sits centered in the ViewHelper area and resets the view.
+        // Home button: bottom of the orbit / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
                 this.resetView();
                 this._viewHomeBtn.blur();
             });
         }
-        // ISO button: corner of the ViewHelper area; snaps to the isometric
-        // view (the axis bubbles cover the six orthogonal views).
-        if (this._viewIsoBtn) {
-            this._viewIsoBtn.addEventListener('click', () => {
-                // A true isometric is orthographic by definition — ISO is a
-                // seventh snap under the auto-projection rule: it auto-enters
-                // ortho like the axis bubbles, and orbiting away returns to
-                // perspective (Thijs).
-                this._snapOrthoAxisView('iso');
-                this._viewIsoBtn.blur();
+        // Orbit-mode button: top of the stack; the same turntable <-> free flip as the R key.
+        if (this._viewOrbitBtn) {
+            this._viewOrbitBtn.addEventListener('click', () => {
+                this._toggleOrbitMode();
+                this._viewOrbitBtn.blur();
             });
         }
         // Projection indicator/toggle (P = perspective, O = ortho). A click is
@@ -11220,7 +11237,7 @@ export class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
-                this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
+                this._toggleOrbitMode();
                 return;
             }
             // KeyS toggles strand_collapse on every tube that has both buffers
@@ -11905,6 +11922,9 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
+                        // Same ordering as add_mesh_binary: the pose lands
+                        // after registration so a pending re-parent sees it.
+                        if (data.transform) this._applyTransform(line, data.transform);
                         deferred.resolve();
                     } catch (e) {
                         this._reportLoadFailure(e, 'polyline',
@@ -12046,6 +12066,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(points, data.parent);
                         this._registerObject(data.id, points);
+                        if (data.transform) this._applyTransform(points, data.transform);
                         // Unlit point quads read flat without a depth cue —
                         // switch EDL on the first time a cloud appears (unless
                         // the user pinned it).
@@ -12165,6 +12186,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(group, data.parent);
                         this._registerObject(data.id, group);
+                        if (data.transform) this._applyTransform(group, data.transform);
                         // Sculpt the streaming octree nodes with EDL from the
                         // first frame (unless the user pinned the EDL state).
                         this._depthCue.maybeAutoEnableEdl();
@@ -13647,17 +13669,28 @@ export class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
-     * Enlarge the ViewHelper's axis sprites so they have a bigger hit target
-     * and a more visible cue. Baseline opacity is captured for the hover
-     * restore. Called once per ViewHelper instance — the helper is re-created
-     * on every perspective/ortho swap.
+     * Restyle the stock ViewHelper after construction: the axis sprites get
+     * the viewer's bubble size (a bigger hit target and a clearer cue than
+     * stock) and are pushed out along their axis, and the three arm meshes are
+     * stretched along their own length by _gizmoArmScale. The arms share one
+     * x-oriented cylinder that each mesh rotates into place, so a local
+     * scale.x stretches every arm along itself. Baseline opacity is captured
+     * for the hover restore. _gizmoHitTest raycasts the live sprites through
+     * a mirror of the helper's ortho camera, so it follows these edits.
+     * Called once per ViewHelper instance (re-created on every persp/ortho
+     * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
         for (const child of helper.children) {
-            if (!child.userData || !child.userData.type) continue;
+            if (!child.userData || !child.userData.type) {
+                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                continue;
+            }
             child.scale.setScalar(this._gizmoBaseScale);
+            // Stock sprites sit on the unit axis; keep them at the arm tips.
+            child.position.normalize().multiplyScalar(this._gizmoArmScale);
             child.userData.baseOpacity = child.material.opacity;
             sprites.push(child);
         }
@@ -13671,8 +13704,8 @@ export class ThreeJSViewer {
      * framing) — with a short eased tween, and sets an axis-appropriate up
      * vector (top/bottom get +Y up so the view doesn't roll unpredictably).
      * Works with both the perspective and the orthographic camera. Also the
-     * implementation behind gimbal axis-bubble clicks, the ISO corner button,
-     * and the `set_view` WS message.
+     * implementation behind gimbal axis-bubble clicks and the `set_view` WS
+     * message ('iso' has no button; use setView or Python set_view).
      * @param {string} name
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
      */
@@ -13834,7 +13867,7 @@ export class ThreeJSViewer {
 
     /**
      * Push the toolbar's current height into both the cache (hit-test +
-     * render shim) and the --tjsv-anim-lift CSS var (Home button).
+     * render shim) and the --tjsv-anim-lift CSS var (orbit / P / Home stack).
      * display:none yields 0, which matches the "toolbar hidden" state.
      * Called on show/hide (no arg → reads offsetHeight to flush layout and
      * get the post-transition height synchronously) and from the

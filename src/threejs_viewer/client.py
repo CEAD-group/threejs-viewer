@@ -169,6 +169,29 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
 _TIME_UNBOUNDED = float(np.finfo(np.float32).max)
 
 
+def _transform_header(
+    position: Optional[List[float]],
+    rotation: Optional[List[float]],
+    scale: Optional[List[float]],
+    matrix: Optional[List[float]],
+) -> Optional[dict]:
+    """Build the ``transform`` header field shared by the binary add_* methods.
+
+    ``matrix`` wins over the loose form; returns ``None`` when nothing was
+    given so the header stays byte-identical to an untransformed add.
+    """
+    if matrix:
+        return {"matrix": matrix}
+    transform = {}
+    if position:
+        transform["position"] = position
+    if rotation:
+        transform["rotation"] = rotation
+    if scale:
+        transform["scale"] = scale
+    return transform or None
+
+
 def _sanitize_point_times(values, name: str, n_points: int, nan_to: float):
     """Validate and pack a per-point time array for add_points.
 
@@ -1355,16 +1378,8 @@ class ViewerClient:
             header["yUp"] = True
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
 
         self._send_binary(header, mesh_bytes)
@@ -1384,6 +1399,10 @@ class ViewerClient:
         pickable: bool = True,
         segments: bool = False,
         visible: bool = True,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -1424,6 +1443,10 @@ class ViewerClient:
                 per-vertex ``colors`` and ``set_draw_range`` (leading
                 ``frac*N`` points ⇒ whole edges) work as usual. Segment
                 soups have no arc length, so the object is never pickable.
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
         """
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
@@ -1475,6 +1498,9 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
+            header["transform"] = transform
         self._send_binary(header, raw_bytes)
 
     def add_mesh(
@@ -1575,16 +1601,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
@@ -1604,6 +1622,10 @@ class ViewerClient:
         lod: Optional[Union[bool, dict]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
     ) -> None:
         """
         Add a GPU point cloud (``THREE.Points``) using binary transfer.
@@ -1680,6 +1702,10 @@ class ViewerClient:
                 ``docs/points-lod-grid-api.md`` — and the builder skips its
                 quantise and sort stages (~55-60% of the build).
             parent: Optional parent group id.
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
 
         Reveal a cloud progressively (e.g. a cheap material-removal animation)
         with :meth:`set_draw_range` or the ``draw_ranges`` animation channel —
@@ -1746,6 +1772,7 @@ class ViewerClient:
                 parent=parent,
                 lod=lod,
                 visible=visible,
+                transform=_transform_header(position, rotation, scale, matrix),
             )
             return
 
@@ -1775,6 +1802,9 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
+            header["transform"] = transform
         self._send_binary(header, raw_bytes)
         # Remember what append_points needs to keep a later chunk consistent
         # with this one (colour mode, and the colormap range frozen here).
@@ -1955,6 +1985,7 @@ class ViewerClient:
         parent: Optional[str],
         lod: Union[bool, dict],
         visible: bool = True,
+        transform: Optional[dict] = None,
     ) -> None:
         """Build the sampled octree, register lazy node providers on the
         blob store, and send the add_points_lod header (see
@@ -2075,6 +2106,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        if transform:
+            header["transform"] = transform
         self._send(header)
 
     def _release_points_lod(self, id: str) -> None:
@@ -2354,16 +2387,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
@@ -2519,16 +2544,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
-        if matrix:
-            header["transform"] = {"matrix": matrix}
-        elif position or rotation or scale:
-            transform = {}
-            if position:
-                transform["position"] = position
-            if rotation:
-                transform["rotation"] = rotation
-            if scale:
-                transform["scale"] = scale
+        transform = _transform_header(position, rotation, scale, matrix)
+        if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
 
@@ -3056,9 +3073,10 @@ class ViewerClient:
             animate: Tween the reorientation smoothly (default). ``False``
                 jumps to the view immediately.
 
-        The same views are clickable in the browser: the corner gimbal's axis
-        bubbles snap to the six orthogonal views, the ISO corner button to the
-        isometric one. Works with both perspective and ortho cameras.
+        The six orthogonal views are also clickable in the browser (the corner
+        gimbal's axis bubbles); ``"iso"`` has no button and is reached through
+        this call or ``viewer.setView('iso')``. Works with both perspective
+        and ortho cameras.
         """
         if name not in _ALLOWED_VIEWS:
             raise ValueError(
