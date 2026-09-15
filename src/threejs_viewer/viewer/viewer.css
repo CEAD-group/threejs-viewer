@@ -6,38 +6,87 @@
 .threejs-viewer:focus { outline: none; }
 .threejs-viewer canvas { display: block; }
 
-/* Top toolbar: a single menu button; the advanced options live in the
-   dropdown below it. Hidden until the client opts in (setToolbarVisible). */
-.threejs-viewer .tjsv-toolbar {
+/* ---- Design tokens ----
+   Defaults follow ribweaver's overlay palette so the menus read as one UI
+   there; an embedder overrides by setting the same variables on the
+   container. */
+.threejs-viewer {
+    --tjsv-float-bg: rgba(30, 30, 30, 0.95);
+    --tjsv-panel-2: #2a2a2a;
+    --tjsv-panel-3: #333;
+    --tjsv-border: #3a3a3a;
+    --tjsv-text: #e0e0e0;
+    --tjsv-text-dim: #999;
+    --tjsv-text-faint: #666;
+    --tjsv-primary: #0066cc;
+    --tjsv-radius: 4px;
+    --tjsv-font-size: 12px;
+}
+
+/* ---- Menus ----
+   Three hosts: the top-right bar of dropdown buttons (.tjsv-menubar), the
+   stack of always-open panels below it (.tjsv-overlay-tr), and the top-left
+   row of inline bars (.tjsv-overlay-tl). Every menu root is built by
+   MenuController; the viewer's own options menu is the first dropdown. */
+.threejs-viewer .tjsv-menubar {
     position: absolute;
     top: 10px;
     right: 10px;
-    user-select: none;
     display: flex;
     justify-content: flex-end;
+    align-items: flex-start;
+    gap: 6px;
+    user-select: none;
+    z-index: 8;
 }
-.threejs-viewer .tjsv-toolbar[hidden] { display: none; }
-.threejs-viewer .tjsv-btn-menu {
-    background: rgba(30, 30, 30, 0.85);
-    border: none;
-    color: #aaa;
+.threejs-viewer .tjsv-overlay-tr {
+    position: absolute;
+    top: 44px;
+    right: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    user-select: none;
+    z-index: 7;
+    pointer-events: none;
+}
+.threejs-viewer .tjsv-overlay-tr > * { pointer-events: auto; }
+.threejs-viewer .tjsv-overlay-tl {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    user-select: none;
+    z-index: 7;
+}
+.threejs-viewer .tjsv-menu-root { position: relative; }
+.threejs-viewer .tjsv-menu-root[hidden] { display: none; }
+
+/* Dropdown button */
+.threejs-viewer .tjsv-menu-btn {
+    background: var(--tjsv-float-bg);
+    border: 1px solid var(--tjsv-border);
+    color: var(--tjsv-text-dim);
     height: 28px;
-    padding: 0 8px 0 6px;
-    border-radius: 6px;
+    padding: 0 8px;
+    border-radius: var(--tjsv-radius);
     cursor: pointer;
-    font-size: 14px;
+    font: inherit;
+    font-size: 13px;
     display: flex;
     align-items: center;
     gap: 6px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    backdrop-filter: blur(2px);
     transition: background 0.15s, color 0.15s;
 }
-.threejs-viewer .tjsv-btn-menu:hover,
-.threejs-viewer .tjsv-btn-menu.active { background: rgba(60, 60, 60, 0.95); color: white; }
-.threejs-viewer .tjsv-btn-menu:focus { outline: none; }
-.threejs-viewer .tjsv-btn-menu:focus-visible { outline: 2px solid #3399ff; outline-offset: 1px; }
-.threejs-viewer .tjsv-menu-item:focus { outline: none; }
-.threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid #3399ff; outline-offset: -2px; }
+.threejs-viewer .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); color: var(--tjsv-text); }
+.threejs-viewer .tjsv-menu-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+.threejs-viewer .tjsv-menu-btn:focus { outline: none; }
+.threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
 .threejs-viewer .tjsv-status-dot {
     width: 8px;
     height: 8px;
@@ -50,67 +99,179 @@
 .threejs-viewer .tjsv-status-dot.disconnected { background: #cc3333; }
 /* Embedder-set neutral state (setStatus / autoConnect:false — no backend expected) */
 .threejs-viewer .tjsv-status-dot.neutral { background: #8a8a8a; }
+
+/* Body: the dropdown and the pinned panel share it */
 .threejs-viewer .tjsv-menu {
+    min-width: 200px;
+    box-sizing: border-box;
+    background: var(--tjsv-float-bg);
+    border: 1px solid var(--tjsv-border);
+    border-radius: var(--tjsv-radius);
+    padding: 4px;
+    backdrop-filter: blur(3px);
+    display: flex;
+    flex-direction: column;
+    color: var(--tjsv-text);
+    font-size: var(--tjsv-font-size);
+}
+.threejs-viewer .tjsv-menu-dropdown > .tjsv-menu {
     position: absolute;
     top: 34px;
     right: 0;
-    min-width: 240px;
-    background: rgba(30, 30, 30, 0.95);
-    border-radius: 6px;
-    padding: 4px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-    display: flex;
-    flex-direction: column;
     z-index: 10;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    max-height: calc(100vh - 60px);
+    overflow-y: auto;
 }
 .threejs-viewer .tjsv-menu[hidden] { display: none; }
 .threejs-viewer .tjsv-menu-status {
-    color: #999;
+    color: var(--tjsv-text-dim);
     font-family: monospace;
     font-size: 11px;
     padding: 4px 8px 6px;
-    border-bottom: 1px solid #555;
+    border-bottom: 1px solid var(--tjsv-border);
     margin-bottom: 4px;
     white-space: nowrap;
 }
+.threejs-viewer .tjsv-menu-title,
+.threejs-viewer .tjsv-menu-caption {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--tjsv-text-dim);
+    padding: 4px 8px 3px;
+    white-space: nowrap;
+}
+.threejs-viewer .tjsv-menu-title { border-bottom: 1px solid var(--tjsv-border); margin-bottom: 4px; }
+.threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 4px 0; }
+.threejs-viewer .tjsv-menu-custom { padding: 4px 8px; }
+
+/* Rows: buttons, toggles, eyes */
 .threejs-viewer .tjsv-menu-item {
     background: none;
-    border: none;
-    color: #ccc;
+    border: 1px solid transparent;
+    color: var(--tjsv-text);
     height: 28px;
     padding: 0 8px;
-    border-radius: 4px;
+    border-radius: var(--tjsv-radius);
     cursor: pointer;
-    font-size: 13px;
+    font: inherit;
+    font-size: var(--tjsv-font-size);
     display: flex;
     align-items: center;
     gap: 8px;
     text-align: left;
     white-space: nowrap;
+    width: 100%;
+    box-sizing: border-box;
     transition: background 0.15s, color 0.15s;
 }
-.threejs-viewer .tjsv-menu-item:hover { background: rgba(255,255,255,0.1); color: white; }
-.threejs-viewer .tjsv-menu-item.active { color: white; }
-.threejs-viewer .tjsv-menu-item.active .tjsv-menu-label::before {
-    content: '\25CF';
-    color: #3399ff;
-    margin-right: 6px;
-    font-size: 9px;
-    vertical-align: middle;
+.threejs-viewer .tjsv-menu-item:hover:not(.disabled) { background: var(--tjsv-panel-3); color: #fff; }
+.threejs-viewer .tjsv-menu-item.disabled { color: var(--tjsv-text-faint); cursor: default; }
+.threejs-viewer .tjsv-menu-item[hidden] { display: none; }
+.threejs-viewer .tjsv-menu-item.off .tjsv-menu-label { color: var(--tjsv-text-dim); }
+.threejs-viewer .tjsv-menu-item:focus { outline: none; }
+.threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: -2px; }
+.threejs-viewer .tjsv-menu-mark {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--tjsv-text-faint);
+}
+.threejs-viewer .tjsv-menu-mark svg { width: 15px; height: 15px; display: block; }
+.threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark { color: var(--tjsv-primary); }
+/* Buttons and toggles: a dot mark when active; eyes draw their own glyph */
+.threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark:empty::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--tjsv-primary);
 }
 .threejs-viewer .tjsv-menu-label { flex: 1; }
-.threejs-viewer .tjsv-menu-state { color: #888; font-size: 11px; }
+.threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
 .threejs-viewer .tjsv-menu-item kbd {
     font-family: monospace;
     font-size: 11px;
-    color: #aaa;
-    background: rgba(255,255,255,0.08);
-    border: 1px solid #555;
+    color: var(--tjsv-text-dim);
+    background: var(--tjsv-panel-2);
+    border: 1px solid var(--tjsv-border);
     border-radius: 3px;
     padding: 1px 5px;
     min-width: 14px;
     text-align: center;
 }
+
+/* Rows with a control: select, segmented */
+.threejs-viewer .tjsv-menu-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 8px;
+    min-height: 28px;
+    box-sizing: border-box;
+    white-space: nowrap;
+}
+.threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 11px; }
+.threejs-viewer .tjsv-menu-row.disabled { color: var(--tjsv-text-faint); }
+.threejs-viewer .tjsv-menu-row[hidden] { display: none; }
+.threejs-viewer .tjsv-menu-select {
+    background: var(--tjsv-panel-2);
+    border: 1px solid var(--tjsv-border);
+    border-radius: 3px;
+    color: var(--tjsv-text);
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 4px;
+    min-width: 90px;
+}
+.threejs-viewer .tjsv-segmented { display: flex; gap: 0; }
+.threejs-viewer .tjsv-seg-btn {
+    background: var(--tjsv-panel-2);
+    border: 1px solid var(--tjsv-border);
+    color: var(--tjsv-text-dim);
+    padding: 2px 8px;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+}
+.threejs-viewer .tjsv-seg-btn + .tjsv-seg-btn { border-left: none; }
+.threejs-viewer .tjsv-seg-btn:first-child { border-radius: 3px 0 0 3px; }
+.threejs-viewer .tjsv-seg-btn:last-child { border-radius: 0 3px 3px 0; }
+.threejs-viewer .tjsv-seg-btn:hover:not(:disabled) { color: var(--tjsv-text); }
+.threejs-viewer .tjsv-seg-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+
+/* Bar mode: the items inline as one segmented cluster */
+.threejs-viewer .tjsv-menu-bar-items {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    background: var(--tjsv-float-bg);
+    border: 1px solid var(--tjsv-border);
+    border-radius: var(--tjsv-radius);
+    padding: 2px;
+    backdrop-filter: blur(2px);
+    color: var(--tjsv-text);
+    font-size: 11px;
+}
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item {
+    width: auto;
+    height: 24px;
+    padding: 0 8px;
+    gap: 6px;
+    font-size: 11px;
+}
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active { background: var(--tjsv-primary); color: #fff; }
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active .tjsv-menu-mark { color: #fff; }
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active .tjsv-menu-mark:empty::before { background: #fff; }
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-mark:empty { display: none; }
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-divider { width: 1px; height: 18px; margin: 0 4px; }
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-caption { padding: 0 6px; }
+.threejs-viewer .tjsv-menu-bar-items .tjsv-menu-row { padding: 0 4px; min-height: 24px; }
 
 /* Animation Controls */
 .threejs-viewer .tjsv-animation-controls {

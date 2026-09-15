@@ -5804,8 +5804,8 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
     settle(viewer_client)
     page.locator(".tjsv-btn-menu").click()
     items = page.evaluate(
-        "() => [...document.querySelectorAll('.tjsv-menu-item')]"
-        "  .filter(b => b.style.display !== 'none')"
+        "() => [...document.querySelectorAll('[data-menu=viewer] .tjsv-menu-item')]"
+        "  .filter(b => !b.hidden)"
         "  .map(b => [b.querySelector('.tjsv-menu-label').textContent,"
         "             b.querySelector('kbd').textContent])"
     )
@@ -5822,16 +5822,16 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
     ]
     # Camera tracking only shows once an animation with a track target exists.
     assert (
-        page.evaluate("() => document.querySelector('.tjsv-btn-track').style.display")
-        == "none"
+        page.evaluate("() => document.querySelector('[data-item=track]').hidden")
+        is True
     )
 
-    page.locator(".tjsv-btn-wireframe").click()
+    page.locator("[data-menu=viewer] [data-item=wireframe]").click()
     state = page.evaluate(
         "() => ({mode: window.threejsViewer._shading.wireframeMode,"
-        "        active: document.querySelector('.tjsv-btn-wireframe')"
+        "        active: document.querySelector('[data-item=wireframe]')"
         "                  .classList.contains('active'),"
-        "        label: document.querySelector('.tjsv-btn-wireframe .tjsv-menu-state')"
+        "        label: document.querySelector('[data-item=wireframe] .tjsv-menu-state')"
         "                  .textContent,"
         "        open: window.threejsViewer._menuOpen})"
     )
@@ -5865,6 +5865,288 @@ def test_toolbar_option_and_url_param(viewer_client, viewer_page):
         "}"
     )
     assert result == {"plain": True, "opt": False, "off": True}
+
+
+def _press_viewer_key(page, key, code, shift=False):
+    """Dispatch a keydown on the viewer container (its keyboard handler is
+    scoped there, so a page-level keyboard.press needs focus it may not have)."""
+    page.evaluate(
+        "([key, code, shift]) => window.threejsViewer.container.dispatchEvent("
+        "  new KeyboardEvent('keydown', {key, code, shiftKey: shift, bubbles: true}))",
+        [key, code, shift],
+    )
+
+
+@pytest.mark.browser
+def test_add_menu_dropdown_items_and_callbacks(viewer_client, viewer_page):
+    """addMenu builds a dropdown next to the built-in menu; each item type
+    renders, fires its callback, and setItem patches from outside."""
+    page = viewer_page
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " window.__log = [];"
+        " const m = v.addMenu({id: 'demo', label: 'Demo', items: ["
+        "   {type: 'label', label: 'Scene'},"
+        "   {id: 'go', label: 'Go', shortcut: 'G', bindKey: true,"
+        "    onClick: () => window.__log.push('go')},"
+        "   {type: 'toggle', id: 'spin', label: 'Spin', checked: false,"
+        "    onChange: (on) => window.__log.push('spin:' + on)},"
+        "   {type: 'select', id: 'size', label: 'Size',"
+        "    options: [{value: 's', label: 'S'}, {value: 'm', label: 'M'}], value: 'm',"
+        "    onChange: (val) => window.__log.push('size:' + val)},"
+        "   {type: 'segmented', id: 'side', options: ['left', 'right'], value: 'right',"
+        "    onChange: (val) => window.__log.push('side:' + val)},"
+        "   {type: 'divider'},"
+        "   {type: 'custom', id: 'legend', render: (el) => { el.textContent = 'legend'; }},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push('action:' + a.item + ':' + a.type + ':' + a.value));"
+        " const root = m.el;"
+        " return {inBar: root.parentElement.classList.contains('tjsv-menubar'),"
+        "         btnText: root.querySelector('.tjsv-menu-btn').textContent.trim(),"
+        "         hidden: root.querySelector('.tjsv-menu').hidden,"
+        "         kbd: root.querySelector('[data-item=go] kbd').textContent,"
+        "         custom: root.querySelector('[data-item=legend]').textContent,"
+        "         segActive: root.querySelector('[data-item=side] .tjsv-seg-btn.active').dataset.value};"
+        "}"
+    )
+    assert result == {
+        "inBar": True,
+        "btnText": "Demo",
+        "hidden": True,
+        "kbd": "G",
+        "custom": "legend",
+        "segActive": "right",
+    }
+
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+    assert page.evaluate("() => window.threejsViewer.getMenu('demo').isOpen()") is True
+    # Opening one dropdown closes the other.
+    viewer_client.set_toolbar_visible(True)
+    settle(viewer_client)
+    page.locator(".tjsv-btn-menu").click()
+    assert page.evaluate("() => window.threejsViewer.getMenu('demo').isOpen()") is False
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+
+    page.locator("[data-menu=demo] [data-item=go]").click()
+    page.locator("[data-menu=demo] [data-item=spin]").click()
+    page.locator("[data-menu=demo] [data-item=size] select").select_option("s")
+    page.locator(
+        "[data-menu=demo] [data-item=side] .tjsv-seg-btn[data-value=left]"
+    ).click()
+    # A bound shortcut runs the item without the menu.
+    page.keyboard.press("Escape")
+    _press_viewer_key(page, "g", "KeyG")
+    log = page.evaluate("() => window.__log")
+    assert log == [
+        "go",
+        "action:go:button:undefined",
+        "spin:true",
+        "action:spin:toggle:true",
+        "size:s",
+        "action:size:select:s",
+        "side:left",
+        "action:side:segmented:left",
+        "go",
+        "action:go:button:undefined",
+    ]
+
+    state = page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer.getMenu('demo');"
+        " m.setItem('spin', {checked: false, state: 'idle'});"
+        " m.setItem('size', {options: [{value: 'xl', label: 'XL'}], value: 'xl'});"
+        " m.setItem('go', {disabled: true, label: 'Gone'});"
+        " const r = m.el;"
+        " return {spinOn: r.querySelector('[data-item=spin]').classList.contains('active'),"
+        "         spinState: r.querySelector('[data-item=spin] .tjsv-menu-state').textContent,"
+        "         size: r.querySelector('[data-item=size] select').value,"
+        "         goDisabled: r.querySelector('[data-item=go]').disabled,"
+        "         goLabel: r.querySelector('[data-item=go] .tjsv-menu-label').textContent,"
+        "         value: m.getValue('spin')};"
+        "}"
+    )
+    assert state == {
+        "spinOn": False,
+        "spinState": "idle",
+        "size": "xl",
+        "goDisabled": True,
+        "goLabel": "Gone",
+        "value": False,
+    }
+    assert page.evaluate("() => window.threejsViewer.removeMenu('demo')") is True
+    assert page.evaluate("() => document.querySelector('[data-menu=demo]')") is None
+
+
+@pytest.mark.browser
+def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_page):
+    """An eye item hides every object it owns, keeps hiding objects that are
+    added later, persists under storageKey, and hidingEyeFor names it."""
+    page = viewer_page
+    viewer_client.add_box("box_a", 1, 1, 1)
+    settle(viewer_client)
+    page.evaluate(
+        "() => {"
+        " try { localStorage.removeItem('tjsv-test.eyes'); } catch (e) {}"
+        " window.threejsViewer.addMenu({id: 'layers', label: 'Layers', storageKey: 'tjsv-test.eyes',"
+        "   items: [{type: 'eye', id: 'boxes', label: 'Boxes', prefix: 'box_'}]});"
+        "}"
+    )
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_a').visible") is True
+    )
+    page.locator("[data-menu=layers] .tjsv-menu-btn").click()
+    page.locator("[data-menu=layers] [data-item=boxes]").click()
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_a').visible") is False
+    )
+    assert page.evaluate("() => window.threejsViewer.hidingEyeFor('box_a')") == "Boxes"
+    assert page.evaluate("() => window.threejsViewer.hidingEyeFor('other')") is None
+
+    viewer_client.add_box("box_b", 1, 1, 1, position=[2, 0, 0])
+    settle(viewer_client)
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_b').visible") is False
+    )
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('tjsv-test.eyes'))"
+    ) == {"boxes": False}
+    # A fresh mount under the same storageKey starts from the stored choice.
+    stored = page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer.addMenu({id: 'layers', label: 'Layers',"
+        "   storageKey: 'tjsv-test.eyes', items: [{type: 'eye', id: 'boxes', prefix: 'box_'}]});"
+        " return [m.getValue('boxes'), m.el.querySelector('[data-item=boxes]').classList.contains('off')];"
+        "}"
+    )
+    assert stored == [False, True]
+
+
+@pytest.mark.browser
+def test_add_menu_eye_match_apply_and_veto(viewer_client, viewer_page):
+    """An eye may own objects through `match` and show/hide through `apply`;
+    an `apply` returning false vetoes the flip and the row reverts."""
+    page = viewer_page
+    viewer_client.add_box("ws_1_base", 1, 1, 1)
+    viewer_client.add_box("ws_1_reach", 1, 1, 1)
+    settle(viewer_client)
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer; window.__applied = [];"
+        " const m = v.addMenu({id: 'e', label: 'E', items: ["
+        "   {type: 'eye', id: 'base', label: 'Base', match: id => /_base$/.test(id)},"
+        "   {type: 'eye', id: 'tcp', label: 'TCP', ids: [], apply: on => { window.__applied.push(on); }},"
+        "   {type: 'eye', id: 'locked', label: 'Locked', ids: [], apply: () => false,"
+        "    onChange: () => window.__applied.push('never')},"
+        " ]});"
+        " m.setItem('base', {checked: false});"
+        " m.setItem('tcp', {checked: false});"
+        " const r = m.el;"
+        " r.querySelector('.tjsv-menu-btn').click();"
+        " r.querySelector('[data-item=locked]').click();"
+        " return {base: v.getObject('ws_1_base').visible, reach: v.getObject('ws_1_reach').visible,"
+        "         hiding: v.hidingEyeFor('ws_1_base'), applied: window.__applied,"
+        "         locked: m.getValue('locked'),"
+        "         lockedRow: r.querySelector('[data-item=locked]').classList.contains('active')};"
+        "}"
+    )
+    assert result == {
+        "base": False,
+        "reach": True,
+        "hiding": "Base",
+        "applied": [True, False],
+        "locked": True,
+        "lockedRow": True,
+    }
+
+
+@pytest.mark.browser
+def test_add_menu_panel_and_bar_modes(viewer_client, viewer_page):
+    """`panel` stacks an always-open body below the top-right bar; `bar`
+    renders the items inline at top-left."""
+    page = viewer_page
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const p = v.addMenu({id: 'legend', label: 'Colour', mode: 'panel',"
+        "   items: [{type: 'select', id: 'mode', label: 'By', options: ['a', 'b']}]});"
+        " const b = v.addMenu({id: 'gz', mode: 'bar', placement: 'top-left',"
+        "   items: [{type: 'toggle', id: 'move', label: 'Move'}, {type: 'toggle', id: 'rot', label: 'Rotate'}]});"
+        " return {panelHost: p.el.parentElement.className, panelTitle: p.el.querySelector('.tjsv-menu-title').textContent,"
+        "         panelVisible: !p.el.querySelector('.tjsv-menu').hidden, panelBtn: !!p.el.querySelector('.tjsv-menu-btn'),"
+        "         barHost: b.el.parentElement.className, barItems: b.el.querySelectorAll('.tjsv-menu-item').length};"
+        "}"
+    )
+    assert result == {
+        "panelHost": "tjsv-overlay-tr",
+        "panelTitle": "Colour",
+        "panelVisible": True,
+        "panelBtn": False,
+        "barHost": "tjsv-overlay-tl",
+        "barItems": 2,
+    }
+    page.locator("[data-menu=gz] [data-item=move]").click()
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('gz').getValue('move')")
+        is True
+    )
+
+
+@pytest.mark.browser
+def test_add_menu_reserved_shortcut_is_not_bound(viewer_client, viewer_page):
+    """A client item may display a viewer key but never binds it."""
+    page = viewer_page
+    warned = []
+    page.on("console", lambda m: warned.append(m.text) if m.type == "warning" else None)
+    page.evaluate(
+        "() => { window.__hits = 0; window.threejsViewer.addMenu({id: 'k', label: 'K', items: ["
+        "  {id: 'x', label: 'X', shortcut: 'M', bindKey: true, onClick: () => window.__hits++}]}); }"
+    )
+    _press_viewer_key(page, "m", "KeyM")
+    frames(page)
+    assert page.evaluate("() => window.__hits") == 0
+    assert page.evaluate("() => window.threejsViewer._shading.wireframeMode") == 1
+    assert any("is a viewer key" in w for w in warned)
+
+
+@pytest.mark.browser
+def test_python_add_menu_round_trip(viewer_client, viewer_page):
+    """add_menu from Python renders in the viewer; a click comes back as a
+    menu_action to on_menu_action; update_menu_item patches live."""
+    import threading
+
+    page = viewer_page
+    got = []
+    ev = threading.Event()
+
+    def cb(action):
+        got.append(action)
+        ev.set()
+
+    viewer_client.on_menu_action(cb)
+    viewer_client.add_menu(
+        "py",
+        label="Py",
+        items=[
+            {"id": "hello", "label": "Hello", "shortcut": "H", "bind_key": True},
+            {"type": "toggle", "id": "flag", "label": "Flag", "checked": True},
+        ],
+    )
+    settle(viewer_client)
+    page.locator("[data-menu=py] .tjsv-menu-btn").click()
+    page.locator("[data-menu=py] [data-item=flag]").click()
+    assert ev.wait(5), "no menu_action reached Python"
+    assert got == [{"menu": "py", "item": "flag", "type": "toggle", "value": False}]
+
+    viewer_client.update_menu_item("py", "hello", state="ready", disabled=True)
+    settle(viewer_client)
+    assert page.evaluate(
+        "() => [document.querySelector('[data-item=hello] .tjsv-menu-state').textContent,"
+        "       document.querySelector('[data-item=hello]').disabled]"
+    ) == ["ready", True]
+    viewer_client.remove_menu("py")
+    settle(viewer_client)
+    assert page.evaluate("() => document.querySelector('[data-menu=py]')") is None
 
 
 @pytest.mark.browser
