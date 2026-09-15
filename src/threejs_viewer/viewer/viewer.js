@@ -125,6 +125,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
+ * @property {boolean} [toolbar]                          Show the top-left menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
  */
 
 /**
@@ -1028,6 +1029,46 @@ const FOV_MIN = 1;
 const FOV_MAX = 179;
 
 /**
+ * Parse a boolean-ish option/URL/localStorage value. `null` means "not set"
+ * so the caller can fall through to the next precedence level.
+ * @param {string|null|number|boolean|undefined} raw
+ * @returns {boolean|null}
+ */
+function parseBoolOption(raw) {
+    if (raw === null || raw === undefined || raw === '') return null;
+    if (typeof raw === 'boolean') return raw;
+    const s = String(raw).toLowerCase();
+    if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+    if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
+    return null;
+}
+
+/**
+ * Write the small grey state label of a menu item (the span between the
+ * label and the shortcut key).
+ * @param {HTMLElement|null} btn
+ * @param {string} text
+ */
+function setMenuState(btn, text) {
+    const el = btn?.querySelector?.('.tjsv-menu-state');
+    if (el) el.textContent = text;
+}
+
+/**
+ * Resolve the initial toolbar (menu button) visibility.
+ * Precedence: URL `toolbar` param > `toolbar` option > hidden.
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {boolean}
+ */
+function resolveToolbarVisible(options, urlParams) {
+    const fromUrl = parseBoolOption(urlParams.get('toolbar'));
+    if (fromUrl != null) return fromUrl;
+    const fromOpt = parseBoolOption(options.toolbar);
+    return fromOpt != null ? fromOpt : false;
+}
+
+/**
  * Resolve the perspective camera's vertical FOV (degrees) at construction.
  *
  * Precedence — URL `fov` query param > `fov` option > hard default — mirroring
@@ -1098,15 +1139,7 @@ function resolveLightingDefaults(options, urlParams) {
         const n = typeof raw === 'number' ? raw : parseFloat(raw);
         return Number.isFinite(n) ? n : null;
     };
-    /** @type {(raw: (string|null|number|boolean|undefined)) => (boolean|null)} */
-    const parseBool = (raw) => {
-        if (raw === null || raw === undefined || raw === '') return null;
-        if (typeof raw === 'boolean') return raw;
-        const s = String(raw).toLowerCase();
-        if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
-        if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
-        return null;
-    };
+    const parseBool = parseBoolOption;
     /** @type {(raw: (string|null|undefined)) => (string|null)} */
     const parseToneMapping = (raw) => {
         if (raw === null || raw === undefined || raw === '') return null;
@@ -7985,6 +8018,10 @@ export class ThreeJSViewer {
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
 
+        // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
+        this._toolbarVisible = resolveToolbarVisible(options, urlParams);
+        this._menuOpen = false;
+
         // State
         this._objects = new Map();
         this._mixers = new Map();
@@ -8170,6 +8207,7 @@ export class ThreeJSViewer {
 
         // Cache DOM refs
         this._cacheElements();
+        this.setToolbarVisible(this._toolbarVisible);
 
         // Init Three.js
         this._initThreeJS();
@@ -8215,11 +8253,20 @@ export class ThreeJSViewer {
     _cacheElements() {
         /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
+        this._toolbarEl = q('.tjsv-toolbar');
+        this._btnMenu = q('.tjsv-btn-menu');
+        this._menuEl = q('.tjsv-menu');
         this._statusDot = q('.tjsv-status-dot');
         this._statusText = q('.tjsv-status-text');
         this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
         this._btnClip = q('.tjsv-btn-clip');
         this._btnLighting = q('.tjsv-btn-lighting');
+        this._btnProjection = q('.tjsv-btn-projection');
+        this._btnWireframe = q('.tjsv-btn-wireframe');
+        this._btnShading = q('.tjsv-btn-shading');
+        this._btnFog = q('.tjsv-btn-fog');
+        this._btnEdl = q('.tjsv-btn-edl');
+        this._btnFrame = q('.tjsv-btn-frame');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._lightingPanelEl = q('.tjsv-lighting-panel');
         this._lightingExposureSlider = q('.tjsv-lighting-exposure');
@@ -9245,7 +9292,10 @@ export class ThreeJSViewer {
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
-        this._btnLighting.addEventListener('click', () => this._toggleLightingPanel());
+        this._btnLighting.addEventListener('click', () => {
+            this._toggleLightingPanel();
+            this._updateMenuState();
+        });
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
 
         this._lightingToneMappingSelect.addEventListener('change', () => {
@@ -9298,7 +9348,7 @@ export class ThreeJSViewer {
         if (!this._btnOrbitMode) return;
         const isFree = this._orbitMode === 'free';
         this._btnOrbitMode.classList.toggle('active', isFree);
-        this._btnOrbitMode.textContent = '\u27F3 R';
+        setMenuState(this._btnOrbitMode, isFree ? 'free' : 'turntable');
         this._btnOrbitMode.title = isFree
             ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
             : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
@@ -10751,6 +10801,9 @@ export class ThreeJSViewer {
             title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
         }
         this._btnTrack.title = title;
+        setMenuState(this._btnTrack, this._trackMode === 'off' ? 'off'
+            : this._trackMode === 'scripted' ? 'scripted'
+            : `${this._trackMode}: ${this._trackTargetId || ''}`);
     }
 
     /** @param {number} frameIndex @param {number} [frameIndexNext] @param {number} [t] */
@@ -11064,14 +11117,32 @@ export class ThreeJSViewer {
     // ========== Events ==========
 
     _bindEvents() {
+        // Menu button + dropdown. Every item runs the same action as its
+        // keyboard shortcut and then refreshes the state labels.
+        this._btnMenu.addEventListener('click', () => this._setMenuOpen(!this._menuOpen));
+        /** @type {(btn: HTMLElement, action: () => void) => void} */
+        const item = (btn, action) => btn.addEventListener('click', () => {
+            action();
+            this._updateMenuState();
+        });
         // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        this._btnOrbitMode.addEventListener('click', () => {
-            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable');
-        });
-
-        // Clip button
-        this._btnClip.addEventListener('click', () => this._toggleClipPanel());
+        item(this._btnOrbitMode, () =>
+            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable'));
+        item(this._btnClip, () => this._toggleClipPanel());
+        item(this._btnProjection, () => this._switchCamera(!this._isOrtho));
+        item(this._btnWireframe, () => this._shading.cycleWireframe());
+        item(this._btnShading, () => this._shading.cycleShading());
+        item(this._btnFog, () => this._depthCue.toggleFog());
+        item(this._btnEdl, () => this._depthCue.toggleEdl());
+        item(this._btnFrame, () => this.resetView());
+        // A pointerdown anywhere outside the toolbar closes the menu.
+        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
+            if (this._menuOpen && !this._toolbarEl.contains(/** @type {Node} */ (e.target))) {
+                this._setMenuOpen(false);
+            }
+        };
+        document.addEventListener('pointerdown', this._onDocPointerDown);
 
         // Lighting panel
         this._initLightingPanelUI();
@@ -11145,7 +11216,10 @@ export class ThreeJSViewer {
             this._animationLoop = !this._animationLoop;
             this._btnLoop.classList.toggle('active', this._animationLoop);
         });
-        this._btnTrack.addEventListener('click', () => this._cycleTrackMode());
+        this._btnTrack.addEventListener('click', () => {
+            this._cycleTrackMode();
+            this._updateMenuState();
+        });
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
@@ -11208,6 +11282,12 @@ export class ThreeJSViewer {
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
             if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
+            if (this._menuOpen) {
+                if (e.code === 'Escape') { this._setMenuOpen(false); return; }
+                // Shortcuts keep working with the menu open; refresh its labels
+                // after the handler below has run.
+                queueMicrotask(() => this._updateMenuState());
+            }
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
@@ -13149,6 +13229,9 @@ export class ThreeJSViewer {
             case 'set_view':
                 this.setView(data.name, { animate: data.animate !== false });
                 break;
+            case 'set_toolbar':
+                this.setToolbarVisible(data.visible !== false);
+                break;
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
@@ -14495,6 +14578,52 @@ export class ThreeJSViewer {
     }
 
     /**
+     * Show or hide the top-left menu button (the `tjsv-toolbar`). Hidden by
+     * default so a bare viewer has no chrome besides the gimbal; the Python
+     * side flips it with `set_toolbar_visible()` (WS `set_toolbar`) or the
+     * `toolbar=` launch kwarg. Hiding also closes an open menu. Keyboard
+     * shortcuts work regardless.
+     * @param {boolean} visible
+     */
+    setToolbarVisible(visible) {
+        this._toolbarVisible = !!visible;
+        this._toolbarEl.hidden = !this._toolbarVisible;
+        if (!this._toolbarVisible) this._setMenuOpen(false);
+    }
+
+    /** @returns {boolean} */
+    isToolbarVisible() { return this._toolbarVisible; }
+
+    /** @param {boolean} open */
+    _setMenuOpen(open) {
+        this._menuOpen = !!open && this._toolbarVisible;
+        this._menuEl.hidden = !this._menuOpen;
+        this._btnMenu.classList.toggle('active', this._menuOpen);
+        this._btnMenu.setAttribute('aria-expanded', String(this._menuOpen));
+        if (this._menuOpen) this._updateMenuState();
+    }
+
+    /** Refresh the active marks and state labels of the menu items. */
+    _updateMenuState() {
+        if (!this._menuEl) return;
+        this._btnClip.classList.toggle('active', !!this._clipEnabled);
+        this._btnLighting.classList.toggle('active',
+            this._lightingPanelEl.classList.contains('visible'));
+        this._btnProjection.classList.toggle('active', !!this._isOrtho);
+        setMenuState(this._btnProjection, this._isOrtho ? 'orthographic' : 'perspective');
+        const wf = this._shading?.wireframeMode ?? 0;
+        this._btnWireframe.classList.toggle('active', wf !== 0);
+        setMenuState(this._btnWireframe, ['off', 'wire', 'solid + wire'][wf]);
+        const sh = this._shading?.shadingMode ?? 0;
+        this._btnShading.classList.toggle('active', sh !== 0);
+        setMenuState(this._btnShading, ['off', 'normals', 'UV checker', 'normal lines'][sh]);
+        this._btnFog.classList.toggle('active', !!this._depthCue?.fogActive);
+        this._btnEdl.classList.toggle('active', !!this._depthCue?.edlActive);
+        this._updateOrbitModeButton();
+        this._updateTrackingUI();
+    }
+
+    /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
      * translate), Shift to snap. With `clickSelect` (default) clicking an object
      * attaches the gizmo to it; pass `id` to attach immediately. With
@@ -14664,6 +14793,7 @@ export class ThreeJSViewer {
         window.removeEventListener('pointercancel', this._onObjectClickCancel);
         this._objectClickDown = null;
         this._objectClickHooks.length = 0;
+        document.removeEventListener('pointerdown', this._onDocPointerDown);
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();

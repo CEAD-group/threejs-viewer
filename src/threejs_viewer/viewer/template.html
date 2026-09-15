@@ -1,11 +1,20 @@
-<div class="tjsv-toolbar">
-    <div class="tjsv-status-dot disconnected" title="Disconnected"></div>
-    <span class="tjsv-status-text">Disconnected</span>
-    <div class="toolbar-sep"></div>
-    <button class="toolbar-btn tjsv-btn-clip" title="Clipping Plane">&#x2702; C</button>
-    <button class="toolbar-btn tjsv-btn-lighting" title="Lighting / exposure (E)">&#x263C; E</button>
-    <button class="toolbar-btn tjsv-btn-orbit-mode" title="Orbit mode (R)">&#x27F3; R</button>
-    <button class="toolbar-btn tjsv-btn-track" title="Camera tracking" style="display:none">&#x229A; T</button>
+<div class="tjsv-toolbar" hidden>
+    <button class="tjsv-btn-menu" title="Viewer menu" aria-haspopup="true" aria-expanded="false">
+        <span class="tjsv-status-dot disconnected" title="Disconnected"></span>&#x2630;
+    </button>
+    <div class="tjsv-menu" hidden>
+        <div class="tjsv-menu-status tjsv-status-text">Disconnected</div>
+        <button class="tjsv-menu-item tjsv-btn-clip"><span class="tjsv-menu-label">Clipping plane</span><span class="tjsv-menu-state"></span><kbd>C</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-lighting"><span class="tjsv-menu-label">Lighting</span><span class="tjsv-menu-state"></span><kbd>E</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-orbit-mode"><span class="tjsv-menu-label">Orbit mode</span><span class="tjsv-menu-state"></span><kbd>R</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-track" style="display:none"><span class="tjsv-menu-label">Camera tracking</span><span class="tjsv-menu-state"></span><kbd>T</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-projection"><span class="tjsv-menu-label">Projection</span><span class="tjsv-menu-state"></span><kbd>O</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-wireframe"><span class="tjsv-menu-label">Wireframe</span><span class="tjsv-menu-state"></span><kbd>M</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-shading"><span class="tjsv-menu-label">Shading debug</span><span class="tjsv-menu-state"></span><kbd>N</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-fog"><span class="tjsv-menu-label">Distance fog</span><span class="tjsv-menu-state"></span><kbd>D</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-edl"><span class="tjsv-menu-label">Eye-dome lighting</span><span class="tjsv-menu-state"></span><kbd>Shift+D</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-frame"><span class="tjsv-menu-label">Frame all</span><span class="tjsv-menu-state"></span><kbd>F</kbd></button>
+    </div>
 </div>
 
 <div class="tjsv-clipping-panel">
