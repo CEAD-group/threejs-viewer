@@ -11,8 +11,10 @@
 .threejs-viewer .tjsv-toolbar {
     position: absolute;
     top: 10px;
-    left: 10px;
+    right: 10px;
     user-select: none;
+    display: flex;
+    justify-content: flex-end;
 }
 .threejs-viewer .tjsv-toolbar[hidden] { display: none; }
 .threejs-viewer .tjsv-btn-menu {
@@ -51,7 +53,7 @@
 .threejs-viewer .tjsv-menu {
     position: absolute;
     top: 34px;
-    left: 0;
+    right: 0;
     min-width: 240px;
     background: rgba(30, 30, 30, 0.95);
     border-radius: 6px;

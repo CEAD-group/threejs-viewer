@@ -396,7 +396,7 @@ class ViewerClient:
                 CAD-like; wider values exaggerate perspective. Must be finite
                 and within the open interval ``(0, 180)``; other values raise
                 ``ValueError``.
-            toolbar: Show the viewer's top-left menu button on launch (default
+            toolbar: Show the viewer's top-right menu button on launch (default
                 ``False``: the viewer opens with no chrome besides the view
                 gimbal). The menu lists the advanced options (clipping,
                 lighting, orbit mode, projection, wireframe, shading debug,
@@ -3079,7 +3079,7 @@ class ViewerClient:
         self._send(msg)
 
     def set_toolbar_visible(self, visible: bool = True) -> None:
-        """Show or hide the viewer's top-left menu button.
+        """Show or hide the viewer's top-right menu button.
 
         The viewer opens without it unless ``ViewerClient(toolbar=True)`` was
         passed. The menu lists the advanced options with their keyboard
