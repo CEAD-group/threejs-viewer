@@ -42,6 +42,11 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
 _ALLOWED_HIGHLIGHT_STYLES = frozenset({"silhouette", "edges"})
+_ALLOWED_MENU_ITEM_TYPES = frozenset(
+    {"button", "toggle", "eye", "select", "segmented", "label", "divider"}
+)
+_ALLOWED_MENU_MODES = frozenset({"dropdown", "panel"})
+
 _ALLOWED_VIEWS = frozenset(
     {"top", "bottom", "front", "back", "left", "right", "iso", "home"}
 )
@@ -577,6 +582,11 @@ class ViewerClient:
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
+        # Client-defined menus (add_menu): id -> the add_menu message, kept
+        # current through update_menu_item so a reconnect replays the latest
+        # state; plus the callbacks fed by the viewer's menu_action messages.
+        self._menus: Dict[str, dict] = {}
+        self._menu_callbacks: List = []
         self._ws = None
         # One WebSocket server and one blob sidecar per address ``host``
         # resolves to (issue #187); both lists are filled by _start_servers.
@@ -796,6 +806,13 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-add client menus (the viewer forgets across a refresh).
+        for menu_msg in self._menus.values():
+            try:
+                websocket.send(json.dumps(menu_msg))
+            except Exception:
+                pass
+
         # Re-enable polyline picking if it was on (the viewer forgets across a
         # refresh; the polyline itself is re-added by the user's script).
         if self._polyline_picking is not None:
@@ -847,6 +864,8 @@ class ViewerClient:
                         self._dispatch_polyline_pick(data)
                     elif msg_type == "object_clicked":
                         self._dispatch_object_click(data)
+                    elif msg_type == "menu_action":
+                        self._dispatch_menu_action(data)
                     elif msg_type == "transform_gizmo":
                         self._dispatch_object_move(data)
                     else:
@@ -3238,6 +3257,166 @@ class ViewerClient:
         """
         self._toolbar_visible = {"type": "set_toolbar", "visible": bool(visible)}
         self._send(self._toolbar_visible)
+
+    # === Client menus ===
+
+    def add_menu(
+        self,
+        id: str,
+        items: List[dict],
+        label: Optional[str] = None,
+        mode: str = "dropdown",
+        storage_key: Optional[str] = None,
+        title: Optional[str] = None,
+        body_width: Optional[str] = None,
+    ) -> None:
+        """Add a menu to the viewer whose contents you define.
+
+        The viewer provides the mechanism, styling and layout (the same as its
+        own options menu); this call provides the items. Interactions come
+        back through :meth:`on_menu_action`.
+
+        Args:
+            id: Menu id (``"viewer"`` is reserved for the built-in menu).
+                Re-using an id replaces the menu.
+            items: Ordered item dicts. ``type`` is one of ``"button"``,
+                ``"toggle"``, ``"eye"``, ``"select"``, ``"segmented"``,
+                ``"label"``, ``"divider"`` (default ``"button"``). Every
+                interactive item needs an ``id``. Common keys: ``label``,
+                ``hint`` (tooltip), ``shortcut`` (a user-defined keyboard
+                shortcut such as ``"G"`` or ``"Shift+G"``: shown as a key chip
+                and bound in the viewer, so pressing it triggers the item;
+                keys the viewer itself uses are refused with a console
+                warning; pass ``bind_key=False`` to only show the chip),
+                ``disabled``, ``state`` (small grey text).
+                ``toggle`` takes ``checked``; ``eye`` takes ``ids`` and/or
+                ``prefix`` naming the viewer objects it shows/hides
+                (``checked`` defaults to ``True``); ``select`` and
+                ``segmented`` take ``options`` (a list of values or of
+                ``{"value", "label"}`` dicts) and ``value``.
+            label: The tab text. Every menu is a vertical tab folded against
+                the viewer's right edge; clicking it slides the body out.
+            mode: ``"dropdown"`` (default: starts folded, an outside click
+                folds it back) or ``"panel"`` (starts open and stays open
+                across outside clicks, for a legend).
+            storage_key: Persist toggle/eye/select/segmented values in the
+                browser's localStorage under this key.
+            title: Tooltip on the tab.
+            body_width: CSS width of the body (default ``"190px"``).
+
+        Menus are re-added on reconnect with their latest item state.
+        """
+        if id == "viewer":
+            raise ValueError("'viewer' is the built-in menu id")
+        if mode not in _ALLOWED_MENU_MODES:
+            raise ValueError(
+                f"mode must be one of {sorted(_ALLOWED_MENU_MODES)} (got {mode!r})"
+            )
+        wire_items = [self._validate_menu_item(it) for it in items]
+        menu: dict = {"id": id, "mode": mode, "items": wire_items}
+        if label is not None:
+            menu["label"] = label
+        if title is not None:
+            menu["title"] = title
+        if body_width is not None:
+            menu["bodyWidth"] = body_width
+        if storage_key is not None:
+            menu["storageKey"] = storage_key
+        msg = {"type": "add_menu", "menu": menu}
+        self._menus[id] = msg
+        self._send(msg)
+
+    @staticmethod
+    def _validate_menu_item(item: dict) -> dict:
+        if not isinstance(item, dict):
+            raise ValueError(f"menu items must be dicts, got {item!r}")
+        kind = item.get("type", "button")
+        if kind not in _ALLOWED_MENU_ITEM_TYPES:
+            raise ValueError(
+                f"item type must be one of {sorted(_ALLOWED_MENU_ITEM_TYPES)} "
+                f"(got {kind!r})"
+            )
+        if kind not in ("label", "divider") and not item.get("id"):
+            raise ValueError(f"menu item of type {kind!r} needs an 'id': {item!r}")
+        out = {"type": kind}
+        for key in (
+            "id",
+            "label",
+            "hint",
+            "shortcut",
+            "state",
+            "checked",
+            "value",
+            "ids",
+            "prefix",
+            "disabled",
+            "hidden",
+        ):
+            if key in item:
+                out[key] = item[key]
+        if "bind_key" in item:
+            out["bindKey"] = bool(item["bind_key"])
+        if "options" in item:
+            out["options"] = [
+                o if isinstance(o, dict) else {"value": o} for o in item["options"]
+            ]
+        return out
+
+    def update_menu_item(self, menu: str, item: str, **patch) -> None:
+        """Patch one item of a menu added with :meth:`add_menu`.
+
+        Accepts the item keys of :meth:`add_menu` (``label``, ``state``,
+        ``checked``, ``value``, ``options``, ``disabled``, ``hidden``,
+        ``hint``). The stored menu is updated too, so a reconnect replays the
+        patched state.
+        """
+        msg = self._menus.get(menu)
+        if msg is None:
+            raise ValueError(f"no menu {menu!r} (add it with add_menu first)")
+        if "options" in patch:
+            patch["options"] = [
+                o if isinstance(o, dict) else {"value": o} for o in patch["options"]
+            ]
+        for it in msg["menu"]["items"]:
+            if it.get("id") == item:
+                it.update(patch)
+                break
+        else:
+            raise ValueError(f"no item {item!r} in menu {menu!r}")
+        self._send(
+            {"type": "update_menu_item", "menu": menu, "item": item, "patch": patch}
+        )
+
+    def remove_menu(self, id: str) -> None:
+        """Remove a menu added with :meth:`add_menu`."""
+        self._menus.pop(id, None)
+        self._send({"type": "remove_menu", "id": id})
+
+    def on_menu_action(self, callback) -> None:
+        """Register a callback for interactions with menus from :meth:`add_menu`.
+
+        The callback receives a dict ``{"menu", "item", "type", "value"}``:
+        ``value`` is the new value for toggles, eyes, selects and segmented
+        controls, and absent for buttons. It runs on the client's WebSocket
+        thread, so keep it short and hand real work to your own thread.
+        """
+        self._menu_callbacks.append(callback)
+
+    def _dispatch_menu_action(self, data: dict) -> None:
+        action = {
+            "menu": data.get("menu"),
+            "item": data.get("item"),
+            "type": data.get("itemType", "button"),
+        }
+        if "value" in data:
+            action["value"] = data["value"]
+        for cb in list(self._menu_callbacks):
+            try:
+                cb(action)
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
 
     def set_points_time(self, id: str, time: float) -> None:
         """Set the time-window scrub time for a point cloud.

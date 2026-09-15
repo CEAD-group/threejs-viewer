@@ -1,21 +1,7 @@
-<div class="tjsv-toolbar" hidden>
-    <button class="tjsv-btn-menu" title="Viewer menu" aria-haspopup="true" aria-expanded="false">
-        <span class="tjsv-status-dot disconnected" title="Disconnected"></span>&#x2630;
-    </button>
-    <div class="tjsv-menu" hidden>
-        <div class="tjsv-menu-status tjsv-status-text">Disconnected</div>
-        <button class="tjsv-menu-item tjsv-btn-clip"><span class="tjsv-menu-label">Clipping plane</span><span class="tjsv-menu-state"></span><kbd>C</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-lighting"><span class="tjsv-menu-label">Lighting</span><span class="tjsv-menu-state"></span><kbd>E</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-orbit-mode"><span class="tjsv-menu-label">Orbit mode</span><span class="tjsv-menu-state"></span><kbd>R</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-track" style="display:none"><span class="tjsv-menu-label">Camera tracking</span><span class="tjsv-menu-state"></span><kbd>T</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-projection"><span class="tjsv-menu-label">Projection</span><span class="tjsv-menu-state"></span><kbd>O</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-wireframe"><span class="tjsv-menu-label">Wireframe</span><span class="tjsv-menu-state"></span><kbd>M</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-shading"><span class="tjsv-menu-label">Shading debug</span><span class="tjsv-menu-state"></span><kbd>N</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-fog"><span class="tjsv-menu-label">Distance fog</span><span class="tjsv-menu-state"></span><kbd>D</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-edl"><span class="tjsv-menu-label">Eye-dome lighting</span><span class="tjsv-menu-state"></span><kbd>Shift+D</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-frame"><span class="tjsv-menu-label">Frame all</span><span class="tjsv-menu-state"></span><kbd>F</kbd></button>
-    </div>
-</div>
+<!-- Menu hosts. The MenuController (viewer.js) builds every menu into these,
+     including the viewer's own options menu: a rail of vertical tabs folded
+     against the right edge whose bodies slide out on click. -->
+<div class="tjsv-rail tjsv-toolbar"></div>
 
 <div class="tjsv-clipping-panel">
     <h3>Clipping Plane <button class="tjsv-clip-close" title="Close (C)">&times;</button></h3>

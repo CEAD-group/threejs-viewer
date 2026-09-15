@@ -446,6 +446,70 @@ class TestVersion:
         assert not _is_dev_version(version)
 
 
+def test_enable_object_click_payload():
+    """enable_object_click stores the replayable enable message (issue #178)."""
+    client = ViewerClient()
+    assert client._object_click is None
+    client.enable_object_click()
+    assert client._object_click == {"type": "set_object_click", "enabled": True}
+    client.disable_object_click()
+    assert client._object_click is None
+
+
+def test_on_object_click_enables_and_dispatches():
+    """Registering a callback enables the event and receives clicks, including
+    the null-id empty-space click and a payload without modifiers."""
+    client = ViewerClient()
+    got = []
+    client.on_object_click(got.append)
+    assert client._object_click is not None and client._object_click["enabled"]
+    client._dispatch_object_click(
+        {
+            "type": "object_clicked",
+            "id": "box",
+            "point": [1.0, 2.0, 3.0],
+            "button": 2,
+            "modifiers": {"shift": True, "ctrl": False, "alt": False, "meta": False},
+        }
+    )
+    client._dispatch_object_click({"type": "object_clicked", "id": None, "point": None})
+    assert got == [
+        {
+            "id": "box",
+            "point": [1.0, 2.0, 3.0],
+            "button": 2,
+            "modifiers": {"shift": True, "ctrl": False, "alt": False, "meta": False},
+        },
+        {
+            "id": None,
+            "point": None,
+            "button": 0,
+            "modifiers": {"shift": False, "ctrl": False, "alt": False, "meta": False},
+        },
+    ]
+
+
+def test_on_object_click_rejects_non_callable():
+    client = ViewerClient()
+    with pytest.raises(TypeError):
+        client.on_object_click(42)
+    assert client._object_click is None
+
+
+def test_object_click_callback_error_does_not_break_dispatch():
+    """A raising callback is logged and the remaining callbacks still run."""
+    client = ViewerClient()
+    got = []
+
+    def bad(_click):
+        raise RuntimeError("boom")
+
+    client.on_object_click(bad)
+    client.on_object_click(got.append)
+    client._dispatch_object_click({"id": "a", "point": [0, 0, 0], "button": 0})
+    assert [c["id"] for c in got] == ["a"]
+
+
 # --- Sidecar reachability over both loopback families (issue #187) ---
 
 
@@ -551,65 +615,64 @@ def test_listen_sockets_raises_when_ipv6_port_is_taken():
         s.close()
 
 
-def test_enable_object_click_payload():
-    """enable_object_click stores the replayable enable message (issue #178)."""
+def test_add_menu_validates_and_records_for_reconnect():
     client = ViewerClient()
-    assert client._object_click is None
-    client.enable_object_click()
-    assert client._object_click == {"type": "set_object_click", "enabled": True}
-    client.disable_object_click()
-    assert client._object_click is None
-
-
-def test_on_object_click_enables_and_dispatches():
-    """Registering a callback enables the event and receives clicks, including
-    the null-id empty-space click and a payload without modifiers."""
-    client = ViewerClient()
-    got = []
-    client.on_object_click(got.append)
-    assert client._object_click is not None and client._object_click["enabled"]
-    client._dispatch_object_click(
-        {
-            "type": "object_clicked",
-            "id": "box",
-            "point": [1.0, 2.0, 3.0],
-            "button": 2,
-            "modifiers": {"shift": True, "ctrl": False, "alt": False, "meta": False},
-        }
+    sent = []
+    client._send = sent.append
+    client.add_menu(
+        "demo",
+        label="Demo",
+        items=[
+            {"type": "label", "label": "Scene"},
+            {"type": "eye", "id": "boxes", "label": "Boxes", "prefix": "box_"},
+            {"id": "go", "label": "Go", "shortcut": "G", "bind_key": False},
+            {"type": "select", "id": "size", "options": ["s", "m"], "value": "m"},
+        ],
     )
-    client._dispatch_object_click({"type": "object_clicked", "id": None, "point": None})
-    assert got == [
-        {
-            "id": "box",
-            "point": [1.0, 2.0, 3.0],
-            "button": 2,
-            "modifiers": {"shift": True, "ctrl": False, "alt": False, "meta": False},
-        },
-        {
-            "id": None,
-            "point": None,
-            "button": 0,
-            "modifiers": {"shift": False, "ctrl": False, "alt": False, "meta": False},
-        },
-    ]
+    assert sent[0]["type"] == "add_menu"
+    menu = sent[0]["menu"]
+    assert menu["id"] == "demo" and menu["mode"] == "dropdown"
+    assert menu["items"][2] == {
+        "type": "button",
+        "id": "go",
+        "label": "Go",
+        "shortcut": "G",
+        "bindKey": False,
+    }
+    assert menu["items"][3]["options"] == [{"value": "s"}, {"value": "m"}]
+    assert client._menus["demo"] is sent[0]
+
+    client.update_menu_item("demo", "size", value="s")
+    assert sent[-1] == {
+        "type": "update_menu_item",
+        "menu": "demo",
+        "item": "size",
+        "patch": {"value": "s"},
+    }
+    assert client._menus["demo"]["menu"]["items"][3]["value"] == "s"
+
+    client.remove_menu("demo")
+    assert "demo" not in client._menus
 
 
-def test_on_object_click_rejects_non_callable():
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"id": "viewer", "items": []}, "built-in menu id"),
+        ({"id": "m", "items": [], "mode": "rail"}, "mode must be"),
+        ({"id": "m", "items": [{"type": "toggle"}]}, "needs an 'id'"),
+        ({"id": "m", "items": [{"type": "slider", "id": "x"}]}, "item type must be"),
+    ],
+)
+def test_add_menu_rejects_bad_specs(kwargs, match):
     client = ViewerClient()
-    with pytest.raises(TypeError):
-        client.on_object_click(42)
-    assert client._object_click is None
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match=match):
+        client.add_menu(**kwargs)
 
 
-def test_object_click_callback_error_does_not_break_dispatch():
-    """A raising callback is logged and the remaining callbacks still run."""
+def test_update_menu_item_unknown_raises():
     client = ViewerClient()
-    got = []
-
-    def bad(_click):
-        raise RuntimeError("boom")
-
-    client.on_object_click(bad)
-    client.on_object_click(got.append)
-    client._dispatch_object_click({"id": "a", "point": [0, 0, 0], "button": 0})
-    assert [c["id"] for c in got] == ["a"]
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match="no menu"):
+        client.update_menu_item("nope", "x", label="y")

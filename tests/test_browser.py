@@ -5854,8 +5854,8 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
     settle(viewer_client)
     page.locator(".tjsv-btn-menu").click()
     items = page.evaluate(
-        "() => [...document.querySelectorAll('.tjsv-menu-item')]"
-        "  .filter(b => b.style.display !== 'none')"
+        "() => [...document.querySelectorAll('[data-menu=viewer] .tjsv-menu-action')]"
+        "  .filter(b => !b.hidden)"
         "  .map(b => [b.querySelector('.tjsv-menu-label').textContent,"
         "             b.querySelector('kbd').textContent])"
     )
@@ -5867,21 +5867,21 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
         ["Wireframe", "M"],
         ["Shading debug", "N"],
         ["Distance fog", "D"],
-        ["Eye-dome lighting", "Shift+D"],
+        ["Eye-dome lighting", "\u21e7D"],
         ["Frame all", "F"],
     ]
     # Camera tracking only shows once an animation with a track target exists.
     assert (
-        page.evaluate("() => document.querySelector('.tjsv-btn-track').style.display")
-        == "none"
+        page.evaluate("() => document.querySelector('[data-item=track]').hidden")
+        is True
     )
 
-    page.locator(".tjsv-btn-wireframe").click()
+    page.locator("[data-menu=viewer] [data-item=wireframe]").click()
     state = page.evaluate(
         "() => ({mode: window.threejsViewer._shading.wireframeMode,"
-        "        active: document.querySelector('.tjsv-btn-wireframe')"
+        "        active: document.querySelector('[data-item=wireframe]')"
         "                  .classList.contains('active'),"
-        "        label: document.querySelector('.tjsv-btn-wireframe .tjsv-menu-state')"
+        "        label: document.querySelector('[data-item=wireframe] .tjsv-menu-state')"
         "                  .textContent,"
         "        open: window.threejsViewer._menuOpen})"
     )
@@ -5915,6 +5915,305 @@ def test_toolbar_option_and_url_param(viewer_client, viewer_page):
         "}"
     )
     assert result == {"plain": True, "opt": False, "off": True}
+
+
+def _press_viewer_key(page, key, code, shift=False):
+    """Dispatch a keydown on the viewer container (its keyboard handler is
+    scoped there, so a page-level keyboard.press needs focus it may not have)."""
+    page.evaluate(
+        "([key, code, shift]) => window.threejsViewer.container.dispatchEvent("
+        "  new KeyboardEvent('keydown', {key, code, shiftKey: shift, bubbles: true}))",
+        [key, code, shift],
+    )
+
+
+@pytest.mark.browser
+def test_add_menu_dropdown_items_and_callbacks(viewer_client, viewer_page):
+    """addMenu builds a dropdown next to the built-in menu; each item type
+    renders, fires its callback, and setItem patches from outside."""
+    page = viewer_page
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " window.__log = [];"
+        " const m = v.addMenu({id: 'demo', label: 'Demo', items: ["
+        "   {type: 'label', label: 'Scene'},"
+        "   {id: 'go', label: 'Go', shortcut: 'G', bindKey: true,"
+        "    onClick: () => window.__log.push('go')},"
+        "   {type: 'toggle', id: 'spin', label: 'Spin', checked: false,"
+        "    onChange: (on) => window.__log.push('spin:' + on)},"
+        "   {type: 'select', id: 'size', label: 'Size',"
+        "    options: [{value: 's', label: 'S'}, {value: 'm', label: 'M'}], value: 'm',"
+        "    onChange: (val) => window.__log.push('size:' + val)},"
+        "   {type: 'segmented', id: 'side', options: ['left', 'right'], value: 'right',"
+        "    onChange: (val) => window.__log.push('side:' + val)},"
+        "   {type: 'divider'},"
+        "   {type: 'custom', id: 'legend', render: (el) => { el.textContent = 'legend'; }},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push('action:' + a.item + ':' + a.type + ':' + a.value));"
+        " const root = m.el;"
+        " return {inBar: root.parentElement.classList.contains('tjsv-rail'),"
+        "         btnText: root.querySelector('.tjsv-menu-btn').textContent.trim(),"
+        "         hidden: !root.classList.contains('open'),"
+        "         kbd: root.querySelector('[data-item=go] kbd').textContent,"
+        "         custom: root.querySelector('[data-item=legend]').textContent,"
+        "         segActive: root.querySelector('[data-item=side] .tjsv-seg-btn.active').dataset.value};"
+        "}"
+    )
+    assert result == {
+        "inBar": True,
+        "btnText": "Demo",
+        "hidden": True,
+        "kbd": "G",
+        "custom": "legend",
+        "segActive": "right",
+    }
+
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+    assert page.evaluate("() => window.threejsViewer.getMenu('demo').isOpen()") is True
+    # Opening one dropdown closes the other.
+    viewer_client.set_toolbar_visible(True)
+    settle(viewer_client)
+    page.locator(".tjsv-btn-menu").click()
+    assert page.evaluate("() => window.threejsViewer.getMenu('demo').isOpen()") is False
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+
+    page.locator("[data-menu=demo] [data-item=go]").click()
+    page.locator("[data-menu=demo] [data-item=spin]").click()
+    page.locator("[data-menu=demo] [data-item=size] select").select_option("s")
+    page.locator(
+        "[data-menu=demo] [data-item=side] .tjsv-seg-btn[data-value=left]"
+    ).click()
+    # A bound shortcut runs the item without the menu.
+    page.keyboard.press("Escape")
+    _press_viewer_key(page, "g", "KeyG")
+    log = page.evaluate("() => window.__log")
+    assert log == [
+        "go",
+        "action:go:button:undefined",
+        "spin:true",
+        "action:spin:toggle:true",
+        "size:s",
+        "action:size:select:s",
+        "side:left",
+        "action:side:segmented:left",
+        "go",
+        "action:go:button:undefined",
+    ]
+
+    state = page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer.getMenu('demo');"
+        " m.setItem('spin', {checked: false, state: 'idle'});"
+        " m.setItem('size', {options: [{value: 'xl', label: 'XL'}], value: 'xl'});"
+        " m.setItem('go', {disabled: true, label: 'Gone'});"
+        " const r = m.el;"
+        " return {spinOn: r.querySelector('[data-item=spin]').classList.contains('active'),"
+        "         spinState: r.querySelector('[data-item=spin] .tjsv-menu-state').textContent,"
+        "         size: r.querySelector('[data-item=size] select').value,"
+        "         goDisabled: r.querySelector('[data-item=go]').disabled,"
+        "         goLabel: r.querySelector('[data-item=go] .tjsv-menu-label').textContent,"
+        "         value: m.getValue('spin')};"
+        "}"
+    )
+    assert state == {
+        "spinOn": False,
+        "spinState": "idle",
+        "size": "xl",
+        "goDisabled": True,
+        "goLabel": "Gone",
+        "value": False,
+    }
+    assert page.evaluate("() => window.threejsViewer.removeMenu('demo')") is True
+    assert page.evaluate("() => document.querySelector('[data-menu=demo]')") is None
+
+
+@pytest.mark.browser
+def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_page):
+    """An eye item hides every object it owns, keeps hiding objects that are
+    added later, persists under storageKey, and hidingEyeFor names it."""
+    page = viewer_page
+    viewer_client.add_box("box_a", 1, 1, 1)
+    settle(viewer_client)
+    page.evaluate(
+        "() => {"
+        " try { localStorage.removeItem('tjsv-test.eyes'); } catch (e) {}"
+        " window.threejsViewer.addMenu({id: 'layers', label: 'Layers', storageKey: 'tjsv-test.eyes',"
+        "   items: [{type: 'eye', id: 'boxes', label: 'Boxes', prefix: 'box_'}]});"
+        "}"
+    )
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_a').visible") is True
+    )
+    page.locator("[data-menu=layers] .tjsv-menu-btn").click()
+    page.locator("[data-menu=layers] [data-item=boxes]").click()
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_a').visible") is False
+    )
+    assert page.evaluate("() => window.threejsViewer.hidingEyeFor('box_a')") == "Boxes"
+    assert page.evaluate("() => window.threejsViewer.hidingEyeFor('other')") is None
+
+    viewer_client.add_box("box_b", 1, 1, 1, position=[2, 0, 0])
+    settle(viewer_client)
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_b').visible") is False
+    )
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('tjsv-test.eyes'))"
+    ) == {"boxes": False}
+    # A fresh mount under the same storageKey starts from the stored choice.
+    stored = page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer.addMenu({id: 'layers', label: 'Layers',"
+        "   storageKey: 'tjsv-test.eyes', items: [{type: 'eye', id: 'boxes', prefix: 'box_'}]});"
+        " return [m.getValue('boxes'), m.el.querySelector('[data-item=boxes]').classList.contains('off')];"
+        "}"
+    )
+    assert stored == [False, True]
+
+
+@pytest.mark.browser
+def test_add_menu_eye_match_apply_and_veto(viewer_client, viewer_page):
+    """An eye may own objects through `match` and show/hide through `apply`;
+    an `apply` returning false vetoes the flip and the row reverts."""
+    page = viewer_page
+    viewer_client.add_box("ws_1_base", 1, 1, 1)
+    viewer_client.add_box("ws_1_reach", 1, 1, 1)
+    settle(viewer_client)
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer; window.__applied = [];"
+        " const m = v.addMenu({id: 'e', label: 'E', items: ["
+        "   {type: 'eye', id: 'base', label: 'Base', match: id => /_base$/.test(id)},"
+        "   {type: 'eye', id: 'tcp', label: 'TCP', ids: [], apply: on => { window.__applied.push(on); }},"
+        "   {type: 'eye', id: 'locked', label: 'Locked', ids: [], apply: () => false,"
+        "    onChange: () => window.__applied.push('never')},"
+        " ]});"
+        " m.setItem('base', {checked: false});"
+        " m.setItem('tcp', {checked: false});"
+        " const r = m.el;"
+        " r.querySelector('.tjsv-menu-btn').click();"
+        " r.querySelector('[data-item=locked]').click();"
+        " return {base: v.getObject('ws_1_base').visible, reach: v.getObject('ws_1_reach').visible,"
+        "         hiding: v.hidingEyeFor('ws_1_base'), applied: window.__applied,"
+        "         locked: m.getValue('locked'),"
+        "         lockedRow: r.querySelector('[data-item=locked]').classList.contains('active')};"
+        "}"
+    )
+    assert result == {
+        "base": False,
+        "reach": True,
+        "hiding": "Base",
+        "applied": [True, False],
+        "locked": True,
+        "lockedRow": True,
+    }
+
+
+@pytest.mark.browser
+def test_add_menu_rail_stacks_and_panel_mode(viewer_client, viewer_page):
+    """Every menu is a tab on the right-edge rail, stacked top to bottom; a
+    `panel` menu starts open and survives an outside click, a dropdown does not."""
+    page = viewer_page
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const p = v.addMenu({id: 'legend', label: 'Colour', mode: 'panel', bodyWidth: '220px',"
+        "   items: [{type: 'select', id: 'mode', label: 'By', options: ['a', 'b']}]});"
+        " const d = v.addMenu({id: 'gz', label: 'Gizmo',"
+        "   items: [{type: 'toggle', id: 'move', label: 'Move'}, {type: 'toggle', id: 'rot', label: 'Rotate'}]});"
+        " const top = el => parseFloat(getComputedStyle(el).top);"
+        " return {host: p.el.parentElement.className, tab: p.el.querySelector('.tjsv-menu-btn-label').textContent,"
+        "         panelOpen: p.isOpen() && p.el.classList.contains('open'),"
+        "         width: getComputedStyle(p.el.querySelector('.tjsv-menu')).width,"
+        "         stacked: top(d.el) > top(p.el) + p.el.querySelector('.tjsv-menu-btn').getBoundingClientRect().height,"
+        "         items: d.el.querySelectorAll('.tjsv-menu-item').length};"
+        "}"
+    )
+    assert result == {
+        "host": "tjsv-rail tjsv-toolbar",
+        "tab": "Colour",
+        "panelOpen": True,
+        "width": "220px",
+        "stacked": True,
+        "items": 2,
+    }
+    page.locator("[data-menu=gz] .tjsv-menu-btn").click()
+    assert page.evaluate("() => window.threejsViewer.getMenu('gz').isOpen()") is True
+    page.locator("[data-menu=gz] [data-item=move]").click()
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('gz').getValue('move')")
+        is True
+    )
+    # Opening one tab folds the others (one open at a time), an outside click
+    # folds a dropdown, and a panel re-opened by its tab survives that click.
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('legend').isOpen()") is False
+    )
+    page.mouse.click(400, 300)
+    assert page.evaluate("() => window.threejsViewer.getMenu('gz').isOpen()") is False
+    page.locator("[data-menu=legend] .tjsv-menu-btn").click()
+    page.mouse.click(400, 300)
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('legend').isOpen()") is True
+    )
+
+
+@pytest.mark.browser
+def test_add_menu_reserved_shortcut_is_not_bound(viewer_client, viewer_page):
+    """A client item may display a viewer key but never binds it."""
+    page = viewer_page
+    warned = []
+    page.on("console", lambda m: warned.append(m.text) if m.type == "warning" else None)
+    page.evaluate(
+        "() => { window.__hits = 0; window.threejsViewer.addMenu({id: 'k', label: 'K', items: ["
+        "  {id: 'x', label: 'X', shortcut: 'M', bindKey: true, onClick: () => window.__hits++}]}); }"
+    )
+    _press_viewer_key(page, "m", "KeyM")
+    frames(page)
+    assert page.evaluate("() => window.__hits") == 0
+    assert page.evaluate("() => window.threejsViewer._shading.wireframeMode") == 1
+    assert any("is a viewer key" in w for w in warned)
+
+
+@pytest.mark.browser
+def test_python_add_menu_round_trip(viewer_client, viewer_page):
+    """add_menu from Python renders in the viewer; a click comes back as a
+    menu_action to on_menu_action; update_menu_item patches live."""
+    import threading
+
+    page = viewer_page
+    got = []
+    ev = threading.Event()
+
+    def cb(action):
+        got.append(action)
+        ev.set()
+
+    viewer_client.on_menu_action(cb)
+    viewer_client.add_menu(
+        "py",
+        label="Py",
+        items=[
+            {"id": "hello", "label": "Hello", "shortcut": "H", "bind_key": True},
+            {"type": "toggle", "id": "flag", "label": "Flag", "checked": True},
+        ],
+    )
+    settle(viewer_client)
+    page.locator("[data-menu=py] .tjsv-menu-btn").click()
+    page.locator("[data-menu=py] [data-item=flag]").click()
+    assert ev.wait(5), "no menu_action reached Python"
+    assert got == [{"menu": "py", "item": "flag", "type": "toggle", "value": False}]
+
+    viewer_client.update_menu_item("py", "hello", state="ready", disabled=True)
+    settle(viewer_client)
+    assert page.evaluate(
+        "() => [document.querySelector('[data-item=hello] .tjsv-menu-state').textContent,"
+        "       document.querySelector('[data-item=hello]').disabled]"
+    ) == ["ready", True]
+    viewer_client.remove_menu("py")
+    settle(viewer_client)
+    assert page.evaluate("() => document.querySelector('[data-menu=py]')") is None
 
 
 @pytest.mark.browser
@@ -7046,89 +7345,257 @@ def test_set_highlight_style_switch_rebuilds_in_place(viewer_client, viewer_page
     assert still_drawable
 
 
-# --- ws_host: WebSocket and sidecar on one non-default hostname (issue #187) ---
+_WORLD_POS_JS = """(id) => {
+    const o = window.threejsViewer.getObject(id);
+    if (!o) return null;
+    o.updateWorldMatrix(true, false);
+    const e = o.matrixWorld.elements;
+    return { local: o.position.toArray(), world: [e[12], e[13], e[14]] };
+}"""
 
 
 @pytest.mark.browser
-def test_ws_host_param_routes_websocket_and_blobs_to_one_host(page):
-    """``ViewerClient(host="127.0.0.1")`` must connect the WebSocket to that
-    host (via ``ws_host``) and fetch blobs from it, not from localhost."""
-    client = _start_client(host="127.0.0.1")
-    try:
-        page.goto(client.viewer_url, timeout=90_000)
-        assert client._connected_event.wait(timeout=60)
-        assert page.evaluate("() => window.threejsViewer._wsUrl") == (
-            f"ws://127.0.0.1:{client.port}"
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"fat": False}, {"segments": True}],
+    ids=["fat", "native", "segments"],
+)
+def test_add_polyline_applies_transform(viewer_client, viewer_page, kwargs):
+    """add_polyline_binary honours data.transform on all three line variants
+    (issue #194): the polyline lands at the requested pose, not the origin."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
+    viewer_client.add_polyline("pl", pts, position=[5, 6, 7], **kwargs)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got is not None
+    assert got["local"] == pytest.approx([5, 6, 7])
+    assert got["world"] == pytest.approx([5, 6, 7])
+
+
+@pytest.mark.browser
+def test_add_polyline_applies_matrix_under_parent(viewer_client, viewer_page):
+    """A matrix transform composes under a transformed parent group."""
+    viewer_client.add_group("g", position=[10, 0, 0])
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1]
+    viewer_client.add_polyline("pl", pts, parent="g", matrix=mat)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got["local"] == pytest.approx([1, 2, 3])
+    assert got["world"] == pytest.approx([11, 2, 3])
+
+
+@pytest.mark.browser
+def test_add_points_applies_transform(viewer_client, viewer_page):
+    """add_points_binary honours data.transform (same omission as #194)."""
+    pts = np.random.default_rng(1).random((100, 3)).astype(np.float32)
+    viewer_client.add_points("pc", pts, position=[3, 4, 5])
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pc")
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_add_points_lod_applies_transform(viewer_client, viewer_page):
+    """add_points_lod honours data.transform on the octree group."""
+    pts = np.random.default_rng(2).random((5000, 3)).astype(np.float32)
+    viewer_client.add_points(
+        "cloud", pts, lod={"node_capacity": 1000}, position=[3, 4, 5]
+    )
+    got = None
+    for _ in range(100):
+        time.sleep(0.05)
+        got = viewer_page.evaluate(_WORLD_POS_JS, "cloud")
+        if got is not None:
+            break
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_page):
+    """A LOD cloud scaled [1, 1, 4] must refine exactly like one scaled
+    [4, 4, 4]: the node-size estimate bounds the radius by the largest scale
+    component, so the stretched axis never stops refinement early. Under
+    ortho the estimate ignores camera position, so the wanted sets compare
+    exactly."""
+    pts = np.random.default_rng(5).random((20_000, 3)).astype(np.float32)
+    lod = {"node_capacity": 1000, "point_budget": 1_000_000, "refine_pixels": 100}
+    for cid, scale in (("s111", [1, 1, 1]), ("s114", [1, 1, 4]), ("s444", [4, 4, 4])):
+        viewer_client.add_points(cid, pts, lod=lod, scale=scale)
+    viewer_page.evaluate("() => window.threejsViewer._camController.switch(true)")
+    wanted = None
+    for _ in range(100):
+        time.sleep(0.05)
+        wanted = viewer_page.evaluate(
+            "() => {"
+            " const out = {};"
+            " for (const id of ['s111', 's114', 's444']) {"
+            "   const g = window.threejsViewer._objects.get(id);"
+            "   if (!g || !g.userData.pointsLOD) return null;"
+            "   out[id] = g.userData.pointsLOD.wanted.reduce((a, b) => a + b, 0);"
+            " }"
+            " return out;"
+            "}"
         )
-        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
-        indices = np.array([[0, 1, 2]], dtype=np.uint32)
-        client.add_mesh("wh", positions, indices)
-        settle(client)
-        assert "wh" in client.query_scene()["objects"]
-    finally:
-        client.disconnect()
+        if wanted and wanted["s444"] > 1 and wanted["s114"] == wanted["s444"]:
+            break
+    assert wanted, "LOD clouds never appeared"
+    assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
+    assert wanted["s114"] == wanted["s444"], wanted
+    assert wanted["s111"] < wanted["s444"], wanted
 
 
-# --- Firefox smoke test: sidecar fetch from a file:// page (issue #187) ---
+_ZOOM_PROJECT_JS = """([x, y, z]) => {
+    const v = window.threejsViewer;
+    const THREE = window.tjsv.THREE;
+    const rect = v._renderer.domElement.getBoundingClientRect();
+    const cam = v._camera;
+    cam.updateMatrixWorld(true);
+    const ndc = new THREE.Vector3(x, y, z).project(cam);
+    return {
+        px: rect.left + ((ndc.x + 1) / 2) * rect.width,
+        py: rect.top + ((1 - ndc.y) / 2) * rect.height,
+        dist: cam.position.distanceTo(v._controls.target),
+        zoom: cam.zoom,
+        ortho: !!v._isOrtho,
+        target: v._controls.target.toArray(),
+    };
+}"""
 
 
-@pytest.mark.browser
-def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
-    """One binary asset must land under Firefox from a file:// viewer page.
+def _zoom_drift_at_cursor(page, world_point, delta_y, n_events):
+    """Put the mouse on `world_point`'s projection, wheel n times, and return
+    the pixel drift of that world point plus the before/after camera state.
 
-    Firefox treats a blob URL on a different host than the page's WebSocket
-    host as a cross-origin request and refuses it (#185 advertised
-    127.0.0.1 while the page used localhost). Chromium allows that, so the
-    Chromium-only suite never saw it; this test keeps the one-hostname
-    contract honest in the browser that enforces it.
+    Chromium rounds a synthetic wheel event's clientX/clientY to whole pixels
+    (a move to 791.39 arrives as 791), so the anchor sits up to 0.5 px off the
+    projected point and the drift after a 1.85x zoom lands around 0.5 px. The
+    1 px tolerance covers that; the exact-NDC test below shows the math itself
+    is exact to 1e-13 px.
     """
-    from playwright.sync_api import Error as PlaywrightError
+    before = page.evaluate(_ZOOM_PROJECT_JS, world_point)
+    page.mouse.move(before["px"], before["py"])
+    for _ in range(n_events):
+        page.mouse.wheel(0, delta_y)
+    frames(page, 3)
+    after = page.evaluate(_ZOOM_PROJECT_JS, world_point)
+    drift = math.hypot(after["px"] - before["px"], after["py"] - before["py"])
+    return drift, before, after
 
-    try:
-        # Headless Firefox on a GPU-less Linux runner refuses to create a WebGL
-        # context (the viewer constructor then throws before connect() runs);
-        # allow software rendering so it has a chance.
-        browser = playwright.firefox.launch(
-            firefox_user_prefs={
-                "webgl.force-enabled": True,
-                "webgl.forbid-software": False,
-                "gfx.webrender.software": True,
-            }
-        )
-    except PlaywrightError as exc:
-        pytest.skip(f"Firefox not installed for Playwright: {exc}")
-    try:
-        page = browser.new_page()
-        has_webgl2 = page.evaluate(
-            "() => !!document.createElement('canvas').getContext('webgl2')"
-        )
-        if not has_webgl2:
-            pytest.skip("Playwright Firefox cannot create a WebGL2 context here")
-        # Firefox has no devtools in the CI log; keep its console for the
-        # failure message so a non-connecting page explains itself.
-        log = []
-        page.on("console", lambda m: log.append(f"console[{m.type}]: {m.text}"))
-        page.on("pageerror", lambda e: log.append(f"pageerror: {e}"))
-        page.on(
-            "requestfailed", lambda r: log.append(f"requestfailed: {r.url} {r.failure}")
-        )
-        viewer_path = viewer_client.viewer_path.resolve()
-        page.goto(
-            f"{viewer_path.as_uri()}?ws_port={viewer_client.port}", timeout=90_000
-        )
-        assert viewer_client._connected_event.wait(timeout=120), (
-            "Firefox did not connect to the WebSocket server; page log:\n"
-            + "\n".join(log[-40:])
-        )
-        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
-        indices = np.array([[0, 1, 2]], dtype=np.uint32)
-        viewer_client.add_mesh("ff_mesh", positions, indices)
-        settle(viewer_client)
-        objects = viewer_client.query_scene()["objects"]
-        assert "ff_mesh" in objects, f"mesh did not load in Firefox: {sorted(objects)}"
-        assert objects["ff_mesh"]["type"] == "Mesh"
-    finally:
-        browser.close()
+
+@pytest.mark.browser
+def test_wheel_zoom_anchors_on_cursor_perspective_and_ortho(viewer_client, viewer_page):
+    """Issue #192: wheel zoom keeps the world point under the cursor at the
+    same screen pixel, in both projections, instead of converging on the orbit
+    target. The camera still moves (distance / zoom change), and the target
+    shifts with the camera so the ViewHelper centre (same Vector3) follows."""
+    viewer_client.add_box(
+        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
+    )
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    world_point = [1.5, 0.5, 0.0]
+
+    # Perspective: zoom in, then zoom out, cursor parked on the box.
+    drift_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
+    assert after["ortho"] is False
+    assert after["dist"] < before["dist"] * 0.8, "zoom in shortened the dolly"
+    assert drift_in < 1.0, f"perspective zoom-in drift {drift_in:.3f}px"
+    assert after["target"] != before["target"], "target rides along with the camera"
+    drift_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
+    assert after["dist"] > before["dist"] * 1.2
+    assert drift_out < 1.0, f"perspective zoom-out drift {drift_out:.3f}px"
+    # The screen centre (the old anchor) is not fixed anymore when the cursor
+    # is off-centre: the target projection should have moved.
+    print(f"perspective drift in={drift_in:.4f}px out={drift_out:.4f}px")
+
+    # Orthographic (manual O key path), same check on cam.zoom.
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page, 2)
+    drift_o_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
+    assert after["ortho"] is True
+    assert after["zoom"] > before["zoom"] * 1.2, "ortho zoom increased"
+    assert drift_o_in < 1.0, f"ortho zoom-in drift {drift_o_in:.3f}px"
+    drift_o_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
+    assert after["zoom"] < before["zoom"] * 0.8
+    assert drift_o_out < 1.0, f"ortho zoom-out drift {drift_o_out:.3f}px"
+    print(f"ortho drift in={drift_o_in:.4f}px out={drift_o_out:.4f}px")
+
+    # After the long zoom the ViewHelper centre is still the controls' target
+    # (same Vector3, mutated in place), so click-to-pivot and the gimbal agree.
+    same = viewer_page.evaluate(
+        "() => window.threejsViewer._viewHelper.center === window.threejsViewer._controls.target"
+    )
+    assert same is True
+
+
+@pytest.mark.browser
+def test_wheel_zoom_anchor_math_is_exact(viewer_client, viewer_page):
+    """Drive `_applyZoom` with the float NDC of a world point directly, so the
+    wheel event's integer pixel rounding is out of the picture: 12 steps in and
+    12 back out leave the point's projection where it was to sub-1e-6 px."""
+    viewer_client.add_box(
+        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
+    )
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    js = (
+        "([x, y, z]) => {"
+        " const v = window.threejsViewer; const THREE = window.tjsv.THREE;"
+        " const cam = v._camera; cam.updateMatrixWorld(true);"
+        " const rect = v._renderer.domElement.getBoundingClientRect();"
+        " const n0 = new THREE.Vector3(x, y, z).project(cam);"
+        " const d0 = cam.position.distanceTo(v._controls.target), z0 = cam.zoom;"
+        " const out = [];"
+        " for (const s of [1 / 0.95, 0.95]) {"
+        "   for (let i = 0; i < 12; i++) v._controls._applyZoom(s, n0.x, n0.y);"
+        "   cam.updateMatrixWorld(true);"
+        "   const n1 = new THREE.Vector3(x, y, z).project(cam);"
+        "   out.push(Math.hypot((n1.x - n0.x) / 2 * rect.width, (n1.y - n0.y) / 2 * rect.height));"
+        " }"
+        " return { drift: out, d0, d1: cam.position.distanceTo(v._controls.target),"
+        "          z0, z1: cam.zoom };"
+        "}"
+    )
+    persp = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
+    assert max(persp["drift"]) < 1e-6, persp
+    assert abs(persp["d1"] - persp["d0"]) < 1e-9, "in then out restores the distance"
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page, 2)
+    ortho = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
+    assert max(ortho["drift"]) < 1e-6, ortho
+    assert abs(ortho["z1"] - ortho["z0"]) < 1e-9 * ortho["z0"], (
+        "in then out restores the zoom"
+    )
+
+
+@pytest.mark.browser
+def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_page):
+    """With the cursor exactly on the orbit target the zoom degenerates to the
+    old about-target dolly: the target does not move at all."""
+    viewer_client.add_box("b", width=0.5, height=0.5, depth=0.5, position=[0, 0, 0])
+    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    drift, before, after = _zoom_drift_at_cursor(viewer_page, [0, 0, 0], -300, 4)
+    assert drift < 1.0
+    assert after["dist"] < before["dist"] * 0.8
+    assert max(abs(a - b) for a, b in zip(after["target"], before["target"])) < 1e-6
+    # Programmatic zoom without a cursor keeps the about-target behaviour.
+    moved = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " const t0 = v._controls.target.toArray();"
+        " v._controls._applyZoom(1.5);"
+        " const t1 = v._controls.target.toArray();"
+        " return t0.some((c, i) => Math.abs(c - t1[i]) > 1e-9);"
+        "}"
+    )
+    assert moved is False
 
 
 # Object click (issue #178) and dblclick framing switch (issue #177).
@@ -7414,254 +7881,86 @@ def test_destroy_removes_object_click_listeners(viewer_client, viewer_page):
     assert removed == ["canvas:pointerdown", "window:pointercancel", "window:pointerup"]
 
 
-_ZOOM_PROJECT_JS = """([x, y, z]) => {
-    const v = window.threejsViewer;
-    const THREE = window.tjsv.THREE;
-    const rect = v._renderer.domElement.getBoundingClientRect();
-    const cam = v._camera;
-    cam.updateMatrixWorld(true);
-    const ndc = new THREE.Vector3(x, y, z).project(cam);
-    return {
-        px: rect.left + ((ndc.x + 1) / 2) * rect.width,
-        py: rect.top + ((1 - ndc.y) / 2) * rect.height,
-        dist: cam.position.distanceTo(v._controls.target),
-        zoom: cam.zoom,
-        ortho: !!v._isOrtho,
-        target: v._controls.target.toArray(),
-    };
-}"""
-
-
-def _zoom_drift_at_cursor(page, world_point, delta_y, n_events):
-    """Put the mouse on `world_point`'s projection, wheel n times, and return
-    the pixel drift of that world point plus the before/after camera state.
-
-    Chromium rounds a synthetic wheel event's clientX/clientY to whole pixels
-    (a move to 791.39 arrives as 791), so the anchor sits up to 0.5 px off the
-    projected point and the drift after a 1.85x zoom lands around 0.5 px. The
-    1 px tolerance covers that; the exact-NDC test below shows the math itself
-    is exact to 1e-13 px.
-    """
-    before = page.evaluate(_ZOOM_PROJECT_JS, world_point)
-    page.mouse.move(before["px"], before["py"])
-    for _ in range(n_events):
-        page.mouse.wheel(0, delta_y)
-    frames(page, 3)
-    after = page.evaluate(_ZOOM_PROJECT_JS, world_point)
-    drift = math.hypot(after["px"] - before["px"], after["py"] - before["py"])
-    return drift, before, after
+# --- ws_host: WebSocket and sidecar on one non-default hostname (issue #187) ---
 
 
 @pytest.mark.browser
-def test_wheel_zoom_anchors_on_cursor_perspective_and_ortho(viewer_client, viewer_page):
-    """Issue #192: wheel zoom keeps the world point under the cursor at the
-    same screen pixel, in both projections, instead of converging on the orbit
-    target. The camera still moves (distance / zoom change), and the target
-    shifts with the camera so the ViewHelper centre (same Vector3) follows."""
-    viewer_client.add_box(
-        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
-    )
-    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
-    settle(viewer_client)
-    frames(viewer_page, 2)
-    world_point = [1.5, 0.5, 0.0]
-
-    # Perspective: zoom in, then zoom out, cursor parked on the box.
-    drift_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
-    assert after["ortho"] is False
-    assert after["dist"] < before["dist"] * 0.8, "zoom in shortened the dolly"
-    assert drift_in < 1.0, f"perspective zoom-in drift {drift_in:.3f}px"
-    assert after["target"] != before["target"], "target rides along with the camera"
-    drift_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
-    assert after["dist"] > before["dist"] * 1.2
-    assert drift_out < 1.0, f"perspective zoom-out drift {drift_out:.3f}px"
-    # The screen centre (the old anchor) is not fixed anymore when the cursor
-    # is off-centre: the target projection should have moved.
-    print(f"perspective drift in={drift_in:.4f}px out={drift_out:.4f}px")
-
-    # Orthographic (manual O key path), same check on cam.zoom.
-    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
-    frames(viewer_page, 2)
-    drift_o_in, before, after = _zoom_drift_at_cursor(viewer_page, world_point, -300, 4)
-    assert after["ortho"] is True
-    assert after["zoom"] > before["zoom"] * 1.2, "ortho zoom increased"
-    assert drift_o_in < 1.0, f"ortho zoom-in drift {drift_o_in:.3f}px"
-    drift_o_out, before, after = _zoom_drift_at_cursor(viewer_page, world_point, 300, 4)
-    assert after["zoom"] < before["zoom"] * 0.8
-    assert drift_o_out < 1.0, f"ortho zoom-out drift {drift_o_out:.3f}px"
-    print(f"ortho drift in={drift_o_in:.4f}px out={drift_o_out:.4f}px")
-
-    # After the long zoom the ViewHelper centre is still the controls' target
-    # (same Vector3, mutated in place), so click-to-pivot and the gimbal agree.
-    same = viewer_page.evaluate(
-        "() => window.threejsViewer._viewHelper.center === window.threejsViewer._controls.target"
-    )
-    assert same is True
-
-
-@pytest.mark.browser
-def test_wheel_zoom_anchor_math_is_exact(viewer_client, viewer_page):
-    """Drive `_applyZoom` with the float NDC of a world point directly, so the
-    wheel event's integer pixel rounding is out of the picture: 12 steps in and
-    12 back out leave the point's projection where it was to sub-1e-6 px."""
-    viewer_client.add_box(
-        "b", width=0.5, height=0.5, depth=0.5, position=[1.5, 0.5, 0.0]
-    )
-    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
-    settle(viewer_client)
-    frames(viewer_page, 2)
-    js = (
-        "([x, y, z]) => {"
-        " const v = window.threejsViewer; const THREE = window.tjsv.THREE;"
-        " const cam = v._camera; cam.updateMatrixWorld(true);"
-        " const rect = v._renderer.domElement.getBoundingClientRect();"
-        " const n0 = new THREE.Vector3(x, y, z).project(cam);"
-        " const d0 = cam.position.distanceTo(v._controls.target), z0 = cam.zoom;"
-        " const out = [];"
-        " for (const s of [1 / 0.95, 0.95]) {"
-        "   for (let i = 0; i < 12; i++) v._controls._applyZoom(s, n0.x, n0.y);"
-        "   cam.updateMatrixWorld(true);"
-        "   const n1 = new THREE.Vector3(x, y, z).project(cam);"
-        "   out.push(Math.hypot((n1.x - n0.x) / 2 * rect.width, (n1.y - n0.y) / 2 * rect.height));"
-        " }"
-        " return { drift: out, d0, d1: cam.position.distanceTo(v._controls.target),"
-        "          z0, z1: cam.zoom };"
-        "}"
-    )
-    persp = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
-    assert max(persp["drift"]) < 1e-6, persp
-    assert abs(persp["d1"] - persp["d0"]) < 1e-9, "in then out restores the distance"
-    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
-    frames(viewer_page, 2)
-    ortho = viewer_page.evaluate(js, [1.5, 0.5, 0.0])
-    assert max(ortho["drift"]) < 1e-6, ortho
-    assert abs(ortho["z1"] - ortho["z0"]) < 1e-9 * ortho["z0"], (
-        "in then out restores the zoom"
-    )
-
-
-@pytest.mark.browser
-def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_page):
-    """With the cursor exactly on the orbit target the zoom degenerates to the
-    old about-target dolly: the target does not move at all."""
-    viewer_client.add_box("b", width=0.5, height=0.5, depth=0.5, position=[0, 0, 0])
-    viewer_client.set_camera(position=[6, -6, 5], target=[0, 0, 0], up=[0, 0, 1])
-    settle(viewer_client)
-    frames(viewer_page, 2)
-    drift, before, after = _zoom_drift_at_cursor(viewer_page, [0, 0, 0], -300, 4)
-    assert drift < 1.0
-    assert after["dist"] < before["dist"] * 0.8
-    assert max(abs(a - b) for a, b in zip(after["target"], before["target"])) < 1e-6
-    # Programmatic zoom without a cursor keeps the about-target behaviour.
-    moved = viewer_page.evaluate(
-        "() => {"
-        " const v = window.threejsViewer;"
-        " const t0 = v._controls.target.toArray();"
-        " v._controls._applyZoom(1.5);"
-        " const t1 = v._controls.target.toArray();"
-        " return t0.some((c, i) => Math.abs(c - t1[i]) > 1e-9);"
-        "}"
-    )
-    assert moved is False
-
-
-_WORLD_POS_JS = """(id) => {
-    const o = window.threejsViewer.getObject(id);
-    if (!o) return null;
-    o.updateWorldMatrix(true, false);
-    const e = o.matrixWorld.elements;
-    return { local: o.position.toArray(), world: [e[12], e[13], e[14]] };
-}"""
-
-
-@pytest.mark.browser
-@pytest.mark.parametrize(
-    "kwargs",
-    [{}, {"fat": False}, {"segments": True}],
-    ids=["fat", "native", "segments"],
-)
-def test_add_polyline_applies_transform(viewer_client, viewer_page, kwargs):
-    """add_polyline_binary honours data.transform on all three line variants
-    (issue #194): the polyline lands at the requested pose, not the origin."""
-    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
-    viewer_client.add_polyline("pl", pts, position=[5, 6, 7], **kwargs)
-    settle(viewer_client)
-    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
-    assert got is not None
-    assert got["local"] == pytest.approx([5, 6, 7])
-    assert got["world"] == pytest.approx([5, 6, 7])
-
-
-@pytest.mark.browser
-def test_add_polyline_applies_matrix_under_parent(viewer_client, viewer_page):
-    """A matrix transform composes under a transformed parent group."""
-    viewer_client.add_group("g", position=[10, 0, 0])
-    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
-    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1]
-    viewer_client.add_polyline("pl", pts, parent="g", matrix=mat)
-    settle(viewer_client)
-    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
-    assert got["local"] == pytest.approx([1, 2, 3])
-    assert got["world"] == pytest.approx([11, 2, 3])
-
-
-@pytest.mark.browser
-def test_add_points_applies_transform(viewer_client, viewer_page):
-    """add_points_binary honours data.transform (same omission as #194)."""
-    pts = np.random.default_rng(1).random((100, 3)).astype(np.float32)
-    viewer_client.add_points("pc", pts, position=[3, 4, 5])
-    settle(viewer_client)
-    got = viewer_page.evaluate(_WORLD_POS_JS, "pc")
-    assert got is not None
-    assert got["world"] == pytest.approx([3, 4, 5])
-
-
-@pytest.mark.browser
-def test_add_points_lod_applies_transform(viewer_client, viewer_page):
-    """add_points_lod honours data.transform on the octree group."""
-    pts = np.random.default_rng(2).random((5000, 3)).astype(np.float32)
-    viewer_client.add_points(
-        "cloud", pts, lod={"node_capacity": 1000}, position=[3, 4, 5]
-    )
-    got = None
-    for _ in range(100):
-        time.sleep(0.05)
-        got = viewer_page.evaluate(_WORLD_POS_JS, "cloud")
-        if got is not None:
-            break
-    assert got is not None
-    assert got["world"] == pytest.approx([3, 4, 5])
-
-
-@pytest.mark.browser
-def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_page):
-    """A LOD cloud scaled [1, 1, 4] must refine exactly like one scaled
-    [4, 4, 4]: the node-size estimate bounds the radius by the largest scale
-    component, so the stretched axis never stops refinement early. Under
-    ortho the estimate ignores camera position, so the wanted sets compare
-    exactly."""
-    pts = np.random.default_rng(5).random((20_000, 3)).astype(np.float32)
-    lod = {"node_capacity": 1000, "point_budget": 1_000_000, "refine_pixels": 100}
-    for cid, scale in (("s111", [1, 1, 1]), ("s114", [1, 1, 4]), ("s444", [4, 4, 4])):
-        viewer_client.add_points(cid, pts, lod=lod, scale=scale)
-    viewer_page.evaluate("() => window.threejsViewer._camController.switch(true)")
-    wanted = None
-    for _ in range(100):
-        time.sleep(0.05)
-        wanted = viewer_page.evaluate(
-            "() => {"
-            " const out = {};"
-            " for (const id of ['s111', 's114', 's444']) {"
-            "   const g = window.threejsViewer._objects.get(id);"
-            "   if (!g || !g.userData.pointsLOD) return null;"
-            "   out[id] = g.userData.pointsLOD.wanted.reduce((a, b) => a + b, 0);"
-            " }"
-            " return out;"
-            "}"
+def test_ws_host_param_routes_websocket_and_blobs_to_one_host(page):
+    """``ViewerClient(host="127.0.0.1")`` must connect the WebSocket to that
+    host (via ``ws_host``) and fetch blobs from it, not from localhost."""
+    client = _start_client(host="127.0.0.1")
+    try:
+        page.goto(client.viewer_url, timeout=90_000)
+        assert client._connected_event.wait(timeout=60)
+        assert page.evaluate("() => window.threejsViewer._wsUrl") == (
+            f"ws://127.0.0.1:{client.port}"
         )
-        if wanted and wanted["s444"] > 1 and wanted["s114"] == wanted["s444"]:
-            break
-    assert wanted, "LOD clouds never appeared"
-    assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
-    assert wanted["s114"] == wanted["s444"], wanted
-    assert wanted["s111"] < wanted["s444"], wanted
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        client.add_mesh("wh", positions, indices)
+        settle(client)
+        assert "wh" in client.query_scene()["objects"]
+    finally:
+        client.disconnect()
+
+
+# --- Firefox smoke test: sidecar fetch from a file:// page (issue #187) ---
+
+
+@pytest.mark.browser
+def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
+    """One binary asset must land under Firefox from a file:// viewer page.
+
+    Firefox treats a blob URL on a different host than the page's WebSocket
+    host as a cross-origin request and refuses it (#185 advertised
+    127.0.0.1 while the page used localhost). Chromium allows that, so the
+    Chromium-only suite never saw it; this test keeps the one-hostname
+    contract honest in the browser that enforces it.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    try:
+        # Headless Firefox on a GPU-less Linux runner refuses to create a WebGL
+        # context (the viewer constructor then throws before connect() runs);
+        # allow software rendering so it has a chance.
+        browser = playwright.firefox.launch(
+            firefox_user_prefs={
+                "webgl.force-enabled": True,
+                "webgl.forbid-software": False,
+                "gfx.webrender.software": True,
+            }
+        )
+    except PlaywrightError as exc:
+        pytest.skip(f"Firefox not installed for Playwright: {exc}")
+    try:
+        page = browser.new_page()
+        has_webgl2 = page.evaluate(
+            "() => !!document.createElement('canvas').getContext('webgl2')"
+        )
+        if not has_webgl2:
+            pytest.skip("Playwright Firefox cannot create a WebGL2 context here")
+        # Firefox has no devtools in the CI log; keep its console for the
+        # failure message so a non-connecting page explains itself.
+        log = []
+        page.on("console", lambda m: log.append(f"console[{m.type}]: {m.text}"))
+        page.on("pageerror", lambda e: log.append(f"pageerror: {e}"))
+        page.on(
+            "requestfailed", lambda r: log.append(f"requestfailed: {r.url} {r.failure}")
+        )
+        viewer_path = viewer_client.viewer_path.resolve()
+        page.goto(
+            f"{viewer_path.as_uri()}?ws_port={viewer_client.port}", timeout=90_000
+        )
+        assert viewer_client._connected_event.wait(timeout=120), (
+            "Firefox did not connect to the WebSocket server; page log:\n"
+            + "\n".join(log[-40:])
+        )
+        positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        viewer_client.add_mesh("ff_mesh", positions, indices)
+        settle(viewer_client)
+        objects = viewer_client.query_scene()["objects"]
+        assert "ff_mesh" in objects, f"mesh did not load in Firefox: {sorted(objects)}"
+        assert objects["ff_mesh"]["type"] == "Mesh"
+    finally:
+        browser.close()
