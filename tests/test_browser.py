@@ -6860,6 +6860,8 @@ def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
         assert objects["ff_mesh"]["type"] == "Mesh"
     finally:
         browser.close()
+
+
 # Object click (issue #178) and dblclick framing switch (issue #177).
 
 
