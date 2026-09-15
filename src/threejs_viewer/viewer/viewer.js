@@ -7159,7 +7159,9 @@ class PolylinePickController {
 // Lives in the scene like the pivot / pick markers; never enters _objects, so it
 // can't be picked or cleared and survives `clear`.
 
-const GIZMO_PALETTE = { x: 0xef5468, y: 0x43c873, z: 0x4a90e2, n: 0xcfd3da };
+// Axis colours match three's ViewHelper bubbles in the corner gimbal, so the
+// handles and the gimbal agree on what X / Y / Z look like (issue #191).
+const GIZMO_PALETTE = { x: 0xff4466, y: 0x88ff44, z: 0x4488ff, n: 0xcfd3da };
 const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
 const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
 const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
