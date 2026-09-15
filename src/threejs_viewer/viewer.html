@@ -17,26 +17,43 @@
         .threejs-viewer:focus { outline: none; }
         .threejs-viewer canvas { display: block; }
 
-        /* Top toolbar */
+        /* Top toolbar: a single menu button; the advanced options live in the
+           dropdown below it. Hidden until the client opts in (setToolbarVisible). */
         .threejs-viewer .tjsv-toolbar {
             position: absolute;
             top: 10px;
-            left: 10px;
+            right: 10px;
+            user-select: none;
+            display: flex;
+            justify-content: flex-end;
+        }
+        .threejs-viewer .tjsv-toolbar[hidden] { display: none; }
+        .threejs-viewer .tjsv-btn-menu {
+            background: rgba(30, 30, 30, 0.85);
+            border: none;
+            color: #aaa;
+            height: 28px;
+            padding: 0 8px 0 6px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
             display: flex;
             align-items: center;
-            gap: 4px;
-            background: rgba(30, 30, 30, 0.85);
-            padding: 4px 6px;
-            border-radius: 6px;
-            user-select: none;
+            gap: 6px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            transition: background 0.15s, color 0.15s;
         }
+        .threejs-viewer .tjsv-btn-menu:hover,
+        .threejs-viewer .tjsv-btn-menu.active { background: rgba(60, 60, 60, 0.95); color: white; }
+        .threejs-viewer .tjsv-btn-menu:focus { outline: none; }
+        .threejs-viewer .tjsv-btn-menu:focus-visible { outline: 2px solid #3399ff; outline-offset: 1px; }
+        .threejs-viewer .tjsv-menu-item:focus { outline: none; }
+        .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid #3399ff; outline-offset: -2px; }
         .threejs-viewer .tjsv-status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             background: #cc3333;
-            margin: 0 4px;
             flex-shrink: 0;
             transition: background 0.3s;
         }
@@ -44,36 +61,67 @@
         .threejs-viewer .tjsv-status-dot.disconnected { background: #cc3333; }
         /* Embedder-set neutral state (setStatus / autoConnect:false — no backend expected) */
         .threejs-viewer .tjsv-status-dot.neutral { background: #8a8a8a; }
-        .threejs-viewer .tjsv-status-text {
+        .threejs-viewer .tjsv-menu {
+            position: absolute;
+            top: 34px;
+            right: 0;
+            min-width: 240px;
+            background: rgba(30, 30, 30, 0.95);
+            border-radius: 6px;
+            padding: 4px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            display: flex;
+            flex-direction: column;
+            z-index: 10;
+        }
+        .threejs-viewer .tjsv-menu[hidden] { display: none; }
+        .threejs-viewer .tjsv-menu-status {
             color: #999;
             font-family: monospace;
             font-size: 11px;
-            margin-right: 4px;
+            padding: 4px 8px 6px;
+            border-bottom: 1px solid #555;
+            margin-bottom: 4px;
+            white-space: nowrap;
         }
-        .threejs-viewer .toolbar-sep {
-            width: 1px;
-            height: 20px;
-            background: #555;
-            margin: 0 2px;
-        }
-        .threejs-viewer .toolbar-btn {
+        .threejs-viewer .tjsv-menu-item {
             background: none;
             border: none;
-            color: #aaa;
-            min-width: 28px;
+            color: #ccc;
             height: 28px;
-            padding: 0 6px;
+            padding: 0 8px;
             border-radius: 4px;
             cursor: pointer;
             font-size: 13px;
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 3px;
+            gap: 8px;
+            text-align: left;
+            white-space: nowrap;
             transition: background 0.15s, color 0.15s;
         }
-        .threejs-viewer .toolbar-btn:hover { background: rgba(255,255,255,0.1); color: white; }
-        .threejs-viewer .toolbar-btn.active { background: #0066cc; color: white; }
+        .threejs-viewer .tjsv-menu-item:hover { background: rgba(255,255,255,0.1); color: white; }
+        .threejs-viewer .tjsv-menu-item.active { color: white; }
+        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-label::before {
+            content: '\25CF';
+            color: #3399ff;
+            margin-right: 6px;
+            font-size: 9px;
+            vertical-align: middle;
+        }
+        .threejs-viewer .tjsv-menu-label { flex: 1; }
+        .threejs-viewer .tjsv-menu-state { color: #888; font-size: 11px; }
+        .threejs-viewer .tjsv-menu-item kbd {
+            font-family: monospace;
+            font-size: 11px;
+            color: #aaa;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid #555;
+            border-radius: 3px;
+            padding: 1px 5px;
+            min-width: 14px;
+            text-align: center;
+        }
 
         /* Animation Controls */
         .threejs-viewer .tjsv-animation-controls {
@@ -641,14 +689,23 @@ const DRACO_DECODER_DATA = {
     wrapperGzB64: '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'
 };
 
-const HTML_TEMPLATE = `<div class="tjsv-toolbar">
-    <div class="tjsv-status-dot disconnected" title="Disconnected"></div>
-    <span class="tjsv-status-text">Disconnected</span>
-    <div class="toolbar-sep"></div>
-    <button class="toolbar-btn tjsv-btn-clip" title="Clipping Plane">&#x2702; C</button>
-    <button class="toolbar-btn tjsv-btn-lighting" title="Lighting / exposure (E)">&#x263C; E</button>
-    <button class="toolbar-btn tjsv-btn-orbit-mode" title="Orbit mode (R)">&#x27F3; R</button>
-    <button class="toolbar-btn tjsv-btn-track" title="Camera tracking" style="display:none">&#x229A; T</button>
+const HTML_TEMPLATE = `<div class="tjsv-toolbar" hidden>
+    <button class="tjsv-btn-menu" title="Viewer menu" aria-haspopup="true" aria-expanded="false">
+        <span class="tjsv-status-dot disconnected" title="Disconnected"></span>&#x2630;
+    </button>
+    <div class="tjsv-menu" hidden>
+        <div class="tjsv-menu-status tjsv-status-text">Disconnected</div>
+        <button class="tjsv-menu-item tjsv-btn-clip"><span class="tjsv-menu-label">Clipping plane</span><span class="tjsv-menu-state"></span><kbd>C</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-lighting"><span class="tjsv-menu-label">Lighting</span><span class="tjsv-menu-state"></span><kbd>E</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-orbit-mode"><span class="tjsv-menu-label">Orbit mode</span><span class="tjsv-menu-state"></span><kbd>R</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-track" style="display:none"><span class="tjsv-menu-label">Camera tracking</span><span class="tjsv-menu-state"></span><kbd>T</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-projection"><span class="tjsv-menu-label">Projection</span><span class="tjsv-menu-state"></span><kbd>O</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-wireframe"><span class="tjsv-menu-label">Wireframe</span><span class="tjsv-menu-state"></span><kbd>M</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-shading"><span class="tjsv-menu-label">Shading debug</span><span class="tjsv-menu-state"></span><kbd>N</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-fog"><span class="tjsv-menu-label">Distance fog</span><span class="tjsv-menu-state"></span><kbd>D</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-edl"><span class="tjsv-menu-label">Eye-dome lighting</span><span class="tjsv-menu-state"></span><kbd>Shift+D</kbd></button>
+        <button class="tjsv-menu-item tjsv-btn-frame"><span class="tjsv-menu-label">Frame all</span><span class="tjsv-menu-state"></span><kbd>F</kbd></button>
+    </div>
 </div>
 
 <div class="tjsv-clipping-panel">
@@ -1442,6 +1499,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
+ * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  */
 
@@ -2346,6 +2404,46 @@ const FOV_MIN = 1;
 const FOV_MAX = 179;
 
 /**
+ * Parse a boolean-ish option/URL/localStorage value. `null` means "not set"
+ * so the caller can fall through to the next precedence level.
+ * @param {string|null|number|boolean|undefined} raw
+ * @returns {boolean|null}
+ */
+function parseBoolOption(raw) {
+    if (raw === null || raw === undefined || raw === '') return null;
+    if (typeof raw === 'boolean') return raw;
+    const s = String(raw).toLowerCase();
+    if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+    if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
+    return null;
+}
+
+/**
+ * Write the small grey state label of a menu item (the span between the
+ * label and the shortcut key).
+ * @param {HTMLElement|null} btn
+ * @param {string} text
+ */
+function setMenuState(btn, text) {
+    const el = btn?.querySelector?.('.tjsv-menu-state');
+    if (el) el.textContent = text;
+}
+
+/**
+ * Resolve the initial toolbar (menu button) visibility.
+ * Precedence: URL `toolbar` param > `toolbar` option > hidden.
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {boolean}
+ */
+function resolveToolbarVisible(options, urlParams) {
+    const fromUrl = parseBoolOption(urlParams.get('toolbar'));
+    if (fromUrl != null) return fromUrl;
+    const fromOpt = parseBoolOption(options.toolbar);
+    return fromOpt != null ? fromOpt : false;
+}
+
+/**
  * Resolve the perspective camera's vertical FOV (degrees) at construction.
  *
  * Precedence — URL `fov` query param > `fov` option > hard default — mirroring
@@ -2416,15 +2514,7 @@ function resolveLightingDefaults(options, urlParams) {
         const n = typeof raw === 'number' ? raw : parseFloat(raw);
         return Number.isFinite(n) ? n : null;
     };
-    /** @type {(raw: (string|null|number|boolean|undefined)) => (boolean|null)} */
-    const parseBool = (raw) => {
-        if (raw === null || raw === undefined || raw === '') return null;
-        if (typeof raw === 'boolean') return raw;
-        const s = String(raw).toLowerCase();
-        if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
-        if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
-        return null;
-    };
+    const parseBool = parseBoolOption;
     /** @type {(raw: (string|null|undefined)) => (string|null)} */
     const parseToneMapping = (raw) => {
         if (raw === null || raw === undefined || raw === '') return null;
@@ -9303,6 +9393,10 @@ class ThreeJSViewer {
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
 
+        // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
+        this._toolbarVisible = resolveToolbarVisible(options, urlParams);
+        this._menuOpen = false;
+
         // State
         this._objects = new Map();
         this._mixers = new Map();
@@ -9488,6 +9582,7 @@ class ThreeJSViewer {
 
         // Cache DOM refs
         this._cacheElements();
+        this.setToolbarVisible(this._toolbarVisible);
 
         // Init Three.js
         this._initThreeJS();
@@ -9533,11 +9628,20 @@ class ThreeJSViewer {
     _cacheElements() {
         /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
+        this._toolbarEl = q('.tjsv-toolbar');
+        this._btnMenu = q('.tjsv-btn-menu');
+        this._menuEl = q('.tjsv-menu');
         this._statusDot = q('.tjsv-status-dot');
         this._statusText = q('.tjsv-status-text');
         this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
         this._btnClip = q('.tjsv-btn-clip');
         this._btnLighting = q('.tjsv-btn-lighting');
+        this._btnProjection = q('.tjsv-btn-projection');
+        this._btnWireframe = q('.tjsv-btn-wireframe');
+        this._btnShading = q('.tjsv-btn-shading');
+        this._btnFog = q('.tjsv-btn-fog');
+        this._btnEdl = q('.tjsv-btn-edl');
+        this._btnFrame = q('.tjsv-btn-frame');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._lightingPanelEl = q('.tjsv-lighting-panel');
         this._lightingExposureSlider = q('.tjsv-lighting-exposure');
@@ -10563,7 +10667,10 @@ class ThreeJSViewer {
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
-        this._btnLighting.addEventListener('click', () => this._toggleLightingPanel());
+        this._btnLighting.addEventListener('click', () => {
+            this._toggleLightingPanel();
+            this._updateMenuState();
+        });
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
 
         this._lightingToneMappingSelect.addEventListener('change', () => {
@@ -10620,13 +10727,11 @@ class ThreeJSViewer {
      */
     _updateOrbitModeButton() {
         const isFree = this._orbitMode === 'free';
-        if (this._btnOrbitMode) {
-            this._btnOrbitMode.classList.toggle('active', isFree);
-            this._btnOrbitMode.textContent = '\u27F3 R';
-            this._btnOrbitMode.title = isFree
-                ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
-                : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
-        }
+        this._btnOrbitMode.classList.toggle('active', isFree);
+        setMenuState(this._btnOrbitMode, isFree ? 'free' : 'turntable');
+        this._btnOrbitMode.title = isFree
+            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
+            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
         const btn = this._viewOrbitBtn;
         if (btn) {
             btn.classList.toggle('free', isFree);
@@ -12088,6 +12193,9 @@ class ThreeJSViewer {
             title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
         }
         this._btnTrack.title = title;
+        setMenuState(this._btnTrack, this._trackMode === 'off' ? 'off'
+            : this._trackMode === 'scripted' ? 'scripted'
+            : `${this._trackMode}: ${this._trackTargetId || ''}`);
     }
 
     /** @param {number} frameIndex @param {number} [frameIndexNext] @param {number} [t] */
@@ -12401,12 +12509,31 @@ class ThreeJSViewer {
     // ========== Events ==========
 
     _bindEvents() {
+        // Menu button + dropdown. Every item runs the same action as its
+        // keyboard shortcut and then refreshes the state labels.
+        this._btnMenu.addEventListener('click', () => this._setMenuOpen(!this._menuOpen));
+        /** @type {(btn: HTMLElement, action: () => void) => void} */
+        const item = (btn, action) => btn.addEventListener('click', () => {
+            action();
+            this._updateMenuState();
+        });
         // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        this._btnOrbitMode.addEventListener('click', () => this._toggleOrbitMode());
-
-        // Clip button
-        this._btnClip.addEventListener('click', () => this._toggleClipPanel());
+        item(this._btnOrbitMode, () => this._toggleOrbitMode());
+        item(this._btnClip, () => this._toggleClipPanel());
+        item(this._btnProjection, () => this._switchCamera(!this._isOrtho));
+        item(this._btnWireframe, () => this._shading.cycleWireframe());
+        item(this._btnShading, () => this._shading.cycleShading());
+        item(this._btnFog, () => this._depthCue.toggleFog());
+        item(this._btnEdl, () => this._depthCue.toggleEdl());
+        item(this._btnFrame, () => this.resetView());
+        // A pointerdown anywhere outside the toolbar closes the menu.
+        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
+            if (this._menuOpen && !this._toolbarEl.contains(/** @type {Node} */ (e.target))) {
+                this._setMenuOpen(false);
+            }
+        };
+        document.addEventListener('pointerdown', this._onDocPointerDown);
 
         // Lighting panel
         this._initLightingPanelUI();
@@ -12480,7 +12607,10 @@ class ThreeJSViewer {
             this._animationLoop = !this._animationLoop;
             this._btnLoop.classList.toggle('active', this._animationLoop);
         });
-        this._btnTrack.addEventListener('click', () => this._cycleTrackMode());
+        this._btnTrack.addEventListener('click', () => {
+            this._cycleTrackMode();
+            this._updateMenuState();
+        });
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
@@ -12538,6 +12668,12 @@ class ThreeJSViewer {
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
             if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
+            if (this._menuOpen) {
+                if (e.code === 'Escape') { this._setMenuOpen(false); return; }
+                // Shortcuts keep working with the menu open; refresh its labels
+                // after the handler below has run.
+                queueMicrotask(() => this._updateMenuState());
+            }
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
@@ -14479,6 +14615,9 @@ class ThreeJSViewer {
             case 'set_view':
                 this.setView(data.name, { animate: data.animate !== false });
                 break;
+            case 'set_toolbar':
+                this.setToolbarVisible(data.visible !== false);
+                break;
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
@@ -15825,6 +15964,52 @@ class ThreeJSViewer {
     }
 
     /**
+     * Show or hide the top-right menu button (the `tjsv-toolbar`). Hidden by
+     * default so a bare viewer has no chrome besides the gimbal; the Python
+     * side flips it with `set_toolbar_visible()` (WS `set_toolbar`) or the
+     * `toolbar=` launch kwarg. Hiding also closes an open menu. Keyboard
+     * shortcuts work regardless.
+     * @param {boolean} visible
+     */
+    setToolbarVisible(visible) {
+        this._toolbarVisible = !!visible;
+        this._toolbarEl.hidden = !this._toolbarVisible;
+        if (!this._toolbarVisible) this._setMenuOpen(false);
+    }
+
+    /** @returns {boolean} */
+    isToolbarVisible() { return this._toolbarVisible; }
+
+    /** @param {boolean} open */
+    _setMenuOpen(open) {
+        this._menuOpen = !!open && this._toolbarVisible;
+        this._menuEl.hidden = !this._menuOpen;
+        this._btnMenu.classList.toggle('active', this._menuOpen);
+        this._btnMenu.setAttribute('aria-expanded', String(this._menuOpen));
+        if (this._menuOpen) this._updateMenuState();
+    }
+
+    /** Refresh the active marks and state labels of the menu items. */
+    _updateMenuState() {
+        if (!this._menuEl) return;
+        this._btnClip.classList.toggle('active', !!this._clipEnabled);
+        this._btnLighting.classList.toggle('active',
+            this._lightingPanelEl.classList.contains('visible'));
+        this._btnProjection.classList.toggle('active', !!this._isOrtho);
+        setMenuState(this._btnProjection, this._isOrtho ? 'orthographic' : 'perspective');
+        const wf = this._shading?.wireframeMode ?? 0;
+        this._btnWireframe.classList.toggle('active', wf !== 0);
+        setMenuState(this._btnWireframe, ['off', 'wire', 'solid + wire'][wf]);
+        const sh = this._shading?.shadingMode ?? 0;
+        this._btnShading.classList.toggle('active', sh !== 0);
+        setMenuState(this._btnShading, ['off', 'normals', 'UV checker', 'normal lines'][sh]);
+        this._btnFog.classList.toggle('active', !!this._depthCue?.fogActive);
+        this._btnEdl.classList.toggle('active', !!this._depthCue?.edlActive);
+        this._updateOrbitModeButton();
+        this._updateTrackingUI();
+    }
+
+    /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
      * translate), Shift to snap. With `clickSelect` (default) clicking an object
      * attaches the gizmo to it; pass `id` to attach immediately. With
@@ -15989,6 +16174,7 @@ class ThreeJSViewer {
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
+        document.removeEventListener('pointerdown', this._onDocPointerDown);
         this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
         window.removeEventListener('pointerup', this._onObjectClickUp);
         window.removeEventListener('pointercancel', this._onObjectClickCancel);
