@@ -68,6 +68,8 @@
     gap: 6px;
 }
 .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); }
+/* The viewer's own tab: the status dot alone, no label */
+.threejs-viewer .tjsv-rail-panel > .tjsv-btn-menu { padding: 8px 5px; }
 .threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
 .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
 .threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
