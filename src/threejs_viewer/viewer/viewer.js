@@ -8473,8 +8473,11 @@ export class ThreeJSViewer {
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
         this._gizmoDim = 128;
-        this._gizmoBaseScale = 1.4;
-        this._gizmoHoverScale = 1.75;
+        // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair; arms and
+        // bubble distance at stock length (1.3 read as too long on review).
+        this._gizmoBaseScale = 1.12;
+        this._gizmoHoverScale = 1.4;
+        this._gizmoArmScale = 1.0;
         this._gizmoHoverRaycaster = new THREE.Raycaster();
         this._gizmoHoverOrthoCam = new THREE.OrthographicCamera(-2, 2, 2, -2, 0, 4);
         this._gizmoHoverOrthoCam.position.set(0, 0, 2);
@@ -11078,14 +11081,14 @@ export class ThreeJSViewer {
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
-        // Home button: sits centered in the ViewHelper area and resets the view.
+        // Home button: bottom of the ISO / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
                 this.resetView();
                 this._viewHomeBtn.blur();
             });
         }
-        // ISO button: corner of the ViewHelper area; snaps to the isometric
+        // ISO button: top of the ISO / P / Home stack left of the gimbal; snaps to the isometric
         // view (the axis bubbles cover the six orthogonal views).
         if (this._viewIsoBtn) {
             this._viewIsoBtn.addEventListener('click', () => {
@@ -13594,17 +13597,28 @@ export class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
-     * Enlarge the ViewHelper's axis sprites so they have a bigger hit target
-     * and a more visible cue. Baseline opacity is captured for the hover
-     * restore. Called once per ViewHelper instance — the helper is re-created
-     * on every perspective/ortho swap.
+     * Restyle the stock ViewHelper after construction: the axis sprites get
+     * the viewer's bubble size (a bigger hit target and a clearer cue than
+     * stock) and are pushed out along their axis, and the three arm meshes are
+     * stretched along their own length by _gizmoArmScale. The arms share one
+     * x-oriented cylinder that each mesh rotates into place, so a local
+     * scale.x stretches every arm along itself. Baseline opacity is captured
+     * for the hover restore. _gizmoHitTest raycasts the live sprites through
+     * a mirror of the helper's ortho camera, so it follows these edits.
+     * Called once per ViewHelper instance (re-created on every persp/ortho
+     * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
         for (const child of helper.children) {
-            if (!child.userData || !child.userData.type) continue;
+            if (!child.userData || !child.userData.type) {
+                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                continue;
+            }
             child.scale.setScalar(this._gizmoBaseScale);
+            // Stock sprites sit on the unit axis; keep them at the arm tips.
+            child.position.normalize().multiplyScalar(this._gizmoArmScale);
             child.userData.baseOpacity = child.material.opacity;
             sprites.push(child);
         }
@@ -13618,7 +13632,7 @@ export class ThreeJSViewer {
      * framing) — with a short eased tween, and sets an axis-appropriate up
      * vector (top/bottom get +Y up so the view doesn't roll unpredictably).
      * Works with both the perspective and the orthographic camera. Also the
-     * implementation behind gimbal axis-bubble clicks, the ISO corner button,
+     * implementation behind gimbal axis-bubble clicks, the ISO stack button,
      * and the `set_view` WS message.
      * @param {string} name
      * @param {{animate?: boolean}} [opts] `animate: false` jumps immediately.
@@ -13781,7 +13795,7 @@ export class ThreeJSViewer {
 
     /**
      * Push the toolbar's current height into both the cache (hit-test +
-     * render shim) and the --tjsv-anim-lift CSS var (Home button).
+     * render shim) and the --tjsv-anim-lift CSS var (ISO / P / Home stack).
      * display:none yields 0, which matches the "toolbar hidden" state.
      * Called on show/hide (no arg → reads offsetHeight to flush layout and
      * get the post-transition height synchronously) and from the

@@ -2700,6 +2700,107 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
     assert abs(color["g"] - 1.0) < 1e-3, color
 
 
+# --- ISO / P / Home button stack (issue #190) ---
+
+
+@pytest.mark.browser
+def test_view_buttons_stack_left_of_gimbal(viewer_client, viewer_page):
+    """ISO, P and Home sit in one vertical column left of the axis-bubble
+    cluster, top to bottom, all the same size. Home used to be centred in
+    the 128x128 ViewHelper square, in the middle of the six axis bubbles.
+    The column may overlap the square's outer margin (the bubbles orbit its
+    centre), so the guard is the square's left quarter, not its edge."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const rect = (sel) => {
+                const b = v.el.querySelector(sel).getBoundingClientRect();
+                return {left: b.left, right: b.right, top: b.top,
+                        bottom: b.bottom, width: b.width, height: b.height};
+            };
+            const dom = v._renderer.domElement.getBoundingClientRect();
+            const dim = v._gizmoDim;
+            return {
+                iso: rect('.tjsv-view-iso'),
+                proj: rect('.tjsv-view-proj'),
+                home: rect('.tjsv-view-home'),
+                gimbal: {left: dom.right - dim, top: dom.bottom - dim,
+                         right: dom.right, bottom: dom.bottom},
+            };
+        }"""
+    )
+    iso, proj, home, gimbal = r["iso"], r["proj"], r["home"], r["gimbal"]
+    for name, b in (("iso", iso), ("proj", proj), ("home", home)):
+        assert abs(b["width"] - 28) < 1 and abs(b["height"] - 28) < 1, (name, b)
+        clear_of_bubbles = gimbal["left"] + (gimbal["right"] - gimbal["left"]) / 4
+        assert b["right"] <= clear_of_bubbles, f"{name} reaches the bubbles: {r}"
+        assert b["bottom"] <= gimbal["bottom"] + 1, f"{name} below the gimbal: {r}"
+    # One column: same left edge, ordered ISO above P above Home, no overlap.
+    assert (
+        abs(iso["left"] - proj["left"]) < 1 and abs(proj["left"] - home["left"]) < 1
+    ), r
+    assert iso["bottom"] <= proj["top"] + 1, r
+    assert proj["bottom"] <= home["top"] + 1, r
+    # Vertically centred on the gimbal square, level with the bubble cluster.
+    column_mid = (iso["top"] + home["bottom"]) / 2
+    gimbal_mid = (gimbal["top"] + gimbal["bottom"]) / 2
+    assert abs(column_mid - gimbal_mid) <= 2, (column_mid, gimbal_mid, r)
+
+
+@pytest.mark.browser
+def test_view_gimbal_arms_and_bubbles_restyled(viewer_client, viewer_page):
+    """_configureViewHelper stretches the three arm meshes by _gizmoArmScale,
+    moves the six bubble sprites out to the arm tips and shrinks them to
+    _gizmoBaseScale. The click hit-test raycasts the live sprites, so a
+    synthetic pointer at a bubble's projected screen position must still
+    resolve that bubble after the restyle."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const h = v._viewHelper;
+            const arms = h.children.filter(
+                (c) => c.isMesh && !(c.userData && c.userData.type));
+            const sprites = h.userData.interactiveSprites;
+            // Project the posX bubble the way ViewHelper.render does: the
+            // helper's quaternion is the inverse camera rotation, and the
+            // stock ortho camera spans -2..2 over the dim x dim viewport.
+            const s = sprites.find((o) => o.userData.type === 'posX');
+            const p = s.position.clone().applyQuaternion(h.quaternion);
+            const dom = v._renderer.domElement.getBoundingClientRect();
+            const dim = v._gizmoDim;
+            const lift = v._gizmoLiftCss();
+            const clientX = dom.right - dim + ((p.x + 2) / 4) * dim;
+            const clientY = dom.bottom - dim - lift + ((2 - p.y) / 4) * dim;
+            const hit = v._gizmoHitTest({clientX, clientY});
+            return {
+                armScales: arms.map((a) => [a.scale.x, a.scale.y, a.scale.z]),
+                spriteDist: sprites.map((o) => o.position.length()),
+                spriteScale: sprites.map((o) => o.scale.x),
+                armScale: v._gizmoArmScale,
+                baseScale: v._gizmoBaseScale,
+                insideRect: hit.insideRect,
+                hitType: hit.hit ? hit.hit.userData.type : null,
+                projected: [p.x, p.y],
+            };
+        }"""
+    )
+    assert r["armScale"] == pytest.approx(1.0)
+    assert r["baseScale"] == pytest.approx(1.12)
+    assert len(r["armScales"]) == 3, r
+    for sx, sy, sz in r["armScales"]:
+        assert (sx, sy, sz) == pytest.approx((1.0, 1.0, 1.0)), r
+    assert len(r["spriteDist"]) == 6, r
+    assert r["spriteDist"] == pytest.approx([1.0] * 6), r
+    assert r["spriteScale"] == pytest.approx([1.12] * 6), r
+    # The bubble stays inside the helper's +-2 ortho frustum.
+    assert max(abs(c) for c in r["projected"]) + 0.56 < 2, r
+    assert r["insideRect"] and r["hitType"] == "posX", r
+
+
 # --- ViewHelper setViewport shim regression ---
 
 
