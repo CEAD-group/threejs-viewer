@@ -2700,6 +2700,157 @@ def test_update_polyline_colors_flips_material_when_no_initial_colors(
     assert abs(color["g"] - 1.0) < 1e-3, color
 
 
+# --- Orbit / P / Home button stack (issue #190) ---
+
+
+@pytest.mark.browser
+def test_view_buttons_stack_left_of_gimbal(viewer_client, viewer_page):
+    """Orbit mode, P and Home sit in one vertical column left of the axis-bubble
+    cluster, top to bottom, all the same size. Home used to be centred in
+    the 128x128 ViewHelper square, in the middle of the six axis bubbles.
+    The column may overlap the square's outer margin (the bubbles orbit its
+    centre), so the guard is the square's left quarter, not its edge."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const rect = (sel) => {
+                const b = v.el.querySelector(sel).getBoundingClientRect();
+                return {left: b.left, right: b.right, top: b.top,
+                        bottom: b.bottom, width: b.width, height: b.height};
+            };
+            const dom = v._renderer.domElement.getBoundingClientRect();
+            const dim = v._gizmoDim;
+            return {
+                orbit: rect('.tjsv-view-orbit'),
+                proj: rect('.tjsv-view-proj'),
+                home: rect('.tjsv-view-home'),
+                gimbal: {left: dom.right - dim, top: dom.bottom - dim,
+                         right: dom.right, bottom: dom.bottom},
+            };
+        }"""
+    )
+    orbit, proj, home, gimbal = r["orbit"], r["proj"], r["home"], r["gimbal"]
+    for name, b in (("orbit", orbit), ("proj", proj), ("home", home)):
+        assert abs(b["width"] - 28) < 1 and abs(b["height"] - 28) < 1, (name, b)
+        clear_of_bubbles = gimbal["left"] + (gimbal["right"] - gimbal["left"]) / 4
+        assert b["right"] <= clear_of_bubbles, f"{name} reaches the bubbles: {r}"
+        assert b["bottom"] <= gimbal["bottom"] + 1, f"{name} below the gimbal: {r}"
+    # One column: same left edge, ordered orbit above P above Home, no overlap.
+    assert (
+        abs(orbit["left"] - proj["left"]) < 1 and abs(proj["left"] - home["left"]) < 1
+    ), r
+    assert orbit["bottom"] <= proj["top"] + 1, r
+    assert proj["bottom"] <= home["top"] + 1, r
+    # Vertically centred on the gimbal square, level with the bubble cluster.
+    column_mid = (orbit["top"] + home["bottom"]) / 2
+    gimbal_mid = (gimbal["top"] + gimbal["bottom"]) / 2
+    assert abs(column_mid - gimbal_mid) <= 2, (column_mid, gimbal_mid, r)
+
+
+@pytest.mark.browser
+def test_orbit_button_toggles_mode(viewer_client, viewer_page):
+    """The orbit-mode button at the top of the stack flips turntable <-> free
+    like the R key, and always shows the current mode (data-mode, `.free`
+    accent, tooltip, and which glyph is displayed). The R key drives the same
+    indicator, so a keyboard flip updates the button too."""
+    frames(viewer_page)
+
+    def snap():
+        return viewer_page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                const b = v.el.querySelector('.tjsv-view-orbit');
+                const shown = (sel) =>
+                    getComputedStyle(b.querySelector(sel)).display !== 'none';
+                return {
+                    mode: v._orbitMode,
+                    data: b.dataset.mode,
+                    free: b.classList.contains('free'),
+                    title: b.title,
+                    turntableGlyph: shown('.tjsv-orbit-glyph-turntable'),
+                    freeGlyph: shown('.tjsv-orbit-glyph-free'),
+                };
+            }"""
+        )
+
+    start = snap()
+    assert start["mode"] == start["data"]
+    assert start["free"] == (start["mode"] == "free")
+    assert start["turntableGlyph"] != start["freeGlyph"]
+
+    viewer_page.click(".tjsv-view-orbit")
+    after_click = snap()
+    assert after_click["mode"] != start["mode"]
+    assert after_click["data"] == after_click["mode"]
+    assert after_click["free"] == (after_click["mode"] == "free")
+    assert after_click["turntableGlyph"] == (after_click["mode"] == "turntable")
+    assert after_click["freeGlyph"] == (after_click["mode"] == "free")
+    assert after_click["title"] != start["title"]
+    expected_word = "Free" if after_click["mode"] == "free" else "Turntable"
+    assert after_click["title"].startswith(f"Orbit: {expected_word}")
+
+    _press_key(viewer_page, "KeyR")
+    after_key = snap()
+    assert after_key["mode"] == start["mode"]
+    assert after_key["data"] == start["data"]
+    assert after_key["free"] == start["free"]
+    assert after_key["title"] == start["title"]
+
+
+@pytest.mark.browser
+def test_view_gimbal_arms_and_bubbles_restyled(viewer_client, viewer_page):
+    """_configureViewHelper stretches the three arm meshes by _gizmoArmScale,
+    moves the six bubble sprites out to the arm tips and shrinks them to
+    _gizmoBaseScale. The click hit-test raycasts the live sprites, so a
+    synthetic pointer at a bubble's projected screen position must still
+    resolve that bubble after the restyle."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const h = v._viewHelper;
+            const arms = h.children.filter(
+                (c) => c.isMesh && !(c.userData && c.userData.type));
+            const sprites = h.userData.interactiveSprites;
+            // Project the posX bubble the way ViewHelper.render does: the
+            // helper's quaternion is the inverse camera rotation, and the
+            // stock ortho camera spans -2..2 over the dim x dim viewport.
+            const s = sprites.find((o) => o.userData.type === 'posX');
+            const p = s.position.clone().applyQuaternion(h.quaternion);
+            const dom = v._renderer.domElement.getBoundingClientRect();
+            const dim = v._gizmoDim;
+            const lift = v._gizmoLiftCss();
+            const clientX = dom.right - dim + ((p.x + 2) / 4) * dim;
+            const clientY = dom.bottom - dim - lift + ((2 - p.y) / 4) * dim;
+            const hit = v._gizmoHitTest({clientX, clientY});
+            return {
+                armScales: arms.map((a) => [a.scale.x, a.scale.y, a.scale.z]),
+                spriteDist: sprites.map((o) => o.position.length()),
+                spriteScale: sprites.map((o) => o.scale.x),
+                armScale: v._gizmoArmScale,
+                baseScale: v._gizmoBaseScale,
+                insideRect: hit.insideRect,
+                hitType: hit.hit ? hit.hit.userData.type : null,
+                projected: [p.x, p.y],
+            };
+        }"""
+    )
+    assert r["armScale"] == pytest.approx(1.0)
+    assert r["baseScale"] == pytest.approx(1.12)
+    assert len(r["armScales"]) == 3, r
+    for sx, sy, sz in r["armScales"]:
+        assert (sx, sy, sz) == pytest.approx((1.0, 1.0, 1.0)), r
+    assert len(r["spriteDist"]) == 6, r
+    assert r["spriteDist"] == pytest.approx([1.0] * 6), r
+    assert r["spriteScale"] == pytest.approx([1.12] * 6), r
+    # The bubble stays inside the helper's +-2 ortho frustum.
+    assert max(abs(c) for c in r["projected"]) + 0.56 < 2, r
+    assert r["insideRect"] and r["hitType"] == "posX", r
+
+
 # --- ViewHelper setViewport shim regression ---
 
 
@@ -3790,6 +3941,35 @@ def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
 
     assert x1 > x0 + 0.1, f"box did not move in +X ({x0} -> {x1})"
     assert moves[-1]["id"] == "box"
+
+
+@pytest.mark.browser
+def test_move_gizmo_palette_matches_view_helper(viewer_client, viewer_page):
+    """The gizmo handles use three's ViewHelper axis colours (issue #191), so
+    the X / Y / Z arrows and the corner-gimbal bubbles agree on what each
+    axis looks like. Read off the lit arrow materials after a rendered
+    frame, so the per-frame restyle has already run."""
+    viewer_client.add_box("box")
+    settle(viewer_client)  # WS barrier: the box is registered before the attach
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
+    )
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const arrows = window.threejsViewer._transformGizmo.control
+                ._gizmo.gizmo.translate.children;
+            const hex = (name) => {
+                const o = arrows.find((c) => c.name === name && c.userData.__litArrow);
+                return o ? o.material.color.getHex() : null;
+            };
+            return { x: hex('X'), y: hex('Y'), z: hex('Z') };
+        }"""
+    )
+    # three r183 ViewHelper.js axis colours.
+    assert (r["x"], r["y"], r["z"]) == (0xFF4466, 0x88FF44, 0x4488FF), r
 
 
 @pytest.mark.browser
@@ -5858,17 +6038,18 @@ def test_gizmo_axis_click_keeps_zoom(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
-    """The ISO corner button is a true isometric: orthographic projection down
-    the (1,-1,1) direction, snapped under the same auto-projection rule as the
-    axis bubbles (orbiting away returns to perspective). The old ortho toolbar
-    toggle stays removed."""
+def test_iso_snap_is_true_isometric(viewer_client, viewer_page):
+    """The iso snap is a true isometric: orthographic projection down the
+    (1,-1,1) direction, under the same auto-projection rule as the axis
+    bubbles (orbiting away returns to perspective). It has no button since the
+    orbit-mode toggle took its slot; `_snapOrthoAxisView('iso')` stays the
+    programmatic path. The old ortho toolbar toggle stays removed."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
         "() => {"
         " const v = window.threejsViewer;"
-        " v._viewIsoBtn.click();"
+        " v._snapOrthoAxisView('iso');"
         " const afterIso = { ortho: v._isOrtho, snap: v._gizmoAxisView };"
         " const orig = v._controls.isDragging;"
         " v._controls.isDragging = () => true;"
@@ -5880,7 +6061,7 @@ def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
         "}"
     )
     assert result["afterIso"] == {"ortho": True, "snap": "iso"}, (
-        "ISO must snap into an orthographic isometric"
+        "iso must snap into an orthographic isometric"
     )
     assert result["orthoAfterOrbit"] is False, "orbiting away returns to perspective"
     assert result["toolbarOrtho"] is False, "ortho toolbar toggle removed"
@@ -6638,3 +6819,103 @@ def test_wheel_zoom_with_cursor_on_target_is_pure_dolly(viewer_client, viewer_pa
         "}"
     )
     assert moved is False
+_WORLD_POS_JS = """(id) => {
+    const o = window.threejsViewer.getObject(id);
+    if (!o) return null;
+    o.updateWorldMatrix(true, false);
+    const e = o.matrixWorld.elements;
+    return { local: o.position.toArray(), world: [e[12], e[13], e[14]] };
+}"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"fat": False}, {"segments": True}],
+    ids=["fat", "native", "segments"],
+)
+def test_add_polyline_applies_transform(viewer_client, viewer_page, kwargs):
+    """add_polyline_binary honours data.transform on all three line variants
+    (issue #194): the polyline lands at the requested pose, not the origin."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
+    viewer_client.add_polyline("pl", pts, position=[5, 6, 7], **kwargs)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got is not None
+    assert got["local"] == pytest.approx([5, 6, 7])
+    assert got["world"] == pytest.approx([5, 6, 7])
+
+
+@pytest.mark.browser
+def test_add_polyline_applies_matrix_under_parent(viewer_client, viewer_page):
+    """A matrix transform composes under a transformed parent group."""
+    viewer_client.add_group("g", position=[10, 0, 0])
+    pts = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+    mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1]
+    viewer_client.add_polyline("pl", pts, parent="g", matrix=mat)
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pl")
+    assert got["local"] == pytest.approx([1, 2, 3])
+    assert got["world"] == pytest.approx([11, 2, 3])
+
+
+@pytest.mark.browser
+def test_add_points_applies_transform(viewer_client, viewer_page):
+    """add_points_binary honours data.transform (same omission as #194)."""
+    pts = np.random.default_rng(1).random((100, 3)).astype(np.float32)
+    viewer_client.add_points("pc", pts, position=[3, 4, 5])
+    settle(viewer_client)
+    got = viewer_page.evaluate(_WORLD_POS_JS, "pc")
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_add_points_lod_applies_transform(viewer_client, viewer_page):
+    """add_points_lod honours data.transform on the octree group."""
+    pts = np.random.default_rng(2).random((5000, 3)).astype(np.float32)
+    viewer_client.add_points(
+        "cloud", pts, lod={"node_capacity": 1000}, position=[3, 4, 5]
+    )
+    got = None
+    for _ in range(100):
+        time.sleep(0.05)
+        got = viewer_page.evaluate(_WORLD_POS_JS, "cloud")
+        if got is not None:
+            break
+    assert got is not None
+    assert got["world"] == pytest.approx([3, 4, 5])
+
+
+@pytest.mark.browser
+def test_points_lod_nonuniform_scale_uses_max_component(viewer_client, viewer_page):
+    """A LOD cloud scaled [1, 1, 4] must refine exactly like one scaled
+    [4, 4, 4]: the node-size estimate bounds the radius by the largest scale
+    component, so the stretched axis never stops refinement early. Under
+    ortho the estimate ignores camera position, so the wanted sets compare
+    exactly."""
+    pts = np.random.default_rng(5).random((20_000, 3)).astype(np.float32)
+    lod = {"node_capacity": 1000, "point_budget": 1_000_000, "refine_pixels": 100}
+    for cid, scale in (("s111", [1, 1, 1]), ("s114", [1, 1, 4]), ("s444", [4, 4, 4])):
+        viewer_client.add_points(cid, pts, lod=lod, scale=scale)
+    viewer_page.evaluate("() => window.threejsViewer._camController.switch(true)")
+    wanted = None
+    for _ in range(100):
+        time.sleep(0.05)
+        wanted = viewer_page.evaluate(
+            "() => {"
+            " const out = {};"
+            " for (const id of ['s111', 's114', 's444']) {"
+            "   const g = window.threejsViewer._objects.get(id);"
+            "   if (!g || !g.userData.pointsLOD) return null;"
+            "   out[id] = g.userData.pointsLOD.wanted.reduce((a, b) => a + b, 0);"
+            " }"
+            " return out;"
+            "}"
+        )
+        if wanted and wanted["s444"] > 1 and wanted["s114"] == wanted["s444"]:
+            break
+    assert wanted, "LOD clouds never appeared"
+    assert wanted["s444"] > 1, f"scaled cloud never refined past the root: {wanted}"
+    assert wanted["s114"] == wanted["s444"], wanted
+    assert wanted["s111"] < wanted["s444"], wanted
