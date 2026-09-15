@@ -896,6 +896,18 @@ class ViewerControls extends THREE.EventDispatcher {
     }
 
     /**
+     * True only during an orbit drag, never during a pan. Reads the
+     * `_dragMode` snapshot taken at pointerdown (set for a rotate drag,
+     * including the Alt-flipped mode, and cleared at pointerup) so the
+     * answer is fixed for the whole stroke. The auto-ortho exit after a
+     * gizmo snap gates on this: a pan keeps the axis-aligned view, so it
+     * must keep the orthographic projection too (issue #193).
+     */
+    isOrbiting() {
+        return this._state === STATE.ROTATE && this._dragMode !== null;
+    }
+
+    /**
      * Drop any pending damped rotation/pan inertia (the tail of a just-
      * finished drag). Programmatic camera moves (setView) call this so
      * residual deltas — which update() keeps bleeding into the camera every
@@ -9609,15 +9621,17 @@ class ThreeJSViewer {
         });
         this._controls.addEventListener('change', () => {
             this._lodDirty = true;
-            // An orbit/pan drag breaks the clean axis snap, so a later re-click
-            // of a bubble starts fresh (no accidental flip). Gate on isDragging()
-            // so a plain click-to-pivot — which fires 'change' but keeps the
-            // camera looking straight down the snapped axis — preserves the snap.
+            // An orbit drag breaks the clean axis snap, so a later re-click
+            // of a bubble starts fresh (no accidental flip). Gate on isOrbiting()
+            // rather than isDragging() (issue #193): a pan, a wheel zoom, and a
+            // plain click-to-pivot all fire 'change' but keep the camera looking
+            // straight down the snapped axis, so they preserve both the snap
+            // (a re-click still flips) and the projection.
             // Auto-projection: if the snap had auto-entered ortho, orbiting away
             // is exactly the moment ortho stops being what you want — return to
             // perspective (Blender's "auto perspective"). A manual `O` ortho
             // (_orthoAutoEntered false) is never auto-exited.
-            if (this._controls.isDragging() && this._gizmoAxisView) {
+            if (this._controls.isOrbiting() && this._gizmoAxisView) {
                 this._gizmoAxisView = null;
                 if (this._orthoAutoEntered) this._switchCamera(false);
             }
@@ -9767,7 +9781,8 @@ class ThreeJSViewer {
         this._gizmoHovered = null;
         // The axis view the gizmo is currently snapped to (issue #514). Set when
         // an axis bubble click switches to that ortho view; cleared when the
-        // user orbits or leaves ortho. Re-clicking the same bubble flips it.
+        // user orbits or leaves ortho (a pan keeps it). Re-clicking the same
+        // bubble flips it.
         /** @type {string | null} */
         this._gizmoAxisView = null;
         // True while the current ortho projection was entered BY a bubble

@@ -6000,10 +6000,10 @@ def test_iso_button_snaps_true_isometric(viewer_client, viewer_page):
         " const v = window.threejsViewer;"
         " v._viewIsoBtn.click();"
         " const afterIso = { ortho: v._isOrtho, snap: v._gizmoAxisView };"
-        " const orig = v._controls.isDragging;"
-        " v._controls.isDragging = () => true;"
+        " const orig = v._controls.isOrbiting;"
+        " v._controls.isOrbiting = () => true;"
         " v._controls.dispatchEvent({ type: 'change' });"
-        " v._controls.isDragging = orig;"
+        " v._controls.isOrbiting = orig;"
         " const orthoAfterOrbit = v._isOrtho;"
         " const toolbarOrtho = !!document.querySelector('.tjsv-btn-ortho');"
         " return { afterIso, orthoAfterOrbit, toolbarOrtho };"
@@ -6026,10 +6026,10 @@ def test_auto_projection_orbit_returns_to_perspective(viewer_client, viewer_page
         "() => {"
         " const v = window.threejsViewer;"
         " const fakeDrag = () => {"
-        "   const orig = v._controls.isDragging;"
-        "   v._controls.isDragging = () => true;"
+        "   const orig = v._controls.isOrbiting;"
+        "   v._controls.isOrbiting = () => true;"
         "   v._controls.dispatchEvent({ type: 'change' });"
-        "   v._controls.isDragging = orig;"
+        "   v._controls.isOrbiting = orig;"
         " };"
         " v._gizmoAxisClick('top');"  # auto-enters ortho
         " const orthoSnapped = v._isOrtho;"
@@ -6079,7 +6079,7 @@ def test_projection_button_indicates_and_toggles(viewer_client, viewer_page):
 def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page):
     """The gizmo axis snap is preserved through a plain click-to-pivot (a
     controls 'change' fired while not dragging) so a re-click still flips, but
-    an actual orbit/pan drag ('change' while dragging) clears it (#514)."""
+    an actual orbit drag ('change' while orbiting) clears it (#514)."""
     viewer_client.add_box("b")
     assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
     result = viewer_page.evaluate(
@@ -6095,11 +6095,12 @@ def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page
         " v._gizmoAxisClick('front');"  # snap preserved -> flip
         " const afterReclick = v._gizmoAxisView;"
         " v._gizmoAxisClick('front');"  # from 'back' -> 'front'
-        # orbit drag: controls emit 'change' while dragging (state != NONE).
-        " c._state = 1;"
+        # orbit drag: controls emit 'change' while in the ROTATE state with the
+        # pointerdown mode snapshot taken.
+        " c._state = 1; c._dragMode = c.mode;"
         " c.dispatchEvent({ type: 'change' });"
         " const afterOrbit = v._gizmoAxisView;"
-        " c._state = 0;"
+        " c._state = 0; c._dragMode = null;"
         " v._gizmoAxisClick('front');"  # snap cleared -> fresh, no flip
         " const afterFreshClick = v._gizmoAxisView;"
         " return { snapped, afterPivot, afterReclick, afterOrbit,"
@@ -6112,6 +6113,121 @@ def test_axis_snap_survives_pivot_but_clears_on_orbit(viewer_client, viewer_page
     assert result["afterOrbit"] is None, "an orbit drag clears the snap"
     assert result["afterFreshClick"] == "front", (
         "a fresh click after an orbit does not flip"
+    )
+
+
+_CANVAS_CENTER_JS = (
+    "() => { const r = window.threejsViewer._renderer.domElement"
+    ".getBoundingClientRect();"
+    " return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }"
+)
+
+_PROJECTION_STATE_JS = (
+    "() => { const v = window.threejsViewer;"
+    " return { ortho: v._isOrtho, snap: v._gizmoAxisView,"
+    "   auto: v._orthoAutoEntered }; }"
+)
+
+
+def _drag_canvas(page, button, steps=8, step_px=10):
+    """Press ``button`` at the canvas centre and drag it rightwards."""
+    c = page.evaluate(_CANVAS_CENTER_JS)
+    page.mouse.move(c["x"], c["y"])
+    page.mouse.down(button=button)
+    for i in range(1, steps + 1):
+        page.mouse.move(c["x"] + i * step_px, c["y"])
+    page.mouse.up(button=button)
+
+
+@pytest.mark.browser
+def test_pan_after_axis_snap_keeps_auto_ortho(viewer_client, viewer_page):
+    """A right-button pan drag after a bubble snap from perspective keeps the
+    orthographic projection and the axis snap, so the view stays axis-aligned
+    and a re-click of the same bubble still flips (#193). A wheel zoom keeps
+    both as well."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    viewer_page.evaluate("() => window.threejsViewer._snapOrthoAxisView('front')")
+    frames(viewer_page)
+    before = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert before == {"ortho": True, "snap": "front", "auto": True}
+
+    _drag_canvas(viewer_page, "right")
+    frames(viewer_page)
+    after_pan = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_pan == {"ortho": True, "snap": "front", "auto": True}, (
+        "a pan must keep the auto-entered ortho and the axis snap"
+    )
+
+    c = viewer_page.evaluate(_CANVAS_CENTER_JS)
+    viewer_page.mouse.move(c["x"], c["y"])
+    viewer_page.mouse.wheel(0, 200)
+    frames(viewer_page)
+    after_wheel = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_wheel == {"ortho": True, "snap": "front", "auto": True}, (
+        "a wheel zoom must keep the auto-entered ortho and the axis snap"
+    )
+
+    flipped = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v._gizmoAxisClick('front');"
+        " return v._gizmoAxisView; }"
+    )
+    assert flipped == "back", "the snap survived the pan, so a re-click flips"
+
+
+@pytest.mark.browser
+def test_orbit_after_axis_snap_returns_to_perspective(viewer_client, viewer_page):
+    """A left-button orbit drag after a bubble snap from perspective returns
+    to perspective and clears the axis snap (#193)."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    viewer_page.evaluate("() => window.threejsViewer._snapOrthoAxisView('front')")
+    frames(viewer_page)
+    assert viewer_page.evaluate(_PROJECTION_STATE_JS) == {
+        "ortho": True,
+        "snap": "front",
+        "auto": True,
+    }
+
+    _drag_canvas(viewer_page, "left")
+    frames(viewer_page)
+    after_orbit = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_orbit == {"ortho": False, "snap": None, "auto": False}, (
+        "an orbit must return to perspective and clear the axis snap"
+    )
+
+
+@pytest.mark.browser
+def test_manual_ortho_survives_orbit_after_axis_snap(viewer_client, viewer_page):
+    """A manual `O` ortho is never auto-exited: a bubble snap taken while
+    already in manual ortho followed by an orbit drag stays orthographic (the
+    projection the user had before the snap), though the snap itself clears."""
+    viewer_client.add_box("b")
+    assert "b" in viewer_client.query_scene()["objects"]  # sync: box is in-scene
+    # The viewer binds its shortcuts on the container, so dispatch there.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.container.dispatchEvent(new KeyboardEvent("
+        "'keydown', { key: 'o', code: 'KeyO', bubbles: true }))"
+    )
+    frames(viewer_page)
+    assert viewer_page.evaluate(_PROJECTION_STATE_JS) == {
+        "ortho": True,
+        "snap": None,
+        "auto": False,
+    }
+    viewer_page.evaluate("() => window.threejsViewer._snapOrthoAxisView('front')")
+    frames(viewer_page)
+    assert viewer_page.evaluate(_PROJECTION_STATE_JS) == {
+        "ortho": True,
+        "snap": "front",
+        "auto": False,
+    }
+
+    _drag_canvas(viewer_page, "left")
+    frames(viewer_page)
+    after_orbit = viewer_page.evaluate(_PROJECTION_STATE_JS)
+    assert after_orbit == {"ortho": True, "snap": None, "auto": False}, (
+        "a manual ortho stays ortho through an orbit; only the snap clears"
     )
 
 
