@@ -439,3 +439,67 @@ class TestVersion:
         from threejs_viewer.client import _is_dev_version
 
         assert not _is_dev_version(version)
+
+
+def test_add_menu_validates_and_records_for_reconnect():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_menu(
+        "demo",
+        label="Demo",
+        items=[
+            {"type": "label", "label": "Scene"},
+            {"type": "eye", "id": "boxes", "label": "Boxes", "prefix": "box_"},
+            {"id": "go", "label": "Go", "shortcut": "G", "bind_key": True},
+            {"type": "select", "id": "size", "options": ["s", "m"], "value": "m"},
+        ],
+    )
+    assert sent[0]["type"] == "add_menu"
+    menu = sent[0]["menu"]
+    assert menu["id"] == "demo" and menu["mode"] == "dropdown"
+    assert menu["items"][2] == {
+        "type": "button",
+        "id": "go",
+        "label": "Go",
+        "shortcut": "G",
+        "bindKey": True,
+    }
+    assert menu["items"][3]["options"] == [{"value": "s"}, {"value": "m"}]
+    assert client._menus["demo"] is sent[0]
+
+    client.update_menu_item("demo", "size", value="s")
+    assert sent[-1] == {
+        "type": "update_menu_item",
+        "menu": "demo",
+        "item": "size",
+        "patch": {"value": "s"},
+    }
+    assert client._menus["demo"]["menu"]["items"][3]["value"] == "s"
+
+    client.remove_menu("demo")
+    assert "demo" not in client._menus
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"id": "viewer", "items": []}, "built-in menu id"),
+        ({"id": "m", "items": [], "placement": "bottom"}, "placement must be"),
+        ({"id": "m", "items": [], "mode": "rail"}, "mode must be"),
+        ({"id": "m", "items": [{"type": "toggle"}]}, "needs an 'id'"),
+        ({"id": "m", "items": [{"type": "slider", "id": "x"}]}, "item type must be"),
+    ],
+)
+def test_add_menu_rejects_bad_specs(kwargs, match):
+    client = ViewerClient()
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match=match):
+        client.add_menu(**kwargs)
+
+
+def test_update_menu_item_unknown_raises():
+    client = ViewerClient()
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match="no menu"):
+        client.update_menu_item("nope", "x", label="y")

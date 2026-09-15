@@ -1039,17 +1039,6 @@ function parseBoolOption(raw) {
 }
 
 /**
- * Write the small grey state label of a menu item (the span between the
- * label and the shortcut key).
- * @param {HTMLElement|null} btn
- * @param {string} text
- */
-function setMenuState(btn, text) {
-    const el = btn?.querySelector?.('.tjsv-menu-state');
-    if (el) el.textContent = text;
-}
-
-/**
  * Resolve the initial toolbar (menu button) visibility.
  * Precedence: URL `toolbar` param > `toolbar` option > hidden.
  * @param {ThreeJSViewerOptions} options
@@ -5301,6 +5290,569 @@ class CameraController {
  * Owns the M-key wireframe cycle and N-key shading-debug cycle.
  * Holds cached debug materials + per-mesh helpers.
  */
+// ========== Menus ==========
+//
+// One mechanism for every overlay menu on the canvas: the viewer's own
+// options menu and any menu an embedder or the Python side adds. The
+// controller owns DOM, styling, placement, open/close, persistence, eye
+// visibility and shortcut display; the caller owns content and callbacks.
+//
+// MENU  { id, label, icon, title, placement: 'top-right'|'top-left',
+//         mode: 'dropdown'|'panel'|'bar', items: [ITEM…], storageKey, hidden }
+//   dropdown: a button in the top bar with a drop-down body (the default)
+//   panel:    the body is always open, stacked below the bar (a legend)
+//   bar:      the items render inline as one row of buttons (Move|Rotate|Snap)
+//
+// ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'label'|'divider'|'custom',
+//         id, label, hint, shortcut, bindKey, state, active, checked, value,
+//         options: [{value, label}], ids, prefix, disabled, hidden,
+//         onClick(item), onChange(value, item), render(el, item) }
+//   `state`, `active`, `checked`, `value`, `hidden` and `disabled` may be
+//   functions; refresh() re-evaluates them. `eye` items own every tracked
+//   object whose id is in `ids` or starts with `prefix` and flip its
+//   `.visible`; a menu `storageKey` persists toggle/eye/select/segmented
+//   values in localStorage under that key.
+
+/** @typedef {{
+ *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
+ *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
+ *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
+ *   disabled?: any, hidden?: any,
+ *   onClick?: (item: MenuItemSpec) => void,
+ *   onChange?: (value: any, item: MenuItemSpec) => void,
+ *   render?: (el: HTMLElement, item: MenuItemSpec) => void,
+ * }} MenuItemSpec */
+
+/** @typedef {{
+ *   id: string, label?: string, icon?: string, title?: string,
+ *   placement?: 'top-right'|'top-left', mode?: 'dropdown'|'panel'|'bar',
+ *   items?: MenuItemSpec[], storageKey?: string, hidden?: boolean,
+ *   builtin?: boolean,
+ * }} MenuSpec */
+
+const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'label', 'divider', 'custom']);
+
+/**
+ * Parse a shortcut label such as "Shift+D" or "M" into a matcher for keydown.
+ * @param {string} s
+ * @returns {{key: string, shift: boolean, ctrl: boolean, alt: boolean, meta: boolean}|null}
+ */
+function parseShortcut(s) {
+    if (!s) return null;
+    const parts = String(s).split('+').map(p => p.trim()).filter(Boolean);
+    if (!parts.length) return null;
+    const key = parts.pop() || '';
+    const mods = parts.map(p => p.toLowerCase());
+    return {
+        key: key.length === 1 ? key.toUpperCase() : key,
+        shift: mods.includes('shift'), ctrl: mods.includes('ctrl') || mods.includes('control'),
+        alt: mods.includes('alt') || mods.includes('option'), meta: mods.includes('meta') || mods.includes('cmd'),
+    };
+}
+
+/** @param {KeyboardEvent} e @param {ReturnType<typeof parseShortcut>} sc */
+function shortcutMatches(e, sc) {
+    if (!sc) return false;
+    const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    return key === sc.key && e.shiftKey === sc.shift && e.ctrlKey === sc.ctrl
+        && e.altKey === sc.alt && e.metaKey === sc.meta;
+}
+
+/** @param {any} v @param {any} arg */
+function evalProp(v, arg) { return typeof v === 'function' ? v(arg) : v; }
+
+/** Accept bare option values next to `{value, label}` objects. @param {any[]|undefined} options */
+function normalizeOptions(options) {
+    return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
+}
+
+const EYE_ON_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/></svg>';
+const EYE_OFF_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" stroke-dasharray="2 2"/><path d="M3 13L13 3"/></svg>';
+
+class MenuController {
+    /**
+     * @param {ThreeJSViewer} viewer
+     * @param {{bar: HTMLElement, panels: HTMLElement, barLeft: HTMLElement}} hosts
+     */
+    constructor(viewer, hosts) {
+        this._viewer = viewer;
+        this._hosts = hosts;
+        /** @type {Map<string, any>} */
+        this._menus = new Map();
+        /** @type {Array<(action: any) => void>} */
+        this._actionHooks = [];
+        /** @type {Set<string>} shortcut labels owned by the viewer's own key handler */
+        this._reservedKeys = new Set();
+        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
+            const t = /** @type {Node} */ (e.target);
+            for (const m of this._menus.values()) {
+                if (m.spec.mode === 'dropdown' && m.open && !m.root.contains(t)) this._setOpen(m, false);
+            }
+        };
+        document.addEventListener('pointerdown', this._onDocPointerDown);
+    }
+
+    dispose() {
+        document.removeEventListener('pointerdown', this._onDocPointerDown);
+        for (const id of [...this._menus.keys()]) this.remove(id);
+    }
+
+    /** Shortcut labels the viewer's own keydown handler already consumes. @param {string[]} labels */
+    reserveKeys(labels) { for (const l of labels) this._reservedKeys.add(normalizeShortcut(l)); }
+
+    /** @param {(action: any) => void} cb @returns {() => void} */
+    onAction(cb) {
+        this._actionHooks.push(cb);
+        return () => { const i = this._actionHooks.indexOf(cb); if (i >= 0) this._actionHooks.splice(i, 1); };
+    }
+
+    /** @param {string} id */
+    get(id) { return this._menus.get(id)?.handle || null; }
+
+    /** @returns {string[]} */
+    ids() { return [...this._menus.keys()]; }
+
+    /**
+     * Add (or replace) a menu.
+     * @param {MenuSpec} spec
+     */
+    add(spec) {
+        if (!spec || !spec.id) throw new Error('addMenu: spec.id is required');
+        if (this._menus.has(spec.id)) this.remove(spec.id);
+        const mode = spec.mode || 'dropdown';
+        const placement = spec.placement || 'top-right';
+        /** @type {any} */
+        const m = {
+            spec: { ...spec, mode, placement, items: (spec.items || []).map(it => ({ ...it })) },
+            open: false, root: null, button: null, body: null,
+            /** @type {Map<string, any>} */ items: new Map(),
+            state: /** @type {Record<string, any>} */ ({}),
+        };
+        if (spec.storageKey) {
+            try { m.state = JSON.parse(localStorage.getItem(spec.storageKey) || '{}') || {}; } catch (e) { /* ignore */ }
+        }
+        this._build(m);
+        this._menus.set(spec.id, m);
+        m.handle = this._makeHandle(m);
+        this.applyEyes(m);
+        this.refresh(m);
+        return m.handle;
+    }
+
+    /** @param {string} id */
+    remove(id) {
+        const m = this._menus.get(id);
+        if (!m) return false;
+        m.root.remove();
+        this._menus.delete(id);
+        return true;
+    }
+
+    /** @param {any} m */
+    _makeHandle(m) {
+        const self = this;
+        return {
+            id: m.spec.id,
+            get el() { return m.root; },
+            open: () => self._setOpen(m, true),
+            close: () => self._setOpen(m, false),
+            isOpen: () => m.open,
+            refresh: () => self.refresh(m),
+            remove: () => self.remove(m.spec.id),
+            setHidden: /** @param {boolean} h */ (h) => { m.spec.hidden = !!h; m.root.hidden = !!h; if (h) self._setOpen(m, false); },
+            /** @param {string} itemId @param {Partial<MenuItemSpec>} patch */
+            setItem: (itemId, patch) => self.setItem(m, itemId, patch),
+            /** @param {string} itemId */
+            getValue: (itemId) => self._valueOf(m, m.items.get(itemId)?.spec),
+        };
+    }
+
+    // ---- DOM -------------------------------------------------------------
+
+    /** @param {any} m */
+    _build(m) {
+        const spec = m.spec;
+        const root = document.createElement('div');
+        root.className = `tjsv-menu-root tjsv-menu-${spec.mode}`;
+        root.dataset.menu = spec.id;
+        if (spec.hidden) root.hidden = true;
+        m.root = root;
+
+        const body = document.createElement('div');
+        body.className = spec.mode === 'bar' ? 'tjsv-menu-bar-items' : 'tjsv-menu';
+        m.body = body;
+
+        if (spec.mode === 'dropdown') {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
+            btn.title = spec.title || spec.label || '';
+            btn.setAttribute('aria-haspopup', 'true');
+            btn.setAttribute('aria-expanded', 'false');
+            btn.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
+                + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.icon || spec.label || '')}</span>`;
+            btn.addEventListener('click', () => this._setOpen(m, !m.open));
+            m.button = btn;
+            root.appendChild(btn);
+            body.hidden = true;
+            if (spec.builtin) {
+                const status = document.createElement('div');
+                status.className = 'tjsv-menu-status tjsv-status-text';
+                status.textContent = 'Disconnected';
+                body.appendChild(status);
+            }
+        } else if (spec.mode === 'panel' && spec.label) {
+            const title = document.createElement('div');
+            title.className = 'tjsv-menu-title';
+            title.textContent = spec.label;
+            body.appendChild(title);
+        }
+        for (const it of spec.items) this._buildItem(m, it);
+        root.appendChild(body);
+
+        const host = spec.placement === 'top-left' ? this._hosts.barLeft
+            : spec.mode === 'panel' ? this._hosts.panels : this._hosts.bar;
+        host.appendChild(root);
+    }
+
+    /** @param {any} m @param {MenuItemSpec} it */
+    _buildItem(m, it) {
+        const type = it.type || 'button';
+        if (!MENU_ITEM_TYPES.has(type)) {
+            console.warn(`addMenu: unknown item type '${type}' in menu '${m.spec.id}'`);
+            return;
+        }
+        if (it.options) it.options = normalizeOptions(it.options);
+        const rec = { spec: it, el: /** @type {HTMLElement|null} */ (null), input: /** @type {any} */ (null), shortcut: null };
+        let el;
+        if (type === 'divider') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-divider';
+        } else if (type === 'label') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-caption';
+            el.textContent = it.label || '';
+        } else if (type === 'custom') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-custom';
+            if (typeof it.render === 'function') it.render(el, it);
+        } else if (type === 'select') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-row';
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            const sel = document.createElement('select');
+            sel.className = 'tjsv-menu-select';
+            for (const o of it.options || []) {
+                const opt = document.createElement('option');
+                opt.value = String(o.value);
+                opt.textContent = o.label ?? String(o.value);
+                sel.appendChild(opt);
+            }
+            sel.addEventListener('change', () => this._commit(m, rec, sel.value));
+            rec.input = sel;
+            el.appendChild(lab);
+            el.appendChild(sel);
+        } else if (type === 'segmented') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-row';
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            const seg = document.createElement('div');
+            seg.className = 'tjsv-segmented';
+            for (const o of it.options || []) {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'tjsv-seg-btn';
+                b.dataset.value = String(o.value);
+                b.textContent = o.label ?? String(o.value);
+                b.addEventListener('click', () => this._commit(m, rec, o.value));
+                seg.appendChild(b);
+            }
+            rec.input = seg;
+            if (it.label) el.appendChild(lab);
+            el.appendChild(seg);
+        } else {
+            // button | toggle | eye — one row: [mark] label … state [kbd]
+            el = document.createElement('button');
+            el.type = 'button';
+            el.className = 'tjsv-menu-item';
+            const mark = document.createElement('span');
+            mark.className = 'tjsv-menu-mark';
+            if (type === 'eye') mark.innerHTML = EYE_ON_SVG;
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            const st = document.createElement('span');
+            st.className = 'tjsv-menu-state';
+            el.appendChild(mark);
+            el.appendChild(lab);
+            el.appendChild(st);
+            if (it.shortcut) {
+                const kbd = document.createElement('kbd');
+                kbd.textContent = it.shortcut;
+                el.appendChild(kbd);
+            }
+            el.addEventListener('click', () => this._activate(m, rec));
+        }
+        if (it.id) el.dataset.item = it.id;
+        if (it.hint) el.title = it.hint;
+        rec.el = el;
+        if (it.bindKey && it.shortcut) {
+            const norm = normalizeShortcut(it.shortcut);
+            if (this._reservedKeys.has(norm)) {
+                console.warn(`addMenu: shortcut '${it.shortcut}' on '${m.spec.id}/${it.id}' is a viewer key; not bound`);
+            } else {
+                rec.shortcut = parseShortcut(it.shortcut);
+            }
+        }
+        if (it.id) m.items.set(it.id, rec);
+        m.body.appendChild(el);
+    }
+
+    // ---- state -----------------------------------------------------------
+
+    /** Current value of a toggle/eye/select/segmented item. @param {any} m @param {MenuItemSpec|undefined} it */
+    _valueOf(m, it) {
+        if (!it) return undefined;
+        const type = it.type || 'button';
+        if (it.id && it.id in m.state) return m.state[it.id];
+        if (type === 'toggle' || type === 'eye') {
+            const c = evalProp(it.checked, it);
+            return c === undefined ? type === 'eye' : !!c;
+        }
+        if (type === 'select' || type === 'segmented') {
+            const v = evalProp(it.value, it);
+            return v !== undefined ? v : (it.options?.[0]?.value);
+        }
+        return undefined;
+    }
+
+    /** @param {any} m */
+    _persist(m) {
+        if (!m.spec.storageKey) return;
+        try { localStorage.setItem(m.spec.storageKey, JSON.stringify(m.state)); } catch (e) { /* ignore */ }
+    }
+
+    /** Row click: buttons fire onClick, toggles/eyes flip. @param {any} m @param {any} rec */
+    _activate(m, rec) {
+        const it = rec.spec;
+        if (evalProp(it.disabled, it)) return;
+        const type = it.type || 'button';
+        if (type === 'toggle' || type === 'eye') {
+            this._commit(m, rec, !this._valueOf(m, it));
+            return;
+        }
+        if (typeof it.onClick === 'function') it.onClick(it);
+        this._emit(m, it, undefined);
+        this.refresh(m);
+    }
+
+    /** Value change of any stateful item. @param {any} m @param {any} rec @param {any} value */
+    _commit(m, rec, value) {
+        const it = rec.spec;
+        if (evalProp(it.disabled, it)) return;
+        if (it.id) m.state[it.id] = value;
+        this._persist(m);
+        if ((it.type || '') === 'eye') this._applyEye(it, !!value);
+        if (typeof it.onChange === 'function') it.onChange(value, it);
+        this._emit(m, it, value);
+        this.refresh(m);
+    }
+
+    /** @param {any} m @param {MenuItemSpec} it @param {any} value */
+    _emit(m, it, value) {
+        if (!this._actionHooks.length) return;
+        const action = { menu: m.spec.id, item: it.id, type: it.type || 'button', value };
+        for (const cb of this._actionHooks.slice()) {
+            try { cb(action); } catch (e) { console.error('menu action hook failed', e); }
+        }
+    }
+
+    /**
+     * Patch an item from outside its own handler: label, state, checked,
+     * value, disabled, hidden, options.
+     * @param {any} m @param {string} itemId @param {Partial<MenuItemSpec>} patch
+     */
+    setItem(m, itemId, patch) {
+        const rec = m.items.get(itemId);
+        if (!rec) return false;
+        const it = rec.spec;
+        Object.assign(it, patch || {});
+        if ('options' in patch) it.options = normalizeOptions(it.options);
+        if ('checked' in patch || 'value' in patch) {
+            const v = 'checked' in patch ? !!patch.checked : patch.value;
+            if (it.id) m.state[it.id] = v;
+            this._persist(m);
+            if ((it.type || '') === 'eye') this._applyEye(it, !!v);
+        }
+        if ('options' in patch && rec.input) {
+            rec.input.innerHTML = '';
+            const isSel = rec.input.tagName === 'SELECT';
+            for (const o of it.options || []) {
+                const child = document.createElement(isSel ? 'option' : 'button');
+                if (isSel) { /** @type {HTMLOptionElement} */ (child).value = String(o.value); }
+                else {
+                    child.className = 'tjsv-seg-btn';
+                    child.dataset.value = String(o.value);
+                    child.addEventListener('click', () => this._commit(m, rec, o.value));
+                }
+                child.textContent = o.label ?? String(o.value);
+                rec.input.appendChild(child);
+            }
+        }
+        if ('label' in patch) {
+            const lab = rec.el?.querySelector('.tjsv-menu-label');
+            if (lab) lab.textContent = it.label || '';
+            else if ((it.type || '') === 'label' && rec.el) rec.el.textContent = it.label || '';
+        }
+        this.refresh(m);
+        return true;
+    }
+
+    /** Re-evaluate every function-valued property and repaint. @param {any} [only] */
+    refresh(only) {
+        const targets = only ? [only] : [...this._menus.values()];
+        for (const m of targets) {
+            for (const rec of m.items.values()) this._paint(m, rec);
+            // Items without an id (dividers, captions) never change.
+        }
+    }
+
+    /** @param {any} m @param {any} rec */
+    _paint(m, rec) {
+        const it = rec.spec;
+        const el = rec.el;
+        if (!el) return;
+        const type = it.type || 'button';
+        el.hidden = !!evalProp(it.hidden, it);
+        const disabled = !!evalProp(it.disabled, it);
+        el.classList.toggle('disabled', disabled);
+        if (el instanceof HTMLButtonElement) el.disabled = disabled;
+        if (type === 'button') {
+            el.classList.toggle('active', !!evalProp(it.active, it));
+            const st = el.querySelector('.tjsv-menu-state');
+            if (st) st.textContent = evalProp(it.state, it) ?? '';
+        } else if (type === 'toggle' || type === 'eye') {
+            const on = !!this._valueOf(m, it);
+            el.classList.toggle('active', on);
+            el.classList.toggle('off', !on);
+            const mark = el.querySelector('.tjsv-menu-mark');
+            if (mark && type === 'eye') mark.innerHTML = on ? EYE_ON_SVG : EYE_OFF_SVG;
+            const st = el.querySelector('.tjsv-menu-state');
+            if (st) st.textContent = evalProp(it.state, it) ?? '';
+        } else if (type === 'select') {
+            const v = this._valueOf(m, it);
+            if (rec.input && v !== undefined) rec.input.value = String(v);
+            rec.input.disabled = disabled;
+        } else if (type === 'segmented') {
+            const v = this._valueOf(m, it);
+            for (const b of rec.input.querySelectorAll('.tjsv-seg-btn')) {
+                b.classList.toggle('active', String(b.dataset.value) === String(v));
+                b.disabled = disabled;
+            }
+        }
+    }
+
+    // ---- eyes ------------------------------------------------------------
+
+    /** @param {MenuItemSpec} it @param {string} objId */
+    _eyeOwns(it, objId) {
+        if (it.ids && it.ids.includes(objId)) return true;
+        if (it.prefix && objId.startsWith(it.prefix)) return true;
+        return false;
+    }
+
+    /** @param {MenuItemSpec} it @param {boolean} on */
+    _applyEye(it, on) {
+        for (const [objId, obj] of this._viewer._objects) {
+            if (obj && this._eyeOwns(it, objId)) obj.visible = on;
+        }
+    }
+
+    /**
+     * Re-apply every eye of one menu (or all) to the tracked objects. Called
+     * from `_registerObject`, so a hidden layer stays hidden when its objects
+     * are re-pushed or stream in later.
+     * @param {any} [only]
+     */
+    applyEyes(only) {
+        const targets = only ? [only] : [...this._menus.values()];
+        for (const m of targets) {
+            for (const rec of m.items.values()) {
+                if ((rec.spec.type || '') === 'eye') this._applyEye(rec.spec, !!this._valueOf(m, rec.spec));
+            }
+        }
+    }
+
+    /**
+     * Which eye (if any) currently hides an object id: its label, for telling
+     * the user where their geometry went.
+     * @param {string} objId @returns {string|null}
+     */
+    hidingEyeFor(objId) {
+        for (const m of this._menus.values()) {
+            for (const rec of m.items.values()) {
+                const it = rec.spec;
+                if ((it.type || '') === 'eye' && !this._valueOf(m, it) && this._eyeOwns(it, objId)) return it.label || it.id || null;
+            }
+        }
+        return null;
+    }
+
+    // ---- open/close + keys ----------------------------------------------
+
+    /** @param {any} m @param {boolean} open */
+    _setOpen(m, open) {
+        if (m.spec.mode !== 'dropdown') return;
+        const want = !!open && !m.spec.hidden;
+        if (want) {
+            for (const o of this._menus.values()) if (o !== m) this._setOpen(o, false);
+        }
+        m.open = want;
+        m.body.hidden = !want;
+        m.button.classList.toggle('active', want);
+        m.button.setAttribute('aria-expanded', String(want));
+        if (want) this.refresh(m);
+    }
+
+    /** @returns {boolean} */
+    anyOpen() { for (const m of this._menus.values()) if (m.open) return true; return false; }
+
+    closeAll() { for (const m of this._menus.values()) this._setOpen(m, false); }
+
+    /**
+     * Route a keydown to a bound client shortcut. Returns true if consumed.
+     * @param {KeyboardEvent} e
+     */
+    handleKey(e) {
+        for (const m of this._menus.values()) {
+            if (m.spec.hidden) continue;
+            for (const rec of m.items.values()) {
+                if (rec.shortcut && shortcutMatches(e, rec.shortcut) && !evalProp(rec.spec.hidden, rec.spec)) {
+                    this._activate(m, rec);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+}
+
+/** @param {string} s */
+function normalizeShortcut(s) {
+    const sc = parseShortcut(s);
+    if (!sc) return '';
+    return `${sc.ctrl ? 'ctrl+' : ''}${sc.alt ? 'alt+' : ''}${sc.meta ? 'meta+' : ''}${sc.shift ? 'shift+' : ''}${sc.key}`;
+}
+
+/** @param {string} s */
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+}
+
 class ShadingDebugController {
     // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
@@ -8005,7 +8557,6 @@ export class ThreeJSViewer {
 
         // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
         this._toolbarVisible = resolveToolbarVisible(options, urlParams);
-        this._menuOpen = false;
 
         // State
         this._objects = new Map();
@@ -8228,23 +8779,65 @@ export class ThreeJSViewer {
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
     }
 
+    /**
+     * Build the menu controller and the viewer's own options menu on it. The
+     * built-in menu is an ordinary `addMenu` spec whose items read live
+     * viewer state through function-valued `active`/`state`/`hidden`.
+     */
+    _initMenus() {
+        this._menus = new MenuController(this, {
+            bar: this._menuBarEl, panels: this._menuPanelsEl, barLeft: this._menuBarLeftEl,
+        });
+        // Keys the viewer's own keydown handler consumes; a client menu may
+        // display them but not bind them.
+        this._menus.reserveKeys(['C', 'E', 'R', 'T', 'O', 'M', 'N', 'D', 'Shift+D', 'F', 'S', 'V', 'Home']);
+        const v = this;
+        this._menus.add({
+            id: 'viewer', builtin: true, icon: '\u2630', title: 'Viewer menu', hidden: true,
+            items: [
+                { id: 'clip', label: 'Clipping plane', shortcut: 'C',
+                  active: () => !!v._clipEnabled, onClick: () => v._toggleClipPanel() },
+                { id: 'lighting', label: 'Lighting', shortcut: 'E',
+                  active: () => v._lightingPanelEl.classList.contains('visible'),
+                  onClick: () => v._toggleLightingPanel() },
+                { id: 'orbit', label: 'Orbit mode', shortcut: 'R',
+                  active: () => v._orbitMode === 'free', state: () => v._orbitMode === 'free' ? 'free' : 'turntable',
+                  hint: 'Turntable keeps Z up; Free is trackball-style. Hold Alt while dragging for the other mode.',
+                  onClick: () => v._setOrbitMode(v._orbitMode === 'turntable' ? 'free' : 'turntable') },
+                { id: 'track', label: 'Camera tracking', shortcut: 'T',
+                  hidden: () => !v._hasTrackingTargets(),
+                  active: () => v._trackMode !== 'off', state: () => v._trackStateLabel(),
+                  onClick: () => v._cycleTrackMode() },
+                { id: 'projection', label: 'Projection', shortcut: 'O',
+                  active: () => !!v._isOrtho, state: () => v._isOrtho ? 'orthographic' : 'perspective',
+                  onClick: () => v._switchCamera(!v._isOrtho) },
+                { id: 'wireframe', label: 'Wireframe', shortcut: 'M',
+                  active: () => (v._shading?.wireframeMode ?? 0) !== 0,
+                  state: () => ['off', 'wire', 'solid + wire'][v._shading?.wireframeMode ?? 0],
+                  onClick: () => v._shading.cycleWireframe() },
+                { id: 'shading', label: 'Shading debug', shortcut: 'N',
+                  active: () => (v._shading?.shadingMode ?? 0) !== 0,
+                  state: () => ['off', 'normals', 'UV checker', 'normal lines'][v._shading?.shadingMode ?? 0],
+                  onClick: () => v._shading.cycleShading() },
+                { id: 'fog', label: 'Distance fog', shortcut: 'D',
+                  active: () => !!v._depthCue?.fogActive, onClick: () => v._depthCue.toggleFog() },
+                { id: 'edl', label: 'Eye-dome lighting', shortcut: 'Shift+D',
+                  active: () => !!v._depthCue?.edlActive, onClick: () => v._depthCue.toggleEdl() },
+                { id: 'frame', label: 'Frame all', shortcut: 'F', onClick: () => v.resetView() },
+            ],
+        });
+        const root = /** @type {HTMLElement} */ (this._menus.get('viewer').el);
+        this._toolbarEl = root;
+        this._statusDot = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-dot'));
+        this._statusText = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-text'));
+    }
+
     _cacheElements() {
         /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
-        this._toolbarEl = q('.tjsv-toolbar');
-        this._btnMenu = q('.tjsv-btn-menu');
-        this._menuEl = q('.tjsv-menu');
-        this._statusDot = q('.tjsv-status-dot');
-        this._statusText = q('.tjsv-status-text');
-        this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
-        this._btnClip = q('.tjsv-btn-clip');
-        this._btnLighting = q('.tjsv-btn-lighting');
-        this._btnProjection = q('.tjsv-btn-projection');
-        this._btnWireframe = q('.tjsv-btn-wireframe');
-        this._btnShading = q('.tjsv-btn-shading');
-        this._btnFog = q('.tjsv-btn-fog');
-        this._btnEdl = q('.tjsv-btn-edl');
-        this._btnFrame = q('.tjsv-btn-frame');
+        this._menuBarEl = q('.tjsv-menubar');
+        this._menuPanelsEl = q('.tjsv-overlay-tr');
+        this._menuBarLeftEl = q('.tjsv-overlay-tl');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._lightingPanelEl = q('.tjsv-lighting-panel');
         this._lightingExposureSlider = q('.tjsv-lighting-exposure');
@@ -8298,7 +8891,8 @@ export class ThreeJSViewer {
         this._btnLoop = q('.tjsv-btn-loop');
         this._speedDisplayEl = q('.tjsv-speed-display');
         this._timelineContainer = q('.tjsv-timeline-container');
-        this._btnTrack = q('.tjsv-btn-track');
+        // Last: the built-in menu's items read the panels cached above.
+        this._initMenus();
     }
 
     _initThreeJS() {
@@ -9039,7 +9633,7 @@ export class ThreeJSViewer {
             if (d.distance != null) this._setClipDistance(d.distance);
         }
         this._clipPanelEl.classList.toggle('visible', this._clipEnabled);
-        this._btnClip.classList.toggle('active', this._clipEnabled);
+        this._menus?.refresh();
         if (this._clipEnabled) this._updateClipSliderRange();
         this._syncAnchorFromPlane();
         this._updateClipMaterials();
@@ -9122,8 +9716,8 @@ export class ThreeJSViewer {
     // ========== Lighting Panel ==========
 
     _toggleLightingPanel() {
-        const visible = this._lightingPanelEl.classList.toggle('visible');
-        this._btnLighting.classList.toggle('active', visible);
+        this._lightingPanelEl.classList.toggle('visible');
+        this._menus?.refresh();
     }
 
     _applyToneMappingExposure(value) {
@@ -9222,10 +9816,6 @@ export class ThreeJSViewer {
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
-        this._btnLighting.addEventListener('click', () => {
-            this._toggleLightingPanel();
-            this._updateMenuState();
-        });
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
 
         this._lightingToneMappingSelect.addEventListener('change', () => {
@@ -9274,15 +9864,7 @@ export class ThreeJSViewer {
         this._updateOrbitModeButton();
     }
 
-    _updateOrbitModeButton() {
-        if (!this._btnOrbitMode) return;
-        const isFree = this._orbitMode === 'free';
-        this._btnOrbitMode.classList.toggle('active', isFree);
-        setMenuState(this._btnOrbitMode, isFree ? 'free' : 'turntable');
-        this._btnOrbitMode.title = isFree
-            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
-            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
-    }
+    _updateOrbitModeButton() { this._menus?.refresh(); }
 
     /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
@@ -9364,6 +9946,7 @@ export class ThreeJSViewer {
     _registerObject(id, obj) {
         this._objects.set(id, obj);
         this._objGeneration++;
+        this._menus?.applyEyes();
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -10715,25 +11298,22 @@ export class ThreeJSViewer {
         return null;
     }
 
-    _updateTrackingUI() {
-        if (!this._btnTrack) return;
+    /** Whether the built-in menu's Camera tracking item applies right now. */
+    _hasTrackingTargets() {
         const hasTracking = this._trackTargetId || this._followPaths?.size ||
             this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
-        this._btnTrack.style.display = (this._animation && hasTracking) ? '' : 'none';
-        this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
-
-        let title = 'Camera tracking (T)';
-        if (this._trackMode === 'scripted') {
-            title = 'Camera: scripted (T)';
-        } else if (this._trackMode !== 'off') {
-            const modeLabel = this._trackMode === 'follow' ? 'Follow' : 'Look-at';
-            title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
-        }
-        this._btnTrack.title = title;
-        setMenuState(this._btnTrack, this._trackMode === 'off' ? 'off'
-            : this._trackMode === 'scripted' ? 'scripted'
-            : `${this._trackMode}: ${this._trackTargetId || ''}`);
+        return !!(this._animation && hasTracking);
     }
+
+    /** State label for the Camera tracking menu item. */
+    _trackStateLabel() {
+        if (this._trackMode === 'off') return 'off';
+        if (this._trackMode === 'scripted') return 'scripted';
+        const modeLabel = this._trackMode === 'follow' ? 'follow' : 'look-at';
+        return `${modeLabel}: ${this._trackTargetId || ''}`;
+    }
+
+    _updateTrackingUI() { this._menus?.refresh(); }
 
     /** @param {number} frameIndex @param {number} [frameIndexNext] @param {number} [t] */
     _applyCameraTracking(frameIndex, frameIndexNext = frameIndex, t = 0) {
@@ -11046,32 +11626,7 @@ export class ThreeJSViewer {
     // ========== Events ==========
 
     _bindEvents() {
-        // Menu button + dropdown. Every item runs the same action as its
-        // keyboard shortcut and then refreshes the state labels.
-        this._btnMenu.addEventListener('click', () => this._setMenuOpen(!this._menuOpen));
-        /** @type {(btn: HTMLElement, action: () => void) => void} */
-        const item = (btn, action) => btn.addEventListener('click', () => {
-            action();
-            this._updateMenuState();
-        });
-        // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        item(this._btnOrbitMode, () =>
-            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable'));
-        item(this._btnClip, () => this._toggleClipPanel());
-        item(this._btnProjection, () => this._switchCamera(!this._isOrtho));
-        item(this._btnWireframe, () => this._shading.cycleWireframe());
-        item(this._btnShading, () => this._shading.cycleShading());
-        item(this._btnFog, () => this._depthCue.toggleFog());
-        item(this._btnEdl, () => this._depthCue.toggleEdl());
-        item(this._btnFrame, () => this.resetView());
-        // A pointerdown anywhere outside the toolbar closes the menu.
-        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
-            if (this._menuOpen && !this._toolbarEl.contains(/** @type {Node} */ (e.target))) {
-                this._setMenuOpen(false);
-            }
-        };
-        document.addEventListener('pointerdown', this._onDocPointerDown);
 
         // Lighting panel
         this._initLightingPanelUI();
@@ -11145,10 +11700,6 @@ export class ThreeJSViewer {
             this._animationLoop = !this._animationLoop;
             this._btnLoop.classList.toggle('active', this._animationLoop);
         });
-        this._btnTrack.addEventListener('click', () => {
-            this._cycleTrackMode();
-            this._updateMenuState();
-        });
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
@@ -11211,12 +11762,14 @@ export class ThreeJSViewer {
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
             if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
-            if (this._menuOpen) {
-                if (e.code === 'Escape') { this._setMenuOpen(false); return; }
-                // Shortcuts keep working with the menu open; refresh its labels
+            if (this._menus.anyOpen()) {
+                if (e.code === 'Escape') { this._menus.closeAll(); return; }
+                // Shortcuts keep working with a menu open; refresh its labels
                 // after the handler below has run.
-                queueMicrotask(() => this._updateMenuState());
+                queueMicrotask(() => this._menus.refresh());
             }
+            // Client-bound menu shortcuts (never a viewer key: those are reserved).
+            if (this._menus.handleKey(e)) { e.preventDefault(); return; }
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
@@ -13156,6 +13709,24 @@ export class ThreeJSViewer {
             case 'set_toolbar':
                 this.setToolbarVisible(data.visible !== false);
                 break;
+            case 'add_menu': {
+                // Python-defined menu: item interactions become `menu_action`
+                // messages back over the socket (see onMenuAction).
+                const spec = { ...data.menu };
+                spec.items = (spec.items || []).map(/** @param {any} it */ (it) => ({ ...it }));
+                this.addMenu(spec);
+                this._ensureMenuActionBridge();
+                break;
+            }
+            case 'remove_menu':
+                this.removeMenu(data.id);
+                break;
+            case 'update_menu_item': {
+                const menu = this.getMenu(data.menu);
+                if (!menu) { console.warn(`update_menu_item: no menu '${data.menu}'`); break; }
+                if (!menu.setItem(data.item, data.patch || {})) console.warn(`update_menu_item: no item '${data.item}' in '${data.menu}'`);
+                break;
+            }
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
@@ -13181,7 +13752,7 @@ export class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._clipPanelEl.classList.add('visible');
-                this._btnClip.classList.add('active');
+                this._menus?.refresh();
                 this._updateClipMaterials();
                 break;
             }
@@ -13207,14 +13778,14 @@ export class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._clipPanelEl.classList.add('visible');
-                this._btnClip.classList.add('active');
+                this._menus?.refresh();
                 this._updateClipMaterials();
                 break;
             }
             case 'disable_clipping_plane':
                 this._clipEnabled = false;
                 this._clipPanelEl.classList.remove('visible');
-                this._btnClip.classList.remove('active');
+                this._menus?.refresh();
                 this._updateClipMaterials();
                 break;
             case 'set_clipping_defaults':
@@ -14392,50 +14963,69 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Show or hide the top-right menu button (the `tjsv-toolbar`). Hidden by
-     * default so a bare viewer has no chrome besides the gimbal; the Python
-     * side flips it with `set_toolbar_visible()` (WS `set_toolbar`) or the
-     * `toolbar=` launch kwarg. Hiding also closes an open menu. Keyboard
+     * Show or hide the viewer's own options menu button. Hidden by default so
+     * a bare viewer has no chrome besides the gimbal; the Python side flips it
+     * with `set_toolbar_visible()` (WS `set_toolbar`) or the `toolbar=` launch
+     * kwarg. Client menus added with `addMenu` are unaffected. Keyboard
      * shortcuts work regardless.
      * @param {boolean} visible
      */
     setToolbarVisible(visible) {
         this._toolbarVisible = !!visible;
-        this._toolbarEl.hidden = !this._toolbarVisible;
-        if (!this._toolbarVisible) this._setMenuOpen(false);
+        this._menus.get('viewer').setHidden(!this._toolbarVisible);
     }
 
     /** @returns {boolean} */
     isToolbarVisible() { return this._toolbarVisible; }
 
-    /** @param {boolean} open */
-    _setMenuOpen(open) {
-        this._menuOpen = !!open && this._toolbarVisible;
-        this._menuEl.hidden = !this._menuOpen;
-        this._btnMenu.classList.toggle('active', this._menuOpen);
-        this._btnMenu.setAttribute('aria-expanded', String(this._menuOpen));
-        if (this._menuOpen) this._updateMenuState();
+    /** Whether the built-in menu's dropdown is open (test seam). */
+    get _menuOpen() { return !!this._menus.get('viewer')?.isOpen(); }
+
+    /**
+     * Add a client-defined menu. The viewer owns placement, styling,
+     * open/close, persistence and eye visibility; the caller owns the items
+     * and their callbacks. See the MenuController banner for the MENU and
+     * ITEM shapes. Re-using an id replaces the menu.
+     * @param {MenuSpec} spec
+     * @returns {{id: string, el: HTMLElement, open: () => void, close: () => void, isOpen: () => boolean,
+     *   refresh: () => void, remove: () => boolean, setHidden: (h: boolean) => void,
+     *   setItem: (itemId: string, patch: Partial<MenuItemSpec>) => boolean, getValue: (itemId: string) => any}}
+     */
+    addMenu(spec) {
+        if (spec && spec.id === 'viewer') throw new Error("addMenu: 'viewer' is the built-in menu id");
+        return this._menus.add({ ...spec, builtin: false });
     }
 
-    /** Refresh the active marks and state labels of the menu items. */
-    _updateMenuState() {
-        if (!this._menuEl) return;
-        this._btnClip.classList.toggle('active', !!this._clipEnabled);
-        this._btnLighting.classList.toggle('active',
-            this._lightingPanelEl.classList.contains('visible'));
-        this._btnProjection.classList.toggle('active', !!this._isOrtho);
-        setMenuState(this._btnProjection, this._isOrtho ? 'orthographic' : 'perspective');
-        const wf = this._shading?.wireframeMode ?? 0;
-        this._btnWireframe.classList.toggle('active', wf !== 0);
-        setMenuState(this._btnWireframe, ['off', 'wire', 'solid + wire'][wf]);
-        const sh = this._shading?.shadingMode ?? 0;
-        this._btnShading.classList.toggle('active', sh !== 0);
-        setMenuState(this._btnShading, ['off', 'normals', 'UV checker', 'normal lines'][sh]);
-        this._btnFog.classList.toggle('active', !!this._depthCue?.fogActive);
-        this._btnEdl.classList.toggle('active', !!this._depthCue?.edlActive);
-        this._updateOrbitModeButton();
-        this._updateTrackingUI();
+    /** @param {string} id @returns {boolean} */
+    removeMenu(id) { return id === 'viewer' ? false : this._menus.remove(id); }
+
+    /** @param {string} id */
+    getMenu(id) { return this._menus.get(id); }
+
+    /**
+     * Hook every item interaction on every menu: `{menu, item, type, value}`.
+     * The Python bridge rides this. Returns an unsubscribe fn.
+     * @param {(action: {menu: string, item?: string, type: string, value?: any}) => void} cb
+     */
+    onMenuAction(cb) { return this._menus.onAction(cb); }
+
+    /**
+     * Label of the eye item currently hiding `objId`, or null. Lets an
+     * embedder explain "it is there, behind an eye".
+     * @param {string} objId
+     */
+    hidingEyeFor(objId) { return this._menus.hidingEyeFor(objId); }
+
+    /** Forward menu interactions to the Python side once (idempotent). */
+    _ensureMenuActionBridge() {
+        if (this._menuActionBridge) return;
+        this._menuActionBridge = this.onMenuAction((action) => {
+            if (action.menu === 'viewer') return;
+            this._reply({ type: 'menu_action', menu: action.menu, item: action.item,
+                itemType: action.type, value: action.value });
+        });
     }
+
 
     /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
@@ -14602,7 +15192,7 @@ export class ThreeJSViewer {
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
-        document.removeEventListener('pointerdown', this._onDocPointerDown);
+        this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();

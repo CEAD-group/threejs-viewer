@@ -17,38 +17,87 @@
         .threejs-viewer:focus { outline: none; }
         .threejs-viewer canvas { display: block; }
 
-        /* Top toolbar: a single menu button; the advanced options live in the
-           dropdown below it. Hidden until the client opts in (setToolbarVisible). */
-        .threejs-viewer .tjsv-toolbar {
+        /* ---- Design tokens ----
+           Defaults follow ribweaver's overlay palette so the menus read as one UI
+           there; an embedder overrides by setting the same variables on the
+           container. */
+        .threejs-viewer {
+            --tjsv-float-bg: rgba(30, 30, 30, 0.95);
+            --tjsv-panel-2: #2a2a2a;
+            --tjsv-panel-3: #333;
+            --tjsv-border: #3a3a3a;
+            --tjsv-text: #e0e0e0;
+            --tjsv-text-dim: #999;
+            --tjsv-text-faint: #666;
+            --tjsv-primary: #0066cc;
+            --tjsv-radius: 4px;
+            --tjsv-font-size: 12px;
+        }
+
+        /* ---- Menus ----
+           Three hosts: the top-right bar of dropdown buttons (.tjsv-menubar), the
+           stack of always-open panels below it (.tjsv-overlay-tr), and the top-left
+           row of inline bars (.tjsv-overlay-tl). Every menu root is built by
+           MenuController; the viewer's own options menu is the first dropdown. */
+        .threejs-viewer .tjsv-menubar {
             position: absolute;
             top: 10px;
             right: 10px;
-            user-select: none;
             display: flex;
             justify-content: flex-end;
+            align-items: flex-start;
+            gap: 6px;
+            user-select: none;
+            z-index: 8;
         }
-        .threejs-viewer .tjsv-toolbar[hidden] { display: none; }
-        .threejs-viewer .tjsv-btn-menu {
-            background: rgba(30, 30, 30, 0.85);
-            border: none;
-            color: #aaa;
+        .threejs-viewer .tjsv-overlay-tr {
+            position: absolute;
+            top: 44px;
+            right: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+            user-select: none;
+            z-index: 7;
+            pointer-events: none;
+        }
+        .threejs-viewer .tjsv-overlay-tr > * { pointer-events: auto; }
+        .threejs-viewer .tjsv-overlay-tl {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            user-select: none;
+            z-index: 7;
+        }
+        .threejs-viewer .tjsv-menu-root { position: relative; }
+        .threejs-viewer .tjsv-menu-root[hidden] { display: none; }
+
+        /* Dropdown button */
+        .threejs-viewer .tjsv-menu-btn {
+            background: var(--tjsv-float-bg);
+            border: 1px solid var(--tjsv-border);
+            color: var(--tjsv-text-dim);
             height: 28px;
-            padding: 0 8px 0 6px;
-            border-radius: 6px;
+            padding: 0 8px;
+            border-radius: var(--tjsv-radius);
             cursor: pointer;
-            font-size: 14px;
+            font: inherit;
+            font-size: 13px;
             display: flex;
             align-items: center;
             gap: 6px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            backdrop-filter: blur(2px);
             transition: background 0.15s, color 0.15s;
         }
-        .threejs-viewer .tjsv-btn-menu:hover,
-        .threejs-viewer .tjsv-btn-menu.active { background: rgba(60, 60, 60, 0.95); color: white; }
-        .threejs-viewer .tjsv-btn-menu:focus { outline: none; }
-        .threejs-viewer .tjsv-btn-menu:focus-visible { outline: 2px solid #3399ff; outline-offset: 1px; }
-        .threejs-viewer .tjsv-menu-item:focus { outline: none; }
-        .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid #3399ff; outline-offset: -2px; }
+        .threejs-viewer .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); color: var(--tjsv-text); }
+        .threejs-viewer .tjsv-menu-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+        .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
+        .threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
         .threejs-viewer .tjsv-status-dot {
             width: 8px;
             height: 8px;
@@ -61,67 +110,179 @@
         .threejs-viewer .tjsv-status-dot.disconnected { background: #cc3333; }
         /* Embedder-set neutral state (setStatus / autoConnect:false — no backend expected) */
         .threejs-viewer .tjsv-status-dot.neutral { background: #8a8a8a; }
+
+        /* Body: the dropdown and the pinned panel share it */
         .threejs-viewer .tjsv-menu {
+            min-width: 200px;
+            box-sizing: border-box;
+            background: var(--tjsv-float-bg);
+            border: 1px solid var(--tjsv-border);
+            border-radius: var(--tjsv-radius);
+            padding: 4px;
+            backdrop-filter: blur(3px);
+            display: flex;
+            flex-direction: column;
+            color: var(--tjsv-text);
+            font-size: var(--tjsv-font-size);
+        }
+        .threejs-viewer .tjsv-menu-dropdown > .tjsv-menu {
             position: absolute;
             top: 34px;
             right: 0;
-            min-width: 240px;
-            background: rgba(30, 30, 30, 0.95);
-            border-radius: 6px;
-            padding: 4px;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-            display: flex;
-            flex-direction: column;
             z-index: 10;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            max-height: calc(100vh - 60px);
+            overflow-y: auto;
         }
         .threejs-viewer .tjsv-menu[hidden] { display: none; }
         .threejs-viewer .tjsv-menu-status {
-            color: #999;
+            color: var(--tjsv-text-dim);
             font-family: monospace;
             font-size: 11px;
             padding: 4px 8px 6px;
-            border-bottom: 1px solid #555;
+            border-bottom: 1px solid var(--tjsv-border);
             margin-bottom: 4px;
             white-space: nowrap;
         }
+        .threejs-viewer .tjsv-menu-title,
+        .threejs-viewer .tjsv-menu-caption {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--tjsv-text-dim);
+            padding: 4px 8px 3px;
+            white-space: nowrap;
+        }
+        .threejs-viewer .tjsv-menu-title { border-bottom: 1px solid var(--tjsv-border); margin-bottom: 4px; }
+        .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 4px 0; }
+        .threejs-viewer .tjsv-menu-custom { padding: 4px 8px; }
+
+        /* Rows: buttons, toggles, eyes */
         .threejs-viewer .tjsv-menu-item {
             background: none;
-            border: none;
-            color: #ccc;
+            border: 1px solid transparent;
+            color: var(--tjsv-text);
             height: 28px;
             padding: 0 8px;
-            border-radius: 4px;
+            border-radius: var(--tjsv-radius);
             cursor: pointer;
-            font-size: 13px;
+            font: inherit;
+            font-size: var(--tjsv-font-size);
             display: flex;
             align-items: center;
             gap: 8px;
             text-align: left;
             white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
             transition: background 0.15s, color 0.15s;
         }
-        .threejs-viewer .tjsv-menu-item:hover { background: rgba(255,255,255,0.1); color: white; }
-        .threejs-viewer .tjsv-menu-item.active { color: white; }
-        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-label::before {
-            content: '\25CF';
-            color: #3399ff;
-            margin-right: 6px;
-            font-size: 9px;
-            vertical-align: middle;
+        .threejs-viewer .tjsv-menu-item:hover:not(.disabled) { background: var(--tjsv-panel-3); color: #fff; }
+        .threejs-viewer .tjsv-menu-item.disabled { color: var(--tjsv-text-faint); cursor: default; }
+        .threejs-viewer .tjsv-menu-item[hidden] { display: none; }
+        .threejs-viewer .tjsv-menu-item.off .tjsv-menu-label { color: var(--tjsv-text-dim); }
+        .threejs-viewer .tjsv-menu-item:focus { outline: none; }
+        .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: -2px; }
+        .threejs-viewer .tjsv-menu-mark {
+            width: 14px;
+            height: 14px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--tjsv-text-faint);
+        }
+        .threejs-viewer .tjsv-menu-mark svg { width: 15px; height: 15px; display: block; }
+        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark { color: var(--tjsv-primary); }
+        /* Buttons and toggles: a dot mark when active; eyes draw their own glyph */
+        .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark:empty::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--tjsv-primary);
         }
         .threejs-viewer .tjsv-menu-label { flex: 1; }
-        .threejs-viewer .tjsv-menu-state { color: #888; font-size: 11px; }
+        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
         .threejs-viewer .tjsv-menu-item kbd {
             font-family: monospace;
             font-size: 11px;
-            color: #aaa;
-            background: rgba(255,255,255,0.08);
-            border: 1px solid #555;
+            color: var(--tjsv-text-dim);
+            background: var(--tjsv-panel-2);
+            border: 1px solid var(--tjsv-border);
             border-radius: 3px;
             padding: 1px 5px;
             min-width: 14px;
             text-align: center;
         }
+
+        /* Rows with a control: select, segmented */
+        .threejs-viewer .tjsv-menu-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 8px;
+            min-height: 28px;
+            box-sizing: border-box;
+            white-space: nowrap;
+        }
+        .threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 11px; }
+        .threejs-viewer .tjsv-menu-row.disabled { color: var(--tjsv-text-faint); }
+        .threejs-viewer .tjsv-menu-row[hidden] { display: none; }
+        .threejs-viewer .tjsv-menu-select {
+            background: var(--tjsv-panel-2);
+            border: 1px solid var(--tjsv-border);
+            border-radius: 3px;
+            color: var(--tjsv-text);
+            font: inherit;
+            font-size: 11px;
+            padding: 2px 4px;
+            min-width: 90px;
+        }
+        .threejs-viewer .tjsv-segmented { display: flex; gap: 0; }
+        .threejs-viewer .tjsv-seg-btn {
+            background: var(--tjsv-panel-2);
+            border: 1px solid var(--tjsv-border);
+            color: var(--tjsv-text-dim);
+            padding: 2px 8px;
+            font: inherit;
+            font-size: 11px;
+            cursor: pointer;
+            transition: background 0.1s, color 0.1s;
+        }
+        .threejs-viewer .tjsv-seg-btn + .tjsv-seg-btn { border-left: none; }
+        .threejs-viewer .tjsv-seg-btn:first-child { border-radius: 3px 0 0 3px; }
+        .threejs-viewer .tjsv-seg-btn:last-child { border-radius: 0 3px 3px 0; }
+        .threejs-viewer .tjsv-seg-btn:hover:not(:disabled) { color: var(--tjsv-text); }
+        .threejs-viewer .tjsv-seg-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+
+        /* Bar mode: the items inline as one segmented cluster */
+        .threejs-viewer .tjsv-menu-bar-items {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            background: var(--tjsv-float-bg);
+            border: 1px solid var(--tjsv-border);
+            border-radius: var(--tjsv-radius);
+            padding: 2px;
+            backdrop-filter: blur(2px);
+            color: var(--tjsv-text);
+            font-size: 11px;
+        }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item {
+            width: auto;
+            height: 24px;
+            padding: 0 8px;
+            gap: 6px;
+            font-size: 11px;
+        }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active { background: var(--tjsv-primary); color: #fff; }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active .tjsv-menu-mark { color: #fff; }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-item.active .tjsv-menu-mark:empty::before { background: #fff; }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-mark:empty { display: none; }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-divider { width: 1px; height: 18px; margin: 0 4px; }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-caption { padding: 0 6px; }
+        .threejs-viewer .tjsv-menu-bar-items .tjsv-menu-row { padding: 0 4px; min-height: 24px; }
 
         /* Animation Controls */
         .threejs-viewer .tjsv-animation-controls {
@@ -707,24 +868,13 @@ const DRACO_DECODER_DATA = {
     wrapperGzB64: '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'
 };
 
-const HTML_TEMPLATE = `<div class="tjsv-toolbar" hidden>
-    <button class="tjsv-btn-menu" title="Viewer menu" aria-haspopup="true" aria-expanded="false">
-        <span class="tjsv-status-dot disconnected" title="Disconnected"></span>&#x2630;
-    </button>
-    <div class="tjsv-menu" hidden>
-        <div class="tjsv-menu-status tjsv-status-text">Disconnected</div>
-        <button class="tjsv-menu-item tjsv-btn-clip"><span class="tjsv-menu-label">Clipping plane</span><span class="tjsv-menu-state"></span><kbd>C</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-lighting"><span class="tjsv-menu-label">Lighting</span><span class="tjsv-menu-state"></span><kbd>E</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-orbit-mode"><span class="tjsv-menu-label">Orbit mode</span><span class="tjsv-menu-state"></span><kbd>R</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-track" style="display:none"><span class="tjsv-menu-label">Camera tracking</span><span class="tjsv-menu-state"></span><kbd>T</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-projection"><span class="tjsv-menu-label">Projection</span><span class="tjsv-menu-state"></span><kbd>O</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-wireframe"><span class="tjsv-menu-label">Wireframe</span><span class="tjsv-menu-state"></span><kbd>M</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-shading"><span class="tjsv-menu-label">Shading debug</span><span class="tjsv-menu-state"></span><kbd>N</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-fog"><span class="tjsv-menu-label">Distance fog</span><span class="tjsv-menu-state"></span><kbd>D</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-edl"><span class="tjsv-menu-label">Eye-dome lighting</span><span class="tjsv-menu-state"></span><kbd>Shift+D</kbd></button>
-        <button class="tjsv-menu-item tjsv-btn-frame"><span class="tjsv-menu-label">Frame all</span><span class="tjsv-menu-state"></span><kbd>F</kbd></button>
-    </div>
-</div>
+const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds every menu into these,
+     including the viewer's own options menu: the top-right bar of dropdown
+     buttons, the stack of pinned panels below it, and the top-left row of
+     inline bars. -->
+<div class="tjsv-menubar tjsv-toolbar"></div>
+<div class="tjsv-overlay-tr"></div>
+<div class="tjsv-overlay-tl"></div>
 
 <div class="tjsv-clipping-panel">
     <h3>Clipping Plane <button class="tjsv-clip-close" title="Close (C)">&times;</button></h3>
@@ -2333,17 +2483,6 @@ function parseBoolOption(raw) {
     if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
     if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
     return null;
-}
-
-/**
- * Write the small grey state label of a menu item (the span between the
- * label and the shortcut key).
- * @param {HTMLElement|null} btn
- * @param {string} text
- */
-function setMenuState(btn, text) {
-    const el = btn?.querySelector?.('.tjsv-menu-state');
-    if (el) el.textContent = text;
 }
 
 /**
@@ -6598,6 +6737,569 @@ class CameraController {
  * Owns the M-key wireframe cycle and N-key shading-debug cycle.
  * Holds cached debug materials + per-mesh helpers.
  */
+// ========== Menus ==========
+//
+// One mechanism for every overlay menu on the canvas: the viewer's own
+// options menu and any menu an embedder or the Python side adds. The
+// controller owns DOM, styling, placement, open/close, persistence, eye
+// visibility and shortcut display; the caller owns content and callbacks.
+//
+// MENU  { id, label, icon, title, placement: 'top-right'|'top-left',
+//         mode: 'dropdown'|'panel'|'bar', items: [ITEM…], storageKey, hidden }
+//   dropdown: a button in the top bar with a drop-down body (the default)
+//   panel:    the body is always open, stacked below the bar (a legend)
+//   bar:      the items render inline as one row of buttons (Move|Rotate|Snap)
+//
+// ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'label'|'divider'|'custom',
+//         id, label, hint, shortcut, bindKey, state, active, checked, value,
+//         options: [{value, label}], ids, prefix, disabled, hidden,
+//         onClick(item), onChange(value, item), render(el, item) }
+//   `state`, `active`, `checked`, `value`, `hidden` and `disabled` may be
+//   functions; refresh() re-evaluates them. `eye` items own every tracked
+//   object whose id is in `ids` or starts with `prefix` and flip its
+//   `.visible`; a menu `storageKey` persists toggle/eye/select/segmented
+//   values in localStorage under that key.
+
+/** @typedef {{
+ *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
+ *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
+ *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
+ *   disabled?: any, hidden?: any,
+ *   onClick?: (item: MenuItemSpec) => void,
+ *   onChange?: (value: any, item: MenuItemSpec) => void,
+ *   render?: (el: HTMLElement, item: MenuItemSpec) => void,
+ * }} MenuItemSpec */
+
+/** @typedef {{
+ *   id: string, label?: string, icon?: string, title?: string,
+ *   placement?: 'top-right'|'top-left', mode?: 'dropdown'|'panel'|'bar',
+ *   items?: MenuItemSpec[], storageKey?: string, hidden?: boolean,
+ *   builtin?: boolean,
+ * }} MenuSpec */
+
+const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'label', 'divider', 'custom']);
+
+/**
+ * Parse a shortcut label such as "Shift+D" or "M" into a matcher for keydown.
+ * @param {string} s
+ * @returns {{key: string, shift: boolean, ctrl: boolean, alt: boolean, meta: boolean}|null}
+ */
+function parseShortcut(s) {
+    if (!s) return null;
+    const parts = String(s).split('+').map(p => p.trim()).filter(Boolean);
+    if (!parts.length) return null;
+    const key = parts.pop() || '';
+    const mods = parts.map(p => p.toLowerCase());
+    return {
+        key: key.length === 1 ? key.toUpperCase() : key,
+        shift: mods.includes('shift'), ctrl: mods.includes('ctrl') || mods.includes('control'),
+        alt: mods.includes('alt') || mods.includes('option'), meta: mods.includes('meta') || mods.includes('cmd'),
+    };
+}
+
+/** @param {KeyboardEvent} e @param {ReturnType<typeof parseShortcut>} sc */
+function shortcutMatches(e, sc) {
+    if (!sc) return false;
+    const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    return key === sc.key && e.shiftKey === sc.shift && e.ctrlKey === sc.ctrl
+        && e.altKey === sc.alt && e.metaKey === sc.meta;
+}
+
+/** @param {any} v @param {any} arg */
+function evalProp(v, arg) { return typeof v === 'function' ? v(arg) : v; }
+
+/** Accept bare option values next to `{value, label}` objects. @param {any[]|undefined} options */
+function normalizeOptions(options) {
+    return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
+}
+
+const EYE_ON_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/></svg>';
+const EYE_OFF_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" stroke-dasharray="2 2"/><path d="M3 13L13 3"/></svg>';
+
+class MenuController {
+    /**
+     * @param {ThreeJSViewer} viewer
+     * @param {{bar: HTMLElement, panels: HTMLElement, barLeft: HTMLElement}} hosts
+     */
+    constructor(viewer, hosts) {
+        this._viewer = viewer;
+        this._hosts = hosts;
+        /** @type {Map<string, any>} */
+        this._menus = new Map();
+        /** @type {Array<(action: any) => void>} */
+        this._actionHooks = [];
+        /** @type {Set<string>} shortcut labels owned by the viewer's own key handler */
+        this._reservedKeys = new Set();
+        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
+            const t = /** @type {Node} */ (e.target);
+            for (const m of this._menus.values()) {
+                if (m.spec.mode === 'dropdown' && m.open && !m.root.contains(t)) this._setOpen(m, false);
+            }
+        };
+        document.addEventListener('pointerdown', this._onDocPointerDown);
+    }
+
+    dispose() {
+        document.removeEventListener('pointerdown', this._onDocPointerDown);
+        for (const id of [...this._menus.keys()]) this.remove(id);
+    }
+
+    /** Shortcut labels the viewer's own keydown handler already consumes. @param {string[]} labels */
+    reserveKeys(labels) { for (const l of labels) this._reservedKeys.add(normalizeShortcut(l)); }
+
+    /** @param {(action: any) => void} cb @returns {() => void} */
+    onAction(cb) {
+        this._actionHooks.push(cb);
+        return () => { const i = this._actionHooks.indexOf(cb); if (i >= 0) this._actionHooks.splice(i, 1); };
+    }
+
+    /** @param {string} id */
+    get(id) { return this._menus.get(id)?.handle || null; }
+
+    /** @returns {string[]} */
+    ids() { return [...this._menus.keys()]; }
+
+    /**
+     * Add (or replace) a menu.
+     * @param {MenuSpec} spec
+     */
+    add(spec) {
+        if (!spec || !spec.id) throw new Error('addMenu: spec.id is required');
+        if (this._menus.has(spec.id)) this.remove(spec.id);
+        const mode = spec.mode || 'dropdown';
+        const placement = spec.placement || 'top-right';
+        /** @type {any} */
+        const m = {
+            spec: { ...spec, mode, placement, items: (spec.items || []).map(it => ({ ...it })) },
+            open: false, root: null, button: null, body: null,
+            /** @type {Map<string, any>} */ items: new Map(),
+            state: /** @type {Record<string, any>} */ ({}),
+        };
+        if (spec.storageKey) {
+            try { m.state = JSON.parse(localStorage.getItem(spec.storageKey) || '{}') || {}; } catch (e) { /* ignore */ }
+        }
+        this._build(m);
+        this._menus.set(spec.id, m);
+        m.handle = this._makeHandle(m);
+        this.applyEyes(m);
+        this.refresh(m);
+        return m.handle;
+    }
+
+    /** @param {string} id */
+    remove(id) {
+        const m = this._menus.get(id);
+        if (!m) return false;
+        m.root.remove();
+        this._menus.delete(id);
+        return true;
+    }
+
+    /** @param {any} m */
+    _makeHandle(m) {
+        const self = this;
+        return {
+            id: m.spec.id,
+            get el() { return m.root; },
+            open: () => self._setOpen(m, true),
+            close: () => self._setOpen(m, false),
+            isOpen: () => m.open,
+            refresh: () => self.refresh(m),
+            remove: () => self.remove(m.spec.id),
+            setHidden: /** @param {boolean} h */ (h) => { m.spec.hidden = !!h; m.root.hidden = !!h; if (h) self._setOpen(m, false); },
+            /** @param {string} itemId @param {Partial<MenuItemSpec>} patch */
+            setItem: (itemId, patch) => self.setItem(m, itemId, patch),
+            /** @param {string} itemId */
+            getValue: (itemId) => self._valueOf(m, m.items.get(itemId)?.spec),
+        };
+    }
+
+    // ---- DOM -------------------------------------------------------------
+
+    /** @param {any} m */
+    _build(m) {
+        const spec = m.spec;
+        const root = document.createElement('div');
+        root.className = `tjsv-menu-root tjsv-menu-${spec.mode}`;
+        root.dataset.menu = spec.id;
+        if (spec.hidden) root.hidden = true;
+        m.root = root;
+
+        const body = document.createElement('div');
+        body.className = spec.mode === 'bar' ? 'tjsv-menu-bar-items' : 'tjsv-menu';
+        m.body = body;
+
+        if (spec.mode === 'dropdown') {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
+            btn.title = spec.title || spec.label || '';
+            btn.setAttribute('aria-haspopup', 'true');
+            btn.setAttribute('aria-expanded', 'false');
+            btn.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
+                + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.icon || spec.label || '')}</span>`;
+            btn.addEventListener('click', () => this._setOpen(m, !m.open));
+            m.button = btn;
+            root.appendChild(btn);
+            body.hidden = true;
+            if (spec.builtin) {
+                const status = document.createElement('div');
+                status.className = 'tjsv-menu-status tjsv-status-text';
+                status.textContent = 'Disconnected';
+                body.appendChild(status);
+            }
+        } else if (spec.mode === 'panel' && spec.label) {
+            const title = document.createElement('div');
+            title.className = 'tjsv-menu-title';
+            title.textContent = spec.label;
+            body.appendChild(title);
+        }
+        for (const it of spec.items) this._buildItem(m, it);
+        root.appendChild(body);
+
+        const host = spec.placement === 'top-left' ? this._hosts.barLeft
+            : spec.mode === 'panel' ? this._hosts.panels : this._hosts.bar;
+        host.appendChild(root);
+    }
+
+    /** @param {any} m @param {MenuItemSpec} it */
+    _buildItem(m, it) {
+        const type = it.type || 'button';
+        if (!MENU_ITEM_TYPES.has(type)) {
+            console.warn(`addMenu: unknown item type '${type}' in menu '${m.spec.id}'`);
+            return;
+        }
+        if (it.options) it.options = normalizeOptions(it.options);
+        const rec = { spec: it, el: /** @type {HTMLElement|null} */ (null), input: /** @type {any} */ (null), shortcut: null };
+        let el;
+        if (type === 'divider') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-divider';
+        } else if (type === 'label') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-caption';
+            el.textContent = it.label || '';
+        } else if (type === 'custom') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-custom';
+            if (typeof it.render === 'function') it.render(el, it);
+        } else if (type === 'select') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-row';
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            const sel = document.createElement('select');
+            sel.className = 'tjsv-menu-select';
+            for (const o of it.options || []) {
+                const opt = document.createElement('option');
+                opt.value = String(o.value);
+                opt.textContent = o.label ?? String(o.value);
+                sel.appendChild(opt);
+            }
+            sel.addEventListener('change', () => this._commit(m, rec, sel.value));
+            rec.input = sel;
+            el.appendChild(lab);
+            el.appendChild(sel);
+        } else if (type === 'segmented') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-row';
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            const seg = document.createElement('div');
+            seg.className = 'tjsv-segmented';
+            for (const o of it.options || []) {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'tjsv-seg-btn';
+                b.dataset.value = String(o.value);
+                b.textContent = o.label ?? String(o.value);
+                b.addEventListener('click', () => this._commit(m, rec, o.value));
+                seg.appendChild(b);
+            }
+            rec.input = seg;
+            if (it.label) el.appendChild(lab);
+            el.appendChild(seg);
+        } else {
+            // button | toggle | eye — one row: [mark] label … state [kbd]
+            el = document.createElement('button');
+            el.type = 'button';
+            el.className = 'tjsv-menu-item';
+            const mark = document.createElement('span');
+            mark.className = 'tjsv-menu-mark';
+            if (type === 'eye') mark.innerHTML = EYE_ON_SVG;
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            const st = document.createElement('span');
+            st.className = 'tjsv-menu-state';
+            el.appendChild(mark);
+            el.appendChild(lab);
+            el.appendChild(st);
+            if (it.shortcut) {
+                const kbd = document.createElement('kbd');
+                kbd.textContent = it.shortcut;
+                el.appendChild(kbd);
+            }
+            el.addEventListener('click', () => this._activate(m, rec));
+        }
+        if (it.id) el.dataset.item = it.id;
+        if (it.hint) el.title = it.hint;
+        rec.el = el;
+        if (it.bindKey && it.shortcut) {
+            const norm = normalizeShortcut(it.shortcut);
+            if (this._reservedKeys.has(norm)) {
+                console.warn(`addMenu: shortcut '${it.shortcut}' on '${m.spec.id}/${it.id}' is a viewer key; not bound`);
+            } else {
+                rec.shortcut = parseShortcut(it.shortcut);
+            }
+        }
+        if (it.id) m.items.set(it.id, rec);
+        m.body.appendChild(el);
+    }
+
+    // ---- state -----------------------------------------------------------
+
+    /** Current value of a toggle/eye/select/segmented item. @param {any} m @param {MenuItemSpec|undefined} it */
+    _valueOf(m, it) {
+        if (!it) return undefined;
+        const type = it.type || 'button';
+        if (it.id && it.id in m.state) return m.state[it.id];
+        if (type === 'toggle' || type === 'eye') {
+            const c = evalProp(it.checked, it);
+            return c === undefined ? type === 'eye' : !!c;
+        }
+        if (type === 'select' || type === 'segmented') {
+            const v = evalProp(it.value, it);
+            return v !== undefined ? v : (it.options?.[0]?.value);
+        }
+        return undefined;
+    }
+
+    /** @param {any} m */
+    _persist(m) {
+        if (!m.spec.storageKey) return;
+        try { localStorage.setItem(m.spec.storageKey, JSON.stringify(m.state)); } catch (e) { /* ignore */ }
+    }
+
+    /** Row click: buttons fire onClick, toggles/eyes flip. @param {any} m @param {any} rec */
+    _activate(m, rec) {
+        const it = rec.spec;
+        if (evalProp(it.disabled, it)) return;
+        const type = it.type || 'button';
+        if (type === 'toggle' || type === 'eye') {
+            this._commit(m, rec, !this._valueOf(m, it));
+            return;
+        }
+        if (typeof it.onClick === 'function') it.onClick(it);
+        this._emit(m, it, undefined);
+        this.refresh(m);
+    }
+
+    /** Value change of any stateful item. @param {any} m @param {any} rec @param {any} value */
+    _commit(m, rec, value) {
+        const it = rec.spec;
+        if (evalProp(it.disabled, it)) return;
+        if (it.id) m.state[it.id] = value;
+        this._persist(m);
+        if ((it.type || '') === 'eye') this._applyEye(it, !!value);
+        if (typeof it.onChange === 'function') it.onChange(value, it);
+        this._emit(m, it, value);
+        this.refresh(m);
+    }
+
+    /** @param {any} m @param {MenuItemSpec} it @param {any} value */
+    _emit(m, it, value) {
+        if (!this._actionHooks.length) return;
+        const action = { menu: m.spec.id, item: it.id, type: it.type || 'button', value };
+        for (const cb of this._actionHooks.slice()) {
+            try { cb(action); } catch (e) { console.error('menu action hook failed', e); }
+        }
+    }
+
+    /**
+     * Patch an item from outside its own handler: label, state, checked,
+     * value, disabled, hidden, options.
+     * @param {any} m @param {string} itemId @param {Partial<MenuItemSpec>} patch
+     */
+    setItem(m, itemId, patch) {
+        const rec = m.items.get(itemId);
+        if (!rec) return false;
+        const it = rec.spec;
+        Object.assign(it, patch || {});
+        if ('options' in patch) it.options = normalizeOptions(it.options);
+        if ('checked' in patch || 'value' in patch) {
+            const v = 'checked' in patch ? !!patch.checked : patch.value;
+            if (it.id) m.state[it.id] = v;
+            this._persist(m);
+            if ((it.type || '') === 'eye') this._applyEye(it, !!v);
+        }
+        if ('options' in patch && rec.input) {
+            rec.input.innerHTML = '';
+            const isSel = rec.input.tagName === 'SELECT';
+            for (const o of it.options || []) {
+                const child = document.createElement(isSel ? 'option' : 'button');
+                if (isSel) { /** @type {HTMLOptionElement} */ (child).value = String(o.value); }
+                else {
+                    child.className = 'tjsv-seg-btn';
+                    child.dataset.value = String(o.value);
+                    child.addEventListener('click', () => this._commit(m, rec, o.value));
+                }
+                child.textContent = o.label ?? String(o.value);
+                rec.input.appendChild(child);
+            }
+        }
+        if ('label' in patch) {
+            const lab = rec.el?.querySelector('.tjsv-menu-label');
+            if (lab) lab.textContent = it.label || '';
+            else if ((it.type || '') === 'label' && rec.el) rec.el.textContent = it.label || '';
+        }
+        this.refresh(m);
+        return true;
+    }
+
+    /** Re-evaluate every function-valued property and repaint. @param {any} [only] */
+    refresh(only) {
+        const targets = only ? [only] : [...this._menus.values()];
+        for (const m of targets) {
+            for (const rec of m.items.values()) this._paint(m, rec);
+            // Items without an id (dividers, captions) never change.
+        }
+    }
+
+    /** @param {any} m @param {any} rec */
+    _paint(m, rec) {
+        const it = rec.spec;
+        const el = rec.el;
+        if (!el) return;
+        const type = it.type || 'button';
+        el.hidden = !!evalProp(it.hidden, it);
+        const disabled = !!evalProp(it.disabled, it);
+        el.classList.toggle('disabled', disabled);
+        if (el instanceof HTMLButtonElement) el.disabled = disabled;
+        if (type === 'button') {
+            el.classList.toggle('active', !!evalProp(it.active, it));
+            const st = el.querySelector('.tjsv-menu-state');
+            if (st) st.textContent = evalProp(it.state, it) ?? '';
+        } else if (type === 'toggle' || type === 'eye') {
+            const on = !!this._valueOf(m, it);
+            el.classList.toggle('active', on);
+            el.classList.toggle('off', !on);
+            const mark = el.querySelector('.tjsv-menu-mark');
+            if (mark && type === 'eye') mark.innerHTML = on ? EYE_ON_SVG : EYE_OFF_SVG;
+            const st = el.querySelector('.tjsv-menu-state');
+            if (st) st.textContent = evalProp(it.state, it) ?? '';
+        } else if (type === 'select') {
+            const v = this._valueOf(m, it);
+            if (rec.input && v !== undefined) rec.input.value = String(v);
+            rec.input.disabled = disabled;
+        } else if (type === 'segmented') {
+            const v = this._valueOf(m, it);
+            for (const b of rec.input.querySelectorAll('.tjsv-seg-btn')) {
+                b.classList.toggle('active', String(b.dataset.value) === String(v));
+                b.disabled = disabled;
+            }
+        }
+    }
+
+    // ---- eyes ------------------------------------------------------------
+
+    /** @param {MenuItemSpec} it @param {string} objId */
+    _eyeOwns(it, objId) {
+        if (it.ids && it.ids.includes(objId)) return true;
+        if (it.prefix && objId.startsWith(it.prefix)) return true;
+        return false;
+    }
+
+    /** @param {MenuItemSpec} it @param {boolean} on */
+    _applyEye(it, on) {
+        for (const [objId, obj] of this._viewer._objects) {
+            if (obj && this._eyeOwns(it, objId)) obj.visible = on;
+        }
+    }
+
+    /**
+     * Re-apply every eye of one menu (or all) to the tracked objects. Called
+     * from `_registerObject`, so a hidden layer stays hidden when its objects
+     * are re-pushed or stream in later.
+     * @param {any} [only]
+     */
+    applyEyes(only) {
+        const targets = only ? [only] : [...this._menus.values()];
+        for (const m of targets) {
+            for (const rec of m.items.values()) {
+                if ((rec.spec.type || '') === 'eye') this._applyEye(rec.spec, !!this._valueOf(m, rec.spec));
+            }
+        }
+    }
+
+    /**
+     * Which eye (if any) currently hides an object id: its label, for telling
+     * the user where their geometry went.
+     * @param {string} objId @returns {string|null}
+     */
+    hidingEyeFor(objId) {
+        for (const m of this._menus.values()) {
+            for (const rec of m.items.values()) {
+                const it = rec.spec;
+                if ((it.type || '') === 'eye' && !this._valueOf(m, it) && this._eyeOwns(it, objId)) return it.label || it.id || null;
+            }
+        }
+        return null;
+    }
+
+    // ---- open/close + keys ----------------------------------------------
+
+    /** @param {any} m @param {boolean} open */
+    _setOpen(m, open) {
+        if (m.spec.mode !== 'dropdown') return;
+        const want = !!open && !m.spec.hidden;
+        if (want) {
+            for (const o of this._menus.values()) if (o !== m) this._setOpen(o, false);
+        }
+        m.open = want;
+        m.body.hidden = !want;
+        m.button.classList.toggle('active', want);
+        m.button.setAttribute('aria-expanded', String(want));
+        if (want) this.refresh(m);
+    }
+
+    /** @returns {boolean} */
+    anyOpen() { for (const m of this._menus.values()) if (m.open) return true; return false; }
+
+    closeAll() { for (const m of this._menus.values()) this._setOpen(m, false); }
+
+    /**
+     * Route a keydown to a bound client shortcut. Returns true if consumed.
+     * @param {KeyboardEvent} e
+     */
+    handleKey(e) {
+        for (const m of this._menus.values()) {
+            if (m.spec.hidden) continue;
+            for (const rec of m.items.values()) {
+                if (rec.shortcut && shortcutMatches(e, rec.shortcut) && !evalProp(rec.spec.hidden, rec.spec)) {
+                    this._activate(m, rec);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+}
+
+/** @param {string} s */
+function normalizeShortcut(s) {
+    const sc = parseShortcut(s);
+    if (!sc) return '';
+    return `${sc.ctrl ? 'ctrl+' : ''}${sc.alt ? 'alt+' : ''}${sc.meta ? 'meta+' : ''}${sc.shift ? 'shift+' : ''}${sc.key}`;
+}
+
+/** @param {string} s */
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+}
+
 class ShadingDebugController {
     // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
@@ -9302,7 +10004,6 @@ class ThreeJSViewer {
 
         // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
         this._toolbarVisible = resolveToolbarVisible(options, urlParams);
-        this._menuOpen = false;
 
         // State
         this._objects = new Map();
@@ -9525,23 +10226,65 @@ class ThreeJSViewer {
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
     }
 
+    /**
+     * Build the menu controller and the viewer's own options menu on it. The
+     * built-in menu is an ordinary `addMenu` spec whose items read live
+     * viewer state through function-valued `active`/`state`/`hidden`.
+     */
+    _initMenus() {
+        this._menus = new MenuController(this, {
+            bar: this._menuBarEl, panels: this._menuPanelsEl, barLeft: this._menuBarLeftEl,
+        });
+        // Keys the viewer's own keydown handler consumes; a client menu may
+        // display them but not bind them.
+        this._menus.reserveKeys(['C', 'E', 'R', 'T', 'O', 'M', 'N', 'D', 'Shift+D', 'F', 'S', 'V', 'Home']);
+        const v = this;
+        this._menus.add({
+            id: 'viewer', builtin: true, icon: '\u2630', title: 'Viewer menu', hidden: true,
+            items: [
+                { id: 'clip', label: 'Clipping plane', shortcut: 'C',
+                  active: () => !!v._clipEnabled, onClick: () => v._toggleClipPanel() },
+                { id: 'lighting', label: 'Lighting', shortcut: 'E',
+                  active: () => v._lightingPanelEl.classList.contains('visible'),
+                  onClick: () => v._toggleLightingPanel() },
+                { id: 'orbit', label: 'Orbit mode', shortcut: 'R',
+                  active: () => v._orbitMode === 'free', state: () => v._orbitMode === 'free' ? 'free' : 'turntable',
+                  hint: 'Turntable keeps Z up; Free is trackball-style. Hold Alt while dragging for the other mode.',
+                  onClick: () => v._setOrbitMode(v._orbitMode === 'turntable' ? 'free' : 'turntable') },
+                { id: 'track', label: 'Camera tracking', shortcut: 'T',
+                  hidden: () => !v._hasTrackingTargets(),
+                  active: () => v._trackMode !== 'off', state: () => v._trackStateLabel(),
+                  onClick: () => v._cycleTrackMode() },
+                { id: 'projection', label: 'Projection', shortcut: 'O',
+                  active: () => !!v._isOrtho, state: () => v._isOrtho ? 'orthographic' : 'perspective',
+                  onClick: () => v._switchCamera(!v._isOrtho) },
+                { id: 'wireframe', label: 'Wireframe', shortcut: 'M',
+                  active: () => (v._shading?.wireframeMode ?? 0) !== 0,
+                  state: () => ['off', 'wire', 'solid + wire'][v._shading?.wireframeMode ?? 0],
+                  onClick: () => v._shading.cycleWireframe() },
+                { id: 'shading', label: 'Shading debug', shortcut: 'N',
+                  active: () => (v._shading?.shadingMode ?? 0) !== 0,
+                  state: () => ['off', 'normals', 'UV checker', 'normal lines'][v._shading?.shadingMode ?? 0],
+                  onClick: () => v._shading.cycleShading() },
+                { id: 'fog', label: 'Distance fog', shortcut: 'D',
+                  active: () => !!v._depthCue?.fogActive, onClick: () => v._depthCue.toggleFog() },
+                { id: 'edl', label: 'Eye-dome lighting', shortcut: 'Shift+D',
+                  active: () => !!v._depthCue?.edlActive, onClick: () => v._depthCue.toggleEdl() },
+                { id: 'frame', label: 'Frame all', shortcut: 'F', onClick: () => v.resetView() },
+            ],
+        });
+        const root = /** @type {HTMLElement} */ (this._menus.get('viewer').el);
+        this._toolbarEl = root;
+        this._statusDot = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-dot'));
+        this._statusText = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-text'));
+    }
+
     _cacheElements() {
         /** @type {(sel: string) => any} */
         const q = (sel) => this.el.querySelector(sel);
-        this._toolbarEl = q('.tjsv-toolbar');
-        this._btnMenu = q('.tjsv-btn-menu');
-        this._menuEl = q('.tjsv-menu');
-        this._statusDot = q('.tjsv-status-dot');
-        this._statusText = q('.tjsv-status-text');
-        this._btnOrbitMode = q('.tjsv-btn-orbit-mode');
-        this._btnClip = q('.tjsv-btn-clip');
-        this._btnLighting = q('.tjsv-btn-lighting');
-        this._btnProjection = q('.tjsv-btn-projection');
-        this._btnWireframe = q('.tjsv-btn-wireframe');
-        this._btnShading = q('.tjsv-btn-shading');
-        this._btnFog = q('.tjsv-btn-fog');
-        this._btnEdl = q('.tjsv-btn-edl');
-        this._btnFrame = q('.tjsv-btn-frame');
+        this._menuBarEl = q('.tjsv-menubar');
+        this._menuPanelsEl = q('.tjsv-overlay-tr');
+        this._menuBarLeftEl = q('.tjsv-overlay-tl');
         this._clipPanelEl = q('.tjsv-clipping-panel');
         this._lightingPanelEl = q('.tjsv-lighting-panel');
         this._lightingExposureSlider = q('.tjsv-lighting-exposure');
@@ -9595,7 +10338,8 @@ class ThreeJSViewer {
         this._btnLoop = q('.tjsv-btn-loop');
         this._speedDisplayEl = q('.tjsv-speed-display');
         this._timelineContainer = q('.tjsv-timeline-container');
-        this._btnTrack = q('.tjsv-btn-track');
+        // Last: the built-in menu's items read the panels cached above.
+        this._initMenus();
     }
 
     _initThreeJS() {
@@ -10336,7 +11080,7 @@ class ThreeJSViewer {
             if (d.distance != null) this._setClipDistance(d.distance);
         }
         this._clipPanelEl.classList.toggle('visible', this._clipEnabled);
-        this._btnClip.classList.toggle('active', this._clipEnabled);
+        this._menus?.refresh();
         if (this._clipEnabled) this._updateClipSliderRange();
         this._syncAnchorFromPlane();
         this._updateClipMaterials();
@@ -10419,8 +11163,8 @@ class ThreeJSViewer {
     // ========== Lighting Panel ==========
 
     _toggleLightingPanel() {
-        const visible = this._lightingPanelEl.classList.toggle('visible');
-        this._btnLighting.classList.toggle('active', visible);
+        this._lightingPanelEl.classList.toggle('visible');
+        this._menus?.refresh();
     }
 
     _applyToneMappingExposure(value) {
@@ -10519,10 +11263,6 @@ class ThreeJSViewer {
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
-        this._btnLighting.addEventListener('click', () => {
-            this._toggleLightingPanel();
-            this._updateMenuState();
-        });
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
 
         this._lightingToneMappingSelect.addEventListener('change', () => {
@@ -10571,15 +11311,7 @@ class ThreeJSViewer {
         this._updateOrbitModeButton();
     }
 
-    _updateOrbitModeButton() {
-        if (!this._btnOrbitMode) return;
-        const isFree = this._orbitMode === 'free';
-        this._btnOrbitMode.classList.toggle('active', isFree);
-        setMenuState(this._btnOrbitMode, isFree ? 'free' : 'turntable');
-        this._btnOrbitMode.title = isFree
-            ? 'Orbit: Free (trackball-style, no world-up lock). Press R or click to switch to Turntable. Hold Alt while dragging to temporarily use the other mode.'
-            : 'Orbit: Turntable (Z-up locked \u2014 level horizon). Press R or click to switch to Free. Hold Alt while dragging to temporarily use the other mode.';
-    }
+    _updateOrbitModeButton() { this._menus?.refresh(); }
 
     /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
@@ -10661,6 +11393,7 @@ class ThreeJSViewer {
     _registerObject(id, obj) {
         this._objects.set(id, obj);
         this._objGeneration++;
+        this._menus?.applyEyes();
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -12012,25 +12745,22 @@ class ThreeJSViewer {
         return null;
     }
 
-    _updateTrackingUI() {
-        if (!this._btnTrack) return;
+    /** Whether the built-in menu's Camera tracking item applies right now. */
+    _hasTrackingTargets() {
         const hasTracking = this._trackTargetId || this._followPaths?.size ||
             this._animation?.channels?.camera_target || this._animation?.channels?.camera_position;
-        this._btnTrack.style.display = (this._animation && hasTracking) ? '' : 'none';
-        this._btnTrack.classList.toggle('active', this._trackMode !== 'off');
-
-        let title = 'Camera tracking (T)';
-        if (this._trackMode === 'scripted') {
-            title = 'Camera: scripted (T)';
-        } else if (this._trackMode !== 'off') {
-            const modeLabel = this._trackMode === 'follow' ? 'Follow' : 'Look-at';
-            title = `${modeLabel}: ${this._trackTargetId || ''} (T)`;
-        }
-        this._btnTrack.title = title;
-        setMenuState(this._btnTrack, this._trackMode === 'off' ? 'off'
-            : this._trackMode === 'scripted' ? 'scripted'
-            : `${this._trackMode}: ${this._trackTargetId || ''}`);
+        return !!(this._animation && hasTracking);
     }
+
+    /** State label for the Camera tracking menu item. */
+    _trackStateLabel() {
+        if (this._trackMode === 'off') return 'off';
+        if (this._trackMode === 'scripted') return 'scripted';
+        const modeLabel = this._trackMode === 'follow' ? 'follow' : 'look-at';
+        return `${modeLabel}: ${this._trackTargetId || ''}`;
+    }
+
+    _updateTrackingUI() { this._menus?.refresh(); }
 
     /** @param {number} frameIndex @param {number} [frameIndexNext] @param {number} [t] */
     _applyCameraTracking(frameIndex, frameIndexNext = frameIndex, t = 0) {
@@ -12343,32 +13073,7 @@ class ThreeJSViewer {
     // ========== Events ==========
 
     _bindEvents() {
-        // Menu button + dropdown. Every item runs the same action as its
-        // keyboard shortcut and then refreshes the state labels.
-        this._btnMenu.addEventListener('click', () => this._setMenuOpen(!this._menuOpen));
-        /** @type {(btn: HTMLElement, action: () => void) => void} */
-        const item = (btn, action) => btn.addEventListener('click', () => {
-            action();
-            this._updateMenuState();
-        });
-        // Orbit-mode toggle (Turntable <-> Free)
         this._updateOrbitModeButton();
-        item(this._btnOrbitMode, () =>
-            this._setOrbitMode(this._orbitMode === 'turntable' ? 'free' : 'turntable'));
-        item(this._btnClip, () => this._toggleClipPanel());
-        item(this._btnProjection, () => this._switchCamera(!this._isOrtho));
-        item(this._btnWireframe, () => this._shading.cycleWireframe());
-        item(this._btnShading, () => this._shading.cycleShading());
-        item(this._btnFog, () => this._depthCue.toggleFog());
-        item(this._btnEdl, () => this._depthCue.toggleEdl());
-        item(this._btnFrame, () => this.resetView());
-        // A pointerdown anywhere outside the toolbar closes the menu.
-        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
-            if (this._menuOpen && !this._toolbarEl.contains(/** @type {Node} */ (e.target))) {
-                this._setMenuOpen(false);
-            }
-        };
-        document.addEventListener('pointerdown', this._onDocPointerDown);
 
         // Lighting panel
         this._initLightingPanelUI();
@@ -12442,10 +13147,6 @@ class ThreeJSViewer {
             this._animationLoop = !this._animationLoop;
             this._btnLoop.classList.toggle('active', this._animationLoop);
         });
-        this._btnTrack.addEventListener('click', () => {
-            this._cycleTrackMode();
-            this._updateMenuState();
-        });
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
 
@@ -12508,12 +13209,14 @@ class ThreeJSViewer {
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
             if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
-            if (this._menuOpen) {
-                if (e.code === 'Escape') { this._setMenuOpen(false); return; }
-                // Shortcuts keep working with the menu open; refresh its labels
+            if (this._menus.anyOpen()) {
+                if (e.code === 'Escape') { this._menus.closeAll(); return; }
+                // Shortcuts keep working with a menu open; refresh its labels
                 // after the handler below has run.
-                queueMicrotask(() => this._updateMenuState());
+                queueMicrotask(() => this._menus.refresh());
             }
+            // Client-bound menu shortcuts (never a viewer key: those are reserved).
+            if (this._menus.handleKey(e)) { e.preventDefault(); return; }
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
@@ -14453,6 +15156,24 @@ class ThreeJSViewer {
             case 'set_toolbar':
                 this.setToolbarVisible(data.visible !== false);
                 break;
+            case 'add_menu': {
+                // Python-defined menu: item interactions become `menu_action`
+                // messages back over the socket (see onMenuAction).
+                const spec = { ...data.menu };
+                spec.items = (spec.items || []).map(/** @param {any} it */ (it) => ({ ...it }));
+                this.addMenu(spec);
+                this._ensureMenuActionBridge();
+                break;
+            }
+            case 'remove_menu':
+                this.removeMenu(data.id);
+                break;
+            case 'update_menu_item': {
+                const menu = this.getMenu(data.menu);
+                if (!menu) { console.warn(`update_menu_item: no menu '${data.menu}'`); break; }
+                if (!menu.setItem(data.item, data.patch || {})) console.warn(`update_menu_item: no item '${data.item}' in '${data.menu}'`);
+                break;
+            }
             case 'set_strand_collapse_enabled':
                 this._withObject(data.id, 'set_strand_collapse_enabled', () =>
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
@@ -14478,7 +15199,7 @@ class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._clipPanelEl.classList.add('visible');
-                this._btnClip.classList.add('active');
+                this._menus?.refresh();
                 this._updateClipMaterials();
                 break;
             }
@@ -14504,14 +15225,14 @@ class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._clipPanelEl.classList.add('visible');
-                this._btnClip.classList.add('active');
+                this._menus?.refresh();
                 this._updateClipMaterials();
                 break;
             }
             case 'disable_clipping_plane':
                 this._clipEnabled = false;
                 this._clipPanelEl.classList.remove('visible');
-                this._btnClip.classList.remove('active');
+                this._menus?.refresh();
                 this._updateClipMaterials();
                 break;
             case 'set_clipping_defaults':
@@ -15689,50 +16410,69 @@ class ThreeJSViewer {
     }
 
     /**
-     * Show or hide the top-right menu button (the `tjsv-toolbar`). Hidden by
-     * default so a bare viewer has no chrome besides the gimbal; the Python
-     * side flips it with `set_toolbar_visible()` (WS `set_toolbar`) or the
-     * `toolbar=` launch kwarg. Hiding also closes an open menu. Keyboard
+     * Show or hide the viewer's own options menu button. Hidden by default so
+     * a bare viewer has no chrome besides the gimbal; the Python side flips it
+     * with `set_toolbar_visible()` (WS `set_toolbar`) or the `toolbar=` launch
+     * kwarg. Client menus added with `addMenu` are unaffected. Keyboard
      * shortcuts work regardless.
      * @param {boolean} visible
      */
     setToolbarVisible(visible) {
         this._toolbarVisible = !!visible;
-        this._toolbarEl.hidden = !this._toolbarVisible;
-        if (!this._toolbarVisible) this._setMenuOpen(false);
+        this._menus.get('viewer').setHidden(!this._toolbarVisible);
     }
 
     /** @returns {boolean} */
     isToolbarVisible() { return this._toolbarVisible; }
 
-    /** @param {boolean} open */
-    _setMenuOpen(open) {
-        this._menuOpen = !!open && this._toolbarVisible;
-        this._menuEl.hidden = !this._menuOpen;
-        this._btnMenu.classList.toggle('active', this._menuOpen);
-        this._btnMenu.setAttribute('aria-expanded', String(this._menuOpen));
-        if (this._menuOpen) this._updateMenuState();
+    /** Whether the built-in menu's dropdown is open (test seam). */
+    get _menuOpen() { return !!this._menus.get('viewer')?.isOpen(); }
+
+    /**
+     * Add a client-defined menu. The viewer owns placement, styling,
+     * open/close, persistence and eye visibility; the caller owns the items
+     * and their callbacks. See the MenuController banner for the MENU and
+     * ITEM shapes. Re-using an id replaces the menu.
+     * @param {MenuSpec} spec
+     * @returns {{id: string, el: HTMLElement, open: () => void, close: () => void, isOpen: () => boolean,
+     *   refresh: () => void, remove: () => boolean, setHidden: (h: boolean) => void,
+     *   setItem: (itemId: string, patch: Partial<MenuItemSpec>) => boolean, getValue: (itemId: string) => any}}
+     */
+    addMenu(spec) {
+        if (spec && spec.id === 'viewer') throw new Error("addMenu: 'viewer' is the built-in menu id");
+        return this._menus.add({ ...spec, builtin: false });
     }
 
-    /** Refresh the active marks and state labels of the menu items. */
-    _updateMenuState() {
-        if (!this._menuEl) return;
-        this._btnClip.classList.toggle('active', !!this._clipEnabled);
-        this._btnLighting.classList.toggle('active',
-            this._lightingPanelEl.classList.contains('visible'));
-        this._btnProjection.classList.toggle('active', !!this._isOrtho);
-        setMenuState(this._btnProjection, this._isOrtho ? 'orthographic' : 'perspective');
-        const wf = this._shading?.wireframeMode ?? 0;
-        this._btnWireframe.classList.toggle('active', wf !== 0);
-        setMenuState(this._btnWireframe, ['off', 'wire', 'solid + wire'][wf]);
-        const sh = this._shading?.shadingMode ?? 0;
-        this._btnShading.classList.toggle('active', sh !== 0);
-        setMenuState(this._btnShading, ['off', 'normals', 'UV checker', 'normal lines'][sh]);
-        this._btnFog.classList.toggle('active', !!this._depthCue?.fogActive);
-        this._btnEdl.classList.toggle('active', !!this._depthCue?.edlActive);
-        this._updateOrbitModeButton();
-        this._updateTrackingUI();
+    /** @param {string} id @returns {boolean} */
+    removeMenu(id) { return id === 'viewer' ? false : this._menus.remove(id); }
+
+    /** @param {string} id */
+    getMenu(id) { return this._menus.get(id); }
+
+    /**
+     * Hook every item interaction on every menu: `{menu, item, type, value}`.
+     * The Python bridge rides this. Returns an unsubscribe fn.
+     * @param {(action: {menu: string, item?: string, type: string, value?: any}) => void} cb
+     */
+    onMenuAction(cb) { return this._menus.onAction(cb); }
+
+    /**
+     * Label of the eye item currently hiding `objId`, or null. Lets an
+     * embedder explain "it is there, behind an eye".
+     * @param {string} objId
+     */
+    hidingEyeFor(objId) { return this._menus.hidingEyeFor(objId); }
+
+    /** Forward menu interactions to the Python side once (idempotent). */
+    _ensureMenuActionBridge() {
+        if (this._menuActionBridge) return;
+        this._menuActionBridge = this.onMenuAction((action) => {
+            if (action.menu === 'viewer') return;
+            this._reply({ type: 'menu_action', menu: action.menu, item: action.item,
+                itemType: action.type, value: action.value });
+        });
     }
+
 
     /**
      * Enable the move/rotate gizmo. Hold Alt while interacting to rotate (else
@@ -15899,7 +16639,7 @@ class ThreeJSViewer {
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
         document.removeEventListener('mouseup', this._onDocMouseUp);
-        document.removeEventListener('pointerdown', this._onDocPointerDown);
+        this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();
         this._controls.dispose();
