@@ -2007,6 +2007,27 @@ function buildBillboardMesh(data, material) {
     return new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
 }
 
+/**
+ * A closed circle outline in the local XY plane (normal +Z), for a sphere
+ * primitive's `outline` ring. Drawn as a `THREE.LineLoop` and registered as a
+ * billboard (mode `'aim'`) by the caller, so it stays camera-facing without a
+ * bespoke per-frame `lookAt` — the ring's own +Z plane normal already matches
+ * the billboard system's default `face` axis.
+ * @param {number} radius
+ * @param {number} [segments]
+ * @returns {THREE.BufferGeometry}
+ */
+function buildOutlineRingGeometry(radius, segments = 64) {
+    const points = [];
+    for (let i = 0; i <= segments; i++) {
+        const angle = (i / segments) * Math.PI * 2;
+        points.push(Math.cos(angle) * radius, Math.sin(angle) * radius, 0);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    return geometry;
+}
+
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
 // min(width, height) / 2.  Always emits N_CROSS_SECTION (6) vertices CCW.
 // When w > h: flat top & bottom, pointed left & right (hexagon).
@@ -10178,9 +10199,44 @@ export class ThreeJSViewer {
         const token = this._claimLoadToken(id);
 
         if (objData.primitive) {
-            const geometry = PRIMITIVES[objData.primitive](objData.params || {});
-            const material = this._createMaterial(objData.params || {});
-            obj = new THREE.Mesh(geometry, material);
+            const params = objData.params || {};
+            const geometry = PRIMITIVES[objData.primitive](params);
+            const material = this._createMaterial(params);
+            const mesh = new THREE.Mesh(geometry, material);
+            // `outline`: a crisper, less-transparent accent on top of the
+            // translucent fill — box edges (EdgesGeometry) or, for a sphere, a
+            // ring that stays camera-facing via the existing generic billboard
+            // system (see buildOutlineRingGeometry). Opt-in per object; every
+            // other primitive/no-outline path is the single Mesh as before.
+            if (params.outline && (objData.primitive === 'box' || objData.primitive === 'sphere')) {
+                const group = new THREE.Group();
+                group.add(mesh);
+                const outlineOpacity = params.outlineOpacity != null ? params.outlineOpacity : 0.9;
+                const outlineMat = new THREE.LineBasicMaterial({
+                    color: params.color || 0x4a90d9,
+                    transparent: true,
+                    opacity: outlineOpacity,
+                });
+                if (objData.primitive === 'box') {
+                    group.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry), outlineMat));
+                } else {
+                    const radius = params.radius || 0.5;
+                    const ring = new THREE.LineLoop(buildOutlineRingGeometry(radius), outlineMat);
+                    const ringId = `${id}::outline`;
+                    ring.userData.id = ringId;
+                    group.add(ring);
+                    // Not registered via `_registerObject` — the ring is an
+                    // internal visual detail, not addressable by its own id.
+                    // `_deleteObject` still cleans it up: it traverses every
+                    // descendant of the parent id and prunes any child that
+                    // carries `userData.id` from both `_objects` and
+                    // `_billboards`.
+                    this._enableBillboard(ringId, ring, { mode: 'aim' });
+                }
+                obj = group;
+            } else {
+                obj = mesh;
+            }
         } else if (objData.model) {
             const format = objData.format || 'gltf';
             const loader = this._loaders[/** @type {keyof typeof this._loaders} */ (format)];
