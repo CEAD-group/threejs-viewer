@@ -2743,6 +2743,13 @@ function resolveLightingDefaults(options, urlParams) {
     };
 }
 
+/** Material `side` by the name the wire uses. Unknown names fall back to front. */
+const SIDE_BY_NAME = {
+    front: THREE.FrontSide,
+    back: THREE.BackSide,
+    double: THREE.DoubleSide,
+};
+
 /**
  * @param {THREE.Object3D} obj
  * @param {number} opacity
@@ -2759,7 +2766,8 @@ function applyOpacity(obj, opacity) {
             const wasTransparent = mat.transparent;
             mat.transparent = opacity < 1;
             mat.opacity = opacity;
-            mat.depthWrite = opacity >= 1;
+            // An explicit params.depthWrite outranks the opacity rule (#207).
+            if (!mat.userData || !mat.userData.__depthWriteExplicit) mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
         }
         // transparent/depthWrite just changed, and a silhouette highlight is
@@ -2889,8 +2897,8 @@ function buildHighlightEdges(geometry, color, thresholdDeg) {
  *    *within* a pass. The hull's material is opaque, so it always draws before
  *    a transparent mesh no matter how high its renderOrder, and the depth
  *    buffer is still empty when it does. A primitive added with `opacity < 1`
- *    is exactly this case: `_createMaterial` sets `transparent` but leaves
- *    `depthWrite` true, so testing depthWrite alone would miss it.
+ *    is exactly this case when the caller passed an explicit
+ *    `depthWrite: true`, so testing depthWrite alone would miss it.
  * @param {any} child
  * @returns {boolean}
  */
@@ -11544,21 +11552,39 @@ class ThreeJSViewer {
         const materialType = params.materialType || 'standard';
         const opacity = params.opacity != null ? params.opacity : 1;
         const transparent = opacity < 1;
+        const wireframe = params.wireframe === true;
         const clip = this._activeClippingPlanes();
-
-        switch (materialType) {
-            case 'basic':
-                return new THREE.MeshBasicMaterial({ color, opacity, transparent, clippingPlanes: clip });
-            case 'phong':
-                return new THREE.MeshPhongMaterial({ color, opacity, transparent, clippingPlanes: clip });
-            case 'lambert':
-                return new THREE.MeshLambertMaterial({ color, opacity, transparent, clippingPlanes: clip });
-            default: {
-                const roughness = params.roughness != null ? params.roughness : 0.7;
-                const metalness = params.metalness != null ? params.metalness : 0.3;
-                return new THREE.MeshStandardMaterial({ color, roughness, metalness, opacity, transparent, clippingPlanes: clip });
-            }
+        // Front-only culls a translucent body's far walls, leaving a flat
+        // silhouette in one shade; opaque bodies hide theirs anyway.
+        const side = params.side != null
+            ? (SIDE_BY_NAME[String(params.side)] || THREE.FrontSide)
+            : (transparent && !wireframe ? THREE.DoubleSide : THREE.FrontSide);
+        // Same rule as applyOpacity, so both paths agree: a translucent body
+        // that writes depth occludes its neighbours by draw order (issue #207).
+        const depthWriteExplicit = params.depthWrite != null;
+        const depthWrite = depthWriteExplicit ? params.depthWrite !== false : opacity >= 1;
+        /** @type {any} */
+        const common = { color, opacity, transparent, wireframe, depthWrite, side, clippingPlanes: clip };
+        if (params.polygonOffset) {
+            common.polygonOffset = true;
+            common.polygonOffsetFactor = params.polygonOffsetFactor != null ? params.polygonOffsetFactor : 0;
+            common.polygonOffsetUnits = params.polygonOffsetUnits != null ? params.polygonOffsetUnits : 0;
         }
+
+        /** @type {any} */ let mat;
+        switch (materialType) {
+            case 'basic': mat = new THREE.MeshBasicMaterial(common); break;
+            case 'phong': mat = new THREE.MeshPhongMaterial(common); break;
+            case 'lambert': mat = new THREE.MeshLambertMaterial(common); break;
+            default:
+                mat = new THREE.MeshStandardMaterial({
+                    ...common,
+                    roughness: params.roughness != null ? params.roughness : 0.7,
+                    metalness: params.metalness != null ? params.metalness : 0.3,
+                });
+        }
+        if (depthWriteExplicit) mat.userData.__depthWriteExplicit = true;
+        return mat;
     }
 
     /** @param {string} id @param {number} opacity */
