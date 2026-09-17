@@ -1231,6 +1231,9 @@ function applyOpacity(obj, opacity) {
         // Highlight outlines keep their own styling — set_opacity addresses
         // the object's appearance, not the selection indicator riding on it.
         if (child.userData.__highlightOutline) return;
+        // Same for a primitive's `outline`: an accent that follows the fill's
+        // opacity dissolves. set_color and set_visibility still reach it.
+        if (child.userData.__primitiveOutline) return;
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
             const wasTransparent = mat.transparent;
@@ -2013,6 +2016,25 @@ function buildBillboardMesh(data, material) {
     const width = data.width > 0 ? data.width : 1;
     const height = data.height > 0 ? data.height : 1;
     return new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+}
+
+/**
+ * A closed circle in the local XY plane, for a sphere's `outline` ring. Its +Z
+ * normal is the billboard system's default `face` axis, so the caller keeps it
+ * camera-facing with `mode: 'aim'` instead of a per-frame lookAt.
+ * @param {number} radius
+ * @param {number} [segments]
+ * @returns {THREE.BufferGeometry}
+ */
+function buildOutlineRingGeometry(radius, segments = 64) {
+    const points = [];
+    for (let i = 0; i <= segments; i++) {
+        const angle = (i / segments) * Math.PI * 2;
+        points.push(Math.cos(angle) * radius, Math.sin(angle) * radius, 0);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    return geometry;
 }
 
 // Chamfered rectangle cross-section: 45° chamfers on all corners, depth =
@@ -10204,9 +10226,40 @@ export class ThreeJSViewer {
         const token = this._claimLoadToken(id);
 
         if (objData.primitive) {
-            const geometry = PRIMITIVES[objData.primitive](objData.params || {});
-            const material = this._createMaterial(objData.params || {});
-            obj = new THREE.Mesh(geometry, material);
+            const params = objData.params || {};
+            const geometry = PRIMITIVES[objData.primitive](params);
+            const material = this._createMaterial(params);
+            const mesh = new THREE.Mesh(geometry, material);
+            // A crisper accent over the translucent fill; opt-in, so every
+            // other path stays the single Mesh it was.
+            if (params.outline && (objData.primitive === 'box' || objData.primitive === 'sphere')) {
+                const group = new THREE.Group();
+                group.add(mesh);
+                const outlineOpacity = params.outlineOpacity != null ? params.outlineOpacity : 0.9;
+                const outlineMat = new THREE.LineBasicMaterial({
+                    color: params.color || 0x4a90d9,
+                    transparent: true,
+                    opacity: outlineOpacity,
+                });
+                if (objData.primitive === 'box') {
+                    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), outlineMat);
+                    edges.userData.__primitiveOutline = true;
+                    group.add(edges);
+                } else {
+                    const radius = params.radius || 0.5;
+                    const ring = new THREE.LineLoop(buildOutlineRingGeometry(radius), outlineMat);
+                    const ringId = `${id}::outline`;
+                    ring.userData.id = ringId;
+                    ring.userData.__primitiveOutline = true;
+                    group.add(ring);
+                    // Not in `_objects`: an internal detail, not addressable.
+                    // `_deleteObject` still prunes it via its userData.id.
+                    this._enableBillboard(ringId, ring, { mode: 'aim' });
+                }
+                obj = group;
+            } else {
+                obj = mesh;
+            }
         } else if (objData.model) {
             const format = objData.format || 'gltf';
             const loader = this._loaders[/** @type {keyof typeof this._loaders} */ (format)];
@@ -13071,7 +13124,10 @@ export class ThreeJSViewer {
 
                         const hasAlphaColor = data.hasVertexColors && vcc === 4;
                         const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
-                        const isTransparent = meshOpacity < 1 || hasAlphaColor;
+                        // Opt into the transparent pass at any opacity, so an
+                        // opaque mesh can be renderOrder-ed against one that is
+                        // translucent (renderOrder only sorts within a pass).
+                        const isTransparent = meshOpacity < 1 || hasAlphaColor || data.transparent === true;
                         const meshMaterial = new THREE.MeshStandardMaterial({
                             color: colors ? 0xffffff : (data.color || 0x7ab8cc),
                             metalness: data.metalness !== undefined ? data.metalness : 0.1,
@@ -13089,6 +13145,8 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
+                        // Paint order for a coplanar layer stack.
+                        if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
                         // mid-fetch would otherwise be dropped).
