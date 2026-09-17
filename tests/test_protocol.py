@@ -1774,3 +1774,39 @@ def test_set_highlight_style_validated(client):
 def test_set_highlight_width_validated(client, bad):
     with pytest.raises(ValueError, match="width_px"):
         client.set_highlight("box", width_px=bad)
+
+
+# --- Primitive material flags (issue #207) ---
+
+
+def test_primitive_material_flags_omitted_by_default(client):
+    client.add_box("b")
+    params = client._messages[-1]["object"]["params"]
+    for key in ("wireframe", "depthWrite", "polygonOffset"):
+        assert key not in params
+
+
+def test_primitive_wireframe_and_depth_write_forwarded(client):
+    client.add_box("b", wireframe=True, depth_write=False)
+    params = client._messages[-1]["object"]["params"]
+    assert params["wireframe"] is True
+    assert params["depthWrite"] is False
+
+
+def test_primitive_depth_write_true_is_explicit(client):
+    client.add_sphere("s", opacity=0.25, depth_write=True)
+    params = client._messages[-1]["object"]["params"]
+    assert params["depthWrite"] is True
+
+
+def test_primitive_polygon_offset_forwarded(client):
+    client.add_cylinder("c", polygon_offset=-1.0, polygon_offset_units=-2.0)
+    params = client._messages[-1]["object"]["params"]
+    assert params["polygonOffset"] is True
+    assert params["polygonOffsetFactor"] == -1.0
+    assert params["polygonOffsetUnits"] == -2.0
+
+
+def test_primitive_material_flags_on_capsule(client):
+    client.add_capsule("cap", wireframe=True)
+    assert client._messages[-1]["object"]["params"]["wireframe"] is True

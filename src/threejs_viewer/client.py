@@ -176,6 +176,26 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
 _TIME_UNBOUNDED = float(np.finfo(np.float32).max)
 
 
+def _apply_material_flags(
+    params: dict,
+    wireframe: bool,
+    depth_write: Optional[bool],
+    polygon_offset: Optional[float],
+    polygon_offset_units: float,
+) -> None:
+    """Add the optional material flags of a primitive to its params (issue #207)."""
+    if wireframe:
+        params["wireframe"] = True
+    if depth_write is not None:
+        params["depthWrite"] = bool(depth_write)
+    if polygon_offset is not None:
+        # A non-zero factor/units pair pushes coplanar overlays apart in depth
+        # instead of the caller nudging geometry by millimetres.
+        params["polygonOffset"] = True
+        params["polygonOffsetFactor"] = float(polygon_offset)
+        params["polygonOffsetUnits"] = float(polygon_offset_units)
+
+
 def _transform_header(
     position: Optional[List[float]],
     rotation: Optional[List[float]],
@@ -1010,13 +1030,24 @@ class ViewerClient:
         opacity: float = 1.0,
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
+        wireframe: bool = False,
+        depth_write: Optional[bool] = None,
+        polygon_offset: Optional[float] = None,
+        polygon_offset_units: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
     ) -> None:
-        """Add a box primitive to the scene."""
+        """Add a box primitive to the scene.
+
+        ``wireframe`` draws the primitive as an edge cage instead of a solid
+        body. ``depth_write`` overrides the default (write depth only when
+        fully opaque) and is then never touched by a later ``set_opacity`` /
+        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
+        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        """
         params = {
             "width": width,
             "height": height,
@@ -1028,6 +1059,9 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
+        _apply_material_flags(
+            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+        )
         self._add_primitive(
             id,
             "box",
@@ -1047,18 +1081,32 @@ class ViewerClient:
         opacity: float = 1.0,
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
+        wireframe: bool = False,
+        depth_write: Optional[bool] = None,
+        polygon_offset: Optional[float] = None,
+        polygon_offset_units: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
     ) -> None:
-        """Add a sphere primitive to the scene."""
+        """Add a sphere primitive to the scene.
+
+        ``wireframe`` draws the primitive as an edge cage instead of a solid
+        body. ``depth_write`` overrides the default (write depth only when
+        fully opaque) and is then never touched by a later ``set_opacity`` /
+        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
+        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        """
         params = {"radius": radius, "color": color, "opacity": opacity}
         if roughness is not None:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
+        _apply_material_flags(
+            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+        )
         self._add_primitive(
             id,
             "sphere",
@@ -1080,13 +1128,24 @@ class ViewerClient:
         opacity: float = 1.0,
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
+        wireframe: bool = False,
+        depth_write: Optional[bool] = None,
+        polygon_offset: Optional[float] = None,
+        polygon_offset_units: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
     ) -> None:
-        """Add a cylinder primitive to the scene."""
+        """Add a cylinder primitive to the scene.
+
+        ``wireframe`` draws the primitive as an edge cage instead of a solid
+        body. ``depth_write`` overrides the default (write depth only when
+        fully opaque) and is then never touched by a later ``set_opacity`` /
+        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
+        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        """
         params = {
             "radiusTop": radius_top,
             "radiusBottom": radius_bottom,
@@ -1098,6 +1157,9 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
+        _apply_material_flags(
+            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+        )
         self._add_primitive(
             id,
             "cylinder",
@@ -1118,13 +1180,24 @@ class ViewerClient:
         opacity: float = 1.0,
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
+        wireframe: bool = False,
+        depth_write: Optional[bool] = None,
+        polygon_offset: Optional[float] = None,
+        polygon_offset_units: float = 1.0,
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
     ) -> None:
-        """Add a capsule (pill) primitive to the scene."""
+        """Add a capsule (pill) primitive to the scene.
+
+        ``wireframe`` draws the primitive as an edge cage instead of a solid
+        body. ``depth_write`` overrides the default (write depth only when
+        fully opaque) and is then never touched by a later ``set_opacity`` /
+        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
+        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        """
         params = {
             "radius": radius,
             "length": length,
@@ -1135,6 +1208,9 @@ class ViewerClient:
             params["roughness"] = roughness
         if metalness is not None:
             params["metalness"] = metalness
+        _apply_material_flags(
+            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+        )
         self._add_primitive(
             id,
             "capsule",

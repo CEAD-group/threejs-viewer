@@ -7964,3 +7964,77 @@ def test_firefox_file_page_loads_binary_asset(viewer_client, playwright):
         assert objects["ff_mesh"]["type"] == "Mesh"
     finally:
         browser.close()
+
+
+def _material_flags(page, obj_id):
+    """Read the first material's wireframe/transparent/depthWrite for an object."""
+    return page.evaluate(
+        "(id) => {"
+        "  const obj = window.threejsViewer._objects.get(id);"
+        "  if (!obj) return null;"
+        "  const m = Array.isArray(obj.material) ? obj.material[0] : obj.material;"
+        "  if (!m) return null;"
+        "  return {wireframe: m.wireframe, transparent: m.transparent,"
+        "          depthWrite: m.depthWrite, opacity: m.opacity,"
+        "          polygonOffset: m.polygonOffset,"
+        "          polygonOffsetFactor: m.polygonOffsetFactor};"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_primitive_wireframe_param_is_honoured(viewer_client, viewer_page):
+    """add_object's params.wireframe reaches the material (issue #207)."""
+    viewer_client.add_box("wf", color=0x00CCFF, opacity=0.25, wireframe=True)
+    viewer_client.add_box("solid", color=0x00CCFF, opacity=0.25)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "wf")["wireframe"] is True
+    assert _material_flags(viewer_page, "solid")["wireframe"] is False
+
+
+@pytest.mark.browser
+def test_primitive_polygon_offset_param_is_honoured(viewer_client, viewer_page):
+    """add_object's params.polygonOffset reaches the material (issue #207)."""
+    viewer_client.add_box("po", polygon_offset=-1.0, polygon_offset_units=-2.0)
+    settle(viewer_client)
+    flags = _material_flags(viewer_page, "po")
+    assert flags["polygonOffset"] is True
+    assert flags["polygonOffsetFactor"] == -1.0
+
+
+@pytest.mark.browser
+def test_translucent_primitive_depth_write_matches_set_opacity(
+    viewer_client, viewer_page
+):
+    """A primitive added translucent sorts like one turned translucent via
+    set_color, and a round trip back to the original opacity restores the
+    original state (issue #207)."""
+    viewer_client.add_box("a", color=0x00CCFF, opacity=0.25)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "a")["depthWrite"] is False
+
+    viewer_client.set_color("a", 0xFF2020, opacity=0.45)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "a")["depthWrite"] is False
+
+    viewer_client.set_color("a", 0x00CCFF, opacity=0.25)
+    settle(viewer_client)
+    after = _material_flags(viewer_page, "a")
+    assert after["depthWrite"] is False and abs(after["opacity"] - 0.25) < 1e-6
+
+    viewer_client.set_opacity("a", 1.0)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "a")["depthWrite"] is True
+
+
+@pytest.mark.browser
+def test_explicit_depth_write_survives_set_opacity(viewer_client, viewer_page):
+    """An explicit params.depthWrite outranks applyOpacity's opacity rule
+    (issue #207)."""
+    viewer_client.add_box("keep", opacity=0.25, depth_write=True)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "keep")["depthWrite"] is True
+    viewer_client.set_opacity("keep", 0.5)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "keep")["depthWrite"] is True
