@@ -1231,6 +1231,11 @@ function applyOpacity(obj, opacity) {
         // Highlight outlines keep their own styling — set_opacity addresses
         // the object's appearance, not the selection indicator riding on it.
         if (child.userData.__highlightOutline) return;
+        // Same for a primitive's own `outline` accent: its whole job is to stay
+        // crisper than the fill it rides on, so following the fill's opacity
+        // would dissolve it exactly when it is most needed. set_color still
+        // recolours it, and set_visibility still hides the object with it.
+        if (child.userData.__primitiveOutline) return;
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
             const wasTransparent = mat.transparent;
@@ -10244,12 +10249,15 @@ export class ThreeJSViewer {
                     opacity: outlineOpacity,
                 });
                 if (objData.primitive === 'box') {
-                    group.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry), outlineMat));
+                    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), outlineMat);
+                    edges.userData.__primitiveOutline = true;
+                    group.add(edges);
                 } else {
                     const radius = params.radius || 0.5;
                     const ring = new THREE.LineLoop(buildOutlineRingGeometry(radius), outlineMat);
                     const ringId = `${id}::outline`;
                     ring.userData.id = ringId;
+                    ring.userData.__primitiveOutline = true;
                     group.add(ring);
                     // Not registered via `_registerObject` — the ring is an
                     // internal visual detail, not addressable by its own id.

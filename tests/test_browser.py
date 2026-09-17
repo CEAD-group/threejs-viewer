@@ -8067,3 +8067,87 @@ def test_translucent_primitive_is_double_sided(viewer_client, viewer_page):
     # A cage has no interior to reveal, so it keeps the cheaper front-only draw.
     assert _material_side(viewer_page, "cage") == front_side
     assert _material_side(viewer_page, "forced") == front_side
+
+
+@pytest.mark.browser
+def test_primitive_outline_children(viewer_client, viewer_page):
+    """`outline` adds an edge accent to a box and a camera-facing ring to a
+    sphere, both tagged so set_opacity leaves them alone."""
+    viewer_client.add_box("ob", color=0x00CCFF, opacity=0.25, outline=True)
+    viewer_client.add_sphere("os", color=0x00CCFF, opacity=0.25, outline=True)
+    settle(viewer_client)
+    kinds = viewer_page.evaluate(
+        "() => ['ob','os'].map(id => {"
+        "  const g = window.threejsViewer._objects.get(id);"
+        "  const out = g.children.filter(c => c.userData.__primitiveOutline);"
+        "  return {id, isGroup: !!g.isGroup, outlines: out.length,"
+        "          type: out[0] && out[0].type,"
+        "          opacity: out[0] && out[0].material.opacity,"
+        "          billboard: window.threejsViewer._billboards.has(id + '::outline')};"
+        "})"
+    )
+    box, sphere = kinds
+    assert box["isGroup"] and box["outlines"] == 1
+    assert box["type"] == "LineSegments" and not box["billboard"]
+    assert sphere["outlines"] == 1 and sphere["type"] == "LineLoop"
+    # The sphere ring is kept camera-facing by the generic billboard system.
+    assert sphere["billboard"] is True
+
+
+@pytest.mark.browser
+def test_outline_keeps_its_opacity_but_follows_set_color(viewer_client, viewer_page):
+    """set_color recolours the outline with the body; set_opacity does not
+    dissolve it."""
+    viewer_client.add_box("ob2", color=0x00CCFF, opacity=0.25, outline=True)
+    settle(viewer_client)
+    viewer_client.set_color("ob2", 0xFF2020, opacity=0.45)
+    settle(viewer_client)
+    state = viewer_page.evaluate(
+        "() => {"
+        "  const g = window.threejsViewer._objects.get('ob2');"
+        "  const body = g.children.find(c => c.isMesh);"
+        "  const out = g.children.find(c => c.userData.__primitiveOutline);"
+        "  return {bodyOpacity: body.material.opacity,"
+        "          outlineOpacity: out.material.opacity,"
+        "          outlineColor: out.material.color.getHex()};"
+        "}"
+    )
+    assert abs(state["bodyOpacity"] - 0.45) < 1e-6
+    assert abs(state["outlineOpacity"] - 0.9) < 1e-6
+    assert state["outlineColor"] == 0xFF2020
+
+
+@pytest.mark.browser
+def test_outlined_primitive_deletes_cleanly(viewer_client, viewer_page):
+    """Deleting an outlined sphere prunes its ring's billboard entry."""
+    viewer_client.add_sphere("os2", opacity=0.3, outline=True)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._billboards.has('os2::outline')"
+    )
+    viewer_client.delete("os2")
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => !window.threejsViewer._billboards.has('os2::outline')"
+        " && !window.threejsViewer._objects.has('os2')"
+    )
+
+
+@pytest.mark.browser
+def test_mesh_transparent_and_render_order(viewer_client, viewer_page):
+    """An opaque mesh can opt into the transparent pass and carry a
+    renderOrder, so coplanar layers sort by paint order."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("lay", positions, indices, transparent=True, render_order=3)
+    settle(viewer_client)
+    state = viewer_page.evaluate(
+        "() => {"
+        "  const m = window.threejsViewer._objects.get('lay');"
+        "  return {transparent: m.material.transparent, renderOrder: m.renderOrder,"
+        "          opacity: m.material.opacity};"
+        "}"
+    )
+    assert state["transparent"] is True
+    assert state["renderOrder"] == 3
+    assert state["opacity"] == 1
