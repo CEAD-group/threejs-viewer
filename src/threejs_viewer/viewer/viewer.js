@@ -10036,18 +10036,27 @@ export class ThreeJSViewer {
         const opacity = params.opacity != null ? params.opacity : 1;
         const transparent = opacity < 1;
         const clip = this._activeClippingPlanes();
+        // Matches `applyOpacity`'s rule for a LATER opacity change (set_opacity):
+        // a translucent material must not write depth, or two overlapping
+        // translucent primitives (e.g. collision-box viz) occlude each other by
+        // draw order instead of blending — whichever one happens to render first
+        // wins the z-buffer and the other's fragments behind it are discarded,
+        // even though both should show through. Only missing here at CREATION
+        // time; an object that starts opaque and is later faded already got this
+        // right via applyOpacity.
+        const depthWrite = opacity >= 1;
 
         switch (materialType) {
             case 'basic':
-                return new THREE.MeshBasicMaterial({ color, opacity, transparent, clippingPlanes: clip });
+                return new THREE.MeshBasicMaterial({ color, opacity, transparent, depthWrite, clippingPlanes: clip });
             case 'phong':
-                return new THREE.MeshPhongMaterial({ color, opacity, transparent, clippingPlanes: clip });
+                return new THREE.MeshPhongMaterial({ color, opacity, transparent, depthWrite, clippingPlanes: clip });
             case 'lambert':
-                return new THREE.MeshLambertMaterial({ color, opacity, transparent, clippingPlanes: clip });
+                return new THREE.MeshLambertMaterial({ color, opacity, transparent, depthWrite, clippingPlanes: clip });
             default: {
                 const roughness = params.roughness != null ? params.roughness : 0.7;
                 const metalness = params.metalness != null ? params.metalness : 0.3;
-                return new THREE.MeshStandardMaterial({ color, roughness, metalness, opacity, transparent, clippingPlanes: clip });
+                return new THREE.MeshStandardMaterial({ color, roughness, metalness, opacity, transparent, depthWrite, clippingPlanes: clip });
             }
         }
     }
@@ -13101,7 +13110,17 @@ export class ThreeJSViewer {
 
                         const hasAlphaColor = data.hasVertexColors && vcc === 4;
                         const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
-                        const isTransparent = meshOpacity < 1 || hasAlphaColor;
+                        // `data.transparent`: an explicit request to join the
+                        // transparent render pass regardless of opacity — for a
+                        // mesh that is fully opaque at every face it draws (no
+                        // face = nothing there, not a blended one) but still
+                        // needs to be ORDERED against another transparent mesh
+                        // via `renderOrder`, which only sorts objects within the
+                        // SAME pass (three.js always finishes the opaque pass
+                        // before starting the transparent one — see
+                        // `meshPrimesDepth`'s doc comment above for the same
+                        // rule from the selection-outline side).
+                        const isTransparent = meshOpacity < 1 || hasAlphaColor || data.transparent === true;
                         const meshMaterial = new THREE.MeshStandardMaterial({
                             color: colors ? 0xffffff : (data.color || 0x7ab8cc),
                             metalness: data.metalness !== undefined ? data.metalness : 0.1,
@@ -13119,6 +13138,10 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
+                        // Draw-order WITHIN a pass (see the `isTransparent` comment
+                        // above) — e.g. a coplanar analysis-layer stack that relies
+                        // on paint order rather than depth separation.
+                        if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
                         // mid-fetch would otherwise be dropped).
