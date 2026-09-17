@@ -8151,3 +8151,86 @@ def test_mesh_transparent_and_render_order(viewer_client, viewer_page):
     assert state["transparent"] is True
     assert state["renderOrder"] == 3
     assert state["opacity"] == 1
+
+
+@pytest.mark.browser
+def test_fat_polyline_segments_uses_line_segments2(viewer_client, viewer_page):
+    """issue #212: `segments` was ignored on the fat path, so disjoint point
+    pairs were drawn as one connected strip with a false connector between
+    every pair. The fat path must build a LineSegments2 whose instance count
+    is one per pair, carry no pick data, and still honour set_draw_range."""
+    # Four disjoint edges, well separated so a connector would be obvious.
+    pairs = np.array(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 5, 0],
+            [1, 5, 0],
+            [0, 10, 0],
+            [1, 10, 0],
+            [0, 15, 0],
+            [1, 15, 0],
+        ],
+        dtype=np.float32,
+    )
+    viewer_client.add_polyline("fatseg", pairs, segments=True, fat=True, line_width=5)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        settle(viewer_client)
+        if "fatseg" in viewer_client.query_scene()["objects"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("fat segments polyline was never created")
+
+    info = viewer_page.evaluate(
+        """(id) => {
+            const obj = window.threejsViewer._objects.get(id);
+            return {
+                type: obj.type,
+                isSegments: !!obj.userData.isLineSegments,
+                isNative: !!obj.userData.isNativeLine,
+                maxInstanceCount: obj.userData.maxInstanceCount,
+                instanceCount: obj.geometry.instanceCount,
+                hasPickPoints: !!obj.userData.pickPoints,
+                lineWidth: obj.material.linewidth,
+            };
+        }""",
+        "fatseg",
+    )
+    # 8 points ⇒ 4 independent edges, not 7 strip segments.
+    assert info["maxInstanceCount"] == 4, info
+    assert info["instanceCount"] == 4, info
+    assert info["isSegments"] is True, info
+    assert info["isNative"] is False, info
+    assert info["hasPickPoints"] is False, info
+    assert info["lineWidth"] == 5, info
+
+    # Half the edges revealed: whole edges, no partial connector.
+    viewer_client.set_draw_range("fatseg", 0.5)
+    settle(viewer_client)
+    assert (
+        viewer_page.evaluate(
+            "(id) => window.threejsViewer._objects.get(id).geometry.instanceCount",
+            "fatseg",
+        )
+        == 2
+    )
+
+    # Per-vertex color updates address all 8 points (not maxInstanceCount + 1).
+    rgb = np.tile(np.array([[0, 0, 1]], dtype=np.float32), (8, 1))
+    viewer_client.update_polyline_colors("fatseg", rgb)
+    read_blue = """(id) => {
+        const obj = window.threejsViewer._objects.get(id);
+        const start = obj.geometry.attributes.instanceColorStart;
+        return start ? start.array[2] : null;
+    }"""
+    deadline = time.time() + 2
+    blue = None
+    while time.time() < deadline:
+        blue = viewer_page.evaluate(read_blue, "fatseg")
+        if blue is not None and blue > 0.99:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"fat segments color update did not land; last={blue}")

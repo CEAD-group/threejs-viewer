@@ -1709,10 +1709,12 @@ class ViewerClient:
                 (``THREE.LineSegments``) — many separate episodes (e.g. the
                 travel moves of a toolpath) in a single object/draw call with
                 no false connectors between them. Requires an even point
-                count and implies the native path (``fat`` is ignored);
-                per-vertex ``colors`` and ``set_draw_range`` (leading
-                ``frac*N`` points ⇒ whole edges) work as usual. Segment
-                soups have no arc length, so the object is never pickable.
+                count. Works on both paths: ``fat=True`` renders
+                ``LineSegments2`` (honors ``line_width``), ``fat=False``
+                renders ``THREE.LineSegments``. Per-vertex ``colors``,
+                ``set_draw_range`` (leading ``frac*N`` points, whole edges)
+                and ``update_polyline_colors`` work as usual. Segment soups
+                have no arc length, so the object is never pickable.
             position: [x, y, z] position
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
@@ -1730,7 +1732,6 @@ class ViewerClient:
                     f"segments=True needs an even point count "
                     f"(pairs of edge endpoints), got {n_points}"
                 )
-            fat = False
             pickable = False
 
         # Process colors if provided
