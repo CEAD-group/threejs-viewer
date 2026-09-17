@@ -1213,6 +1213,13 @@ function resolveLightingDefaults(options, urlParams) {
     };
 }
 
+/** Material `side` by the name the wire uses. Unknown names fall back to front. */
+const SIDE_BY_NAME = {
+    front: THREE.FrontSide,
+    back: THREE.BackSide,
+    double: THREE.DoubleSide,
+};
+
 /**
  * @param {THREE.Object3D} obj
  * @param {number} opacity
@@ -10018,6 +10025,15 @@ export class ThreeJSViewer {
         const transparent = opacity < 1;
         const wireframe = params.wireframe === true;
         const clip = this._activeClippingPlanes();
+        // A translucent body drawn front-faces-only is a flat silhouette in one
+        // shade — the far walls are culled, so nothing reads as a solid. Draw
+        // both sides by default when transparent: the back faces show through
+        // at their own lighting and the shape becomes legible. Opaque bodies
+        // keep front-only (the back faces are invisible, so they are pure
+        // overdraw). params.side overrides either way.
+        const side = params.side != null
+            ? (SIDE_BY_NAME[String(params.side)] || THREE.FrontSide)
+            : (transparent && !wireframe ? THREE.DoubleSide : THREE.FrontSide);
         // depthWrite follows applyOpacity's rule by default, so a primitive
         // added translucent sorts like one turned translucent later (issue
         // #207); an explicit params.depthWrite wins and is remembered so
@@ -10025,7 +10041,7 @@ export class ThreeJSViewer {
         const depthWriteExplicit = params.depthWrite != null;
         const depthWrite = depthWriteExplicit ? params.depthWrite !== false : opacity >= 1;
         /** @type {any} */
-        const common = { color, opacity, transparent, wireframe, depthWrite, clippingPlanes: clip };
+        const common = { color, opacity, transparent, wireframe, depthWrite, side, clippingPlanes: clip };
         if (params.polygonOffset) {
             common.polygonOffset = true;
             common.polygonOffsetFactor = params.polygonOffsetFactor != null ? params.polygonOffsetFactor : 0;

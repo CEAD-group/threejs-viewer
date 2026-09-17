@@ -176,9 +176,13 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
 _TIME_UNBOUNDED = float(np.finfo(np.float32).max)
 
 
+_ALLOWED_MATERIAL_SIDES = ("front", "back", "double")
+
+
 def _apply_material_flags(
     params: dict,
     wireframe: bool,
+    side: Optional[str],
     depth_write: Optional[bool],
     polygon_offset: Optional[float],
     polygon_offset_units: float,
@@ -186,6 +190,12 @@ def _apply_material_flags(
     """Add the optional material flags of a primitive to its params (issue #207)."""
     if wireframe:
         params["wireframe"] = True
+    if side is not None:
+        if side not in _ALLOWED_MATERIAL_SIDES:
+            raise ValueError(
+                f"side must be one of {_ALLOWED_MATERIAL_SIDES}, got {side!r}"
+            )
+        params["side"] = side
     if depth_write is not None:
         params["depthWrite"] = bool(depth_write)
     if polygon_offset is not None:
@@ -1031,6 +1041,7 @@ class ViewerClient:
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
         wireframe: bool = False,
+        side: Optional[str] = None,
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
         polygon_offset_units: float = 1.0,
@@ -1043,7 +1054,10 @@ class ViewerClient:
         """Add a box primitive to the scene.
 
         ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``depth_write`` overrides the default (write depth only when
+        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
+        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
+        far walls of a translucent body show through and the shape reads as a
+        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
         fully opaque) and is then never touched by a later ``set_opacity`` /
         ``set_color``. ``polygon_offset`` is the depth-offset factor (with
         ``polygon_offset_units``) that pushes coplanar overlays apart.
@@ -1060,7 +1074,7 @@ class ViewerClient:
         if metalness is not None:
             params["metalness"] = metalness
         _apply_material_flags(
-            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+            params, wireframe, side, depth_write, polygon_offset, polygon_offset_units
         )
         self._add_primitive(
             id,
@@ -1082,6 +1096,7 @@ class ViewerClient:
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
         wireframe: bool = False,
+        side: Optional[str] = None,
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
         polygon_offset_units: float = 1.0,
@@ -1094,7 +1109,10 @@ class ViewerClient:
         """Add a sphere primitive to the scene.
 
         ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``depth_write`` overrides the default (write depth only when
+        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
+        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
+        far walls of a translucent body show through and the shape reads as a
+        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
         fully opaque) and is then never touched by a later ``set_opacity`` /
         ``set_color``. ``polygon_offset`` is the depth-offset factor (with
         ``polygon_offset_units``) that pushes coplanar overlays apart.
@@ -1105,7 +1123,7 @@ class ViewerClient:
         if metalness is not None:
             params["metalness"] = metalness
         _apply_material_flags(
-            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+            params, wireframe, side, depth_write, polygon_offset, polygon_offset_units
         )
         self._add_primitive(
             id,
@@ -1129,6 +1147,7 @@ class ViewerClient:
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
         wireframe: bool = False,
+        side: Optional[str] = None,
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
         polygon_offset_units: float = 1.0,
@@ -1141,7 +1160,10 @@ class ViewerClient:
         """Add a cylinder primitive to the scene.
 
         ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``depth_write`` overrides the default (write depth only when
+        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
+        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
+        far walls of a translucent body show through and the shape reads as a
+        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
         fully opaque) and is then never touched by a later ``set_opacity`` /
         ``set_color``. ``polygon_offset`` is the depth-offset factor (with
         ``polygon_offset_units``) that pushes coplanar overlays apart.
@@ -1158,7 +1180,7 @@ class ViewerClient:
         if metalness is not None:
             params["metalness"] = metalness
         _apply_material_flags(
-            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+            params, wireframe, side, depth_write, polygon_offset, polygon_offset_units
         )
         self._add_primitive(
             id,
@@ -1181,6 +1203,7 @@ class ViewerClient:
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
         wireframe: bool = False,
+        side: Optional[str] = None,
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
         polygon_offset_units: float = 1.0,
@@ -1193,7 +1216,10 @@ class ViewerClient:
         """Add a capsule (pill) primitive to the scene.
 
         ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``depth_write`` overrides the default (write depth only when
+        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
+        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
+        far walls of a translucent body show through and the shape reads as a
+        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
         fully opaque) and is then never touched by a later ``set_opacity`` /
         ``set_color``. ``polygon_offset`` is the depth-offset factor (with
         ``polygon_offset_units``) that pushes coplanar overlays apart.
@@ -1209,7 +1235,7 @@ class ViewerClient:
         if metalness is not None:
             params["metalness"] = metalness
         _apply_material_flags(
-            params, wireframe, depth_write, polygon_offset, polygon_offset_units
+            params, wireframe, side, depth_write, polygon_offset, polygon_offset_units
         )
         self._add_primitive(
             id,

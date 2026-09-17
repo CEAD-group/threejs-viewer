@@ -1810,3 +1810,13 @@ def test_primitive_polygon_offset_forwarded(client):
 def test_primitive_material_flags_on_capsule(client):
     client.add_capsule("cap", wireframe=True)
     assert client._messages[-1]["object"]["params"]["wireframe"] is True
+
+
+def test_primitive_side_forwarded(client):
+    client.add_box("b", side="front")
+    assert client._messages[-1]["object"]["params"]["side"] == "front"
+
+
+def test_primitive_side_rejects_unknown(client):
+    with pytest.raises(ValueError):
+        client.add_box("b", side="sideways")

@@ -8038,3 +8038,32 @@ def test_explicit_depth_write_survives_set_opacity(viewer_client, viewer_page):
     viewer_client.set_opacity("keep", 0.5)
     settle(viewer_client)
     assert _material_flags(viewer_page, "keep")["depthWrite"] is True
+
+
+def _material_side(page, obj_id):
+    return page.evaluate(
+        "(id) => {"
+        "  const obj = window.threejsViewer._objects.get(id);"
+        "  const m = Array.isArray(obj.material) ? obj.material[0] : obj.material;"
+        "  return m.side;"
+        "}",
+        obj_id,
+    )
+
+
+@pytest.mark.browser
+def test_translucent_primitive_is_double_sided(viewer_client, viewer_page):
+    """A translucent body draws its far walls too, so the shape reads as a
+    solid instead of a flat silhouette; an opaque one stays front-only."""
+    viewer_client.add_box("clear", color=0x00CCFF, opacity=0.3)
+    viewer_client.add_box("solid", color=0x00CCFF)
+    viewer_client.add_box("cage", color=0x00CCFF, opacity=0.3, wireframe=True)
+    viewer_client.add_box("forced", color=0x00CCFF, opacity=0.3, side="front")
+    settle(viewer_client)
+    # three's THREE.FrontSide / THREE.DoubleSide; the module is not a page global.
+    front_side, double_side = 0, 2
+    assert _material_side(viewer_page, "clear") == double_side
+    assert _material_side(viewer_page, "solid") == front_side
+    # A cage has no interior to reveal, so it keeps the cheaper front-only draw.
+    assert _material_side(viewer_page, "cage") == front_side
+    assert _material_side(viewer_page, "forced") == front_side
