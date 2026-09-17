@@ -1231,10 +1231,8 @@ function applyOpacity(obj, opacity) {
         // Highlight outlines keep their own styling — set_opacity addresses
         // the object's appearance, not the selection indicator riding on it.
         if (child.userData.__highlightOutline) return;
-        // Same for a primitive's own `outline` accent: its whole job is to stay
-        // crisper than the fill it rides on, so following the fill's opacity
-        // would dissolve it exactly when it is most needed. set_color still
-        // recolours it, and set_visibility still hides the object with it.
+        // Same for a primitive's `outline`: an accent that follows the fill's
+        // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
@@ -2021,11 +2019,9 @@ function buildBillboardMesh(data, material) {
 }
 
 /**
- * A closed circle outline in the local XY plane (normal +Z), for a sphere
- * primitive's `outline` ring. Drawn as a `THREE.LineLoop` and registered as a
- * billboard (mode `'aim'`) by the caller, so it stays camera-facing without a
- * bespoke per-frame `lookAt` — the ring's own +Z plane normal already matches
- * the billboard system's default `face` axis.
+ * A closed circle in the local XY plane, for a sphere's `outline` ring. Its +Z
+ * normal is the billboard system's default `face` axis, so the caller keeps it
+ * camera-facing with `mode: 'aim'` instead of a per-frame lookAt.
  * @param {number} radius
  * @param {number} [segments]
  * @returns {THREE.BufferGeometry}
@@ -10234,11 +10230,8 @@ export class ThreeJSViewer {
             const geometry = PRIMITIVES[objData.primitive](params);
             const material = this._createMaterial(params);
             const mesh = new THREE.Mesh(geometry, material);
-            // `outline`: a crisper, less-transparent accent on top of the
-            // translucent fill — box edges (EdgesGeometry) or, for a sphere, a
-            // ring that stays camera-facing via the existing generic billboard
-            // system (see buildOutlineRingGeometry). Opt-in per object; every
-            // other primitive/no-outline path is the single Mesh as before.
+            // A crisper accent over the translucent fill; opt-in, so every
+            // other path stays the single Mesh it was.
             if (params.outline && (objData.primitive === 'box' || objData.primitive === 'sphere')) {
                 const group = new THREE.Group();
                 group.add(mesh);
@@ -10259,12 +10252,8 @@ export class ThreeJSViewer {
                     ring.userData.id = ringId;
                     ring.userData.__primitiveOutline = true;
                     group.add(ring);
-                    // Not registered via `_registerObject` — the ring is an
-                    // internal visual detail, not addressable by its own id.
-                    // `_deleteObject` still cleans it up: it traverses every
-                    // descendant of the parent id and prunes any child that
-                    // carries `userData.id` from both `_objects` and
-                    // `_billboards`.
+                    // Not in `_objects`: an internal detail, not addressable.
+                    // `_deleteObject` still prunes it via its userData.id.
                     this._enableBillboard(ringId, ring, { mode: 'aim' });
                 }
                 obj = group;
@@ -13135,16 +13124,9 @@ export class ThreeJSViewer {
 
                         const hasAlphaColor = data.hasVertexColors && vcc === 4;
                         const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
-                        // `data.transparent`: an explicit request to join the
-                        // transparent render pass regardless of opacity — for a
-                        // mesh that is fully opaque at every face it draws (no
-                        // face = nothing there, not a blended one) but still
-                        // needs to be ORDERED against another transparent mesh
-                        // via `renderOrder`, which only sorts objects within the
-                        // SAME pass (three.js always finishes the opaque pass
-                        // before starting the transparent one — see
-                        // `meshPrimesDepth`'s doc comment above for the same
-                        // rule from the selection-outline side).
+                        // Opt into the transparent pass at any opacity, so an
+                        // opaque mesh can be renderOrder-ed against one that is
+                        // translucent (renderOrder only sorts within a pass).
                         const isTransparent = meshOpacity < 1 || hasAlphaColor || data.transparent === true;
                         const meshMaterial = new THREE.MeshStandardMaterial({
                             color: colors ? 0xffffff : (data.color || 0x7ab8cc),
@@ -13163,9 +13145,7 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
-                        // Draw-order WITHIN a pass (see the `isTransparent` comment
-                        // above) — e.g. a coplanar analysis-layer stack that relies
-                        // on paint order rather than depth separation.
+                        // Paint order for a coplanar layer stack.
                         if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
