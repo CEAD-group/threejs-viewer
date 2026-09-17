@@ -1820,3 +1820,35 @@ def test_primitive_side_forwarded(client):
 def test_primitive_side_rejects_unknown(client):
     with pytest.raises(ValueError):
         client.add_box("b", side="sideways")
+
+
+# --- Primitive outline / mesh render ordering ---
+
+
+def test_box_outline_forwarded(client):
+    client.add_box("b", outline=True, outline_opacity=0.6)
+    params = client._messages[-1]["object"]["params"]
+    assert params["outline"] is True
+    assert params["outlineOpacity"] == 0.6
+
+
+def test_outline_omitted_by_default(client):
+    client.add_sphere("s")
+    assert "outline" not in client._messages[-1]["object"]["params"]
+
+
+def test_add_mesh_transparent_and_render_order_forwarded(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx, transparent=True, render_order=5)
+    header, _ = client._binary_messages[-1]
+    assert header["transparent"] is True
+    assert header["renderOrder"] == 5
+
+
+def test_add_mesh_render_flags_omitted_by_default(client):
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx)
+    header, _ = client._binary_messages[-1]
+    assert "transparent" not in header and "renderOrder" not in header

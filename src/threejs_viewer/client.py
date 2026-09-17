@@ -186,10 +186,15 @@ def _apply_material_flags(
     depth_write: Optional[bool],
     polygon_offset: Optional[float],
     polygon_offset_units: float,
+    outline: bool = False,
+    outline_opacity: float = 0.9,
 ) -> None:
     """Add the optional material flags of a primitive to its params (issue #207)."""
     if wireframe:
         params["wireframe"] = True
+    if outline:
+        params["outline"] = True
+        params["outlineOpacity"] = float(outline_opacity)
     if side is not None:
         if side not in _ALLOWED_MATERIAL_SIDES:
             raise ValueError(
@@ -1041,6 +1046,8 @@ class ViewerClient:
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
         wireframe: bool = False,
+        outline: bool = False,
+        outline_opacity: float = 0.9,
         side: Optional[str] = None,
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
@@ -1071,7 +1078,14 @@ class ViewerClient:
         if metalness is not None:
             params["metalness"] = metalness
         _apply_material_flags(
-            params, wireframe, side, depth_write, polygon_offset, polygon_offset_units
+            params,
+            wireframe,
+            side,
+            depth_write,
+            polygon_offset,
+            polygon_offset_units,
+            outline=outline,
+            outline_opacity=outline_opacity,
         )
         self._add_primitive(
             id,
@@ -1093,6 +1107,8 @@ class ViewerClient:
         roughness: Optional[float] = None,
         metalness: Optional[float] = None,
         wireframe: bool = False,
+        outline: bool = False,
+        outline_opacity: float = 0.9,
         side: Optional[str] = None,
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
@@ -1117,7 +1133,14 @@ class ViewerClient:
         if metalness is not None:
             params["metalness"] = metalness
         _apply_material_flags(
-            params, wireframe, side, depth_write, polygon_offset, polygon_offset_units
+            params,
+            wireframe,
+            side,
+            depth_write,
+            polygon_offset,
+            polygon_offset_units,
+            outline=outline,
+            outline_opacity=outline_opacity,
         )
         self._add_primitive(
             id,
@@ -1761,6 +1784,8 @@ class ViewerClient:
         opacity: float = 1.0,
         metalness: float = 0.1,
         roughness: float = 0.8,
+        transparent: bool = False,
+        render_order: Optional[int] = None,
         parent: Optional[str] = None,
         position: Optional[list] = None,
         rotation: Optional[list] = None,
@@ -1844,6 +1869,10 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if transparent:
+            header["transparent"] = True
+        if render_order is not None:
+            header["renderOrder"] = int(render_order)
         if parent:
             header["parent"] = parent
         if not visible:
