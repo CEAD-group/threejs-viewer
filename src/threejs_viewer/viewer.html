@@ -2766,8 +2766,7 @@ function applyOpacity(obj, opacity) {
             const wasTransparent = mat.transparent;
             mat.transparent = opacity < 1;
             mat.opacity = opacity;
-            // An explicit params.depthWrite from the add path is the caller's
-            // choice and outranks the opacity rule (issue #207).
+            // An explicit params.depthWrite outranks the opacity rule (#207).
             if (!mat.userData || !mat.userData.__depthWriteExplicit) mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
         }
@@ -11555,19 +11554,13 @@ class ThreeJSViewer {
         const transparent = opacity < 1;
         const wireframe = params.wireframe === true;
         const clip = this._activeClippingPlanes();
-        // A translucent body drawn front-faces-only is a flat silhouette in one
-        // shade — the far walls are culled, so nothing reads as a solid. Draw
-        // both sides by default when transparent: the back faces show through
-        // at their own lighting and the shape becomes legible. Opaque bodies
-        // keep front-only (the back faces are invisible, so they are pure
-        // overdraw). params.side overrides either way.
+        // Front-only culls a translucent body's far walls, leaving a flat
+        // silhouette in one shade; opaque bodies hide theirs anyway.
         const side = params.side != null
             ? (SIDE_BY_NAME[String(params.side)] || THREE.FrontSide)
             : (transparent && !wireframe ? THREE.DoubleSide : THREE.FrontSide);
-        // depthWrite follows applyOpacity's rule by default, so a primitive
-        // added translucent sorts like one turned translucent later (issue
-        // #207); an explicit params.depthWrite wins and is remembered so
-        // applyOpacity never overwrites it.
+        // Same rule as applyOpacity, so both paths agree: a translucent body
+        // that writes depth occludes its neighbours by draw order (issue #207).
         const depthWriteExplicit = params.depthWrite != null;
         const depthWrite = depthWriteExplicit ? params.depthWrite !== false : opacity >= 1;
         /** @type {any} */

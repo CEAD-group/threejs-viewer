@@ -1053,14 +1053,11 @@ class ViewerClient:
     ) -> None:
         """Add a box primitive to the scene.
 
-        ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
-        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
-        far walls of a translucent body show through and the shape reads as a
-        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
-        fully opaque) and is then never touched by a later ``set_opacity`` /
-        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
-        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        ``side`` (``"front"``/``"back"``/``"double"``) defaults to double while
+        ``opacity < 1`` so a translucent body shows its far walls.
+        ``depth_write`` overrides the default (depth only when opaque) and then
+        survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
+        ``polygon_offset_units``) separates coplanar overlays.
         """
         params = {
             "width": width,
@@ -1108,14 +1105,11 @@ class ViewerClient:
     ) -> None:
         """Add a sphere primitive to the scene.
 
-        ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
-        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
-        far walls of a translucent body show through and the shape reads as a
-        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
-        fully opaque) and is then never touched by a later ``set_opacity`` /
-        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
-        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        ``side`` (``"front"``/``"back"``/``"double"``) defaults to double while
+        ``opacity < 1`` so a translucent body shows its far walls.
+        ``depth_write`` overrides the default (depth only when opaque) and then
+        survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
+        ``polygon_offset_units``) separates coplanar overlays.
         """
         params = {"radius": radius, "color": color, "opacity": opacity}
         if roughness is not None:
@@ -1159,14 +1153,11 @@ class ViewerClient:
     ) -> None:
         """Add a cylinder primitive to the scene.
 
-        ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
-        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
-        far walls of a translucent body show through and the shape reads as a
-        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
-        fully opaque) and is then never touched by a later ``set_opacity`` /
-        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
-        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        ``side`` (``"front"``/``"back"``/``"double"``) defaults to double while
+        ``opacity < 1`` so a translucent body shows its far walls.
+        ``depth_write`` overrides the default (depth only when opaque) and then
+        survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
+        ``polygon_offset_units``) separates coplanar overlays.
         """
         params = {
             "radiusTop": radius_top,
@@ -1215,14 +1206,11 @@ class ViewerClient:
     ) -> None:
         """Add a capsule (pill) primitive to the scene.
 
-        ``wireframe`` draws the primitive as an edge cage instead of a solid
-        body. ``side`` (``"front"``/``"back"``/``"double"``) picks which faces
-        are drawn; it defaults to ``"double"`` while ``opacity < 1``, so the
-        far walls of a translucent body show through and the shape reads as a
-        solid, and to ``"front"`` when opaque. ``depth_write`` overrides the default (write depth only when
-        fully opaque) and is then never touched by a later ``set_opacity`` /
-        ``set_color``. ``polygon_offset`` is the depth-offset factor (with
-        ``polygon_offset_units``) that pushes coplanar overlays apart.
+        ``side`` (``"front"``/``"back"``/``"double"``) defaults to double while
+        ``opacity < 1`` so a translucent body shows its far walls.
+        ``depth_write`` overrides the default (depth only when opaque) and then
+        survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
+        ``polygon_offset_units``) separates coplanar overlays.
         """
         params = {
             "radius": radius,
