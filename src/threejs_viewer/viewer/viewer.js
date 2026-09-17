@@ -13127,7 +13127,17 @@ export class ThreeJSViewer {
 
                         const hasAlphaColor = data.hasVertexColors && vcc === 4;
                         const meshOpacity = data.opacity !== undefined ? data.opacity : 1;
-                        const isTransparent = meshOpacity < 1 || hasAlphaColor;
+                        // `data.transparent`: an explicit request to join the
+                        // transparent render pass regardless of opacity — for a
+                        // mesh that is fully opaque at every face it draws (no
+                        // face = nothing there, not a blended one) but still
+                        // needs to be ORDERED against another transparent mesh
+                        // via `renderOrder`, which only sorts objects within the
+                        // SAME pass (three.js always finishes the opaque pass
+                        // before starting the transparent one — see
+                        // `meshPrimesDepth`'s doc comment above for the same
+                        // rule from the selection-outline side).
+                        const isTransparent = meshOpacity < 1 || hasAlphaColor || data.transparent === true;
                         const meshMaterial = new THREE.MeshStandardMaterial({
                             color: colors ? 0xffffff : (data.color || 0x7ab8cc),
                             metalness: data.metalness !== undefined ? data.metalness : 0.1,
@@ -13145,6 +13155,10 @@ export class ThreeJSViewer {
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
                         mesh.userData.totalIndexCount = ni;
+                        // Draw-order WITHIN a pass (see the `isTransparent` comment
+                        // above) — e.g. a coplanar analysis-layer stack that relies
+                        // on paint order rather than depth separation.
+                        if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
                         // mid-fetch would otherwise be dropped).
