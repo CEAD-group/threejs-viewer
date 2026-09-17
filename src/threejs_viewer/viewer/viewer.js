@@ -12,6 +12,8 @@ import { TDSLoader } from 'three/addons/loaders/TDSLoader.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 import { VertexNormalsHelper } from 'three/addons/helpers/VertexNormalsHelper.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
@@ -6235,7 +6237,11 @@ function applyToolpathGroupDrawRange(grp, value, objects) {
                 const mid = (lo + hi) >> 1;
                 if (fracs[mid] <= clamped) lo = mid + 1; else hi = mid;
             }
-            line.geometry.setDrawRange(0, 2 * lo);
+            if (line.userData.isNativeLine) {
+                line.geometry.setDrawRange(0, 2 * lo);
+            } else {
+                line.geometry.instanceCount = lo;
+            }
         }
     }
 }
@@ -12621,9 +12627,21 @@ export class ThreeJSViewer {
                             }
                         }
 
+                        // segments: disjoint edges from consecutive point
+                        // pairs (one object, one draw call, no false
+                        // connectors) — e.g. a toolpath's travel hops.
+                        // Honoured on both the fat and the native path.
+                        const asSegments = data.segments === true;
+
                         let line;
                         if (fat) {
-                            const geometry = new LineGeometry();
+                            // LineSegmentsGeometry packs each consecutive
+                            // point pair as one instance; LineGeometry (its
+                            // subclass) duplicates points into a connected
+                            // strip first.
+                            const geometry = asSegments
+                                ? new LineSegmentsGeometry()
+                                : new LineGeometry();
                             geometry.setPositions(pointData);
                             let material;
                             if (colorData) {
@@ -12645,9 +12663,13 @@ export class ThreeJSViewer {
                             // current fog state so polylines added while fog
                             // is already on don't render unfogged.
                             material.fog = this._depthCue.fogActive;
-                            line = new Line2(geometry, material);
+                            line = asSegments
+                                ? new LineSegments2(geometry, material)
+                                : new Line2(/** @type {LineGeometry} */ (geometry), material);
                             line.computeLineDistances();
-                            line.userData.maxInstanceCount = numPoints - 1;
+                            line.userData.maxInstanceCount = asSegments
+                                ? numPoints / 2
+                                : numPoints - 1;
                         } else {
                             const geometry = new THREE.BufferGeometry();
                             geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointData, 3));
@@ -12658,17 +12680,14 @@ export class ThreeJSViewer {
                             } else {
                                 material = new THREE.LineBasicMaterial({ color: data.color || 0xffffff });
                             }
-                            // segments: disjoint edges from consecutive
-                            // point pairs (one draw call, no false
-                            // connectors) — e.g. a toolpath's travel hops.
-                            line = data.segments
+                            line = asSegments
                                 ? new THREE.LineSegments(geometry, material)
                                 : new THREE.Line(geometry, material);
                             line.userData.isNativeLine = true;
-                            if (data.segments) line.userData.isLineSegments = true;
-                            line.userData.totalPointCount = numPoints;
                             geometry.setDrawRange(0, numPoints);
                         }
+                        if (asSegments) line.userData.isLineSegments = true;
+                        line.userData.totalPointCount = numPoints;
                         line.name = data.id;
                         line.userData.id = data.id;
                         line.userData.isPolyline = true;
@@ -12685,7 +12704,9 @@ export class ThreeJSViewer {
                         // copy is the lighter source of truth.) Skipped
                         // when pickable=False — the object is then absent
                         // from the pick loop entirely (no cost, never hit).
-                        if (data.pickable !== false) {
+                        // A segment soup has no arc length, so it is never
+                        // a pick target regardless of the pickable flag.
+                        if (data.pickable !== false && !asSegments) {
                             line.userData.pickPoints = pointData;
                         }
                         // Before _deleteObject, which prunes this id's recorded
@@ -13012,9 +13033,7 @@ export class ThreeJSViewer {
                             // is maxInstanceCount + 1. A length mismatch
                             // would desync the new color attributes from
                             // the existing positions.
-                            const expected = obj.userData.isNativeLine
-                                ? obj.userData.totalPointCount
-                                : obj.userData.maxInstanceCount + 1;
+                            const expected = obj.userData.totalPointCount;
                             if (numPoints !== expected) {
                                 console.warn(`update_polyline_colors: '${data.id}' expected ${expected} points, got ${numPoints}`);
                                 return;

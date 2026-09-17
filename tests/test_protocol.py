@@ -1475,10 +1475,16 @@ def test_add_polyline_segments_header_and_constraints(client):
     client.add_polyline("seg", pairs, segments=True, fat=True, line_width=4)
     header, payload = client._binary_messages[0]
     assert header["segments"] is True
-    assert header["fat"] is False  # segments implies the native path
+    assert header["fat"] is True  # segments honors fat (LineSegments2)
     assert header["pickable"] is False  # edge soups have no arc length
     assert header["numPoints"] == 4
     assert len(payload) == 4 * 12
+    # the native path is still reachable
+    client.add_polyline("seg_native", pairs, segments=True, fat=False)
+    native_header, _ = client._binary_messages[1]
+    assert native_header["segments"] is True
+    assert native_header["fat"] is False
+    assert native_header["pickable"] is False
     # odd point count rejected
     with pytest.raises(ValueError, match="even point count"):
         client.add_polyline("bad", pairs[:3], segments=True)
