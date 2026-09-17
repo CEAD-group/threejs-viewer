@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.54
+
+### `segments` is honoured on the fat polyline path (#212, #213)
+
+- **`add_polyline(segments=True, fat=True)` draws disjoint edges instead of one connected strip.** The binary handler's fat branch built a `Line2` from the whole position buffer and never looked at `segments`, so a caller sending point pairs got a false connector between every pair: a work-zone box sent as 12 edges rendered with a diagonal across each face. The fat branch now builds a `LineSegments2` when `segments` is set, so a segment soup keeps its line width. Python no longer forces `fat=False` to work around it, and a segments object stays unpickable on both paths.
+- `update_polyline_colors` validates against the object's own point count rather than deriving it from the strip's instance count, which was wrong for pairs, and the toolpath draw-range reveal drives the instance count on a fat segments line.
+
 ## 0.0.53
 
 ### Primitive material flags (#207, #208)
