@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.53
+
+### Primitive material flags (#207, #208)
+
+- **`add_object` honours `wireframe`, `depthWrite` and `polygonOffset` on the primitive path.** `_createMaterial` read only `color`/`materialType`/`opacity`/`roughness`/`metalness`, so a caller asking for a translucent wireframe cage silently got a solid box. Python exposes them as `wireframe=`, `depth_write=`, `polygon_offset=` / `polygon_offset_units=` on box, sphere, cylinder and capsule; a payload that sets none of them is unchanged on the wire.
+- **`depthWrite` agrees across the add and the recolour path.** It now defaults to `opacity >= 1` in `_createMaterial`, the rule `applyOpacity` already applied, so a primitive added translucent sorts like one turned translucent later by `set_color`/`set_opacity`. Previously the add path left three's default `true` and the first recolour flipped it to `false` for good, so an object that had been recoloured blended differently from an identical neighbour that had not. An explicit `depth_write=` outranks the rule and survives later opacity changes.
+- **Translucent primitives are drawn double-sided**, so a transparent body shows its far walls instead of reading as a flat silhouette in one shade. Opaque bodies and wireframe cages stay front-only, where back faces are invisible or absent; `side="front"|"back"|"double"` overrides. A wireframe or `depth_write=False` primitive no longer primes the depth buffer, so `set_highlight` uses its `edges` style on one, as it already did for a translucent mesh.
+
+### Outline accents and mesh render ordering (#210)
+
+- **`add_box`/`add_sphere` take `outline=True`**, a crisper line accent over the fill (`outline_opacity=`, default 0.9): feature edges for a box, a ring for a sphere kept camera-facing by the billboard system. An outlined primitive becomes a `Group`; un-outlined ones stay a single `Mesh`. `set_color` recolours the accent and `set_visibility` hides it, while `set_opacity` leaves it alone, since an accent that follows the fill's opacity dissolves.
+- **`add_mesh` takes `transparent=` and `render_order=`.** three renders the opaque pass to completion before the transparent one and `renderOrder` only sorts within a pass, so a coplanar analysis-layer stack that wants paint order rather than depth separation needs both.
+
 ## 0.0.52
 
 ### Client-defined menus and the viewer's own options menu (#204, #205)
