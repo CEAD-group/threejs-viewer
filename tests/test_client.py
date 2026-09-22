@@ -257,6 +257,47 @@ def test_set_gizmo_axes_payload_and_defaults():
     }
 
 
+def test_set_gizmo_axes_per_mode_masks():
+    """translate/rotate masks ride along as explicit x/y/z dicts (issue #220);
+    dict keys default to shown, and a 3-sequence maps to x, y, z."""
+    client = ViewerClient()
+    client.set_gizmo_axes(rotate={"z": False})
+    assert client._gizmo_axes == {
+        "type": "set_gizmo_axes",
+        "x": True,
+        "y": True,
+        "z": True,
+        "rotate": {"x": True, "y": True, "z": False},
+    }
+    client.set_gizmo_axes(translate=(True, True, False), rotate=[0, 0, 1])
+    assert client._gizmo_axes["translate"] == {"x": True, "y": True, "z": False}
+    assert client._gizmo_axes["rotate"] == {"x": False, "y": False, "z": True}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rotate": {"c": False}},
+        {"translate": (True, False)},
+        {"rotate": "z"},
+    ],
+)
+def test_set_gizmo_axes_rejects_bad_masks(kwargs):
+    client = ViewerClient()
+    with pytest.raises(ValueError):
+        client.set_gizmo_axes(**kwargs)
+    with pytest.raises(ValueError):
+        client.add_gizmo("box", **kwargs)
+
+
+def test_add_gizmo_per_mode_masks():
+    client = ViewerClient()
+    client.add_gizmo("tcp", rotate={"x": False, "y": False})
+    spec = client._gizmos[0]
+    assert "translate" not in spec
+    assert spec["rotate"] == {"x": False, "y": False, "z": True}
+
+
 def test_disable_move_gizmo_clears_axis_constraint():
     """Disabling the gizmo drops any stored axis constraint (the viewer resets
     axes to all-true on detach, so the stale state must not replay)."""

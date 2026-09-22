@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.56
+
+### Separate translate and rotate axis masks on the move gizmo (#220)
+
+- **`set_gizmo_axes` and `add_gizmo` take `translate=` and `rotate=` masks.** TransformControls has one `showX/showY/showZ` set shared by the translate arrows and the rotate rings, so the old single mask could not hide one ring while keeping every arrow, which a driven angle needs (the operator moves the TCP in X/Y/Z but must not drag the derived C ring). A per-mode mask replaces the top-level `x`/`y`/`z` for its mode only, e.g. `set_gizmo_axes(rotate={"z": False})`; a mask is a dict of x/y/z flags (an omitted key shows that axis) or a 3-sequence of bools. In JS the same shape is `viewer.setGizmoAxes({rotate: {z: false}})` and the `axes` option of `viewer.addGizmo`.
+- The mask follows the live mode, so it also holds while Alt switches a translate gizmo to rotate. A payload without per-mode masks is unchanged on the wire.
+
 ## 0.0.55
 
 ### Click-to-pivot ignores hidden and unpickable objects (#215, #218)

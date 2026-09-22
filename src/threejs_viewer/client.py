@@ -156,6 +156,45 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     return f
 
 
+GizmoAxisMask = Union[Dict[str, bool], Tuple[bool, bool, bool], List[bool]]
+
+
+def _gizmo_axis_mask(name: str, mask: GizmoAxisMask) -> Dict[str, bool]:
+    """Normalize a per-mode gizmo axis mask to explicit ``{x, y, z}`` bools.
+
+    Accepts a dict with keys from ``x``/``y``/``z`` (an omitted key shows that
+    axis) or a 3-sequence of bools in x, y, z order.
+    """
+    if isinstance(mask, dict):
+        unknown = set(mask) - {"x", "y", "z"}
+        if unknown:
+            raise ValueError(
+                f"{name} mask keys must be 'x', 'y', 'z' (got {sorted(unknown)!r})"
+            )
+        return {k: bool(mask.get(k, True)) for k in ("x", "y", "z")}
+    if isinstance(mask, (list, tuple)) and len(mask) == 3:
+        return dict(zip(("x", "y", "z"), (bool(v) for v in mask)))
+    raise ValueError(
+        f"{name} must be a dict of x/y/z flags or a 3-sequence of bools (got {mask!r})"
+    )
+
+
+def _gizmo_axes_fields(
+    x: bool,
+    y: bool,
+    z: bool,
+    translate: Optional[GizmoAxisMask],
+    rotate: Optional[GizmoAxisMask],
+) -> dict:
+    """Wire fields for a gizmo axis constraint; per-mode keys only when given."""
+    fields: dict = {"x": bool(x), "y": bool(y), "z": bool(z)}
+    if translate is not None:
+        fields["translate"] = _gizmo_axis_mask("translate", translate)
+    if rotate is not None:
+        fields["rotate"] = _gizmo_axis_mask("rotate", rotate)
+    return fields
+
+
 def _validate_fov(value: Optional[float]) -> Optional[float]:
     """Validate a perspective FOV (degrees): finite and within (0, 180)."""
     if value is None:
@@ -4213,6 +4252,8 @@ class ViewerClient:
         x: bool = True,
         y: bool = True,
         z: bool = True,
+        translate: Optional[GizmoAxisMask] = None,
+        rotate: Optional[GizmoAxisMask] = None,
         mode: str = "translate",
         space: str = "world",
         snap_default: bool = False,
@@ -4250,6 +4291,11 @@ class ViewerClient:
             x: Expose the X axis handle (default ``True``).
             y: Expose the Y axis handle (default ``True``).
             z: Expose the Z axis handle (default ``True``).
+            translate: Optional axis mask for the translate arrows only,
+                replacing ``x``/``y``/``z`` in translate mode (see
+                :meth:`set_gizmo_axes`).
+            rotate: Optional axis mask for the rotate rings only, replacing
+                ``x``/``y``/``z`` in rotate mode.
             mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Alt
                 overrides this live while held.
             space: Handle orientation, ``"world"`` (default — axes stay aligned
@@ -4259,7 +4305,8 @@ class ViewerClient:
                 freely) instead of the default free-with-Shift-to-snap.
 
         Raises:
-            ValueError: For an unknown ``mode`` or ``space``.
+            ValueError: For an unknown ``mode`` or ``space``, or a malformed
+                ``translate``/``rotate`` mask.
         """
         if mode not in _ALLOWED_GIZMO_MODES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
@@ -4270,9 +4317,7 @@ class ViewerClient:
         spec = {
             "type": "add_gizmo",
             "id": id,
-            "x": bool(x),
-            "y": bool(y),
-            "z": bool(z),
+            **_gizmo_axes_fields(x, y, z, translate, rotate),
             "mode": mode,
             "space": space,
             "snapDefault": bool(snap_default),
@@ -4290,7 +4335,15 @@ class ViewerClient:
         if self._ws is not None:
             self._send({"type": "clear_gizmos"})
 
-    def set_gizmo_axes(self, *, x: bool = True, y: bool = True, z: bool = True) -> None:
+    def set_gizmo_axes(
+        self,
+        *,
+        x: bool = True,
+        y: bool = True,
+        z: bool = True,
+        translate: Optional[GizmoAxisMask] = None,
+        rotate: Optional[GizmoAxisMask] = None,
+    ) -> None:
         """Constrain which axes the move gizmo exposes (translate arrows / rotate
         rings).
 
@@ -4298,6 +4351,14 @@ class ViewerClient:
         y=False, z=True)`` for a vertical rail. An axis passed ``False`` is
         hidden; the default (all ``True``) shows every axis, so calling
         :meth:`set_gizmo_axes` with no arguments restores the full gizmo.
+
+        ``x``/``y``/``z`` govern the translate arrows and the rotate rings
+        together. To constrain one mode alone, pass ``translate`` or ``rotate``:
+        that mask replaces ``x``/``y``/``z`` for its mode. For example
+        ``set_gizmo_axes(rotate={"z": False})`` keeps all three arrows and the
+        X/Y rings but hides the Z ring, for a rotation that is derived rather
+        than dragged. The mask follows the live mode, so it also holds while Alt
+        switches the gizmo to rotate.
 
         The constraint applies to whichever object the gizmo is (or becomes)
         attached to, and is re-sent automatically if the browser reconnects. The
@@ -4309,12 +4370,18 @@ class ViewerClient:
             x: Show the X axis handle (default ``True``).
             y: Show the Y axis handle (default ``True``).
             z: Show the Z axis handle (default ``True``).
+            translate: Optional mask for translate mode only: a dict of
+                ``x``/``y``/``z`` flags (an omitted key shows that axis) or a
+                3-sequence of bools.
+            rotate: Optional mask for rotate mode only, same forms as
+                ``translate``.
+
+        Raises:
+            ValueError: For a malformed ``translate``/``rotate`` mask.
         """
         self._gizmo_axes = {
             "type": "set_gizmo_axes",
-            "x": bool(x),
-            "y": bool(y),
-            "z": bool(z),
+            **_gizmo_axes_fields(x, y, z, translate, rotate),
         }
         if self._ws is not None:
             self._send(self._gizmo_axes)

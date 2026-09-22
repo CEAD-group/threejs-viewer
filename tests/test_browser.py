@@ -4151,6 +4151,59 @@ def test_set_gizmo_axes_constrains_and_resets_on_detach(viewer_client, viewer_pa
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
 
 
+@pytest.mark.browser
+def test_set_gizmo_axes_per_mode_follows_live_mode(viewer_client, viewer_page):
+    """A rotate-only mask hides one ring but no arrow (issue #220), and follows
+    the live mode through setGizmoMode and the Alt momentary override."""
+    viewer_client.add_box("box")
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
+    )
+    viewer_client.set_gizmo_axes(rotate={"z": False})
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo._primary.axes.rotate.z === false",
+    )
+    # Translate base: every arrow stays.
+    assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
+
+    alt = """(down) => {
+        window.threejsViewer.container.dispatchEvent(new KeyboardEvent(
+            down ? 'keydown' : 'keyup',
+            { key: 'Alt', code: 'AltLeft', altKey: down, bubbles: true }));
+    }"""
+    viewer_page.evaluate(alt, True)
+    assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": False}
+    viewer_page.evaluate(alt, False)
+    assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
+
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
+    assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": False}
+
+    # A pinned gizmo carries its own per-mode masks and starts in its base mode.
+    viewer_client.add_gizmo(
+        "box", mode="rotate", translate={"z": False}, rotate=(0, 0, 1)
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo._extra.length === 1"
+    )
+    pinned = (
+        "() => { const c = window.threejsViewer._transformGizmo._extra[0].control;"
+        " return { x: c.showX, y: c.showY, z: c.showZ }; }"
+    )
+    assert viewer_page.evaluate(pinned) == {"x": False, "y": False, "z": True}
+    viewer_page.evaluate(alt, False)  # modifier sync falls back to the rotate base
+    assert viewer_page.evaluate(pinned) == {"x": False, "y": False, "z": True}
+    viewer_page.evaluate(
+        "() => { const t = window.threejsViewer._transformGizmo;"
+        " t._setControlMode(t._extra[0], 'translate'); }"
+    )
+    assert viewer_page.evaluate(pinned) == {"x": True, "y": True, "z": False}
+
+
 # Project the 'box' object's world position to screen pixels (its gizmo's centre
 # handle sits there once attached). Like _GIZMO_PROJECT_ORIGIN but for the object.
 _GIZMO_PROJECT_BOX = """() => {
