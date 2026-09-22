@@ -1006,6 +1006,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """
         Add an empty group to the scene. Objects added with parent=id
@@ -1018,6 +1019,8 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             visible: Initial visibility
+            pickable: When False, click-to-pivot passes through this group
+                and everything under it (issue #215).
         """
         msg: dict = {"type": "add_group", "id": id}
         if parent:
@@ -1033,6 +1036,8 @@ class ViewerClient:
             msg["transform"] = transform
         if not visible:
             msg["visible"] = False
+        if not pickable:
+            msg["pickable"] = False
         self._send(msg)
 
     def add_box(
@@ -1793,6 +1798,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -1812,6 +1818,10 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
+            visible: Initial visibility
+            pickable: When False, click-to-pivot passes through this mesh
+                (a translucent volume such as a workzone fill), so the
+                pivot lands on what sits behind it (issue #215).
         """
         positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1)
         indices = np.ascontiguousarray(indices, dtype=np.uint32).reshape(-1)
@@ -1878,6 +1888,8 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        if not pickable:
+            header["pickable"] = False
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform

@@ -52,6 +52,18 @@ const MAX_DISTANCE = 1e6;
 const MIN_ZOOM = 1e-4;
 const MAX_ZOOM = 1e6;
 const POLE_EPS = THREE.MathUtils.degToRad(5); // turntable pitch clamp
+/**
+ * True when `obj` and every ancestor are visible and none opts out of picking
+ * (`userData.pickable === false`, recorded by the viewer's add handlers).
+ * @param {import('three').Object3D | null} obj
+ */
+function isPivotTarget(obj) {
+    for (let n = obj; n; n = n.parent) {
+        if (n.visible === false || (n.userData && n.userData.pickable === false)) return false;
+    }
+    return true;
+}
+
 const _changeEvent = { type: 'change' };
 
 class ViewerControls extends THREE.EventDispatcher {
@@ -324,9 +336,14 @@ class ViewerControls extends THREE.EventDispatcher {
                 const arr = Array.isArray(candidates) ? candidates : Array.from(candidates);
                 if (arr.length > 0) {
                     const hits = this._raycaster.intersectObjects(arr, true);
-                    if (hits.length > 0) {
-                        this.target.copy(hits[0].point);
-                        this.dispatchEvent({ type: 'pivot', point: hits[0].point.clone(), hit: true });
+                    // Nearest hit that is actually on screen (issue #215):
+                    // three's raycaster ignores `.visible`, so a mesh under a
+                    // hidden ancestor is still returned, and an object sent
+                    // with pickable=false is a passthrough for the pivot.
+                    const hit = hits.find((h) => isPivotTarget(h.object));
+                    if (hit) {
+                        this.target.copy(hit.point);
+                        this.dispatchEvent({ type: 'pivot', point: hit.point.clone(), hit: true });
                         this.dispatchEvent(_changeEvent);
                         return;
                     }

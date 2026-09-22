@@ -9050,6 +9050,10 @@ export class ThreeJSViewer {
         this._orbitMode = localStorage.getItem('tjsv.orbitMode') || 'turntable';
         this._controls = new ViewerControls(this._camera, this._renderer.domElement);
         this._controls.setMode(this._orbitMode);
+        // Candidates are pre-filtered on their own `.visible` only; the
+        // controls re-check every hit against its ancestors and the
+        // `userData.pickable` opt-out (issue #215), which also covers
+        // children reached through the recursive intersect.
         this._controls.setRaycastObjects(() => {
             const arr = [];
             for (const o of this._objects.values()) if (o && o.visible) arr.push(o);
@@ -12262,6 +12266,7 @@ export class ThreeJSViewer {
                 const group = new THREE.Group();
                 group.name = data.id;
                 group.userData.id = data.id;
+                if (data.pickable === false) group.userData.pickable = false;
                 if (data.transform) this._applyTransform(group, data.transform);
                 this._applyInitialVisibility(data.id, group, data.visible);
                 this._addToParentOrScene(group, data.parent);
@@ -12709,6 +12714,8 @@ export class ThreeJSViewer {
                         if (data.pickable !== false && !asSegments) {
                             line.userData.pickPoints = pointData;
                         }
+                        // Click-to-pivot passthrough (issue #215).
+                        if (data.pickable === false) line.userData.pickable = false;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
                         // mid-fetch would otherwise be dropped).
@@ -13163,6 +13170,8 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
+                        // Click-to-pivot passthrough (issue #215).
+                        if (data.pickable === false) mesh.userData.pickable = false;
                         mesh.userData.totalIndexCount = ni;
                         // Paint order for a coplanar layer stack.
                         if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
