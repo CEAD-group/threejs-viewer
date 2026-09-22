@@ -13473,6 +13473,9 @@ export class ThreeJSViewer {
                             mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
                             mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
                             mesh.userData.pickHeightOffset = heightOffset;
+                        } else {
+                            // Click-to-pivot passthrough (issue #215).
+                            mesh.userData.pickable = false;
                         }
                         mesh.userData.tubeMorphData = {
                             spine: new Float32Array(buildSpine),

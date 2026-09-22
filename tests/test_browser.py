@@ -7102,6 +7102,15 @@ def test_orbit_pivot_skips_hidden_ancestors_and_unpickable(viewer_client, viewer
     viewer_client.add_mesh(
         "fill_passthrough", cube, tris, opacity=0.2, parent="wz_shown", pickable=False
     )
+    # A fat pickable=False tube across the view at y=-5, in front of both.
+    spine = np.array([[-4, -5, 0], [4, -5, 0]], dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "tube_passthrough",
+        spine,
+        widths=np.full(2, 2.0, dtype=np.float32),
+        heights=np.full(2, 2.0, dtype=np.float32),
+        pickable=False,
+    )
     viewer_client.set_camera(position=[0, -10, 0], target=[0, 0, 0], up=[0, 0, 1])
     settle(viewer_client)
     frames(viewer_page)
@@ -7116,16 +7125,22 @@ def test_orbit_pivot_skips_hidden_ancestors_and_unpickable(viewer_client, viewer
         " const centre = c.target.toArray();"
         " c.target.set(9, 9, 9);"
         " c._tryPickPivot({ clientX: cx + 200, clientY: cy });"
-        " return { centre, offCentre: c.target.toArray(),"
-        "          flag: v._objects.get('fill_passthrough').userData.pickable };"
+        " const fb = c._fallbackPivotGetter().toArray();"
+        " return { centre, offCentre: c.target.toArray(), fallback: fb,"
+        "          flag: v._objects.get('fill_passthrough').userData.pickable,"
+        "          tubeFlag: v._objects.get('tube_passthrough').userData.pickable };"
         "}"
     )
     assert result["flag"] is False
+    assert result["tubeFlag"] is False
     # Centre click: both fills cover the robot, the pivot lands on its near face.
     assert abs(result["centre"][1] - (-0.25)) < 1e-3
-    # Off-centre click: only the fills are under the cursor, so no hit and the
-    # fallback pivots on the visible content centre instead of the fill face.
-    assert abs(result["offCentre"][1]) < 1e-3
+    # Off-centre click: only the fills and the tube are under the cursor, so no
+    # hit and the fallback pivots on the visible content centre (which is not
+    # the fill face at y=-3, nor the tube face at y=-6).
+    assert result["offCentre"] == pytest.approx(result["fallback"], abs=1e-6)
+    assert abs(result["offCentre"][1] - (-3.0)) > 0.5
+    assert abs(result["offCentre"][1] - (-6.0)) > 0.5
 
 
 @pytest.mark.browser
