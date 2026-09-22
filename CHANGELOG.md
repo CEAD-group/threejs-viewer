@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.55
+
+### Click-to-pivot ignores hidden and unpickable objects (#215, #218)
+
+- **A click no longer pivots on a mesh under a hidden group or on an object sent with `pickable=False`.** three's raycaster does not check visibility, so a mesh registered under its own id but parented to a hidden group (a workzone fill) was still the nearest pivot hit, and `pickable` was only honoured by arc-length picking. `_tryPickPivot` now takes the nearest hit whose whole ancestor chain is visible and carries no `pickable=False`, so the pivot lands on what is actually seen, or falls back to the visible content centre. Follow-up to #166, which fixed the fallback path.
+- `add_mesh` and `add_group` take `pickable=`; meshes, groups, polylines and parametric tubes record the opt-out for the pivot raycast.
+
+### Animated eye glyphs on menu toggles (#216)
+
+- **Eye items on the rail menus animate between open and closed** instead of swapping two static icons: one SVG whose diagonal cut and slash are SMIL animations fired on each toggle. An eye that starts hidden rests closed without playing, and each glyph carries its own mask id so several eyes on screen do not share one mask. Contributed by DAlexanderr.
+
 ## 0.0.54
 
 ### `segments` is honoured on the fat polyline path (#212, #213)
