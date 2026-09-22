@@ -6073,6 +6073,67 @@ def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_add_menu_eye_glyph_animates_between_states(viewer_client, viewer_page):
+    """The eye glyph is one SVG whose open/closed transition is a pair of SMIL
+    animations: each eye mounts them, an eye that starts hidden rests closed
+    without playing, and each toggle fires the matching direction (#216)."""
+    page = viewer_page
+    viewer_client.add_box("box_a", 1, 1, 1)
+    settle(viewer_client)
+    state = page.evaluate(
+        "() => {"
+        " try { localStorage.removeItem('tjsv-test.eyeanim'); } catch (e) {}"
+        " const fired = [];"
+        " const orig = SVGAnimationElement.prototype.beginElement;"
+        " SVGAnimationElement.prototype.beginElement = function () {"
+        "   fired.push(this.getAttribute('class')); return orig.call(this); };"
+        " window.__eyeFired = fired;"
+        " const m = window.threejsViewer.addMenu({id: 'anim', label: 'Anim',"
+        "   storageKey: 'tjsv-test.eyeanim',"
+        "   items: [{type: 'eye', id: 'boxes', label: 'Boxes', prefix: 'box_'},"
+        "           {type: 'eye', id: 'other', label: 'Other', prefix: 'zzz_'}]});"
+        " const marks = [...m.el.querySelectorAll('.tjsv-menu-mark svg')];"
+        " const masks = marks.map(s => s.querySelector('mask').id);"
+        " return { animsPerEye: marks.map(s => ({"
+        "     on: s.querySelectorAll('animate.on').length,"
+        "     off: s.querySelectorAll('animate.off').length })),"
+        "   maskIdsUnique: new Set(masks).size === masks.length,"
+        "   cut: marks[0].querySelector('.tjsv-eye-cut').getAttribute('points'),"
+        "   fired: fired.slice() };"
+        "}"
+    )
+    assert state["animsPerEye"] == [{"on": 3, "off": 3}] * 2
+    assert state["maskIdsUnique"] is True  # url(#id) resolves document-wide
+    assert state["cut"] == "12,12 12,12"  # rests open, nothing played on mount
+    assert state["fired"] == []
+
+    page.locator("[data-menu=anim] .tjsv-menu-btn").click()
+    page.locator("[data-menu=anim] [data-item=boxes]").click()
+    assert page.evaluate("() => window.__eyeFired.splice(0)") == ["off"] * 3
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('box_a').visible") is False
+    )
+    page.locator("[data-menu=anim] [data-item=boxes]").click()
+    assert page.evaluate("() => window.__eyeFired.splice(0)") == ["on"] * 3
+
+    # A remount that starts hidden jumps to the closed pose without playing.
+    page.locator("[data-menu=anim] [data-item=boxes]").click()
+    page.evaluate("() => window.__eyeFired.splice(0)")
+    rest = page.evaluate(
+        "() => {"
+        " const m = window.threejsViewer.addMenu({id: 'anim', label: 'Anim',"
+        "   storageKey: 'tjsv-test.eyeanim',"
+        "   items: [{type: 'eye', id: 'boxes', prefix: 'box_'}]});"
+        " const svg = m.el.querySelector('[data-item=boxes] .tjsv-menu-mark svg');"
+        " return { cut: svg.querySelector('.tjsv-eye-cut').getAttribute('points'),"
+        "   slashWidth: svg.querySelector('.tjsv-eye-slash').getAttribute('stroke-width'),"
+        "   fired: window.__eyeFired.splice(0) };"
+        "}"
+    )
+    assert rest == {"cut": "3,20 21,4", "slashWidth": "2", "fired": []}
+
+
+@pytest.mark.browser
 def test_add_menu_eye_match_apply_and_veto(viewer_client, viewer_page):
     """An eye may own objects through `match` and show/hide through `apply`;
     an `apply` returning false vetoes the flip and the row reverts."""
