@@ -6962,9 +6962,60 @@ function normalizeOptions(options) {
     return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
 }
 
-// ribweaver's eye / dashed-eye glyphs (toggle_switch.js), verbatim.
-const EYE_ON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
-const EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+// Animated eye/eye-off glyph: one eye-path masked by a polyline that sweeps
+// a diagonal cut across it, plus a separate slash line drawn on top — both
+// are SMIL <animate>s with begin="indefinite", fired via beginElement() by
+// playEyeTransition() so toggling *animates* between states instead of
+// swapping a static icon. The un-animated markup already rests in the
+// "open" (visible) pose, so an eye that starts visible needs no JS before
+// its first paint; setEyeRestState() jumps a closed eye there without
+// playing the animation. Mask/element ids are suffixed per instance
+// (`_eyeUidSeq`) because `url(#id)` resolves document-wide, and two eye
+// items on screen at once would otherwise fight over one mask.
+let _eyeUidSeq = 0;
+function eyeSvgMarkup() {
+    const mask = `tjsv-eyeCutMask-${++_eyeUidSeq}`;
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<mask id="${mask}" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+<rect width="24" height="24" fill="#fff"/>
+<polyline class="tjsv-eye-cut" points="12,12 12,12" fill="none" stroke="#000" stroke-width="6" stroke-linecap="round">
+<animate class="off" attributeName="points" begin="indefinite" dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1" values="12,12 12,12;3,20 21,4"/>
+<animate class="on" attributeName="points" begin="indefinite" dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1" values="3,20 21,4;12,12 12,12"/>
+</polyline>
+</mask>
+<path mask="url(#${mask})" d="M2 12C4.5 7 8 5 12 5C16 5 19.5 7 22 12C19.5 17 16 19 12 19C8 19 4.5 17 2 12Z"/>
+<polyline class="tjsv-eye-slash" points="12,12 12,12" fill="none" stroke-width="6">
+<animate class="off" attributeName="points" begin="indefinite" dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1" values="12,12 12,12;3,20 21,4"/>
+<animate class="off" attributeName="stroke-width" begin="indefinite" dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1" values="6;2"/>
+<animate class="on" attributeName="points" begin="indefinite" dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1" values="3,20 21,4;12,12 12,12"/>
+<animate class="on" attributeName="stroke-width" begin="indefinite" dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1" values="2;6"/>
+</polyline>
+</svg>`;
+}
+
+/**
+ * Jump an eye glyph straight to its resting pose with no animation — used
+ * on the first paint, where playEyeTransition() would instead animate from
+ * the markup's baked-in "open" default. @param {Element} mark @param {boolean} on
+ */
+function setEyeRestState(mark, on) {
+    if (on) return; // markup already rests open
+    const cut = mark.querySelector('.tjsv-eye-cut');
+    const slash = mark.querySelector('.tjsv-eye-slash');
+    if (cut) cut.setAttribute('points', '3,20 21,4');
+    if (slash) { slash.setAttribute('points', '3,20 21,4'); slash.setAttribute('stroke-width', '2'); }
+}
+
+/**
+ * Play the open<->closed transition baked into the glyph's SMIL animations.
+ * @param {Element} mark @param {boolean} on
+ */
+function playEyeTransition(mark, on) {
+    const dir = on ? 'on' : 'off';
+    for (const anim of /** @type {NodeListOf<SVGAnimationElement>} */ (mark.querySelectorAll(`animate.${dir}`))) {
+        anim.beginElement();
+    }
+}
 const RAIL_BASE_TOP = 16;
 const RAIL_GAP = 6;
 
@@ -7142,7 +7193,7 @@ class MenuController {
             return;
         }
         if (it.options) it.options = normalizeOptions(it.options);
-        const rec = { spec: it, el: /** @type {HTMLElement|null} */ (null), input: /** @type {any} */ (null), shortcut: null };
+        const rec = { spec: it, el: /** @type {HTMLElement|null} */ (null), input: /** @type {any} */ (null), shortcut: null, eyeState: /** @type {boolean|undefined} */ (undefined) };
         let el;
         if (type === 'divider') {
             el = document.createElement('div');
@@ -7206,7 +7257,7 @@ class MenuController {
             if (type === 'eye') {
                 const mark = document.createElement('span');
                 mark.className = 'tjsv-menu-mark';
-                mark.innerHTML = EYE_ON_SVG;
+                mark.innerHTML = eyeSvgMarkup();
                 el.appendChild(mark);
             } else if (type === 'toggle') {
                 const track = document.createElement('span');
@@ -7376,8 +7427,14 @@ class MenuController {
             const on = !!this._valueOf(m, it);
             el.classList.toggle('active', on);
             el.classList.toggle('off', !on);
-            const mark = el.querySelector('.tjsv-menu-mark');
-            if (mark && type === 'eye') mark.innerHTML = on ? EYE_ON_SVG : EYE_OFF_SVG;
+            if (type === 'eye') {
+                const mark = el.querySelector('.tjsv-menu-mark');
+                if (mark) {
+                    if (rec.eyeState === undefined) setEyeRestState(mark, on);
+                    else if (rec.eyeState !== on) playEyeTransition(mark, on);
+                    rec.eyeState = on;
+                }
+            }
             const st = el.querySelector('.tjsv-menu-state');
             if (st) st.textContent = evalProp(it.state, it) ?? '';
         } else if (type === 'select') {
