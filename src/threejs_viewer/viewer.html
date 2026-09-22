@@ -9650,6 +9650,9 @@ function restyleGizmoHelper(helper, sizedPlanes) {
     });
 }
 
+/** @typedef {{x?:boolean|null, y?:boolean|null, z?:boolean|null}} GizmoAxisFlags */
+/** @typedef {GizmoAxisFlags & {translate?:GizmoAxisFlags|null, rotate?:GizmoAxisFlags|null}} GizmoAxesMask */
+
 // One TransformControls instance bound to (at most) one object — the unit the
 // controller manages. The controller owns a `_primary` interactive gizmo (the
 // click-select / `enable({id})` target, always present so the legacy
@@ -9665,7 +9668,9 @@ class Gizmo {
         this.object = null;
         this.id = /** @type {string|null} */ (null);
         this.mode = 'translate';                                  // base mode (Alt overrides live)
-        this.axes = { x: true, y: true, z: true };
+        // Per-mode axis masks: showX/Y/Z is one flag set for both translate
+        // arrows and rotate rings, so it is re-applied on every mode switch.
+        this.axes = { translate: { x: true, y: true, z: true }, rotate: { x: true, y: true, z: true } };
         this.snapDefault = false;                                 // snap is the resting state (Shift → free) instead of free (Shift → snap)
         /** @type {THREE.Object3D|null} */
         this.ghost = null;                                        // translucent clone at the grab-time pose
@@ -9763,7 +9768,7 @@ class TransformGizmoController {
                 // 'translate', so an Alt tap can't clobber a setGizmoMode('rotate').
                 const want = e.altKey ? 'rotate' : g.mode;
                 if (want !== g.control.getMode()) {
-                    g.control.setMode(want);
+                    this._setControlMode(g, want);
                     this._restyleGizmo(g);
                 }
             }
@@ -9875,28 +9880,47 @@ class TransformGizmoController {
     setMode(mode) {
         if (mode !== 'translate' && mode !== 'rotate') return;
         this._primary.mode = mode;
-        this._primary.control.setMode(mode);
+        this._setControlMode(this._primary, mode);
         this._restyleGizmo(this._primary);
+    }
+
+    /** Switch a gizmo's live control mode and show that mode's axis mask.
+     * Every mode change goes through here, or a per-mode mask would leak.
+     * @param {Gizmo} g @param {string} mode */
+    _setControlMode(g, mode) {
+        g.control.setMode(mode);
+        this._syncAxes(g);
+    }
+
+    /** @param {Gizmo} g */
+    _syncAxes(g) {
+        const m = g.axes[g.control.getMode()] || g.axes.translate;
+        g.control.showX = m.x;
+        g.control.showY = m.y;
+        g.control.showZ = m.z;
     }
 
     /**
      * Constrain which axis handles a gizmo exposes (e.g. Z-only for a vertical
      * rail, or X+Y for an in-plane manipulator). A key set explicitly to `false`
      * hides that axis; omitted keys and a `null`/missing mask show all axes.
-     * Additive — `_restyleGizmo()` never touches `showX/Y/Z`.
-     * @param {Gizmo} g @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask]
+     * Top-level `x`/`y`/`z` apply to both modes; a `translate` or `rotate`
+     * sub-mask replaces them for that mode only (issue #220: keep every
+     * translate arrow but hide one rotate ring). Additive — `_restyleGizmo()`
+     * never touches `showX/Y/Z`.
+     * @param {Gizmo} g @param {GizmoAxesMask|null} [mask]
      */
     _applyAxes(g, mask) {
         const m = mask || {};
-        g.axes = { x: m.x !== false, y: m.y !== false, z: m.z !== false };
-        g.control.showX = g.axes.x;
-        g.control.showY = g.axes.y;
-        g.control.showZ = g.axes.z;
+        const resolve = (/** @type {{x?:boolean|null,y?:boolean|null,z?:boolean|null}} */ s) =>
+            ({ x: s.x !== false, y: s.y !== false, z: s.z !== false });
+        g.axes = { translate: resolve(m.translate || m), rotate: resolve(m.rotate || m) };
+        this._syncAxes(g);
     }
 
     /** Constrain the interactive gizmo's axes (Python set_gizmo_axes / JS setGizmoAxes).
      * `detach()` restores all axes so a later attach isn't silently constrained.
-     * @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask] */
+     * @param {GizmoAxesMask|null} [mask] */
     setAxes(mask) { this._applyAxes(this._primary, mask); }
 
     // One-time structural refinement of a gizmo's stock handles (the per-frame
@@ -10022,7 +10046,7 @@ class TransformGizmoController {
         g.control.attach(object);
         g.control.enabled = true;
         g.helper.visible = true;
-        g.control.setMode(g.mode);
+        this._setControlMode(g, g.mode);
         this._restyleGizmo(g);
     }
 
@@ -10047,7 +10071,7 @@ class TransformGizmoController {
      * Moves report through the same hooks. Activates the controller if it wasn't
      * already.
      * @param {THREE.Object3D} object
-     * @param {{id?:string|null, mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, space?:string, snapDefault?:boolean}} [opts]
+     * @param {{id?:string|null, mode?:string, axes?:GizmoAxesMask|null, space?:string, snapDefault?:boolean}} [opts]
      * @returns {Gizmo|null}
      */
     addGizmo(object, opts = {}) {
@@ -10063,7 +10087,7 @@ class TransformGizmoController {
         g.control.enabled = true;
         g.helper.visible = true;
         g.control.setMode(g.mode);
-        this._applyAxes(g, opts.axes || null);
+        this._applyAxes(g, opts.axes || null);  // also syncs showX/Y/Z to g.mode
         this._restyleGizmo(g);
         this._extra.push(g);
         return g;
@@ -10090,7 +10114,7 @@ class TransformGizmoController {
         if (typeof opts.snapDefault === 'boolean') this._primary.snapDefault = opts.snapDefault;
         this.clickSelect = (typeof opts.clickSelect === 'boolean') ? opts.clickSelect : true;
         this._activate();
-        this._primary.control.setMode(this._primary.mode);
+        this._setControlMode(this._primary, this._primary.mode);
         if (opts.id != null) {
             const obj = this.v._objects.get(opts.id);
             if (obj) this.attach(obj, opts.id);
@@ -15705,14 +15729,14 @@ class ThreeJSViewer {
                 }
                 break;
             case 'set_gizmo_axes':
-                this._transformGizmo.setAxes({ x: data.x, y: data.y, z: data.z });
+                this._transformGizmo.setAxes({ x: data.x, y: data.y, z: data.z, translate: data.translate, rotate: data.rotate });
                 break;
             case 'add_gizmo': {
                 const target = this._objects.get(data.id);
                 if (target) this._transformGizmo.addGizmo(target, {
                     id: data.id,
                     mode: data.mode,
-                    axes: { x: data.x, y: data.y, z: data.z },
+                    axes: { x: data.x, y: data.y, z: data.z, translate: data.translate, rotate: data.rotate },
                     space: data.space,
                     snapDefault: data.snapDefault,
                 });
@@ -17028,7 +17052,7 @@ class ThreeJSViewer {
      * snap the resting state (hold Shift to move freely). Enables the gizmo
      * subsystem if it wasn't already.
      * @param {string|THREE.Object3D} objectOrId
-     * @param {{mode?:string, axes?:{x?:boolean,y?:boolean,z?:boolean}|null, id?:string|null, space?:string, snapDefault?:boolean}} [opts]
+     * @param {{mode?:string, axes?:GizmoAxesMask|null, id?:string|null, space?:string, snapDefault?:boolean}} [opts]
      * @returns {any} the created gizmo, or null if the object can't be resolved.
      */
     addGizmo(objectOrId, opts = {}) {
@@ -17051,9 +17075,11 @@ class ThreeJSViewer {
     /**
      * Constrain which translate/rotate axes the move gizmo exposes — e.g.
      * `{x:false, y:false, z:true}` for a Z-only rail. A key set to `false` hides
-     * that axis; omitted keys (or `setGizmoAxes(null)`) show all axes. Resets to
-     * all-axes automatically when the gizmo detaches.
-     * @param {{x?:boolean,y?:boolean,z?:boolean}|null} [mask]
+     * that axis; omitted keys (or `setGizmoAxes(null)`) show all axes. Top-level
+     * `x`/`y`/`z` cover both modes; a `translate` or `rotate` sub-mask replaces
+     * them for that mode, e.g. `{rotate: {z: false}}` keeps every arrow but hides
+     * the Z ring. Resets to all-axes automatically when the gizmo detaches.
+     * @param {GizmoAxesMask|null} [mask]
      */
     setGizmoAxes(mask) { this._transformGizmo.setAxes(mask); }
 
