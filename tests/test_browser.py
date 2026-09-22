@@ -7059,6 +7059,91 @@ def test_orbit_pivot_ignores_invisible_objects(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_orbit_pivot_skips_hidden_ancestors_and_unpickable(viewer_client, viewer_page):
+    """Click-to-pivot passes through a mesh under a hidden group and through a
+    mesh sent with pickable=False, landing on what is actually seen (#215)."""
+    cube = np.array(
+        [
+            [-3, -3, -3],
+            [3, -3, -3],
+            [3, 3, -3],
+            [-3, 3, -3],
+            [-3, -3, 3],
+            [3, -3, 3],
+            [3, 3, 3],
+            [-3, 3, 3],
+        ],
+        dtype=np.float32,
+    )
+    tris = np.array(
+        [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 5, 6],
+            [1, 6, 2],
+            [2, 6, 7],
+            [2, 7, 3],
+            [3, 7, 4],
+            [3, 4, 0],
+        ],
+        dtype=np.uint32,
+    )
+    viewer_client.add_box("robot", width=0.5, height=0.5, depth=0.5)
+    # ribweaver layout: the fill is a child of the group but registered
+    # under its own id, so it is a raycast root of its own.
+    viewer_client.add_group("wz_hidden")
+    viewer_client.add_mesh("fill_hidden", cube, tris, opacity=0.2, parent="wz_hidden")
+    viewer_client.set_visible("wz_hidden", False)
+    viewer_client.add_group("wz_shown")
+    viewer_client.add_mesh(
+        "fill_passthrough", cube, tris, opacity=0.2, parent="wz_shown", pickable=False
+    )
+    # A fat pickable=False tube across the view at y=-5, in front of both.
+    spine = np.array([[-4, -5, 0], [4, -5, 0]], dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "tube_passthrough",
+        spine,
+        widths=np.full(2, 2.0, dtype=np.float32),
+        heights=np.full(2, 2.0, dtype=np.float32),
+        pickable=False,
+    )
+    viewer_client.set_camera(position=[0, -10, 0], target=[0, 0, 0], up=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page)
+
+    result = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer, c = v._controls;"
+        " const r = v._renderer.domElement.getBoundingClientRect();"
+        " const cx = r.left + r.width / 2, cy = r.top + r.height / 2;"
+        " c.target.set(9, 9, 9);"
+        " c._tryPickPivot({ clientX: cx, clientY: cy });"
+        " const centre = c.target.toArray();"
+        " c.target.set(9, 9, 9);"
+        " c._tryPickPivot({ clientX: cx + 200, clientY: cy });"
+        " const fb = c._fallbackPivotGetter().toArray();"
+        " return { centre, offCentre: c.target.toArray(), fallback: fb,"
+        "          flag: v._objects.get('fill_passthrough').userData.pickable,"
+        "          tubeFlag: v._objects.get('tube_passthrough').userData.pickable };"
+        "}"
+    )
+    assert result["flag"] is False
+    assert result["tubeFlag"] is False
+    # Centre click: both fills cover the robot, the pivot lands on its near face.
+    assert abs(result["centre"][1] - (-0.25)) < 1e-3
+    # Off-centre click: only the fills and the tube are under the cursor, so no
+    # hit and the fallback pivots on the visible content centre (which is not
+    # the fill face at y=-3, nor the tube face at y=-6).
+    assert result["offCentre"] == pytest.approx(result["fallback"], abs=1e-6)
+    assert abs(result["offCentre"][1] - (-3.0)) > 0.5
+    assert abs(result["offCentre"][1] - (-6.0)) > 0.5
+
+
+@pytest.mark.browser
 def test_set_highlight_default_style_is_silhouette(viewer_client, viewer_page):
     """The default highlight is an inverted-hull contour that shares the
     mesh's geometry — legible on a smooth body, where a feature-edge outline

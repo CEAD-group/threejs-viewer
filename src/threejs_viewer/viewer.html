@@ -1060,6 +1060,18 @@ const MAX_DISTANCE = 1e6;
 const MIN_ZOOM = 1e-4;
 const MAX_ZOOM = 1e6;
 const POLE_EPS = THREE.MathUtils.degToRad(5); // turntable pitch clamp
+/**
+ * True when `obj` and every ancestor are visible and none opts out of picking
+ * (`userData.pickable === false`, recorded by the viewer's add handlers).
+ * @param {import('three').Object3D | null} obj
+ */
+function isPivotTarget(obj) {
+    for (let n = obj; n; n = n.parent) {
+        if (n.visible === false || (n.userData && n.userData.pickable === false)) return false;
+    }
+    return true;
+}
+
 const _changeEvent = { type: 'change' };
 
 class ViewerControls extends THREE.EventDispatcher {
@@ -1332,9 +1344,14 @@ class ViewerControls extends THREE.EventDispatcher {
                 const arr = Array.isArray(candidates) ? candidates : Array.from(candidates);
                 if (arr.length > 0) {
                     const hits = this._raycaster.intersectObjects(arr, true);
-                    if (hits.length > 0) {
-                        this.target.copy(hits[0].point);
-                        this.dispatchEvent({ type: 'pivot', point: hits[0].point.clone(), hit: true });
+                    // Nearest hit that is actually on screen (issue #215):
+                    // three's raycaster ignores `.visible`, so a mesh under a
+                    // hidden ancestor is still returned, and an object sent
+                    // with pickable=false is a passthrough for the pivot.
+                    const hit = hits.find((h) => isPivotTarget(h.object));
+                    if (hit) {
+                        this.target.copy(hit.point);
+                        this.dispatchEvent({ type: 'pivot', point: hit.point.clone(), hit: true });
                         this.dispatchEvent(_changeEvent);
                         return;
                     }
@@ -10580,6 +10597,10 @@ class ThreeJSViewer {
         this._orbitMode = localStorage.getItem('tjsv.orbitMode') || 'turntable';
         this._controls = new ViewerControls(this._camera, this._renderer.domElement);
         this._controls.setMode(this._orbitMode);
+        // Candidates are pre-filtered on their own `.visible` only; the
+        // controls re-check every hit against its ancestors and the
+        // `userData.pickable` opt-out (issue #215), which also covers
+        // children reached through the recursive intersect.
         this._controls.setRaycastObjects(() => {
             const arr = [];
             for (const o of this._objects.values()) if (o && o.visible) arr.push(o);
@@ -13792,6 +13813,7 @@ class ThreeJSViewer {
                 const group = new THREE.Group();
                 group.name = data.id;
                 group.userData.id = data.id;
+                if (data.pickable === false) group.userData.pickable = false;
                 if (data.transform) this._applyTransform(group, data.transform);
                 this._applyInitialVisibility(data.id, group, data.visible);
                 this._addToParentOrScene(group, data.parent);
@@ -14239,6 +14261,8 @@ class ThreeJSViewer {
                         if (data.pickable !== false && !asSegments) {
                             line.userData.pickPoints = pointData;
                         }
+                        // Click-to-pivot passthrough (issue #215).
+                        if (data.pickable === false) line.userData.pickable = false;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
                         // mid-fetch would otherwise be dropped).
@@ -14693,6 +14717,8 @@ class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isMesh = true;
+                        // Click-to-pivot passthrough (issue #215).
+                        if (data.pickable === false) mesh.userData.pickable = false;
                         mesh.userData.totalIndexCount = ni;
                         // Paint order for a coplanar layer stack.
                         if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
@@ -14994,6 +15020,9 @@ class ThreeJSViewer {
                             mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
                             mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
                             mesh.userData.pickHeightOffset = heightOffset;
+                        } else {
+                            // Click-to-pivot passthrough (issue #215).
+                            mesh.userData.pickable = false;
                         }
                         mesh.userData.tubeMorphData = {
                             spine: new Float32Array(buildSpine),
