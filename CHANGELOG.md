@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Depth settings on meshes, and depth precision inside the scene (#227)
+
+- **`add_mesh` / `add_mesh_binary` honour `depthWrite` and `polygonOffset*`** through the same helper as primitives (#208). `add_mesh` takes `depth_write=`, `polygon_offset=` and `polygon_offset_units=`; an explicit `depth_write` survives `set_opacity`/`set_color`.
+- **The perspective near plane no longer drops to 1 mm with the camera inside the scene.** Near is at least the fitted far / 1000, capped at half the distance to the orbit target so the target never clips. In a 20 m scene this moves near from 1 mm to about 3 cm and depth resolution at 15 m from about 13 mm to under 1 mm.
+- Per-vertex alpha has one spelling: interleaved RGBA with `vertexColorComponents: 4`. A header with `hasVertexAlpha` but no 4-component colours logs a one-time warning.
+
 ## 0.0.56
 
 ### Separate translate and rotate axis masks on the move gizmo (#220)
