@@ -8478,10 +8478,18 @@ def test_axis_control_linear_basic_geometry(viewer_client, viewer_page):
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
 
     viewer_client.add_axis_control(
-        "elz", target_id="mount", axis="z", kind="linear",
-        value=0.4, min=0.0, max=1.2, color=0x4488FF,
+        "elz",
+        target_id="mount",
+        axis="z",
+        kind="linear",
+        value=0.4,
+        min=0.0,
+        max=1.2,
+        color=0x4488FF,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
 
     state = _axis_control_state(viewer_page, "elz")
     assert state["spherePos"] == pytest.approx([0.4, 0, 0], abs=1e-6)
@@ -8504,12 +8512,23 @@ def test_axis_control_rotary_basic_geometry(viewer_client, viewer_page):
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
 
     viewer_client.add_axis_control(
-        "j1", target_id="mount", axis="x", kind="rotary",
-        value=0.0, min=-1.0, max=1.0, radius=2.0, color=0xFF4466,
+        "j1",
+        target_id="mount",
+        axis="x",
+        kind="rotary",
+        value=0.0,
+        min=-1.0,
+        max=1.0,
+        radius=2.0,
+        color=0xFF4466,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')"
+    )
     state = _axis_control_state(viewer_page, "j1")
-    assert state["spherePos"] == pytest.approx([0, 2.0, 0], abs=1e-6)  # cos(0)=1, sin(0)=0
+    assert state["spherePos"] == pytest.approx(
+        [0, 2.0, 0], abs=1e-6
+    )  # cos(0)=1, sin(0)=0
 
     viewer_client.update_axis_control("j1", value=math.pi / 2)
     _wait_for(
@@ -8527,10 +8546,17 @@ def test_axis_control_rotary_unlimited_full_circle(viewer_client, viewer_page):
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "spindle", target_id="mount", axis="y", kind="rotary_unlimited",
-        value=0.0, radius=1.5, color=0x88FF44,
+        "spindle",
+        target_id="mount",
+        axis="y",
+        kind="rotary_unlimited",
+        value=0.0,
+        radius=1.5,
+        color=0x88FF44,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('spindle')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('spindle')"
+    )
     span = viewer_page.evaluate(
         "() => { const p = window.threejsViewer._axisControls.controls.get('spindle')"
         ".line.geometry.attributes.position; return p.count; }"
@@ -8544,10 +8570,17 @@ def test_axis_control_linear_unlimited_window_follows_value(viewer_client, viewe
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "rail", target_id="mount", axis="x", kind="linear_unlimited",
-        value=5.0, window=1.0, color=0xFFFFFF,
+        "rail",
+        target_id="mount",
+        axis="x",
+        kind="linear_unlimited",
+        value=5.0,
+        window=1.0,
+        color=0xFFFFFF,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('rail')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('rail')"
+    )
 
     def line_ends():
         return viewer_page.evaluate(
@@ -8557,7 +8590,10 @@ def test_axis_control_linear_unlimited_window_follows_value(viewer_client, viewe
 
     assert line_ends() == pytest.approx([4.0, 6.0], abs=1e-6)
     viewer_client.update_axis_control("rail", value=10.0)
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.get('rail').value === 10")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._axisControls.controls.get('rail').value === 10",
+    )
     assert line_ends() == pytest.approx([9.0, 11.0], abs=1e-6)
 
 
@@ -8568,9 +8604,17 @@ def test_axis_control_follows_moving_target(viewer_client, viewer_page):
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "elz", target_id="mount", axis="z", kind="linear", value=0.0, min=0, max=1,
+        "elz",
+        target_id="mount",
+        axis="z",
+        kind="linear",
+        value=0.0,
+        min=0,
+        max=1,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
 
     viewer_page.evaluate(
         "() => { window.threejsViewer._objects.get('mount').position.set(3, 4, 5); }"
@@ -8589,9 +8633,17 @@ def test_axis_control_linear_drag_reports_value(viewer_client, viewer_page):
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "elz", target_id="mount", axis="x", kind="linear", value=0.0, min=-2.0, max=2.0,
+        "elz",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-2.0,
+        max=2.0,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
 
     changes = []
     viewer_client.on_axis_control_change(lambda m: changes.append(m))
@@ -8604,7 +8656,9 @@ def test_axis_control_linear_drag_reports_value(viewer_client, viewer_page):
     new_value = viewer_page.evaluate(
         "() => window.threejsViewer._axisControls.controls.get('elz').value"
     )
-    assert new_value > 0.15, f"dragging +X did not increase the linear value ({new_value})"
+    assert new_value > 0.15, (
+        f"dragging +X did not increase the linear value ({new_value})"
+    )
     assert changes[-1]["value"] == pytest.approx(new_value, abs=1e-3)
 
 
@@ -8614,9 +8668,16 @@ def test_axis_control_rotary_drag_reports_value(viewer_client, viewer_page):
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "j1", target_id="mount", axis="x", kind="rotary_unlimited", value=0.0, radius=1.5,
+        "j1",
+        target_id="mount",
+        axis="x",
+        kind="rotary_unlimited",
+        value=0.0,
+        radius=1.5,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')"
+    )
 
     changes = []
     viewer_client.on_axis_control_change(lambda m: changes.append(m))
@@ -8628,7 +8689,9 @@ def test_axis_control_rotary_drag_reports_value(viewer_client, viewer_page):
     new_value = viewer_page.evaluate(
         "() => window.threejsViewer._axisControls.controls.get('j1').value"
     )
-    assert abs(new_value) > 0.05, f"dragging did not change the rotary value ({new_value})"
+    assert abs(new_value) > 0.05, (
+        f"dragging did not change the rotary value ({new_value})"
+    )
 
 
 @pytest.mark.browser
@@ -8638,10 +8701,18 @@ def test_axis_control_hover_highlights_sphere(viewer_client, viewer_page):
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "elz", target_id="mount", axis="x", kind="linear", value=0.0, min=-1, max=1,
+        "elz",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-1,
+        max=1,
         color=0x4488FF,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
     viewer_page.evaluate(_GIZMO_TOPDOWN)
 
     p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "elz")
@@ -8669,10 +8740,16 @@ def test_axis_control_bbox_radius(viewer_client, viewer_page):
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('arm')")
 
     viewer_client.add_axis_control(
-        "j1", target_id="arm", axis="x", kind="rotary_unlimited", value=0.0,
+        "j1",
+        target_id="arm",
+        axis="x",
+        kind="rotary_unlimited",
+        value=0.0,
         bbox_source_id="arm",
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')"
+    )
     radius = viewer_page.evaluate(
         "() => window.threejsViewer._axisControls.controls.get('j1').radius"
     )
@@ -8688,9 +8765,19 @@ def test_remove_axis_control(viewer_client, viewer_page):
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
-        "elz", target_id="mount", axis="z", kind="linear", value=0.0, min=0, max=1,
+        "elz",
+        target_id="mount",
+        axis="z",
+        kind="linear",
+        value=0.0,
+        min=0,
+        max=1,
     )
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
 
     viewer_client.remove_axis_control("elz")
-    _wait_for(viewer_page, "() => !window.threejsViewer._axisControls.controls.has('elz')")
+    _wait_for(
+        viewer_page, "() => !window.threejsViewer._axisControls.controls.has('elz')"
+    )

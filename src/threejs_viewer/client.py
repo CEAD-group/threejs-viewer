@@ -4593,7 +4593,9 @@ class ViewerClient:
             try:
                 cb(change)
             except Exception:
-                logging.getLogger(__name__).exception("Error in axis control change callback")
+                logging.getLogger(__name__).exception(
+                    "Error in axis control change callback"
+                )
 
     def clear(self) -> None:
         """Clear all objects from the scene."""
