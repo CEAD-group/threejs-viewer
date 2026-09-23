@@ -90,12 +90,12 @@
     pointer-events: auto;
     width: var(--tjsv-body-w, 190px);
     box-sizing: border-box;
-    max-height: calc(100% - 8px);
     overflow-y: auto;
     background: rgba(30, 30, 30, 0.94);
     border: 1px solid var(--tjsv-border);
     border-right: none;
-    /* Square top-left (flush against the tab it opens beside); bottom-left rounded. */
+    /* Resting shape: square top-left, flush against its tab. When open,
+       MenuController._placeBody sets max-height, the upward lift and the corners. */
     border-radius: 0 0 0 4px;
     backdrop-filter: blur(3px);
     /* Extra right padding: a stacked tab below can overlap an open body's

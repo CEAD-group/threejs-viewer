@@ -5555,6 +5555,8 @@ function playEyeTransition(mark, on) {
 }
 const RAIL_BASE_TOP = 16;
 const RAIL_GAP = 6;
+const RAIL_BODY_BOTTOM = 8;   // clearance kept under an open panel body
+const RAIL_BODY_RADIUS = 4;
 
 class MenuController {
     /**
@@ -5578,10 +5580,16 @@ class MenuController {
             // A panel-mode menu stays open across outside clicks.
         };
         document.addEventListener('pointerdown', this._onDocPointerDown);
+        // An open body re-places whenever its content or the viewport resizes.
+        this._resizeObs = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
+            for (const m of this._menus.values()) if (m.open) this._placeBody(m);
+        });
+        if (this._resizeObs && hosts.rail) this._resizeObs.observe(hosts.rail);
     }
 
     dispose() {
         document.removeEventListener('pointerdown', this._onDocPointerDown);
+        if (this._resizeObs) this._resizeObs.disconnect();
         for (const id of [...this._menus.keys()]) this.remove(id);
     }
 
@@ -5632,6 +5640,7 @@ class MenuController {
     remove(id) {
         const m = this._menus.get(id);
         if (!m) return false;
+        if (this._resizeObs) this._resizeObs.unobserve(m.body);
         m.root.remove();
         this._menus.delete(id);
         this._layoutRail();
@@ -5648,8 +5657,32 @@ class MenuController {
         for (const m of this._menus.values()) {
             if (m.root.hidden) continue;
             m.root.style.setProperty('--tjsv-rail-top', `${top}px`);
+            m.railTop = top;
             top += m.button.getBoundingClientRect().height + RAIL_GAP;
         }
+        for (const m of this._menus.values()) if (m.open) this._placeBody(m);
+    }
+
+    /**
+     * Lift an open body as high as the rail allows while it still spans its
+     * whole tab, so a tab low on the rail opens a panel that uses the space
+     * above it. The body is capped to the rail height (it scrolls past that),
+     * and only the corners not flush against the tab are rounded.
+     * @param {any} m
+     */
+    _placeBody(m) {
+        const rail = this._hosts.rail;
+        if (!rail || !m.body) return;
+        const tabTop = m.railTop ?? RAIL_BASE_TOP;
+        const tabH = m.button.offsetHeight;
+        const maxH = Math.max(tabH, rail.clientHeight - RAIL_BASE_TOP - RAIL_BODY_BOTTOM);
+        m.body.style.maxHeight = `${maxH}px`;
+        const bodyH = m.body.offsetHeight;
+        const lift = Math.max(0, Math.min(tabTop - RAIL_BASE_TOP, bodyH - tabH));
+        m.body.style.marginTop = `${-lift}px`;
+        const r = RAIL_BODY_RADIUS;
+        const flushBottom = lift > 0 && lift >= bodyH - tabH;
+        m.body.style.borderRadius = `${lift > 0 ? r : 0}px 0 0 ${flushBottom ? 0 : r}px`;
     }
 
     /** @param {any} m */
@@ -5696,6 +5729,7 @@ class MenuController {
         const body = document.createElement('div');
         body.className = 'tjsv-menu';
         m.body = body;
+        if (this._resizeObs) this._resizeObs.observe(body);
 
         // The rail tab: a vertical label. The viewer's own menu is the top
         // tab and shows only the connection-status dot.
@@ -6047,7 +6081,7 @@ class MenuController {
         m.open = want;
         m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
-        if (want) this.refresh(m);
+        if (want) { this.refresh(m); this._placeBody(m); }
     }
 
     /** @returns {boolean} */
