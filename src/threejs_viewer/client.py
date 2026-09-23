@@ -3355,6 +3355,76 @@ class ViewerClient:
             raise ValueError(f"t must be a finite number (got {t!r})")
         self._send({"type": "set_clip_progress", "id": id, "t": t})
 
+    def bind_clip(
+        self,
+        id: str,
+        *,
+        source_id: str,
+        channel: Literal[
+            "translation.x",
+            "translation.y",
+            "translation.z",
+            "rotation.x",
+            "rotation.y",
+            "rotation.z",
+            "scale.x",
+            "scale.y",
+            "scale.z",
+        ],
+        from_value: float,
+        to_value: float,
+        clamp: bool = True,
+    ) -> None:
+        """Declare that ``id``'s embedded clip mixer time tracks another
+        object's own live local transform, instead of being pushed here on
+        every tick.
+
+        ``source_id`` is the object whose local transform drives the clip —
+        typically the same object a drag gizmo or a streamed transform
+        message already moves (a jog, a `set_follow_path`, an in-flight
+        gizmo drag all compose with this automatically, since the viewer
+        just reads that object's current local transform every render
+        frame). ``channel`` picks one local-space component of it;
+        ``from_value``/``to_value`` are that channel's values at clip time 0
+        and 1 respectively.
+
+        This exists because :meth:`set_clip_time` pushed once per tick rides
+        the same latest-wins coalesced WS dispatch as everything else — a
+        fast jog or drag can produce transform updates faster than they're
+        dispatched, so intermediate pushes get dropped and the clip visibly
+        skips. A binding needs no per-frame message at all: the viewer
+        resolves ``source_id``'s live transform itself every frame, so
+        there is nothing to coalesce away.
+
+        Call once (e.g. on cell load / cell switch), not per-tick — this
+        replaces the imperative push for the life of the binding. Call
+        :meth:`unbind_clip` (or :meth:`bind_clip` again, with a different
+        ``source_id``) to change or remove it; the plain :meth:`set_clip_time`
+        / :meth:`set_clip_progress` push path is still there for objects with
+        no natural geometric parent to bind to. Either side of the binding
+        may not exist yet when this is called — it just resolves once both
+        ``id``'s clip mixer and ``source_id`` are in the scene.
+        """
+        self._send(
+            {
+                "type": "bind_clip",
+                "id": id,
+                "source": {
+                    "id": source_id,
+                    "channel": channel,
+                    "from": float(from_value),
+                    "to": float(to_value),
+                },
+                "clamp": bool(clamp),
+            }
+        )
+
+    def unbind_clip(self, id: str) -> None:
+        """Remove a :meth:`bind_clip` binding, restoring the plain
+        :meth:`set_clip_time` / :meth:`set_clip_progress` push path. A no-op
+        if ``id`` has no binding."""
+        self._send({"type": "unbind_clip", "id": id})
+
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
         path — per render tick the viewer computes the pose from the REAL
@@ -4170,7 +4240,7 @@ class ViewerClient:
         """Show an interactive move/rotate gizmo for transforming objects.
 
         The gizmo is built on three.js ``TransformControls``. Once enabled,
-        **hold Alt** while dragging to rotate (otherwise it translates), and
+        **hold Ctrl** while dragging to rotate (otherwise it translates), and
         **hold Shift** to snap — translations to a ``translate_snap`` grid,
         rotations to ``rotate_snap_deg`` increments. Snapping is sampled live,
         so Shift can be toggled mid-drag.
@@ -4286,7 +4356,7 @@ class ViewerClient:
         - all ``True`` (default) → the full 3-DOF gizmo.
 
         As with the interactive gizmo, dragging reports the new transform to every
-        callback registered with :meth:`on_object_move`, holding Alt rotates, and a
+        callback registered with :meth:`on_object_move`, holding Ctrl rotates, and a
         translucent ghost marks the start pose until release. By default the gizmo
         moves freely and holding Shift snaps; pass ``snap_default=True`` to flip
         that — snap becomes the resting state and holding Shift releases it for free
@@ -4309,7 +4379,7 @@ class ViewerClient:
                 :meth:`set_gizmo_axes`).
             rotate: Optional axis mask for the rotate rings only, replacing
                 ``x``/``y``/``z`` in rotate mode.
-            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Alt
+            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Ctrl
                 overrides this live while held.
             space: Handle orientation, ``"world"`` (default — axes stay aligned
                 to the world) or ``"local"`` (the gizmo turns with the object's
@@ -4421,7 +4491,7 @@ class ViewerClient:
         - ``quaternion_start`` — ``[x, y, z, w]`` local rotation at drag-start.
         - ``mode`` — the *effective* mode of this drag: ``"translate"``,
           ``"rotate"`` or ``"scale"``. Read off the live control, so a
-          momentary **Alt** rotate override reports ``"rotate"`` even though
+          momentary **Ctrl** rotate override reports ``"rotate"`` even though
           the gizmo's base mode is still translate — branch on this (not on
           the mode you configured) when interpreting the drag.
         - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).
