@@ -4105,7 +4105,10 @@ def test_move_gizmo_ctrl_is_momentary(viewer_client, viewer_page):
     }"""
 
     # Translate base: Ctrl down → rotate, Ctrl up → translate (normal toggle intact).
-    assert viewer_page.evaluate(ctrl, True) == {"control": "rotate", "base": "translate"}
+    assert viewer_page.evaluate(ctrl, True) == {
+        "control": "rotate",
+        "base": "translate",
+    }
     assert viewer_page.evaluate(ctrl, False) == {
         "control": "translate",
         "base": "translate",
