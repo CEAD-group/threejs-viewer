@@ -403,6 +403,13 @@ def test_add_model_binary_y_up_default_omitted(client):
     assert "yUp" not in header
 
 
+def test_add_model_binary_opts_out_of_viewer_cache(client):
+    # Sidecar blob URLs are single-use, so a cache entry could never be hit.
+    client.add_model_binary("m", b"\x00" * 10)
+    header, _ = client._binary_messages[0]
+    assert header["cache"] is False
+
+
 # === add_polyline ===
 
 

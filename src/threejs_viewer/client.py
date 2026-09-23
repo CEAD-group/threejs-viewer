@@ -1602,6 +1602,10 @@ class ViewerClient:
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
             visible: Initial visibility
+
+        The viewer caches the parsed model by URL for the page session, so
+        adding the same URL again skips the fetch and the decode. Give a
+        file whose contents changed a new URL (e.g. a ``?v=<hash>`` query).
         """
         transform = {}
         if position:
@@ -1685,7 +1689,14 @@ class ViewerClient:
                 raise FileNotFoundError(f"Mesh file not found: {path}")
             mesh_bytes = path.read_bytes()
 
-        header = {"type": "add_model_binary", "id": id, "format": format}
+        # Each push gets a fresh blob URL, so a viewer cache entry for it
+        # could never be hit again.
+        header = {
+            "type": "add_model_binary",
+            "id": id,
+            "format": format,
+            "cache": False,
+        }
         if parent:
             header["parent"] = parent
         if y_up:
