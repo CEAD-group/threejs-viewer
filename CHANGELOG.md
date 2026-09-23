@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.57
 
 ### Depth settings on meshes, and depth precision inside the scene (#227)
 
