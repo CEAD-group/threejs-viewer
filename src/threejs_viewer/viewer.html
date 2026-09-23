@@ -10269,6 +10269,13 @@ class TransformGizmoController {
      * @param {GizmoAxesMask|null} [mask] */
     setAxes(mask) { this._applyAxes(this._primary, mask); }
 
+    /** The interactive gizmo's resolved per-mode masks, copied so a caller can't mutate them.
+     * @returns {{translate:{x:boolean,y:boolean,z:boolean}, rotate:{x:boolean,y:boolean,z:boolean}}} */
+    getAxes() {
+        const a = this._primary.axes;
+        return { translate: { ...a.translate }, rotate: { ...a.rotate } };
+    }
+
     // One-time structural refinement of a gizmo's stock handles (the per-frame
     // `_restyleGizmo` only re-themes/resizes what survives this). Two parts:
     //   1. Slim the rotate gizmo down to just the three coloured axis rings —
@@ -17491,6 +17498,15 @@ class ThreeJSViewer {
      * @param {GizmoAxesMask|null} [mask]
      */
     setGizmoAxes(mask) { this._transformGizmo.setAxes(mask); }
+
+    /**
+     * The move gizmo's axis masks as applied, one explicit `{x, y, z}` per mode,
+     * e.g. `{translate: {x:true, y:true, z:true}, rotate: {x:true, y:true, z:false}}`.
+     * Reflects the all-axes reset on detach, so a caller can diff against it
+     * before calling `setGizmoAxes`.
+     * @returns {{translate:{x:boolean,y:boolean,z:boolean}, rotate:{x:boolean,y:boolean,z:boolean}}}
+     */
+    getGizmoAxes() { return this._transformGizmo.getAxes(); }
 
     /**
      * Register a hook fired as the gizmo moves/rotates its target. Payload:

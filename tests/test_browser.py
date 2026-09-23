@@ -4149,6 +4149,11 @@ def test_set_gizmo_axes_constrains_and_resets_on_detach(viewer_client, viewer_pa
         " return c.showX && c.showY && c.showZ; }",
     )
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
+    all_on = {"x": True, "y": True, "z": True}
+    assert viewer_page.evaluate("() => window.threejsViewer.getGizmoAxes()") == {
+        "translate": all_on,
+        "rotate": all_on,
+    }
 
 
 @pytest.mark.browser
@@ -4182,6 +4187,19 @@ def test_set_gizmo_axes_per_mode_follows_live_mode(viewer_client, viewer_page):
 
     viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": False}
+
+    # Public getter reports the applied masks as a copy (issue #223).
+    assert viewer_page.evaluate("() => window.threejsViewer.getGizmoAxes()") == {
+        "translate": {"x": True, "y": True, "z": True},
+        "rotate": {"x": True, "y": True, "z": False},
+    }
+    assert (
+        viewer_page.evaluate(
+            "() => { const v = window.threejsViewer; v.getGizmoAxes().rotate.z = true;"
+            " return v.getGizmoAxes().rotate.z; }"
+        )
+        is False
+    )
 
     # A pinned gizmo carries its own per-mode masks and starts in its base mode.
     viewer_client.add_gizmo(
