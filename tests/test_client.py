@@ -619,6 +619,25 @@ def test_blob_url_host_is_the_configured_host(host):
     assert urlparse(url).port == 5667
 
 
+def test_add_mesh_sends_depth_fields():
+    """add_mesh carries depthWrite/polygonOffset only when asked (issue #227)."""
+    client = ViewerClient(port=5666, open_browser=False)
+    client._ws = _CaptureWS()
+    tri = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([[0, 1, 2]], dtype=np.uint32)
+    client.add_mesh("plain", tri, idx)
+    header = client._ws.messages[-1]
+    assert "depthWrite" not in header and "polygonOffset" not in header
+    client.add_mesh(
+        "ov", tri, idx, depth_write=False, polygon_offset=0.0, polygon_offset_units=-2.0
+    )
+    header = client._ws.messages[-1]
+    assert header["depthWrite"] is False
+    assert header["polygonOffset"] is True
+    assert header["polygonOffsetFactor"] == 0.0
+    assert header["polygonOffsetUnits"] == -2.0
+
+
 def test_viewer_url_carries_ws_host_when_not_localhost():
     """The viewer defaults to ws://localhost; any other host rides along as
     ``ws_host`` so the WebSocket and the blob sidecar share one hostname."""
