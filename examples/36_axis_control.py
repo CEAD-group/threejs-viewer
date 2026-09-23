@@ -47,9 +47,9 @@ log.propagate = False
 
 
 v = viewer()
-v.clear()
+# v.clear()
 v.unload_animation()
-v.show_grid(True)
+# v.show_grid(True)
 
 RED = 0xAE4346
 RED_HOVER = 0xC74E52

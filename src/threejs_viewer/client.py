@@ -4181,6 +4181,8 @@ class ViewerClient:
         rotate_snap_deg: float = 15.0,
         click_select: bool = True,
         snap_default: bool = False,
+        color: Optional[int] = None,
+        hover_color: Optional[int] = None,
     ) -> None:
         """Show an interactive move/rotate gizmo for transforming objects.
 
@@ -4227,6 +4229,12 @@ class ViewerClient:
                 the gizmo to it.
             snap_default: When ``True``, snap is the resting state and holding
                 Shift moves freely (the inverse of the default free / Shift-to-snap).
+            color: Override the gizmo's per-axis palette with one colour for
+                every axis/plane. ``None`` (default) keeps the distinct X/Y/Z
+                palette (matching the corner view gimbal).
+            hover_color: Override the colour a handle turns while
+                hovered/dragging. ``None`` (default) auto-derives a lightened
+                variant of its base colour.
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
@@ -4255,6 +4263,8 @@ class ViewerClient:
             "rotateSnap": math.radians(rs),
             "clickSelect": bool(click_select),
             "snapDefault": bool(snap_default),
+            "color": color,
+            "hoverColor": hover_color,
         }
         if self._ws is not None:
             self._send(self._move_gizmo)
@@ -4285,6 +4295,9 @@ class ViewerClient:
         mode: str = "translate",
         space: str = "world",
         snap_default: bool = False,
+        color: Optional[int] = None,
+        hover_color: Optional[int] = None,
+        scale: float = 1.0,
     ) -> None:
         """Pin a persistent move/rotate gizmo to object ``id``.
 
@@ -4331,6 +4344,13 @@ class ViewerClient:
                 own rotation, so the arrows follow a tilted object).
             snap_default: When ``True``, snap is the resting state (and Shift moves
                 freely) instead of the default free-with-Shift-to-snap.
+            color: Override this gizmo's per-axis palette with one colour for
+                every axis/plane (see :meth:`enable_move_gizmo`).
+            hover_color: Override the colour this gizmo's handles turn while
+                hovered/dragging (see :meth:`enable_move_gizmo`).
+            scale: Local size multiplier for this gizmo's handles (axis
+                length, plane size, pick radii all scale together). ``1.0``
+                (default) is the standard size.
 
         Raises:
             ValueError: For an unknown ``mode`` or ``space``, or a malformed
@@ -4349,6 +4369,9 @@ class ViewerClient:
             "mode": mode,
             "space": space,
             "snapDefault": bool(snap_default),
+            "scale": float(scale),
+            "color": color,
+            "hoverColor": hover_color,
         }
         self._gizmos.append(spec)
         if self._ws is not None:

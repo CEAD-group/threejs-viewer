@@ -7930,16 +7930,31 @@ class PolylinePickController {
 // Lives in the scene like the pivot / pick markers; never enters _objects, so it
 // can't be picked or cleared and survives `clear`.
 
-// Axis colours match three's ViewHelper bubbles in the corner gimbal, so the
-// handles and the gimbal agree on what X / Y / Z look like (issue #191).
-const GIZMO_PALETTE = { x: 0xff4466, y: 0x88ff44, z: 0x4488ff, n: 0xcfd3da };
-const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
-const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
-const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
-const GIZMO_CENTER_PICKER_SCALE = 0.6; // shrink of the stock centre (XYZ free-move) picker octahedron
+// Same base/hover colour pairs as examples/36_axis_control.py's RED/GREEN/BLUE,
+// so the move gizmo and the axis-control widget agree on what X/Y/Z look like.
+const GIZMO_PALETTE = { x: 0xAE4346, y: 0x5D9C74, z: 0x4369A2, n: 0xcfd3da };
+const GIZMO_HOVER_PALETTE = { x: 0xC74E52, y: 0x6DB587, z: 0x4D7ABD };
 const GIZMO_SIZE = 0.5;            // TransformControls screen-size factor (1 = stock; half keeps handles out of the way)
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
+
+// Move-gizmo axis handles, redesigned to look like the axis-control widget
+// (AXIS_CONTROL_* above): a simple fat line per axis, same linewidth, instead
+// of the stock arrow, meeting at the gizmo centre (GIZMO_AXIS_LENGTH is the
+// local length from centre to tip — TransformControls scales the whole
+// helper to screen size, so this is a plain local unit, same convention the
+// stock arrows used). Plane chips are offset GIZMO_PLANE_GAP_FACTOR * axis
+// length from the centre (a gap from the axis lines) and are
+// GIZMO_PLANE_SIZE_FACTOR * axis length on a side.
+// GIZMO_AXIS_LINE_WIDTH_PX intentionally not aliased here: AXIS_CONTROL_LINE_WIDTH_PX
+// is declared later in this file, and reading it at top-level module-eval time
+// (rather than lazily inside a function) would hit the temporal dead zone.
+const GIZMO_AXIS_LENGTH = 1.0;
+const GIZMO_PLANE_GAP_FACTOR = 0.15;
+const GIZMO_PLANE_SIZE_FACTOR = 0.75;
+const GIZMO_AXIS_PICK_RADIUS = 0.09;   // pill (capsule) hitbox radius around each axis line
+const GIZMO_CENTER_PICK_RADIUS = 0.16; // sphere hitbox radius around the (invisible) centre
+const GIZMO_PLANE_PICK_THICKNESS = 0.02;   // small box depth along the plane's normal, for a forgiving hitbox
 
 /** TransformControls handle name → palette hex, or null to leave it untouched. */
 function gizmoAxisColor(name) {
@@ -7950,14 +7965,49 @@ function gizmoAxisColor(name) {
     return null;
 }
 
+/** TransformControls handle name → default hover-tint hex, or null. */
+function gizmoAxisHoverColor(name) {
+    if (name === 'X' || name === 'YZ') return GIZMO_HOVER_PALETTE.x;
+    if (name === 'Y' || name === 'XZ') return GIZMO_HOVER_PALETTE.y;
+    if (name === 'Z' || name === 'XY') return GIZMO_HOVER_PALETTE.z;
+    return null;
+}
+
+// Which handle names light up together when `name` is hovered/dragging — the
+// centre (free move) highlights everything, a plane highlights itself plus
+// the two axes that span it, a single axis highlights only itself.
+const GIZMO_HIGHLIGHT_ALL = new Set(['X', 'Y', 'Z', 'XY', 'YZ', 'XZ']);
+const GIZMO_HIGHLIGHT_BY_NAME = {
+    XYZ: GIZMO_HIGHLIGHT_ALL,
+    XY: new Set(['XY', 'X', 'Y']),
+    YZ: new Set(['YZ', 'Y', 'Z']),
+    XZ: new Set(['XZ', 'X', 'Z']),
+    X: new Set(['X']), Y: new Set(['Y']), Z: new Set(['Z']),
+};
+/** @param {string|null} name  the live `TransformControls.axis` @returns {Set<string>|null} */
+function gizmoHighlightSet(name) {
+    return name ? (GIZMO_HIGHLIGHT_BY_NAME[name] || null) : null;
+}
+
 // Cached THREE.Color per palette hex — `_restyleGizmo()` runs every frame while a
 // gizmo is attached, so we reuse instances instead of allocating per handle.
 // Never mutate a returned colour (callers .copy()/.clone() it).
 const _gizmoColorCache = new Map();
-/** @param {number} hex @returns {THREE.Color} */
+/** @param {number|string} hex @returns {THREE.Color} */
 function gizmoColor(hex) {
     let c = _gizmoColorCache.get(hex);
     if (!c) { c = new THREE.Color(hex); _gizmoColorCache.set(hex, c); }
+    return c;
+}
+
+// Lazily-derived, cached "hovered" tint (lighten, same recipe as the axis
+// control widget's default hover colour) for a base hex with no explicit
+// hoverColor override.
+const _gizmoHoverColorCache = new Map();
+/** @param {number|string} hex @returns {THREE.Color} */
+function gizmoHoverColor(hex) {
+    let c = _gizmoHoverColorCache.get(hex);
+    if (!c) { c = gizmoColor(hex).clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN); _gizmoHoverColorCache.set(hex, c); }
     return c;
 }
 
@@ -7987,19 +8037,19 @@ function ghostGizmoMaterial(src) {
 //      environment sculpt the cone. The lib's per-frame re-theme + highlight
 //      only touch `.color`/`.opacity` (which Standard supports), so they keep
 //      working; `restyleGizmoHelper` re-applies our `_color` each frame regardless.
-//   3. Slim the translate pickers: hover resolves closest-intersection-wins
-//      across all pickers, and the stock arrow pickers are fat cone volumes
-//      hugging each axis (radius 0.2 at the tip, vs 0.04 for the visible
-//      cone) — from any 3/4 view they bulge in front of the flat plane chips
-//      and steal most of a chip's screen area, so the chip's own picker
-//      (deliberately larger than its visual) was unreachable over roughly
-//      half the visible parallelogram. Scale each arrow picker's two radial
-//      (non-axis) dims down and the centre free-move octahedron uniformly;
-//      the handle's axis passes through the radial origin of its baked
-//      geometry, so a plain geometry scale keeps it centred on the axis.
-//      Arrows keep ~2× their visible cone radius of invisible hit slop.
-/** @param {any} control  a THREE TransformControls */
-function refineGizmoHandles(control) {
+//   3. For the move gizmo only (`opts.customTranslateHandles`, the clip
+//      gizmos don't pass it): replace the stock X/Y/Z arrows with a simple
+//      fat line each (axis-control-widget styling) with a pill-shaped
+//      (capsule) picker around it, replace the centre free-move handle's
+//      picker with a sphere and hide its visible mesh entirely (it renders
+//      nothing — only the plane chips and axis lines stay visible), and
+//      leave the plane chips' own geometry untouched (`restyleGizmoHelper`
+//      already resizes/margins them into a clean box shape). The rotate
+//      rings get the same treatment: fat-line half arcs, same linewidth and
+//      palette, radius = GIZMO_AXIS_LENGTH, with a half-torus picker each.
+/** @param {any} control  a THREE TransformControls
+ *  @param {{customTranslateHandles?: boolean, scale?: number}} [opts] */
+function refineGizmoHandles(control, opts = {}) {
     const gm = control._gizmo;
     if (!gm) return;
     for (const grp of [gm.gizmo && gm.gizmo.rotate, gm.picker && gm.picker.rotate]) {
@@ -8013,6 +8063,12 @@ function refineGizmoHandles(control) {
         for (const child of helperRot.children.slice()) {
             if (child.name === 'AXIS') helperRot.remove(child);
         }
+    }
+    if (opts.customTranslateHandles) {
+        const scale = opts.scale != null ? opts.scale : 1;
+        buildGizmoTranslateHandles(gm, scale);
+        buildGizmoRotateHandles(gm, scale);
+        return;
     }
     const arrows = gm.gizmo && gm.gizmo.translate;
     if (arrows) {
@@ -8058,52 +8114,224 @@ function refineGizmoHandles(control) {
     }
 }
 
+// Legacy stock-arrow picker tuning, kept only for the clip gizmos (which
+// don't opt into `customTranslateHandles`).
+const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
+const GIZMO_CENTER_PICKER_SCALE = 0.6; // shrink of the stock centre (XYZ free-move) picker octahedron
+
+/** @param {string} name  'X'|'Y'|'Z' @returns {[number, number, number]} */
+function gizmoAxisUnitVector(name) {
+    return name === 'X' ? [1, 0, 0] : name === 'Y' ? [0, 1, 0] : [0, 0, 1];
+}
+
+/** The two axes spanning a plane handle, in a fixed (u, v) order.
+ * @param {string} name  'XY'|'YZ'|'XZ' @returns {{u:[number,number,number], v:[number,number,number]}} */
+function gizmoPlaneAxes(name) {
+    if (name === 'XY') return { u: [1, 0, 0], v: [0, 1, 0] };
+    if (name === 'YZ') return { u: [0, 1, 0], v: [0, 0, 1] };
+    return { u: [1, 0, 0], v: [0, 0, 1] };   // 'XZ'
+}
+
+/** Simple fat line from the gizmo centre out to `GIZMO_AXIS_LENGTH * scale`
+ * along `name` (the three axes meet at the centre) — same linewidth
+ * convention as the axis-control widget's guide line.
+ * @param {string} name  'X'|'Y'|'Z' @param {number} scale @returns {any} a Line2 */
+function buildGizmoAxisLine(name, scale) {
+    const [ux, uy, uz] = gizmoAxisUnitVector(name);
+    const len = GIZMO_AXIS_LENGTH * scale;
+    const geo = new LineGeometry();
+    geo.setPositions([0, 0, 0, len * ux, len * uy, len * uz]);
+    const mat = new LineMaterial({
+        linewidth: AXIS_CONTROL_LINE_WIDTH_PX, toneMapped: false,   // depth-tested within the gizmo overlay pass
+    });
+    const line = new Line2(geo, mat);
+    line.name = name;
+    line.computeLineDistances();
+    return line;
+}
+
+/** Pill-shaped (capsule) hitbox around one axis line, centre to tip.
+ * @param {string} name  'X'|'Y'|'Z' @param {number} scale @returns {any} a Mesh */
+function buildGizmoAxisPicker(name, scale) {
+    const len = GIZMO_AXIS_LENGTH * scale;
+    const r = GIZMO_AXIS_PICK_RADIUS * scale;
+    const cylLen = Math.max(len - 2 * r, 0.01);
+    const geo = new THREE.CapsuleGeometry(r, cylLen, 4, 8);   // default long axis is local Y
+    geo.translate(0, len / 2, 0);
+    if (name === 'X') geo.rotateZ(-Math.PI / 2);
+    else if (name === 'Z') geo.rotateX(Math.PI / 2);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+    mesh.name = name;
+    // Raycast-only hitbox — three's raycaster ignores `.visible` (same trick
+    // as the axis-control widget's own invisible pick sphere).
+    mesh.visible = false;
+    return mesh;
+}
+
+/** A flat (or, for a picker, thin-boxed) square plane chip, offset
+ * `GIZMO_PLANE_GAP_FACTOR * axis length` from the gizmo centre along +u/+v
+ * (a gap from the axis lines) and `GIZMO_PLANE_SIZE_FACTOR * axis length`
+ * on a side.
+ * @param {string} name  'XY'|'YZ'|'XZ' @param {number} scale @param {number} thickness  0 for a flat quad
+ * @returns {any} a BufferGeometry */
+function buildGizmoPlaneGeometry(name, scale, thickness) {
+    const { u, v } = gizmoPlaneAxes(name);
+    const uVec = new THREE.Vector3(...u);
+    const vVec = new THREE.Vector3(...v);
+    const nVec = new THREE.Vector3().crossVectors(uVec, vVec).normalize();
+    const basis = new THREE.Matrix4().makeBasis(uVec, vVec, nVec);
+    const axisLen = GIZMO_AXIS_LENGTH * scale;
+    const gap = axisLen * GIZMO_PLANE_GAP_FACTOR;
+    const side = axisLen * GIZMO_PLANE_SIZE_FACTOR;
+    const geo = thickness > 0
+        ? new THREE.BoxGeometry(side, side, thickness * scale)
+        : new THREE.PlaneGeometry(side, side);
+    geo.translate(gap + side / 2, gap + side / 2, 0);   // near corner `gap` out from centre, extends toward +u, +v
+    geo.applyMatrix4(basis);
+    return geo;
+}
+
+/** @param {string} name  'XY'|'YZ'|'XZ' @param {number} scale @returns {any} a Mesh */
+function buildGizmoPlaneMesh(name, scale) {
+    const mesh = new THREE.Mesh(buildGizmoPlaneGeometry(name, scale, 0), new THREE.MeshBasicMaterial({
+        toneMapped: false, side: THREE.DoubleSide,   // opaque, depth-tested within the gizmo overlay pass
+    }));
+    mesh.name = name;
+    return mesh;
+}
+
+/** @param {string} name  'XY'|'YZ'|'XZ' @param {number} scale @returns {any} a Mesh */
+function buildGizmoPlanePicker(name, scale) {
+    const mesh = new THREE.Mesh(buildGizmoPlaneGeometry(name, scale, GIZMO_PLANE_PICK_THICKNESS), new THREE.MeshBasicMaterial());
+    mesh.name = name;
+    mesh.visible = false;   // raycast-only, see buildGizmoAxisPicker
+    return mesh;
+}
+
+/** Replace the stock X/Y/Z arrows, plane chips, and centre handle with
+ * axis-control-style lines/planes/pickers (issue: "look like the axis
+ * control widget"). @param {any} gm  control._gizmo @param {number} scale */
+function buildGizmoTranslateHandles(gm, scale) {
+    const visible = gm.gizmo && gm.gizmo.translate;
+    const picker = gm.picker && gm.picker.translate;
+    const AXES = ['X', 'Y', 'Z'];
+    const PLANES = ['XY', 'YZ', 'XZ'];
+    if (visible) {
+        for (const child of visible.children.slice()) {
+            if (AXES.includes(child.name) || PLANES.includes(child.name)) visible.remove(child);
+            else if (child.name === 'XYZ') child.visible = false;   // centre renders nothing
+        }
+        for (const name of AXES) visible.add(buildGizmoAxisLine(name, scale));
+        for (const name of PLANES) visible.add(buildGizmoPlaneMesh(name, scale));
+    }
+    if (picker) {
+        for (const child of picker.children.slice()) {
+            if (AXES.includes(child.name) || PLANES.includes(child.name)) picker.remove(child);
+            else if (child.name === 'XYZ' && child.geometry) {
+                child.geometry.dispose();
+                child.geometry = new THREE.SphereGeometry(GIZMO_CENTER_PICK_RADIUS * scale, 12, 8);
+            }
+        }
+        for (const name of AXES) picker.add(buildGizmoAxisPicker(name, scale));
+        for (const name of PLANES) picker.add(buildGizmoPlanePicker(name, scale));
+    }
+    // Stock TransformControls extends a long dashed "AXIS" guide line through
+    // whichever handle is being dragged — with the whole handle now just a
+    // simple line, that read as an infinite line snapping into view on
+    // selection. Only three axis lines + three plane chips should ever render.
+    const helperT = gm.helper && gm.helper.translate;
+    if (helperT) {
+        for (const child of helperT.children.slice()) helperT.remove(child);
+    }
+}
+
+// Stock rotate rings are half-circle tori (radius 0.5) whose orientation is
+// baked into the geometry by `setupGizmo` — X: none, Y: Euler(0, 0, -π/2),
+// Z: Euler(0, π/2, 0), on top of the lib's CircleGeometry rotateY(π/2) +
+// rotateX(π/2). TransformControls then spins each handle about its own axis
+// every frame so the half-ring faces the camera. We bake the same transforms
+// into our own arc so that per-frame spin still lines up.
+const GIZMO_ROTATE_BAKED_EULER = { X: [0, 0, 0], Y: [0, 0, -Math.PI / 2], Z: [0, Math.PI / 2, 0] };
+const GIZMO_ROTATE_ARC_SEGMENTS = 48;
+
+/** The stock CircleGeometry + setupGizmo orientation for rotate handle `name`.
+ * @param {string} name  'X'|'Y'|'Z' @returns {THREE.Matrix4} */
+function gizmoRotateBakeMatrix(name) {
+    const [ex, ey, ez] = GIZMO_ROTATE_BAKED_EULER[/** @type {'X'|'Y'|'Z'} */ (name)];
+    const baked = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(ex, ey, ez));
+    const circle = new THREE.Matrix4().makeRotationX(Math.PI / 2)
+        .multiply(new THREE.Matrix4().makeRotationY(Math.PI / 2));
+    return baked.multiply(circle);
+}
+
+/** Half-circle fat-line arc, radius = axis length, same linewidth as the
+ * axis lines. @param {string} name  'X'|'Y'|'Z' @param {number} scale @returns {any} a Line2 */
+function buildGizmoRotateArc(name, scale) {
+    const r = GIZMO_AXIS_LENGTH * scale;
+    const m = gizmoRotateBakeMatrix(name);
+    const p = new THREE.Vector3();
+    const pos = [];
+    for (let i = 0; i <= GIZMO_ROTATE_ARC_SEGMENTS; i++) {
+        const t = (i / GIZMO_ROTATE_ARC_SEGMENTS) * Math.PI;
+        p.set(r * Math.cos(t), r * Math.sin(t), 0).applyMatrix4(m);
+        pos.push(p.x, p.y, p.z);
+    }
+    const geo = new LineGeometry();
+    geo.setPositions(pos);
+    const mat = new LineMaterial({
+        linewidth: AXIS_CONTROL_LINE_WIDTH_PX, toneMapped: false,   // depth-tested within the gizmo overlay pass
+    });
+    const line = new Line2(geo, mat);
+    line.name = name;
+    line.computeLineDistances();
+    return line;
+}
+
+/** Half-torus hitbox hugging the visible arc (same bake, so the lib's
+ * per-frame spin keeps the two aligned). @param {string} name @param {number} scale @returns {any} a Mesh */
+function buildGizmoRotatePicker(name, scale) {
+    const geo = new THREE.TorusGeometry(GIZMO_AXIS_LENGTH * scale, GIZMO_AXIS_PICK_RADIUS * scale, 4, 24, Math.PI);
+    geo.applyMatrix4(gizmoRotateBakeMatrix(name));
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+    mesh.name = name;
+    mesh.visible = false;   // raycast-only, see buildGizmoAxisPicker
+    return mesh;
+}
+
+/** Replace the stock X/Y/Z rotate rings (and their pickers) with arcs styled
+ * like the translate axis lines. @param {any} gm  control._gizmo @param {number} scale */
+function buildGizmoRotateHandles(gm, scale) {
+    const AXES = ['X', 'Y', 'Z'];
+    const visible = gm.gizmo && gm.gizmo.rotate;
+    if (visible) {
+        for (const child of visible.children.slice()) if (AXES.includes(child.name)) visible.remove(child);
+        for (const name of AXES) visible.add(buildGizmoRotateArc(name, scale));
+    }
+    const picker = gm.picker && gm.picker.rotate;
+    if (picker) {
+        for (const child of picker.children.slice()) if (AXES.includes(child.name)) picker.remove(child);
+        for (const name of AXES) picker.add(buildGizmoRotatePicker(name, scale));
+    }
+}
+
 // Refined look for one gizmo helper's handles. Runs every frame (cheap traverse)
-// so our resting palette survives TransformControls' per-frame re-theme; the
-// plane resize + margin + outline are guarded (via `sizedPlanes`) so they only
-// happen once per handle. Shared by the move gizmo and the clipping gizmos.
+// so our resting palette survives TransformControls' per-frame re-theme.
+// Shared by the move gizmo and the clipping gizmos (which never have planar
+// handles, so the planar-only branches below are inert for them).
 /** @param {any} helper  a TransformControls helper Object3D
- *  @param {WeakSet<object>} sizedPlanes  per-gizmo guard set for the one-time plane resize */
-function restyleGizmoHelper(helper, sizedPlanes) {
+ *  @param {{control?: any, color?: number|string|null, hoverColor?: number|string|null, resW?: number, resH?: number}} [opts]
+ *    `control`/`color`/`hoverColor` only ever passed by the move gizmo (never
+ *    the clip gizmos): opts into live hover/drag highlighting, an optional
+ *    colour override (falls back to the per-axis palette), fully-opaque axis
+ *    lines (vs. the legacy 0.92 for stock arrows), and no plane outline. */
+function restyleGizmoHelper(helper, opts = {}) {
+    const highlightSet = opts.control ? gizmoHighlightSet(opts.control.axis) : null;
+    const moveGizmo = !!opts.control;   // discriminates the move gizmo's styling from the clip gizmos'
     helper.traverse((/** @type {any} */ o) => {
         const m = o.material;
         if (!m || o.userData.__gizmoOutline) return;
+        if (m.resolution && opts.resW != null) m.resolution.set(opts.resW, opts.resH);
         const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
-        // Enlarge both the visible plane chip and its invisible picker so the
-        // clickable area matches the larger visual, then push the chip outward
-        // along its own offset direction so the three planes leave a margin
-        // around the gizmo centre instead of all meeting at the origin. Scale
-        // about the geometry's own centroid because the stock handle bakes its
-        // corner offset into the geometry.
-        if (planar && !sizedPlanes.has(o)) {
-            sizedPlanes.add(o);
-            const geo = o.geometry;
-            geo.computeBoundingBox();
-            const c = new THREE.Vector3();
-            geo.boundingBox.getCenter(c);
-            const size = new THREE.Vector3();
-            geo.boundingBox.getSize(size);
-            geo.translate(-c.x, -c.y, -c.z);
-            // The stock chip is a thin BOX (depth 0.01), which reads as a 3D
-            // slab — its sides catch light and its edge outline draws a back
-            // rectangle too. Scale the two broad axes up, but collapse the thin
-            // (normal) axis to zero so the chip is a flat quad. The thin axis is
-            // whichever bbox dimension is smallest (it varies per chip — the box
-            // is pre-rotated, baked into geometry — so detect it, don't hardcode).
-            const minDim = Math.min(size.x, size.y, size.z);
-            geo.scale(
-                size.x === minDim ? 0 : GIZMO_PLANE_SCALE,
-                size.y === minDim ? 0 : GIZMO_PLANE_SCALE,
-                size.z === minDim ? 0 : GIZMO_PLANE_SCALE,
-            );
-            const len = c.length();
-            if (len > 1e-6) {
-                const f = (len + GIZMO_PLANE_MARGIN) / len;   // push centroid out by the margin
-                geo.translate(c.x * f, c.y * f, c.z * f);
-            } else {
-                geo.translate(c.x, c.y, c.z);
-            }
-        }
         // Pickers live in a permanently-hidden group (and the non-current
         // mode's gizmo handles in a hidden one): resized above so the hit area
         // matches, but not recoloured / outlined. `matInvisible` is opacity-
@@ -8111,26 +8339,37 @@ function restyleGizmoHelper(helper, sizedPlanes) {
         // a picker would be raycast-hit before the chip and report an empty
         // axis, breaking plane-chip dragging.
         if (!o.parent || o.parent.visible === false) return;
+        if (moveGizmo && o.name === 'XYZ') {
+            // The centre should render nothing (only its sphere picker is
+            // real) — TransformControls re-asserts `.visible = true` on its
+            // own handles every frame, so force this back off here too
+            // rather than only once at construction.
+            o.visible = false; m.opacity = 0; m.transparent = true;
+            return;
+        }
         const hex = gizmoAxisColor(o.name);
         if (hex == null) return;
-        const col = gizmoColor(hex);              // cached; do not mutate
+        const hovered = !!(highlightSet && highlightSet.has(o.name));
+        const baseHex = opts.color != null ? opts.color : hex;
+        let col;
+        if (!hovered) {
+            col = gizmoColor(baseHex);             // cached; do not mutate
+        } else if (opts.hoverColor != null) {
+            col = gizmoColor(opts.hoverColor);
+        } else if (opts.color != null) {
+            col = gizmoHoverColor(baseHex);        // custom base colour: auto-lighten it
+        } else {
+            const hoverHex = gizmoAxisHoverColor(o.name);
+            col = hoverHex != null ? gizmoColor(hoverHex) : gizmoHoverColor(baseHex);
+        }
         m._color = (m._color || new THREE.Color()).copy(col);
         m.color.copy(col);
         if (planar) {
-            m._opacity = 0.22; m.opacity = 0.22; m.transparent = true;
-            if (!o.userData.__hasOutline) {
-                o.userData.__hasOutline = true;
-                const edge = new THREE.LineSegments(
-                    new THREE.EdgesGeometry(o.geometry),
-                    new THREE.LineBasicMaterial({
-                        color: col.clone().offsetHSL(0, 0, 0.18),
-                        transparent: true, opacity: 0.95, depthTest: false, depthWrite: false,
-                    })
-                );
-                edge.renderOrder = 1000;
-                edge.userData.__gizmoOutline = true;
-                o.add(edge);
-            }
+            // Opaque flat chip, no outline.
+            m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
+        } else if (moveGizmo) {
+            // Move-gizmo axis lines are fully opaque.
+            m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
         } else {
             m._opacity = 0.92; m.opacity = 0.92; m.transparent = true;
         }
@@ -8148,8 +8387,8 @@ function restyleGizmoHelper(helper, sizedPlanes) {
 // base mode. All share the controller's modifier handling, snap settings, drag
 // ghost, and report/change hooks.
 class Gizmo {
-    /** @param {TransformGizmoController} owner */
-    constructor(owner) {
+    /** @param {TransformGizmoController} owner @param {{scale?: number}} [opts] */
+    constructor(owner, opts = {}) {
         this.owner = owner;
         /** @type {THREE.Object3D|null} */
         this.object = null;
@@ -8159,11 +8398,16 @@ class Gizmo {
         // arrows and rotate rings, so it is re-applied on every mode switch.
         this.axes = { translate: { x: true, y: true, z: true }, rotate: { x: true, y: true, z: true } };
         this.snapDefault = false;                                 // snap is the resting state (Shift → free) instead of free (Shift → snap)
+        this.color = /** @type {number|string|null} */ (null);       // override for every axis/plane; null = per-axis palette
+        this.hoverColor = /** @type {number|string|null} */ (null);  // override for the highlighted state; null = auto-lightened
+        // Local-geometry size multiplier for the custom translate handles
+        // (axis length, plane size, pick radii) — fixed at construction,
+        // since the handles are built once, not re-scaled per frame.
+        this.scale = opts.scale != null ? opts.scale : 1;
         /** @type {THREE.Object3D|null} */
         this.ghost = null;                                        // translucent clone at the grab-time pose
         this._snapOrigin = new THREE.Vector3();                   // object position at drag-start (relative snap + positionStart)
         this._snapQuat = new THREE.Quaternion();                  // object rotation at drag-start (quaternionStart)
-        this._sizedPlanes = new WeakSet();                        // plane chips already resized/margined
 
         const v = owner.v;
         const ctrl = /** @type {any} */ (new TransformControls(v._camera, v._renderer.domElement));
@@ -8181,15 +8425,33 @@ class Gizmo {
         // _collectFrameableBounds; updateSceneBounds only walks _objects,
         // which never contains gizmo helpers.
         this.helper.userData.isGizmoHelper = true;
-        v._scene.add(this.helper);
+        v._gizmoScene.add(this.helper);   // overlay pass, see _animate
 
         // Orbit off while dragging a handle; spawn/clear the ghost and flush the
         // final transform on release (see _onDragChange / _onObjectChange).
         ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => owner._onDragChange(this, e.value));
         ctrl.addEventListener('objectChange', () => owner._onObjectChange(this));
 
-        owner._refineHandles(this);  // strip the bulky rotate handles + shade the cones (one-time)
-        owner._restyleGizmo(this);   // prime colour caches / build outlines up front
+        owner._refineHandles(this);  // strip the bulky rotate handles + build our own translate handles (one-time)
+        owner._restyleGizmo(this);   // prime colour caches up front
+
+        // TransformControlsGizmo re-themes its own handles (a hardcoded
+        // yellow on whichever one matches `control.axis`) inside its own
+        // `updateMatrixWorld`, which the renderer calls at the start of
+        // every `render()` — strictly *after* our `_restyleGizmo` call in
+        // `_animate`, so it would win the draw every time. Wrap it so our
+        // colours (base + the plane/centre-aware hover highlight) are
+        // re-applied immediately after the stock pass, same frame, before
+        // anything gets drawn.
+        const gizmoObj = /** @type {any} */ (ctrl._gizmo);
+        if (gizmoObj && !gizmoObj.__restyleWrapped) {
+            gizmoObj.__restyleWrapped = true;
+            const stockUpdateMatrixWorld = gizmoObj.updateMatrixWorld.bind(gizmoObj);
+            gizmoObj.updateMatrixWorld = (/** @type {boolean} */ force) => {
+                stockUpdateMatrixWorld(force);
+                owner._restyleGizmo(this);
+            };
+        }
     }
 
     dispose() {
@@ -8197,7 +8459,7 @@ class Gizmo {
         this.owner._clearGhost(this);
         this.control.detach();
         this.control.dispose();
-        v._scene.remove(this.helper);
+        v._gizmoScene.remove(this.helper);
     }
 }
 
@@ -8421,15 +8683,21 @@ class TransformGizmoController {
     //      environment sculpt the cone. The lib's per-frame re-theme + highlight
     //      only touch `.color`/`.opacity` (which Standard supports), so they keep
     //      working; `_restyleGizmo` re-applies our `_color` each frame regardless.
-    // Thin wrappers over the shared free helpers (also used by the clip gizmos).
+    // Thin wrappers over the shared free helpers (also used by the clip gizmos,
+    // which don't pass `customTranslateHandles` and keep the stock arrow look).
     /** @param {Gizmo} g */
-    _refineHandles(g) { refineGizmoHandles(g.control); }
+    _refineHandles(g) { refineGizmoHandles(g.control, { customTranslateHandles: true, scale: g.scale }); }
 
-    // Refined look for one gizmo's handles. Runs every frame (cheap traverse) so
-    // our resting palette survives TransformControls' per-frame re-theme; the
-    // plane resize + margin + outline are guarded so they only happen once per handle.
+    // Refined look for one gizmo's handles. Runs every frame (cheap traverse).
+    // Threads through this gizmo's colour override + live hover/drag axis (for
+    // highlighting) and the renderer size (fat-line resolution uniform).
     /** @param {Gizmo} g */
-    _restyleGizmo(g) { restyleGizmoHelper(g.helper, g._sizedPlanes); }
+    _restyleGizmo(g) {
+        const w = this.v.container.clientWidth, h = this.v.container.clientHeight;
+        restyleGizmoHelper(g.helper, {
+            control: g.control, color: g.color, hoverColor: g.hoverColor, resW: w, resH: h,
+        });
+    }
 
     // Drop a translucent clone of the dragged object at its grab-time world pose,
     // parented to the scene root so it stays put while the object moves. The clone
@@ -8558,17 +8826,19 @@ class TransformGizmoController {
      * Moves report through the same hooks. Activates the controller if it wasn't
      * already.
      * @param {THREE.Object3D} object
-     * @param {{id?:string|null, mode?:string, axes?:GizmoAxesMask|null, space?:string, snapDefault?:boolean}} [opts]
+     * @param {{id?:string|null, mode?:string, axes?:GizmoAxesMask|null, space?:string, snapDefault?:boolean, color?:number|string|null, hoverColor?:number|string|null, scale?:number}} [opts]
      * @returns {Gizmo|null}
      */
     addGizmo(object, opts = {}) {
         if (!object) return null;
         this._activate();
-        const g = new Gizmo(this);
+        const g = new Gizmo(this, { scale: opts.scale });
         g.object = object;
         g.id = (opts.id != null) ? opts.id : this._lookupId(object);
         if (opts.mode === 'rotate' || opts.mode === 'translate') g.mode = opts.mode;
         if (typeof opts.snapDefault === 'boolean') g.snapDefault = opts.snapDefault;
+        if (opts.color != null) g.color = opts.color;
+        if (opts.hoverColor != null) g.hoverColor = opts.hoverColor;
         if (opts.space === 'local' || opts.space === 'world') g.control.setSpace(opts.space);
         g.control.attach(object);
         g.control.enabled = true;
@@ -8599,6 +8869,8 @@ class TransformGizmoController {
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
         if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
         if (typeof opts.snapDefault === 'boolean') this._primary.snapDefault = opts.snapDefault;
+        if (opts.color != null) this._primary.color = opts.color;
+        if (opts.hoverColor != null) this._primary.hoverColor = opts.hoverColor;
         this.clickSelect = (typeof opts.clickSelect === 'boolean') ? opts.clickSelect : true;
         this._activate();
         this._setControlMode(this._primary, this._primary.mode);
@@ -8731,10 +9003,10 @@ const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
 const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
 const AXIS_CONTROL_REPORT_HZ = 30;
 const AXIS_CONTROL_LINE_WIDTH_PX = 3;      // fat line (Line2/LineMaterial), same convention as the polyline path
-const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 3;  // handle segment: 3x the guide line
-const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.15;   // radians either side of value, rotary handle arc
+const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 4;  // handle segment: 4x the guide line
+const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.05;   // radians either side of value, rotary handle arc
 const AXIS_CONTROL_HANDLE_ARC_SEGMENTS = 12;
-const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.08;  // world units either side of value, linear handle segment
+const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.05;  // world units either side of value, linear handle segment
 
 const _acUnitX = new THREE.Vector3(1, 0, 0);
 const _acScratchA = new THREE.Vector3();
@@ -9968,7 +10240,10 @@ export class ThreeJSViewer {
         this._polylinePick.attach();
 
         // Move/rotate gizmo (opt-in; enabled from Python via enable_move_gizmo or
-        // from JS via enableMoveGizmo). Inert until enabled.
+        // from JS via enableMoveGizmo). Inert until enabled. Its helpers live in
+        // their own overlay scene, drawn after the main render over a cleared
+        // depth buffer: depth-tested among themselves, on top of everything else.
+        this._gizmoScene = new THREE.Scene();
         this._transformGizmo = new TransformGizmoController(this);
         this._axisControls = new AxisControlManager(this);
 
@@ -10121,12 +10396,7 @@ export class ThreeJSViewer {
         // shaded translate cone): a ROTATE gizmo to tilt the plane normal, and a
         // Z-only TRANSLATE gizmo (local space, so its arrow follows the current
         // normal) to slide the plane along that normal. Both report through the
-        // same _syncClipFromGizmo handler. Per-gizmo Sets guard the one-time
-        // plane-chip resize inside restyleGizmoHelper (no chips show here, but
-        // the helper expects a Set).
-        this._clipRotSizedPlanes = new WeakSet();
-        this._clipMoveSizedPlanes = new WeakSet();
-
+        // same _syncClipFromGizmo handler.
         this._clipGizmo = new TransformControls(this._camera, this._renderer.domElement);
         this._clipGizmo.attach(this._clipAnchor);
         this._clipGizmo.setMode('rotate');
@@ -14715,6 +14985,8 @@ export class ThreeJSViewer {
                         rotateSnap: data.rotateSnap,   // radians
                         clickSelect: data.clickSelect,
                         snapDefault: data.snapDefault,
+                        color: data.color,
+                        hoverColor: data.hoverColor,
                     });
                 } else {
                     this._transformGizmo.disable();
@@ -14731,6 +15003,9 @@ export class ThreeJSViewer {
                     axes: { x: data.x, y: data.y, z: data.z, translate: data.translate, rotate: data.rotate },
                     space: data.space,
                     snapDefault: data.snapDefault,
+                    color: data.color,
+                    hoverColor: data.hoverColor,
+                    scale: data.scale,
                 });
                 break;
             }
@@ -14960,8 +15235,8 @@ export class ThreeJSViewer {
         // Clipping gizmos wear the same refined look — TransformControls re-themes
         // its handles every frame, so re-apply our palette while the clip tool is open.
         if (this._clipGizmo.enabled) {
-            restyleGizmoHelper(this._clipGizmoHelper, this._clipRotSizedPlanes);
-            restyleGizmoHelper(this._clipMoveGizmoHelper, this._clipMoveSizedPlanes);
+            restyleGizmoHelper(this._clipGizmoHelper);
+            restyleGizmoHelper(this._clipMoveGizmoHelper);
         }
 
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
@@ -14983,6 +15258,12 @@ export class ThreeJSViewer {
             this._renderer.render(this._scene, this._camera);
         }
         this._renderer.autoClear = false;
+        // Move gizmos: own pass over a cleared depth buffer, so handles occlude
+        // each other correctly but always draw over the scene.
+        if (this._gizmoScene.children.some((h) => h.visible)) {
+            this._renderer.clearDepth();
+            this._renderer.render(this._gizmoScene, this._camera);
+        }
         // Lift the ViewHelper above the animation toolbar when it's visible.
         // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
         // call to add a Y offset matching the toolbar height.
@@ -16062,7 +16343,7 @@ export class ThreeJSViewer {
      * snap the resting state (hold Shift to move freely). Enables the gizmo
      * subsystem if it wasn't already.
      * @param {string|THREE.Object3D} objectOrId
-     * @param {{mode?:string, axes?:GizmoAxesMask|null, id?:string|null, space?:string, snapDefault?:boolean}} [opts]
+     * @param {{mode?:string, axes?:GizmoAxesMask|null, id?:string|null, space?:string, snapDefault?:boolean, color?:number|string|null, hoverColor?:number|string|null, scale?:number}} [opts]
      * @returns {any} the created gizmo, or null if the object can't be resolved.
      */
     addGizmo(objectOrId, opts = {}) {
@@ -16070,7 +16351,10 @@ export class ThreeJSViewer {
         let id = opts.id;
         if (typeof objectOrId === 'string') { id = objectOrId; obj = this._objects.get(objectOrId); }
         if (!obj) return null;
-        return this._transformGizmo.addGizmo(obj, { mode: opts.mode, axes: opts.axes, id, space: opts.space, snapDefault: opts.snapDefault });
+        return this._transformGizmo.addGizmo(obj, {
+            mode: opts.mode, axes: opts.axes, id, space: opts.space, snapDefault: opts.snapDefault,
+            color: opts.color, hoverColor: opts.hoverColor, scale: opts.scale,
+        });
     }
 
     /** Remove every pinned gizmo added with `addGizmo` (the interactive gizmo is untouched). */

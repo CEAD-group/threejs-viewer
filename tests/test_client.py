@@ -356,6 +356,9 @@ def test_add_gizmo_payload_and_accumulates():
             "mode": "translate",
             "space": "world",
             "snapDefault": False,
+            "scale": 1.0,
+            "color": None,
+            "hoverColor": None,
         },
         {
             "type": "add_gizmo",
@@ -366,6 +369,9 @@ def test_add_gizmo_payload_and_accumulates():
             "mode": "rotate",
             "space": "local",
             "snapDefault": True,
+            "scale": 1.0,
+            "color": None,
+            "hoverColor": None,
         },
     ]
 

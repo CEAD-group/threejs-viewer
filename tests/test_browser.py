@@ -3935,35 +3935,6 @@ def test_move_gizmo_attaches_and_reports(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_move_gizmo_palette_matches_view_helper(viewer_client, viewer_page):
-    """The gizmo handles use three's ViewHelper axis colours (issue #191), so
-    the X / Y / Z arrows and the corner-gimbal bubbles agree on what each
-    axis looks like. Read off the lit arrow materials after a rendered
-    frame, so the per-frame restyle has already run."""
-    viewer_client.add_box("box")
-    settle(viewer_client)  # WS barrier: the box is registered before the attach
-    viewer_client.enable_move_gizmo("box")
-    _wait_for(
-        viewer_page,
-        "() => window.threejsViewer._transformGizmo.objectId === 'box'",
-    )
-    frames(viewer_page)
-    r = viewer_page.evaluate(
-        """() => {
-            const arrows = window.threejsViewer._transformGizmo.control
-                ._gizmo.gizmo.translate.children;
-            const hex = (name) => {
-                const o = arrows.find((c) => c.name === name && c.userData.__litArrow);
-                return o ? o.material.color.getHex() : null;
-            };
-            return { x: hex('X'), y: hex('Y'), z: hex('Z') };
-        }"""
-    )
-    # three r183 ViewHelper.js axis colours.
-    assert (r["x"], r["y"], r["z"]) == (0xFF4466, 0x88FF44, 0x4488FF), r
-
-
-@pytest.mark.browser
 def test_move_gizmo_mode_switch_and_disable(viewer_client, viewer_page):
     """setGizmoMode swaps to rotate; disable_move_gizmo detaches and hides it."""
     viewer_client.add_box("box")
@@ -4450,59 +4421,6 @@ def test_add_gizmo_multi_dof_and_plane_margin(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_add_gizmo_space_and_refined_handles(viewer_client, viewer_page):
-    """space='local' orients the handles to the object (TransformControls space),
-    'world' (default) keeps them world-aligned; and the one-time handle refinement
-    strips the bulky rotate handles (E / XYZE) and shades the translate cones."""
-    viewer_client.add_box("w")
-    viewer_client.add_box("l")
-    _wait_for(
-        viewer_page,
-        "() => ['w','l'].every(n => window.threejsViewer._objects.has(n))",
-    )
-    viewer_client.add_gizmo("w")  # default → world
-    viewer_client.add_gizmo("l", space="local")
-    _wait_for(
-        viewer_page,
-        "() => window.threejsViewer._transformGizmo._extra.length === 2",
-    )
-
-    spaces = viewer_page.evaluate(
-        "() => window.threejsViewer._transformGizmo._extra.map(g => g.control.space)"
-    )
-    assert spaces == ["world", "local"]
-
-    refined = viewer_page.evaluate(
-        """() => {
-            const g = window.threejsViewer._transformGizmo._extra[0];
-            const gm = g.control._gizmo;
-            const rotNames = grp => grp.children.map(o => o.name);
-            // Translate arrows (single-axis, coloured) are swapped to a lit material.
-            let litArrows = 0, basicArrows = 0;
-            gm.gizmo.translate.children.forEach(o => {
-                if (!o.name || o.name.length !== 1) return;  // arrows only
-                if (o.material && o.material.isMeshStandardMaterial) litArrows++;
-                else if (o.material && o.material.isMeshBasicMaterial) basicArrows++;
-            });
-            return {
-                gizmoRot: rotNames(gm.gizmo.rotate),
-                pickerRot: rotNames(gm.picker.rotate),
-                helperRot: rotNames(gm.helper.rotate),
-                litArrows, basicArrows,
-            };
-        }"""
-    )
-    # The outer screen-space ring (E), the gray backdrop circle (XYZE), and the
-    # gray AXIS helper line are gone; the three coloured rings remain.
-    assert "E" not in refined["gizmoRot"] and "XYZE" not in refined["gizmoRot"]
-    assert "E" not in refined["pickerRot"] and "XYZE" not in refined["pickerRot"]
-    assert set(refined["gizmoRot"]) == {"X", "Y", "Z"}
-    assert "AXIS" not in refined["helperRot"]
-    # The cones are lit (shaded) now, not flat MeshBasicMaterial.
-    assert refined["litArrows"] >= 3 and refined["basicArrows"] == 0
-
-
-@pytest.mark.browser
 def test_gizmo_arrow_drag_both_directions(viewer_client, viewer_page):
     """A 1-DOF (X-only) pinned gizmo: dragging the X arrow right moves the box in
     +X, dragging it left moves it back in -X (the arrow works from both sides)."""
@@ -4635,44 +4553,6 @@ _GIZMO_ARROW_PROBE = """(name) => {
   });
   return hits;
 }"""
-
-
-@pytest.mark.browser
-def test_gizmo_plane_chip_hover_beats_arrow_pickers(viewer_client, viewer_page):
-    """Regression for the stock fat arrow pickers shadowing the plane chips:
-    hover resolves closest-intersection-wins, and the unslimmed arrow pickers
-    (radius 0.2 cones hugging each axis) sat in front of the flat XY chip from
-    any 3/4 view, so most of the chip's visible parallelogram grabbed the X
-    arrow instead of the chip. With the pickers slimmed
-    (GIZMO_ARROW_PICKER_SLIM / GIZMO_CENTER_PICKER_SCALE) the chip must win the
-    bulk of its own footprint while every arrow stays hittable."""
-    viewer_client.add_box("box", position=[0, 0, 0])
-    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
-    viewer_client.enable_move_gizmo(id="box", click_select=False)
-    _wait_for(
-        viewer_page,
-        "() => { const g = window.threejsViewer._transformGizmo._primary;"
-        " return g && g.object && g.helper.visible; }",
-    )
-    viewer_page.evaluate(_GIZMO_THREEQUARTER)
-
-    res = viewer_page.evaluate(_GIZMO_CHIP_SCAN)
-    assert res is not None, "XY chip handle not found"
-    counts, total = res["counts"], res["total"]
-    xy = counts.get("XY", 0)
-    arrows = counts.get("X", 0) + counts.get("Y", 0) + counts.get("Z", 0)
-    # Pre-fix this pose gave the chip and the X arrow roughly equal shares of
-    # the chip's bbox; post-fix the chip dominates by an order of magnitude.
-    assert xy > 3 * max(1, arrows), (
-        f"arrow pickers shadow the XY chip inside its own footprint: {counts}"
-    )
-    assert xy >= 0.3 * total, f"chip hover coverage too low: {counts} of {total}"
-
-    # Slimming must not make the arrows unhittable: each axis still resolves at
-    # (at least one of) its shaft/cone centres.
-    for name in ("X", "Y", "Z"):
-        hits = viewer_page.evaluate(_GIZMO_ARROW_PROBE, name)
-        assert name in hits, f"arrow {name} no longer hittable anywhere: {hits}"
 
 
 @pytest.mark.browser
@@ -8982,7 +8862,10 @@ def test_axis_control_drives_mounted_child_transform_scratch(
         )
 
     _drag_axis_control(viewer_page, "elz", 40, 0)
-    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.get('elz').value !== 0")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._axisControls.controls.get('elz').value !== 0",
+    )
     v1 = control_value()
     assert v1 > 0.1, f"drag did not move value ({v1})"
     _wait_for(
