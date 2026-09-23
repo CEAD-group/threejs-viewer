@@ -4157,7 +4157,7 @@ class ViewerClient:
         """Show an interactive move/rotate gizmo for transforming objects.
 
         The gizmo is built on three.js ``TransformControls``. Once enabled,
-        **hold Alt** while dragging to rotate (otherwise it translates), and
+        **hold Ctrl** while dragging to rotate (otherwise it translates), and
         **hold Shift** to snap — translations to a ``translate_snap`` grid,
         rotations to ``rotate_snap_deg`` increments. Snapping is sampled live,
         so Shift can be toggled mid-drag.
@@ -4273,7 +4273,7 @@ class ViewerClient:
         - all ``True`` (default) → the full 3-DOF gizmo.
 
         As with the interactive gizmo, dragging reports the new transform to every
-        callback registered with :meth:`on_object_move`, holding Alt rotates, and a
+        callback registered with :meth:`on_object_move`, holding Ctrl rotates, and a
         translucent ghost marks the start pose until release. By default the gizmo
         moves freely and holding Shift snaps; pass ``snap_default=True`` to flip
         that — snap becomes the resting state and holding Shift releases it for free
@@ -4296,7 +4296,7 @@ class ViewerClient:
                 :meth:`set_gizmo_axes`).
             rotate: Optional axis mask for the rotate rings only, replacing
                 ``x``/``y``/``z`` in rotate mode.
-            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Alt
+            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Ctrl
                 overrides this live while held.
             space: Handle orientation, ``"world"`` (default — axes stay aligned
                 to the world) or ``"local"`` (the gizmo turns with the object's
@@ -4408,7 +4408,7 @@ class ViewerClient:
         - ``quaternion_start`` — ``[x, y, z, w]`` local rotation at drag-start.
         - ``mode`` — the *effective* mode of this drag: ``"translate"``,
           ``"rotate"`` or ``"scale"``. Read off the live control, so a
-          momentary **Alt** rotate override reports ``"rotate"`` even though
+          momentary **Ctrl** rotate override reports ``"rotate"`` even though
           the gizmo's base mode is still translate — branch on this (not on
           the mode you configured) when interpreting the drag.
         - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).
