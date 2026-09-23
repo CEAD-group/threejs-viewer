@@ -2915,6 +2915,8 @@ def _gimbal_layout(page):
                          right: dom.right, bottom: dom.bottom - lift},
                 orbit: rect('.tjsv-view-orbit'),
                 home: rect('.tjsv-view-home'),
+                buttonWidth: v.el.querySelector('.tjsv-view-proj')
+                    .getBoundingClientRect().width,
             };
         }"""
     )
@@ -2936,6 +2938,7 @@ def test_view_helper_size_explicit(viewer_client, viewer_page):
     g = r["gimbal"]
     for name in ("orbit", "home"):
         assert r[name]["right"] <= g["left"] + 112 / 4, (name, r)
+    assert abs(r["buttonWidth"] - 28 * 112 / 128) < 0.5, r
     column_mid = (r["orbit"]["top"] + r["home"]["bottom"]) / 2
     assert abs(column_mid - (g["top"] + g["bottom"]) / 2) <= 2, r
 
@@ -2965,9 +2968,10 @@ def test_view_helper_size_auto_compact_on_small_canvas(viewer_client, viewer_pag
     assert r["hitType"] == "posX", r
     g = r["gimbal"]
     assert r["orbit"]["right"] <= g["left"] + 80 / 4, r
-    # The 96 px column is taller than the square: it starts just off the
-    # canvas bottom rather than centring below it.
-    assert r["home"]["bottom"] <= g["bottom"], r
+    # The buttons scale with the square and the column stays centred on it.
+    assert abs(r["buttonWidth"] - 28 * 80 / 128) < 0.5, r
+    column_mid = (r["orbit"]["top"] + r["home"]["bottom"]) / 2
+    assert abs(column_mid - (g["top"] + g["bottom"]) / 2) <= 2, r
 
     viewer_page.set_viewport_size({"width": 1000, "height": 700})
     viewer_page.wait_for_function(

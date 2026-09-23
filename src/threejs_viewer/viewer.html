@@ -710,29 +710,26 @@
 
         /* Orbit mode, P/O and Home form one vertical stack just LEFT of the gimbal
            bubbles, outside their orbit, so they read as one control group without
-           colliding. Everything derives from --tjsv-view-helper-size (the gimbal
-           square, set from JS, issue #233): the column's right edge sits at 0.9 of
-           the square (115px at 128px), and the 96px column is centred on the square,
-           or starts 4px off the bottom when the square is shorter than the column.
+           colliding. The stack scales with the gimbal square (issue #233):
+           --tjsv-view-helper-size and the unitless --tjsv-view-scale (size / 128)
+           are set from JS. At 128px the buttons are 28px, the right edge sits at
+           115px and the 96px column is centred on the square (84 / 50 / 16px).
            All three shift up with the animation toolbar via --tjsv-anim-lift.
            Home used to sit in the centre of the gimbal, among the bubbles (#190). */
-        .threejs-viewer {
-            --tjsv-view-stack-base: max(4px, var(--tjsv-view-helper-size, 128px) / 2 - 48px);
-        }
         .threejs-viewer .tjsv-view-orbit,
         .threejs-viewer .tjsv-view-proj,
         .threejs-viewer .tjsv-view-home {
             position: absolute;
             right: calc(var(--tjsv-view-helper-size, 128px) * 0.9);
-            bottom: calc(var(--tjsv-view-stack-base) + 68px + var(--tjsv-anim-lift, 0px));
-            width: 28px;
-            height: 28px;
+            bottom: calc(84px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
+            width: calc(28px * var(--tjsv-view-scale, 1));
+            height: calc(28px * var(--tjsv-view-scale, 1));
             padding: 0;
             border-radius: 50%;
             background: rgba(30, 30, 30, 0.72);
             border: 1px solid rgba(255, 255, 255, 0.18);
             color: #ddd;
-            font-size: 9px;
+            font-size: calc(9px * var(--tjsv-view-scale, 1));
             font-weight: 600;
             letter-spacing: 0.5px;
             cursor: pointer;
@@ -744,6 +741,11 @@
             transition: background 0.15s, color 0.15s, opacity 0.15s, transform 0.15s;
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
             z-index: 2;
+        }
+        .threejs-viewer .tjsv-view-orbit svg,
+        .threejs-viewer .tjsv-view-home svg {
+            width: calc(16px * var(--tjsv-view-scale, 1));
+            height: calc(16px * var(--tjsv-view-scale, 1));
         }
         .threejs-viewer .tjsv-view-orbit:hover,
         .threejs-viewer .tjsv-view-proj:hover,
@@ -822,12 +824,12 @@
            A manual toggle is a deliberate choice: auto-projection never overrides it
            (only bubble-snap-entered ortho auto-exits on orbit). */
         .threejs-viewer .tjsv-view-proj {
-            bottom: calc(var(--tjsv-view-stack-base) + 34px + var(--tjsv-anim-lift, 0px));
-            font-size: 11px;
+            bottom: calc(50px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
+            font-size: calc(11px * var(--tjsv-view-scale, 1));
         }
         /* Home (reset view): third item of the stack, below P. */
         .threejs-viewer .tjsv-view-home {
-            bottom: calc(var(--tjsv-view-stack-base) + var(--tjsv-anim-lift, 0px));
+            bottom: calc(16px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
         }
         .threejs-viewer .tjsv-view-proj.ortho {
             background: rgba(70, 110, 160, 0.85);
@@ -16220,7 +16222,8 @@ class ThreeJSViewer {
     /**
      * Apply the explicit or automatic gimbal size for a canvas of the given
      * size. Drives `_gizmoDim` (render + hit-test) and the
-     * --tjsv-view-helper-size CSS var the button stack is laid out from.
+     * --tjsv-view-helper-size / --tjsv-view-scale CSS vars the button stack
+     * is sized and laid out from.
      * @param {number} width
      * @param {number} height
      */
@@ -16229,6 +16232,8 @@ class ThreeJSViewer {
         if (size === this._gizmoDim) return;
         this._gizmoDim = size;
         this.el.style.setProperty('--tjsv-view-helper-size', `${size}px`);
+        // Unitless, because calc() cannot divide a length by a length.
+        this.el.style.setProperty('--tjsv-view-scale', String(size / 128));
     }
 
     /**

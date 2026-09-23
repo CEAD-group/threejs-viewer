@@ -14670,7 +14670,8 @@ export class ThreeJSViewer {
     /**
      * Apply the explicit or automatic gimbal size for a canvas of the given
      * size. Drives `_gizmoDim` (render + hit-test) and the
-     * --tjsv-view-helper-size CSS var the button stack is laid out from.
+     * --tjsv-view-helper-size / --tjsv-view-scale CSS vars the button stack
+     * is sized and laid out from.
      * @param {number} width
      * @param {number} height
      */
@@ -14679,6 +14680,8 @@ export class ThreeJSViewer {
         if (size === this._gizmoDim) return;
         this._gizmoDim = size;
         this.el.style.setProperty('--tjsv-view-helper-size', `${size}px`);
+        // Unitless, because calc() cannot divide a length by a length.
+        this.el.style.setProperty('--tjsv-view-scale', String(size / 128));
     }
 
     /**
