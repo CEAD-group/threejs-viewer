@@ -8512,3 +8512,199 @@ def test_fat_polyline_segments_uses_line_segments2(viewer_client, viewer_page):
         time.sleep(0.05)
     else:
         pytest.fail(f"fat segments color update did not land; last={blue}")
+
+
+# === Parsed-model cache (issue #221) ===
+
+
+def _cache_blob(viewer_client, key, payload):
+    """Serve `payload` at a fixed sidecar key, like a content-addressed
+    emitter would, and return its URL."""
+    viewer_client._blob_store[key] = payload
+    return f"http://{viewer_client.host}:{viewer_client._http_port}{key}"
+
+
+def _count_fetches(viewer_page):
+    viewer_page.evaluate(
+        """() => {
+            window.__fetchLog = [];
+            if (!window.__origFetch) window.__origFetch = window.fetch;
+            window.fetch = (url, ...rest) => {
+                window.__fetchLog.push(String(url));
+                return window.__origFetch(url, ...rest);
+            };
+        }"""
+    )
+
+
+def _fetches_of(viewer_page, url):
+    return viewer_page.evaluate(
+        "(url) => window.__fetchLog.filter(u => u === url).length", url
+    )
+
+
+def _add_cached_glb(viewer_page, obj_id, url):
+    viewer_page.evaluate(
+        """([id, url]) => window.threejsViewer.handleMessage(
+            { type: 'add_model_binary', id, format: 'glb', blob_url: url })""",
+        [obj_id, url],
+    )
+
+
+@pytest.mark.browser
+def test_model_cache_reuses_parse_per_url(viewer_client, viewer_page):
+    """A blob URL parsed once is not fetched or decoded again: the second add
+    clones the cached template. Clones share vertex data but own their
+    geometry wrapper (draw range) and materials (colour), and deleting one
+    leaves the other's shared buffers alone."""
+    url = _cache_blob(viewer_client, "/cache_two_tri", _two_triangle_glb())
+    _count_fetches(viewer_page)
+    _add_cached_glb(viewer_page, "ca", url)
+    settle(viewer_client)
+    _add_cached_glb(viewer_page, "cb", url)
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, url) == 1
+
+    state = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const mesh = (id) => v._objects.get(id).userData.drawRangeMeshes[0];
+            const a = mesh('ca'), b = mesh('cb');
+            window.__disposed = [];
+            b.geometry.addEventListener('dispose', () => window.__disposed.push('b'));
+            return {
+                both: v._objects.has('ca') && v._objects.has('cb'),
+                sameGeom: a.geometry === b.geometry,
+                sameVerts: a.geometry.attributes.position === b.geometry.attributes.position,
+                sameMat: a.material === b.material,
+                stats: v.getModelCacheStats(),
+            };
+        }"""
+    )
+    assert state["both"]
+    assert state["sameVerts"] and not state["sameGeom"] and not state["sameMat"]
+    assert state["stats"]["entries"] == 1
+    assert state["stats"]["hits"] >= 1
+
+    viewer_client.set_draw_range("ca", 0.5)
+    viewer_client.set_color("ca", 0xFF0000)
+    settle(viewer_client)
+    per_object = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const mesh = (id) => v._objects.get(id).userData.drawRangeMeshes[0];
+            return {
+                aCount: mesh('ca').geometry.drawRange.count,
+                bCount: mesh('cb').geometry.drawRange.count,
+                aColor: mesh('ca').material.color.getHex(),
+                bColor: mesh('cb').material.color.getHex(),
+            };
+        }"""
+    )
+    assert per_object["aCount"] == 3
+    assert per_object["bCount"] != 3
+    assert per_object["aColor"] == 0xFF0000
+    assert per_object["bColor"] != 0xFF0000
+
+    viewer_client.delete("ca")
+    settle(viewer_client)
+    frames(viewer_page)
+    after = viewer_page.evaluate(
+        """() => ({
+            disposed: window.__disposed.slice(),
+            bLive: window.threejsViewer._objects.has('cb'),
+        })"""
+    )
+    assert after == {"disposed": [], "bLive": True}
+
+    # The last clone going away frees the shared GPU buffers.
+    viewer_client.delete("cb")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.__disposed") == ["b"]
+
+    # The CPU copy stays cached: a re-add is still a hit.
+    _add_cached_glb(viewer_page, "cc", url)
+    settle(viewer_client)
+    frames(viewer_page)
+    assert _fetches_of(viewer_page, url) == 1
+    assert viewer_page.evaluate("() => window.threejsViewer._objects.has('cc')")
+
+
+@pytest.mark.browser
+def test_model_cache_dedupes_concurrent_adds(viewer_client, viewer_page):
+    """Adds of one URL that arrive before its first parse lands share that
+    fetch and parse."""
+    url = _cache_blob(viewer_client, "/cache_concurrent", _two_triangle_glb())
+    _count_fetches(viewer_page)
+    for obj_id in ("k1", "k2", "k3"):
+        _add_cached_glb(viewer_page, obj_id, url)
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, url) == 1
+    assert viewer_page.evaluate(
+        "() => ['k1', 'k2', 'k3'].every(id => window.threejsViewer._objects.has(id))"
+    )
+
+
+@pytest.mark.browser
+def test_model_cache_eviction_and_clear(viewer_client, viewer_page):
+    """The cache is an LRU bounded by entry count; an evicted URL is fetched
+    again, as is every URL after clearModelCache()."""
+    glb = _two_triangle_glb()
+    urls = [_cache_blob(viewer_client, f"/cache_evict_{i}", glb) for i in range(3)]
+    viewer_page.evaluate("() => { window.threejsViewer._modelCache.maxEntries = 2; }")
+    _count_fetches(viewer_page)
+    for i, url in enumerate(urls):
+        _add_cached_glb(viewer_page, f"e{i}", url)
+        settle(viewer_client)
+    stats = "() => window.threejsViewer.getModelCacheStats().entries"
+    assert viewer_page.evaluate(stats) == 2
+
+    # Oldest evicted: fetched again. Newest still cached.
+    _add_cached_glb(viewer_page, "e0b", urls[0])
+    _add_cached_glb(viewer_page, "e2b", urls[2])
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, urls[0]) == 2
+    assert _fetches_of(viewer_page, urls[2]) == 1
+    # Evicting an entry whose clones are still live leaves them rendering.
+    assert viewer_page.evaluate(
+        "() => ['e0', 'e1', 'e2', 'e0b', 'e2b']"
+        ".every(id => window.threejsViewer._objects.has(id))"
+    )
+
+    viewer_page.evaluate("() => window.threejsViewer.clearModelCache()")
+    assert viewer_page.evaluate(stats) == 0
+    _add_cached_glb(viewer_page, "e2c", urls[2])
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, urls[2]) == 2
+
+
+@pytest.mark.browser
+def test_model_cache_clip_mixers_per_clone(viewer_client, viewer_page):
+    """Two clones of an animated GLB each get their own mixer over the shared
+    clips, so driving one leaves the other in its bind pose."""
+    url = _cache_blob(viewer_client, "/cache_anim", _scale_animated_glb())
+    _add_cached_glb(viewer_page, "m1", url)
+    settle(viewer_client)
+    _add_cached_glb(viewer_page, "m2", url)
+    settle(viewer_client)
+    hits = "() => window.threejsViewer.getModelCacheStats().hits"
+    assert viewer_page.evaluate(hits) >= 1
+    viewer_client.set_clip_progress("m1", 1.0)
+    settle(viewer_client)
+    _wait_for_scale(viewer_page, 0.857, obj_id="m1")
+    assert abs(_node_scale(viewer_page, "m2") - 1.0) < 1e-6
+
+
+@pytest.mark.browser
+def test_model_cache_skipped_for_python_sidecar(viewer_client, viewer_page):
+    """Python's add_model_binary uses a fresh blob URL per push and sends
+    cache: false, so nothing it loads is retained by the cache."""
+    viewer_client.add_model_binary("py1", _two_triangle_glb(), format="glb")
+    settle(viewer_client)
+    state = viewer_page.evaluate(
+        """() => ({
+            has: window.threejsViewer._objects.has('py1'),
+            entries: window.threejsViewer.getModelCacheStats().entries,
+        })"""
+    )
+    assert state == {"has": True, "entries": 0}
