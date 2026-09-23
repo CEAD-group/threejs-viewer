@@ -8265,7 +8265,8 @@ def _material_flags(page, obj_id):
         "  return {wireframe: m.wireframe, transparent: m.transparent,"
         "          depthWrite: m.depthWrite, opacity: m.opacity,"
         "          polygonOffset: m.polygonOffset,"
-        "          polygonOffsetFactor: m.polygonOffsetFactor};"
+        "          polygonOffsetFactor: m.polygonOffsetFactor,"
+        "          polygonOffsetUnits: m.polygonOffsetUnits};"
         "}",
         obj_id,
     )
@@ -8439,6 +8440,66 @@ def test_mesh_transparent_and_render_order(viewer_client, viewer_page):
     assert state["transparent"] is True
     assert state["renderOrder"] == 3
     assert state["opacity"] == 1
+
+
+@pytest.mark.browser
+def test_mesh_binary_honours_depth_fields(viewer_client, viewer_page):
+    """add_mesh_binary reads depthWrite and polygonOffset like primitives do
+    (issue #227), and an explicit depthWrite survives set_opacity."""
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh(
+        "ov",
+        positions,
+        indices,
+        depth_write=False,
+        polygon_offset=0.0,
+        polygon_offset_units=-4.0,
+    )
+    viewer_client.add_mesh("plain", positions, indices)
+    viewer_client.add_mesh("clear", positions, indices, opacity=0.5)
+    settle(viewer_client)
+    ov = _material_flags(viewer_page, "ov")
+    assert ov["depthWrite"] is False
+    assert ov["polygonOffset"] is True
+    assert ov["polygonOffsetFactor"] == 0.0
+    assert ov["polygonOffsetUnits"] == -4.0
+    plain = _material_flags(viewer_page, "plain")
+    assert plain["depthWrite"] is True and plain["polygonOffset"] is False
+    assert _material_flags(viewer_page, "clear")["depthWrite"] is False
+
+    viewer_client.set_opacity("ov", 1.0)
+    settle(viewer_client)
+    assert _material_flags(viewer_page, "ov")["depthWrite"] is False
+
+
+def _near_far(page):
+    return page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v._sceneBoundsDirty = true; v._updateNearFar();"
+        " const c = v._perspCamera;"
+        " return {near: c.near, far: c.far,"
+        "         target: c.position.distanceTo(v._controls.target)}; }"
+    )
+
+
+@pytest.mark.browser
+def test_near_plane_keeps_precision_inside_scene(viewer_client, viewer_page):
+    """Camera inside a 20 m scene: near is tied to the fitted far instead of
+    the 1 mm floor (issue #227), but never clips the orbit target."""
+    viewer_client.add_box("cell", width=20.0, height=20.0, depth=4.0)
+    settle(viewer_client)
+    viewer_client.set_camera(position=[3, -4, 2], target=[3, 6, 0])
+    settle(viewer_client)
+    nf = _near_far(viewer_page)
+    assert nf["near"] > 0.01
+    assert nf["near"] < nf["target"] * 0.5 + 1e-9
+
+    # Zoomed in on a detail: the target guard wins over the far ratio.
+    viewer_client.set_camera(position=[3, 5.99, 0], target=[3, 6, 0])
+    settle(viewer_client)
+    nf = _near_far(viewer_page)
+    assert nf["near"] <= nf["target"] * 0.5 + 1e-9
 
 
 @pytest.mark.browser
