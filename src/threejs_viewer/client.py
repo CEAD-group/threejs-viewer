@@ -4470,13 +4470,16 @@ class ViewerClient:
         min: Optional[float] = None,
         max: Optional[float] = None,
         color: int = 0xFFFFFF,
+        hover_color: Optional[int] = None,
         radius: Optional[float] = None,
         bbox_source_id: Optional[str] = None,
         window: float = 1.0,
     ) -> None:
         """Show a rotary or linear range control: a line spanning the axis's
-        range of motion with a small flat-shaded sphere marking the current
-        value. Only the sphere is draggable/hoverable.
+        range of motion with a short, 3x-thicker section of the same line
+        marking the current value (a small arc for rotary, a short segment
+        for linear). The handle and the guide line always share one colour
+        pair; only the handle's invisible hitbox sphere is draggable/hoverable.
 
         Anchored every render frame at ``target_id``'s live world pivot,
         oriented along its local ``axis`` — a moving target (a jog, a drag)
@@ -4500,6 +4503,9 @@ class ViewerClient:
         ``axis`` (dropping the along-axis extent) — a size that scales with
         whatever component the control is drawn around.
 
+        ``hover_color`` overrides the tint used while hovering/dragging;
+        omit it to auto-derive a lightened variant of ``color``.
+
         Dragging the sphere reports ``{id, value, phase}`` to every callback
         registered with :meth:`on_axis_control_change`, throttled during the
         drag (``"move"``) with a final unthrottled report on release
@@ -4519,6 +4525,7 @@ class ViewerClient:
             "min": None if min is None else float(min),
             "max": None if max is None else float(max),
             "color": color,
+            "hover_color": hover_color,
             "radius": radius,
             "bbox_source_id": bbox_source_id,
             "window": float(window),
@@ -4533,10 +4540,13 @@ class ViewerClient:
         value: Optional[float] = None,
         min: Optional[float] = None,
         max: Optional[float] = None,
+        color: Optional[int] = None,
+        hover_color: Optional[int] = None,
     ) -> None:
-        """Update a control added with :meth:`add_axis_control` — its value
-        and/or its range. Only the given fields change; the rest keep their
-        last value."""
+        """Update a control added with :meth:`add_axis_control` — its value,
+        range, and/or colour. Only the given fields change; the rest keep
+        their last value. Passing ``color`` without ``hover_color``
+        re-derives the hover tint from the new ``color``."""
         spec = self._axis_controls.get(id)
         if spec is not None:
             if value is not None:
@@ -4545,6 +4555,10 @@ class ViewerClient:
                 spec["min"] = float(min)
             if max is not None:
                 spec["max"] = float(max)
+            if color is not None:
+                spec["color"] = color
+            if hover_color is not None:
+                spec["hover_color"] = hover_color
         self._send(
             {
                 "type": "update_axis_control",
@@ -4552,6 +4566,8 @@ class ViewerClient:
                 "value": None if value is None else float(value),
                 "min": None if min is None else float(min),
                 "max": None if max is None else float(max),
+                "color": color,
+                "hover_color": hover_color,
             }
         )
 

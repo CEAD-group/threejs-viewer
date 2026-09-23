@@ -8497,8 +8497,11 @@ def test_axis_control_linear_basic_geometry(viewer_client, viewer_page):
 
     line_ends = viewer_page.evaluate(
         "(id) => { const c = window.threejsViewer._axisControls.controls.get(id);"
-        " const p = c.line.geometry.attributes.position;"
-        " return [p.getX(0), p.getX(p.count - 1)]; }",
+        # Line2/LineGeometry packs points into overlapping (start,end) pairs
+        # in one shared interleaved buffer, not a plain position attribute —
+        # the buffer's own first/last 3 floats are still the first/last point.
+        " const a = c.line.geometry.attributes.instanceStart.data.array;"
+        " return [a[0], a[a.length - 3]]; }",
         "elz",
     )
     assert line_ends == pytest.approx([0.0, 1.2], abs=1e-6)
@@ -8557,11 +8560,13 @@ def test_axis_control_rotary_unlimited_full_circle(viewer_client, viewer_page):
     _wait_for(
         viewer_page, "() => window.threejsViewer._axisControls.controls.has('spindle')"
     )
-    span = viewer_page.evaluate(
-        "() => { const p = window.threejsViewer._axisControls.controls.get('spindle')"
-        ".line.geometry.attributes.position; return p.count; }"
+    # Points = (pair-buffer length / 6) + 1 — see the comment on `line_ends`
+    # above re: LineGeometry's overlapping-pairs packing.
+    point_count = viewer_page.evaluate(
+        "() => { const a = window.threejsViewer._axisControls.controls.get('spindle')"
+        ".line.geometry.attributes.instanceStart.data.array; return a.length / 6 + 1; }"
     )
-    assert span == 65  # AXIS_CONTROL_ARC_SEGMENTS + 1
+    assert point_count == 65  # AXIS_CONTROL_ARC_SEGMENTS + 1
 
 
 @pytest.mark.browser
@@ -8584,8 +8589,9 @@ def test_axis_control_linear_unlimited_window_follows_value(viewer_client, viewe
 
     def line_ends():
         return viewer_page.evaluate(
-            "() => { const p = window.threejsViewer._axisControls.controls.get('rail')"
-            ".line.geometry.attributes.position; return [p.getX(0), p.getX(1)]; }"
+            "() => { const a = window.threejsViewer._axisControls.controls.get('rail')"
+            ".line.geometry.attributes.instanceStart.data.array;"
+            " return [a[0], a[a.length - 3]]; }"
         )
 
     assert line_ends() == pytest.approx([4.0, 6.0], abs=1e-6)
@@ -8732,6 +8738,97 @@ def test_axis_control_hover_highlights_sphere(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_axis_control_custom_hover_color(viewer_client, viewer_page):
+    """`hover_color` overrides the auto-derived hover tint, and both the
+    guide line and the handle segment are recoloured together."""
+    viewer_client.add_box("mount", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
+    viewer_client.add_axis_control(
+        "elz",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-1,
+        max=1,
+        color=0x4488FF,
+        hover_color=0xFF0000,
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+
+    def colors():
+        return viewer_page.evaluate(
+            "() => { const c = window.threejsViewer._axisControls.controls.get('elz');"
+            " return { line: c.lineMaterial.color.getHex(),"
+            " handle: c.handleLineMaterial.color.getHex() }; }"
+        )
+
+    base = colors()
+    assert base == {"line": 0x4488FF, "handle": 0x4488FF}
+
+    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "elz")
+    viewer_page.mouse.move(p["x"], p["y"])
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._axisControls.controls.get('elz')._hovered === true",
+    )
+    assert colors() == {"line": 0xFF0000, "handle": 0xFF0000}
+
+    viewer_page.mouse.move(20, 20)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._axisControls.controls.get('elz')._hovered === false",
+    )
+    assert colors() == base
+
+
+@pytest.mark.browser
+def test_axis_control_update_color(viewer_client, viewer_page):
+    """update_axis_control(color=...) re-tints the control; passing `color`
+    alone (no `hover_color`) re-derives the hover tint from the new color
+    rather than leaving the old explicit one in place."""
+    viewer_client.add_box("mount", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
+    viewer_client.add_axis_control(
+        "elz",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-1,
+        max=1,
+        color=0x4488FF,
+        hover_color=0xFF0000,
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
+
+    viewer_client.update_axis_control("elz", color=0x00FF00)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._axisControls.controls.get('elz')"
+        ".lineMaterial.color.getHex() === 0x00ff00",
+    )
+    handle_hex = viewer_page.evaluate(
+        "() => window.threejsViewer._axisControls.controls.get('elz')"
+        ".handleLineMaterial.color.getHex()"
+    )
+    assert handle_hex == 0x00FF00
+    hover_hex = viewer_page.evaluate(
+        "() => window.threejsViewer._axisControls.controls.get('elz')"
+        "._hoverColor.getHex()"
+    )
+    assert hover_hex != 0xFF0000, (
+        "hover tint should be re-derived from the new color, not left at the "
+        "old explicit value"
+    )
+
+
+@pytest.mark.browser
 def test_axis_control_bbox_radius(viewer_client, viewer_page):
     """Omitting `radius` and passing `bbox_source_id` derives the rotary
     radius from half the source's world-AABB diagonal, projected onto the
@@ -8781,3 +8878,64 @@ def test_remove_axis_control(viewer_client, viewer_page):
     _wait_for(
         viewer_page, "() => !window.threejsViewer._axisControls.controls.has('elz')"
     )
+
+
+@pytest.mark.browser
+def test_axis_control_drives_mounted_child_transform_scratch(
+    viewer_client, viewer_page
+):
+    """SCRATCH: mirrors examples/36_axis_control.py's mount+child pattern —
+    a control anchored on a static mount group (never moved), with
+    batch_update writing the reported value onto a child box's local
+    position on the control's axis, and no drift across repeated drags."""
+    viewer_client.add_group("mount", position=[0, 0, 0])
+    viewer_client.add_box("child", parent="mount")
+    viewer_client.add_axis_control(
+        "elz",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-2.0,
+        max=2.0,
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('elz')"
+    )
+
+    def on_change(m):
+        viewer_client.batch_update({"child": {"position": [m["value"], 0, 0]}})
+
+    viewer_client.on_axis_control_change(on_change)
+
+    def child_x():
+        return viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('child').position.x"
+        )
+
+    def control_value():
+        return viewer_page.evaluate(
+            "() => window.threejsViewer._axisControls.controls.get('elz').value"
+        )
+
+    _drag_axis_control(viewer_page, "elz", 40, 0)
+    _wait_for(viewer_page, "() => window.threejsViewer._axisControls.controls.get('elz').value !== 0")
+    v1 = control_value()
+    assert v1 > 0.1, f"drag did not move value ({v1})"
+    _wait_for(
+        viewer_page,
+        f"() => Math.abs(window.threejsViewer._objects.get('child').position.x - {v1}) < 1e-3",
+    )
+    assert child_x() == pytest.approx(v1, abs=1e-3)
+
+    # No drift: since the mount never moved, a second drag lands the
+    # control's value exactly on the child's local position again (not
+    # doubled, which is what would happen if the control were attached
+    # directly to the moving child instead of the static mount).
+    _drag_axis_control(viewer_page, "elz", 10, 0)
+    _wait_for(
+        viewer_page,
+        f"() => window.threejsViewer._axisControls.controls.get('elz').value > {v1}",
+    )
+    v2 = control_value()
+    assert child_x() == pytest.approx(v2, abs=1e-3)

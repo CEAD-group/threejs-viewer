@@ -10238,11 +10238,16 @@ class TransformGizmoController {
 // single-axis translate) and reports {id, value, phase} back, same shape as
 // the move gizmo's onObjectMove.
 
-const AXIS_CONTROL_SPHERE_RADIUS = 0.05;
+const AXIS_CONTROL_SPHERE_RADIUS = 0.1;    // invisible pick-only hitbox, not rendered
 const AXIS_CONTROL_ARC_SEGMENTS = 64;
 const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
 const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
 const AXIS_CONTROL_REPORT_HZ = 30;
+const AXIS_CONTROL_LINE_WIDTH_PX = 3;      // fat line (Line2/LineMaterial), same convention as the polyline path
+const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 4;  // handle segment: 4x the guide line
+const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.05;   // radians either side of value, rotary handle arc
+const AXIS_CONTROL_HANDLE_ARC_SEGMENTS = 12;
+const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.05;  // world units either side of value, linear handle segment
 
 const _acUnitX = new THREE.Vector3(1, 0, 0);
 const _acScratchA = new THREE.Vector3();
@@ -10269,20 +10274,47 @@ class AxisControl {
 
         const hex = opts.color != null ? opts.color : 0xffffff;
         this._baseColor = new THREE.Color(hex);
-        this._hoverColor = this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
+        this._hoverColor = opts.hoverColor != null
+            ? new THREE.Color(opts.hoverColor)
+            : this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
 
         this.group = new THREE.Group();
         this.group.userData.isAxisControlHelper = true;
         this.group.matrixAutoUpdate = true;
 
-        this.lineMaterial = new THREE.LineBasicMaterial({
-            color: this._baseColor.clone(), transparent: true, opacity: 0.85,
+        // Fat line (Line2/LineMaterial), same construction the polyline path
+        // uses (viewer.js ~13139): a plain THREE.Line's width is 1px on most
+        // GPUs regardless of `linewidth` (WebGL ignores it), too thin to read
+        // as a real range indicator. `resolution` needs the render target's
+        // pixel size and is kept current in AxisControlManager.update() —
+        // devicePixelRatio-independent as long as it matches the renderer's
+        // own drawing-buffer size, same as every other fat line here.
+        this.lineMaterial = new LineMaterial({
+            color: this._baseColor.clone(), linewidth: AXIS_CONTROL_LINE_WIDTH_PX,
             depthTest: false, depthWrite: false, toneMapped: false,
+            resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
         });
-        this.line = new THREE.Line(new THREE.BufferGeometry(), this.lineMaterial);
+        this.line = new Line2(new LineGeometry(), this.lineMaterial);
         this.line.renderOrder = 900;
         this.line.raycast = () => {};   // guide only — the sphere is the only pickable part
 
+        // The handle: a short, 3x-thick section of the same line, centred on
+        // `value` — a small arc for rotary, a short segment for linear. This
+        // is the visible "you are here" indicator; it shares its base/hover
+        // colour with the long guide line (both update together in
+        // `_setHovered`).
+        this.handleLineMaterial = new LineMaterial({
+            color: this._baseColor.clone(), linewidth: AXIS_CONTROL_HANDLE_WIDTH_PX,
+            depthTest: false, depthWrite: false, toneMapped: false,
+            resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
+        });
+        this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
+        this.handleLine.renderOrder = 901;
+        this.handleLine.raycast = () => {};   // guide only — the sphere is the only pickable part
+
+        // The sphere is kept as the pick target (three's raycaster ignores
+        // `.visible`, so it still hit-tests) but is never rendered — the
+        // handle line above is the visible indicator now.
         this.sphereMaterial = new THREE.MeshStandardMaterial({
             color: this._baseColor.clone(), flatShading: true, roughness: 0.5, metalness: 0.0,
             depthTest: false, depthWrite: false, toneMapped: false,
@@ -10290,34 +10322,59 @@ class AxisControl {
         this.sphere = new THREE.Mesh(new THREE.SphereGeometry(AXIS_CONTROL_SPHERE_RADIUS, 12, 8), this.sphereMaterial);
         this.sphere.renderOrder = 901;
         this.sphere.userData.axisControlId = id;
+        this.sphere.visible = false;
 
-        this.group.add(this.line, this.sphere);
+        this.group.add(this.line, this.handleLine, this.sphere);
         this._rebuild();
     }
 
-    /** Re-derive the line geometry (kind-dependent) and the sphere's local
-     * position from the current value/min/max. Cheap (<= ARC_SEGMENTS+1
-     * verts) — called on every value/min/max change, not per frame. */
+    /** Re-derive the line geometry (kind-dependent), the handle segment, and
+     * the sphere's local position from the current value/min/max. Cheap
+     * (<= ARC_SEGMENTS+1 verts) — called on every value/min/max change, not
+     * per frame. */
     _rebuild() {
         const isRotary = this.kind === 'rotary' || this.kind === 'rotary_unlimited';
-        const pts = [];
+        /** @type {number[]} */
+        const flat = [];
+        /** @type {number[]} */
+        const handleFlat = [];
         if (isRotary) {
             const R = this.radius;
             const a0 = this.kind === 'rotary_unlimited' ? 0 : this.min;
             const a1 = this.kind === 'rotary_unlimited' ? Math.PI * 2 : this.max;
             for (let i = 0; i <= AXIS_CONTROL_ARC_SEGMENTS; i++) {
                 const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
-                pts.push(new THREE.Vector3(0, R * Math.cos(a), R * Math.sin(a)));
+                flat.push(0, R * Math.cos(a), R * Math.sin(a));
             }
             this.sphere.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
+
+            let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_ANGLE;
+            let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_ANGLE;
+            if (this.kind === 'rotary') { h0 = Math.max(this.min, h0); h1 = Math.min(this.max, h1); }
+            for (let i = 0; i <= AXIS_CONTROL_HANDLE_ARC_SEGMENTS; i++) {
+                const a = h0 + (h1 - h0) * (i / AXIS_CONTROL_HANDLE_ARC_SEGMENTS);
+                handleFlat.push(0, R * Math.cos(a), R * Math.sin(a));
+            }
         } else {
             const lo = this.kind === 'linear_unlimited' ? this.value - this.window : this.min;
             const hi = this.kind === 'linear_unlimited' ? this.value + this.window : this.max;
-            pts.push(new THREE.Vector3(lo, 0, 0), new THREE.Vector3(hi, 0, 0));
+            flat.push(lo, 0, 0, hi, 0, 0);
             this.sphere.position.set(this.value, 0, 0);
+
+            let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_LENGTH;
+            let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_LENGTH;
+            if (this.kind === 'linear') { h0 = Math.max(this.min, h0); h1 = Math.min(this.max, h1); }
+            handleFlat.push(h0, 0, 0, h1, 0, 0);
         }
         this.line.geometry.dispose();
-        this.line.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+        this.line.geometry = new LineGeometry();
+        this.line.geometry.setPositions(flat);
+        this.line.computeLineDistances();
+
+        this.handleLine.geometry.dispose();
+        this.handleLine.geometry = new LineGeometry();
+        this.handleLine.geometry.setPositions(handleFlat);
+        this.handleLine.computeLineDistances();
     }
 
     /** @param {number} value @param {{min?:number, max?:number}} [opts] */
@@ -10331,12 +10388,30 @@ class AxisControl {
     _setHovered(hovered) {
         if (hovered === this._hovered) return;
         this._hovered = hovered;
-        this.sphereMaterial.color.copy(hovered ? this._hoverColor : this._baseColor);
+        const color = hovered ? this._hoverColor : this._baseColor;
+        this.lineMaterial.color.copy(color);
+        this.handleLineMaterial.color.copy(color);
+    }
+
+    /** Re-tint the guide line + handle. Omitting `hoverColor` re-derives it
+     * from `color` (or the current base color) the same way the constructor
+     * does — passing `color` alone still gives a sensible hover tint.
+     * @param {number|string|null} [color] @param {number|string|null} [hoverColor] */
+    setColor(color, hoverColor) {
+        if (color != null) this._baseColor.set(color);
+        this._hoverColor = hoverColor != null
+            ? new THREE.Color(hoverColor)
+            : this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
+        const current = this._hovered ? this._hoverColor : this._baseColor;
+        this.lineMaterial.color.copy(current);
+        this.handleLineMaterial.color.copy(current);
     }
 
     dispose() {
         this.line.geometry.dispose();
         this.lineMaterial.dispose();
+        this.handleLine.geometry.dispose();
+        this.handleLineMaterial.dispose();
         this.sphere.geometry.dispose();
         this.sphereMaterial.dispose();
     }
@@ -10386,7 +10461,7 @@ class AxisControlManager {
         if (existing) { this.v._scene.remove(existing.group); existing.dispose(); }
         const radius = opts.radius != null ? opts.radius
             : (opts.bboxSourceId != null ? this._radiusFromBbox(opts.bboxSourceId, opts.axis) : 1.0);
-        const c = new AxisControl(id, { ...opts, radius });
+        const c = new AxisControl(id, { ...opts, radius, viewer: this.v });
         this.controls.set(id, c);
         this.v._scene.add(c.group);
     }
@@ -10394,11 +10469,12 @@ class AxisControlManager {
     /** Update one control's value/min/max (update_axis_control) — distinct
      * from the no-arg `update()` below, which repositions every control at
      * its target's live pivot once per render frame.
-     * @param {string} id @param {{value?:number, min?:number, max?:number}} opts */
+     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
     setValue(id, opts) {
         const c = this.controls.get(id);
         if (!c) return;
         c.setValue(opts.value != null ? opts.value : c.value, opts);
+        if (opts.color != null || opts.hoverColor != null) c.setColor(opts.color, opts.hoverColor);
     }
 
     /** @param {string} id */
@@ -10460,7 +10536,13 @@ class AxisControlManager {
      * pose (matches the move gizmo's own "detach on parent loss" being the
      * caller's job, not silently vanishing mid-frame). */
     update() {
+        if (!this.controls.size) return;
+        // Fat lines read their pixel width off this every frame; cheap (a
+        // .set() on an existing Vector2, no realloc) so no resize hook needed.
+        const w = this.v.container.clientWidth, h = this.v.container.clientHeight;
         for (const c of this.controls.values()) {
+            c.lineMaterial.resolution.set(w, h);
+            c.handleLineMaterial.resolution.set(w, h);
             const frame = this._liveFrame(c);
             if (!frame) continue;
             c.group.position.copy(frame.pivot);
@@ -15934,11 +16016,15 @@ class ThreeJSViewer {
                 this._axisControls.add(data.id, {
                     targetId: data.target_id, axis: data.axis, kind: data.kind,
                     value: data.value, min: data.min, max: data.max, color: data.color,
+                    hoverColor: data.hover_color,
                     radius: data.radius, bboxSourceId: data.bbox_source_id, window: data.window,
                 });
                 break;
             case 'update_axis_control':
-                this._axisControls.setValue(data.id, { value: data.value, min: data.min, max: data.max });
+                this._axisControls.setValue(data.id, {
+                    value: data.value, min: data.min, max: data.max,
+                    color: data.color, hoverColor: data.hover_color,
+                });
                 break;
             case 'remove_axis_control':
                 this._axisControls.remove(data.id);
@@ -17458,6 +17544,23 @@ class ThreeJSViewer {
      * @param {THREE.Object3D} object3D @param {string|null} [id]
      */
     attachMoveGizmo(object3D, id = null) { this._transformGizmo.attach(object3D, id); }
+
+    /** Direct-call JS equivalent of the `add_axis_control` WS message — same
+     * effect, for an embedder holding a live `viewer` reference in the same
+     * page (no WS round trip needed). `opts`: `{targetId, axis, kind, value,
+     * min, max, color, hoverColor, radius, bboxSourceId, window}` — see the
+     * WS message for the full shape. `hoverColor` is optional; omitting it
+     * auto-derives a lightened variant of `color`. Values are plain
+     * THREE.js scene units: metres for linear(_unlimited), radians for
+     * rotary(_unlimited) — no CSD-unit conversion happens here.
+     * @param {string} id @param {any} opts */
+    addAxisControl(id, opts) { this._axisControls.add(id, opts); }
+
+    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+    updateAxisControl(id, opts) { this._axisControls.setValue(id, opts); }
+
+    /** @param {string} id */
+    removeAxisControl(id) { this._axisControls.remove(id); }
 
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
