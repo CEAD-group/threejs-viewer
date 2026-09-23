@@ -1853,6 +1853,9 @@ class ViewerClient:
         matrix: Optional[list] = None,
         visible: bool = True,
         pickable: bool = True,
+        depth_write: Optional[bool] = None,
+        polygon_offset: Optional[float] = None,
+        polygon_offset_units: float = 1.0,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -1876,6 +1879,13 @@ class ViewerClient:
             pickable: When False, click-to-pivot passes through this mesh
                 (a translucent volume such as a workzone fill), so the
                 pivot lands on what sits behind it (issue #215).
+            depth_write: Overrides the default (depth only when opaque) and
+                survives ``set_opacity``/``set_color``.
+            polygon_offset: With ``polygon_offset_units``, separates coplanar
+                overlays in depth (issue #227).
+
+        Per-vertex alpha: pass ``colors`` as (N, 4); the header then carries
+        ``vertexColorComponents: 4`` with RGBA interleaved per vertex.
         """
         positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1)
         indices = np.ascontiguousarray(indices, dtype=np.uint32).reshape(-1)
@@ -1944,6 +1954,9 @@ class ViewerClient:
             header["visible"] = False
         if not pickable:
             header["pickable"] = False
+        _apply_material_flags(
+            header, False, None, depth_write, polygon_offset, polygon_offset_units
+        )
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform

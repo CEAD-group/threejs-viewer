@@ -2769,6 +2769,32 @@ const SIDE_BY_NAME = {
     double: THREE.DoubleSide,
 };
 
+let warnedVertexAlphaFlag = false;
+
+// Perspective far/near cap: 24-bit depth then resolves ~1 mm at 15 m in a 20 m scene.
+const NEAR_FAR_MAX_RATIO = 1000;
+
+/**
+ * Depth fields of a material payload, shared by `_createMaterial` and
+ * `add_mesh_binary` so both honour `depthWrite` and `polygonOffset*` alike.
+ * @param {any} params
+ * @param {boolean} defaultDepthWrite
+ * @returns {{fields: any, depthWriteExplicit: boolean}}
+ */
+function depthMaterialFields(params, defaultDepthWrite) {
+    const depthWriteExplicit = params.depthWrite != null;
+    /** @type {any} */
+    const fields = {
+        depthWrite: depthWriteExplicit ? params.depthWrite !== false : defaultDepthWrite,
+    };
+    if (params.polygonOffset) {
+        fields.polygonOffset = true;
+        fields.polygonOffsetFactor = params.polygonOffsetFactor != null ? params.polygonOffsetFactor : 0;
+        fields.polygonOffsetUnits = params.polygonOffsetUnits != null ? params.polygonOffsetUnits : 0;
+    }
+    return { fields, depthWriteExplicit };
+}
+
 /**
  * @param {THREE.Object3D} obj
  * @param {number} opacity
@@ -6817,8 +6843,16 @@ class CameraController {
         // precision exactly when content fills the frame (the deposition-
         // order bias that untangles coincident retrace surfaces needs that
         // precision back).
-        const nextNear = Math.max(0.001, (dist - radius) * 0.5);
-        const nextFar = Math.max(dist + radius * 1.5, 100);
+        const fitFar = dist + radius * 1.5;
+        const nextFar = Math.max(fitFar, 100);
+        // Inside the sphere dist - radius is <= 0; a near tied to the fitted far keeps
+        // depth precision (issue #227), capped so the orbit target never clips.
+        const targetDist = v._perspCamera.position.distanceTo(v._controls.target);
+        const nextNear = Math.max(
+            0.001,
+            (dist - radius) * 0.5,
+            Math.min(fitFar / NEAR_FAR_MAX_RATIO, targetDist * 0.5),
+        );
         if (
             Math.abs(v._perspCamera.near - nextNear) < 1e-6 &&
             Math.abs(v._perspCamera.far - nextFar) < 1e-6
@@ -12093,15 +12127,9 @@ class ThreeJSViewer {
             : (transparent && !wireframe ? THREE.DoubleSide : THREE.FrontSide);
         // Same rule as applyOpacity, so both paths agree: a translucent body
         // that writes depth occludes its neighbours by draw order (issue #207).
-        const depthWriteExplicit = params.depthWrite != null;
-        const depthWrite = depthWriteExplicit ? params.depthWrite !== false : opacity >= 1;
+        const { fields: depth, depthWriteExplicit } = depthMaterialFields(params, opacity >= 1);
         /** @type {any} */
-        const common = { color, opacity, transparent, wireframe, depthWrite, side, clippingPlanes: clip };
-        if (params.polygonOffset) {
-            common.polygonOffset = true;
-            common.polygonOffsetFactor = params.polygonOffsetFactor != null ? params.polygonOffsetFactor : 0;
-            common.polygonOffsetUnits = params.polygonOffsetUnits != null ? params.polygonOffsetUnits : 0;
-        }
+        const common = { color, opacity, transparent, wireframe, side, clippingPlanes: clip, ...depth };
 
         /** @type {any} */ let mat;
         switch (materialType) {
@@ -15149,6 +15177,12 @@ class ThreeJSViewer {
                         const nv = data.numVertices;
                         const ni = data.numIndices;
                         const vcc = data.vertexColorComponents || 3;
+                        // Per-vertex alpha is interleaved RGBA via vertexColorComponents: 4;
+                        // a planar alpha tail flagged hasVertexAlpha is a different layout.
+                        if (data.hasVertexAlpha && vcc !== 4 && !warnedVertexAlphaFlag) {
+                            warnedVertexAlphaFlag = true;
+                            console.warn('add_mesh_binary: hasVertexAlpha is ignored; send interleaved RGBA with vertexColorComponents: 4');
+                        }
 
                         let offset = 0;
                         const positions = new Float32Array(buffer, offset, nv * 3);
@@ -15186,17 +15220,19 @@ class ThreeJSViewer {
                         // opaque mesh can be renderOrder-ed against one that is
                         // translucent (renderOrder only sorts within a pass).
                         const isTransparent = meshOpacity < 1 || hasAlphaColor || data.transparent === true;
+                        const { fields: depth, depthWriteExplicit } = depthMaterialFields(data, !isTransparent);
                         const meshMaterial = new THREE.MeshStandardMaterial({
                             color: colors ? 0xffffff : (data.color || 0x7ab8cc),
                             metalness: data.metalness !== undefined ? data.metalness : 0.1,
                             roughness: data.roughness !== undefined ? data.roughness : 0.8,
                             opacity: meshOpacity,
                             transparent: isTransparent,
-                            depthWrite: !isTransparent,
                             side: THREE.DoubleSide,
                             vertexColors: !!colors,
                             clippingPlanes: this._activeClippingPlanes(),
+                            ...depth,
                         });
+                        if (depthWriteExplicit) meshMaterial.userData.__depthWriteExplicit = true;
 
                         const mesh = new THREE.Mesh(geometry, meshMaterial);
                         mesh.name = data.id;
