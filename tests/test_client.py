@@ -146,6 +146,19 @@ def test_set_toolbar_visible_records_state_for_reconnect():
     assert client._toolbar_visible == {"type": "set_toolbar", "visible": False}
 
 
+def test_viewer_url_view_helper_size():
+    """view_helper_size rides the URL only when given (issue #233)."""
+    assert "view_helper_size" not in _params(ViewerClient().viewer_url)
+    params = _params(ViewerClient(view_helper_size=96).viewer_url)
+    assert params["view_helper_size"] == ["96.0"]
+
+
+@pytest.mark.parametrize("bad", [0, -80, float("nan"), float("inf")])
+def test_viewer_client_rejects_bad_view_helper_size(bad):
+    with pytest.raises(ValueError, match="view_helper_size must be"):
+        ViewerClient(view_helper_size=bad)
+
+
 def test_viewer_client_rejects_invalid_tone_mapping():
     with pytest.raises(ValueError, match="tone_mapping must be one of"):
         ViewerClient(tone_mapping="bogus")

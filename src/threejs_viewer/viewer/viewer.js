@@ -92,6 +92,14 @@ const OPPOSITE_VIEW = {
 // Duration of the eased setView() snap tween (matches the feel of the stock
 // ViewHelper animation it replaces).
 const VIEW_TWEEN_MS = 450;
+// View gimbal square in CSS px (issue #233). Stock is ViewHelper's hardcoded
+// 128; the auto size drops to the compact one when the canvas' shorter side
+// is under the threshold, so a phone pane keeps most of its area.
+const VIEW_HELPER_STOCK_SIZE = 128;
+const VIEW_HELPER_COMPACT_SIZE = 80;
+const VIEW_HELPER_COMPACT_BELOW_PX = 500;
+const VIEW_HELPER_SIZE_MIN = 32;
+const VIEW_HELPER_SIZE_MAX = 512;
 const _viewTweenQuat = new THREE.Quaternion();
 const _viewTweenDir = new THREE.Vector3();
 const _viewTweenUp = new THREE.Vector3();
@@ -126,6 +134,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
+ * @property {number | null} [viewHelperSize]            View gimbal square in CSS px (clamped to 32–512). Omitted/null = auto: 128, or 80 when the canvas' shorter side is under 500 px (issue #233). Overridable per page via the `view_helper_size` URL query param; `setViewHelperSize()` changes it at runtime.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  * @property {false | {maxEntries?: number, maxBytes?: number}} [modelCache] Session cache of parsed models keyed by URL (issue #221). Default 64 entries / 256 MB; `false` disables it. `clearModelCache()` empties it.
  * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
@@ -1086,6 +1095,46 @@ function resolveFov(options, urlParams) {
     const urlFov = parse(urlParams.get('fov'));
     const optFov = parse(options.fov);
     return urlFov != null ? urlFov : optFov != null ? optFov : DEFAULT_FOV;
+}
+
+/**
+ * Parse a view gimbal size (CSS px). Returns null for "auto" (absent, empty,
+ * NaN or non-positive); finite positive values clamp to the allowed range.
+ * @param {string | number | null | undefined} raw
+ * @returns {number | null}
+ */
+function parseViewHelperSize(raw) {
+    if (raw === null || raw === undefined || raw === '') return null;
+    const n = typeof raw === 'number' ? raw : parseFloat(raw);
+    if (!(n > 0)) return null;
+    return Math.round(Math.min(VIEW_HELPER_SIZE_MAX, Math.max(VIEW_HELPER_SIZE_MIN, n)));
+}
+
+/**
+ * Resolve the explicit view gimbal size: URL `view_helper_size` param >
+ * `viewHelperSize` option > null (auto, see `autoViewHelperSize`).
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {number | null}
+ */
+function resolveViewHelperSize(options, urlParams) {
+    const fromUrl = parseViewHelperSize(urlParams.get('view_helper_size'));
+    return fromUrl != null ? fromUrl : parseViewHelperSize(options.viewHelperSize);
+}
+
+/**
+ * Automatic view gimbal size for a canvas: compact when its shorter side is
+ * under VIEW_HELPER_COMPACT_BELOW_PX, stock otherwise (and for a hidden,
+ * zero-size canvas, which has no meaningful size yet).
+ * @param {number} width
+ * @param {number} height
+ * @returns {number}
+ */
+function autoViewHelperSize(width, height) {
+    if (!(width > 0 && height > 0)) return VIEW_HELPER_STOCK_SIZE;
+    return Math.min(width, height) < VIEW_HELPER_COMPACT_BELOW_PX
+        ? VIEW_HELPER_COMPACT_SIZE
+        : VIEW_HELPER_STOCK_SIZE;
 }
 
 /**
@@ -9090,6 +9139,10 @@ export class ThreeJSViewer {
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
 
+        // View gimbal size (issue #233): explicit px, or null for auto.
+        // Precedence: URL `view_helper_size` param > option > auto.
+        this._viewHelperSizeOpt = resolveViewHelperSize(options, urlParams);
+
         // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
         this._toolbarVisible = resolveToolbarVisible(options, urlParams);
 
@@ -9660,7 +9713,8 @@ export class ThreeJSViewer {
         // can see when a click will actually land. Pointerdown inside the gizmo
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
-        this._gizmoDim = 128;
+        this._gizmoDim = 0;
+        this._syncViewHelperSize(w, h);
         // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair; arms and
         // bubble distance at stock length (1.3 read as too long on review).
         this._gizmoBaseScale = 1.12;
@@ -14845,28 +14899,7 @@ export class ThreeJSViewer {
             this._renderer.render(this._scene, this._camera);
         }
         this._renderer.autoClear = false;
-        // Lift the ViewHelper above the animation toolbar when it's visible.
-        // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
-        // call to add a Y offset matching the toolbar height.
-        const lift = (this._animLiftCss || 0) * window.devicePixelRatio;
-        if (lift > 0) {
-            // Cache the true original once so we don't re-wrap the wrapped
-            // setViewport each frame (which would deepen the call chain by
-            // one level per frame and eventually blow the stack).
-            if (!this._rendererSetViewportOriginal) {
-                this._rendererSetViewportOriginal = this._renderer.setViewport.bind(this._renderer);
-            }
-            const orig = this._rendererSetViewportOriginal;
-            const r = this._renderer;
-            r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
-            try {
-                this._viewHelper.render(this._renderer);
-            } finally {
-                r.setViewport = orig;
-            }
-        } else {
-            this._viewHelper.render(this._renderer);
-        }
+        this._renderViewHelper();
 
         // LOD: dispatch to Web Worker after render (non-blocking)
         if (this._lodDirty && !this._lodWorkerBusy && performance.now() - this._lodLastRunTime >= this._lodThrottleMs) {
@@ -14963,6 +14996,7 @@ export class ThreeJSViewer {
         // Selection silhouettes read this by reference (issue #165).
         this._highlightResolution.value.set(width, height);
         this._depthCue.onResize(width, height);
+        this._syncViewHelperSize(width, height);
     }
 
     /** @param {THREE.Object3D} object */
@@ -14980,6 +15014,72 @@ export class ThreeJSViewer {
     }
 
     // ========== ViewHelper (corner gizmo) ==========
+
+    /**
+     * Set the view gimbal size in CSS px (issue #233), clamped to 32-512.
+     * `null` restores the automatic size: 128, or 80 when the canvas' shorter
+     * side is under 500 px. Hit-testing, the animation-toolbar lift and the
+     * orbit / P / Home button stack all follow it.
+     * @param {number | null} size
+     */
+    setViewHelperSize(size) {
+        this._viewHelperSizeOpt = parseViewHelperSize(size);
+        const dom = this._renderer.domElement;
+        this._syncViewHelperSize(dom.clientWidth, dom.clientHeight);
+    }
+
+    /** @returns {number} the view gimbal size currently applied, in CSS px. */
+    getViewHelperSize() {
+        return this._gizmoDim;
+    }
+
+    /**
+     * Apply the explicit or automatic gimbal size for a canvas of the given
+     * size. Drives `_gizmoDim` (render + hit-test) and the
+     * --tjsv-view-helper-size / --tjsv-view-scale CSS vars the button stack
+     * is sized and laid out from.
+     * @param {number} width
+     * @param {number} height
+     */
+    _syncViewHelperSize(width, height) {
+        const size = this._viewHelperSizeOpt ?? autoViewHelperSize(width, height);
+        if (size === this._gizmoDim) return;
+        this._gizmoDim = size;
+        this.el.style.setProperty('--tjsv-view-helper-size', `${size}px`);
+        // Unitless, because calc() cannot divide a length by a length.
+        this.el.style.setProperty('--tjsv-view-scale', String(size / 128));
+    }
+
+    /**
+     * Render the gimbal in the bottom-right corner, lifted above the
+     * animation toolbar. The lift goes through the helper's own
+     * `location.bottom` (CSS px, like every setViewport argument). The size
+     * cannot: ViewHelper hardcodes `dim = 128` in its first setViewport call,
+     * so a one-shot wrapper rewrites that single call and puts the original
+     * back before the helper restores the main viewport.
+     */
+    _renderViewHelper() {
+        const r = this._renderer;
+        // `location` is newer than the bundled @types/three.
+        const helper = /** @type {any} */ (this._viewHelper);
+        const size = this._gizmoDim;
+        const lift = this._animLiftCss || 0;
+        helper.location.bottom = lift;
+        if (size === VIEW_HELPER_STOCK_SIZE) {
+            helper.render(r);
+            return;
+        }
+        const orig = r.setViewport;
+        r.setViewport = (/** @type {any[]} */ ..._args) => {
+            r.setViewport = orig;
+            orig.call(r, r.domElement.offsetWidth - size, lift, size, size);
+        };
+        try {
+            helper.render(r);
+        } finally {
+            r.setViewport = orig;
+        }
+    }
 
     /**
      * Restyle the stock ViewHelper after construction: the axis sprites get
@@ -15198,7 +15298,7 @@ export class ThreeJSViewer {
 
     /**
      * Hit-test a pointer event against the ViewHelper's axis sprites. Returns
-     * whether the pointer is inside the 128×128 gizmo rect at all, plus the
+     * whether the pointer is inside the gizmo square at all, plus the
      * hovered sprite (null if no sprite under cursor).
      * @param {PointerEvent | MouseEvent} e
      * @returns {{ insideRect: boolean, hit: any }}

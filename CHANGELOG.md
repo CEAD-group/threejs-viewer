@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.58
+
+### Configurable view gimbal size, compact on phones (#233)
+
+- **The corner view gimbal is sized in CSS px** instead of three's fixed 128 px square: `new ThreeJSViewer(container, {viewHelperSize})`, `viewer.setViewHelperSize(px | null)` / `getViewHelperSize()`, and `ViewerClient(view_helper_size=)` (a URL param like `fov`; URL > option > auto, clamped 32-512). Auto is 128 px, or 80 px when the canvas' shorter side is under 500 px, re-evaluated on resize, so a phone pane keeps most of its area.
+- Bubble hover, click and tooltip follow the size, and the orbit / P / Home buttons scale with it and stay centred beside the gimbal. At 128 px the layout is unchanged.
+- **Fix:** on HiDPI screens with the animation toolbar open, the gimbal was drawn twice as high as its click area, because the toolbar lift was multiplied by the device pixel ratio that `setViewport` already applies.
+
+### Session cache of parsed models (#221)
+
+- **A model URL parsed once in the page session is not fetched or decoded again.** Each add of the same URL gets a clone that shares vertex data and textures but owns its geometry wrappers, materials and animation mixer, so `set_draw_range`, `set_color`, `set_opacity`, highlight and clip driving stay per object. Deleting a clone never disposes geometry another clone uses; the last delete frees the GPU side and keeps the parse, so a later add is still a hit.
+- LRU over settled entries, capped at 64 entries and 256 MB. Concurrent adds of one URL share one fetch. Skinned models are not cached.
+- `add_model(url)` is cached, so a changed file needs a new URL (e.g. `?v=<hash>`). Python's `add_model_binary` sends `cache: false`, since its blob URLs are fresh per push.
+- JS: a `modelCache` option (`false` or `{maxEntries, maxBytes}`), `viewer.clearModelCache()` and `viewer.getModelCacheStats()`.
+
+### Public getter for the gizmo's axis masks (#223)
+
+- **`viewer.getGizmoAxes()`** returns the interactive gizmo's applied masks as `{translate: {x, y, z}, rotate: {x, y, z}}`, a copy, so an embedder can diff before calling `setGizmoAxes` instead of reading private state.
+
 ## 0.0.57
 
 ### Depth settings on meshes, and depth precision inside the scene (#227)

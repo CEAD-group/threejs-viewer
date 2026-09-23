@@ -697,28 +697,28 @@
     text-align: center;
 }
 
-/* Orbit mode, P/O and Home form one vertical stack just LEFT of the gimbal bubbles,
-   ~15px off the cluster: close enough to read as one control group, outside
-   the bubbles' orbit so they never collide. The column (16px to 112px)
-   is centred on the 128px gimbal square, level with the bubble cluster.
-   All three shift up with the animation toolbar via --tjsv-anim-lift
-   (set from JS). Home used to sit in
-   the centre of the 128x128 ViewHelper area, in the middle of the six axis
-   bubbles (issue #190). */
+/* Orbit mode, P/O and Home form one vertical stack just LEFT of the gimbal
+   bubbles, outside their orbit, so they read as one control group without
+   colliding. The stack scales with the gimbal square (issue #233):
+   --tjsv-view-helper-size and the unitless --tjsv-view-scale (size / 128)
+   are set from JS. At 128px the buttons are 28px, the right edge sits at
+   115px and the 96px column is centred on the square (84 / 50 / 16px).
+   All three shift up with the animation toolbar via --tjsv-anim-lift.
+   Home used to sit in the centre of the gimbal, among the bubbles (#190). */
 .threejs-viewer .tjsv-view-orbit,
 .threejs-viewer .tjsv-view-proj,
 .threejs-viewer .tjsv-view-home {
     position: absolute;
-    right: 115px;
-    bottom: calc(84px + var(--tjsv-anim-lift, 0px));
-    width: 28px;
-    height: 28px;
+    right: calc(var(--tjsv-view-helper-size, 128px) * 0.9);
+    bottom: calc(84px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
+    width: calc(28px * var(--tjsv-view-scale, 1));
+    height: calc(28px * var(--tjsv-view-scale, 1));
     padding: 0;
     border-radius: 50%;
     background: rgba(30, 30, 30, 0.72);
     border: 1px solid rgba(255, 255, 255, 0.18);
     color: #ddd;
-    font-size: 9px;
+    font-size: calc(9px * var(--tjsv-view-scale, 1));
     font-weight: 600;
     letter-spacing: 0.5px;
     cursor: pointer;
@@ -730,6 +730,11 @@
     transition: background 0.15s, color 0.15s, opacity 0.15s, transform 0.15s;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
     z-index: 2;
+}
+.threejs-viewer .tjsv-view-orbit svg,
+.threejs-viewer .tjsv-view-home svg {
+    width: calc(16px * var(--tjsv-view-scale, 1));
+    height: calc(16px * var(--tjsv-view-scale, 1));
 }
 .threejs-viewer .tjsv-view-orbit:hover,
 .threejs-viewer .tjsv-view-proj:hover,
@@ -808,12 +813,12 @@
    A manual toggle is a deliberate choice: auto-projection never overrides it
    (only bubble-snap-entered ortho auto-exits on orbit). */
 .threejs-viewer .tjsv-view-proj {
-    bottom: calc(50px + var(--tjsv-anim-lift, 0px));
-    font-size: 11px;
+    bottom: calc(50px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
+    font-size: calc(11px * var(--tjsv-view-scale, 1));
 }
 /* Home (reset view): third item of the stack, below P. */
 .threejs-viewer .tjsv-view-home {
-    bottom: calc(16px + var(--tjsv-anim-lift, 0px));
+    bottom: calc(16px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
 }
 .threejs-viewer .tjsv-view-proj.ortho {
     background: rgba(70, 110, 160, 0.85);
