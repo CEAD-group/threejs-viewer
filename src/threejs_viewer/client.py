@@ -730,6 +730,10 @@ class ViewerClient:
         # viewer holds none of this state across a fresh WS connection).
         self._axis_controls: Dict[str, dict] = {}
         self._axis_control_callbacks: List = []
+        # Clip bindings declared with bind_clip — id -> its bind_clip message, so
+        # a reconnect re-declares each one (the viewer resolves them per frame
+        # but holds none of them across a fresh WS connection).
+        self._clip_bindings: Dict[str, dict] = {}
         # Pinned (persistent) gizmos added with add_gizmo — a list of
         # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
         # interactive gizmo above; any number can be active at once, each with its
@@ -945,6 +949,14 @@ class ViewerClient:
         # Re-add any axis-control widgets (the viewer's own state is gone on a
         # fresh WS connection, same as pinned gizmos above).
         for spec in self._axis_controls.values():
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
+        # Re-declare clip bindings. Sent after the objects so both sides of each
+        # binding exist, though the viewer also resolves one declared early.
+        for spec in self._clip_bindings.values():
             try:
                 websocket.send(json.dumps(spec))
             except Exception:
@@ -3443,24 +3455,25 @@ class ViewerClient:
         may not exist yet when this is called — it just resolves once both
         ``id``'s clip mixer and ``source_id`` are in the scene.
         """
-        self._send(
-            {
-                "type": "bind_clip",
-                "id": id,
-                "source": {
-                    "id": source_id,
-                    "channel": channel,
-                    "from": float(from_value),
-                    "to": float(to_value),
-                },
-                "clamp": bool(clamp),
-            }
-        )
+        spec = {
+            "type": "bind_clip",
+            "id": id,
+            "source": {
+                "id": source_id,
+                "channel": channel,
+                "from": float(from_value),
+                "to": float(to_value),
+            },
+            "clamp": bool(clamp),
+        }
+        self._clip_bindings[id] = spec
+        self._send(spec)
 
     def unbind_clip(self, id: str) -> None:
         """Remove a :meth:`bind_clip` binding, restoring the plain
         :meth:`set_clip_time` / :meth:`set_clip_progress` push path. A no-op
         if ``id`` has no binding."""
+        self._clip_bindings.pop(id, None)
         self._send({"type": "unbind_clip", "id": id})
 
     def set_follow_path(self, id: str, times, positions, axes) -> None:
@@ -4750,8 +4763,9 @@ class ViewerClient:
         # scene clear, so forget them here too (else a reconnect would re-pin them
         # to ids that no longer exist).
         self._gizmos = []
-        # Axis controls likewise target now-removed objects.
+        # Axis controls and clip bindings likewise target now-removed objects.
         self._axis_controls = {}
+        self._clip_bindings = {}
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a

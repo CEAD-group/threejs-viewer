@@ -445,6 +445,47 @@ def test_clear_scene_drops_pinned_gizmos():
     assert client._gizmos == []
 
 
+def test_bind_clip_records_for_reconnect_and_clear_forgets():
+    """A binding is declared once, so the client keeps it to re-declare on a
+    fresh connection; unbind_clip and a scene clear forget it."""
+
+    class _StubWS:
+        def send(self, _data):
+            pass
+
+    client = ViewerClient()
+    client._ws = _StubWS()
+    client.bind_clip(
+        "bellows_mesh",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=4.0,
+    )
+    client.bind_clip(
+        "chain_mesh",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=4.0,
+        to_value=0.0,
+    )
+    assert client._clip_bindings["bellows_mesh"] == {
+        "type": "bind_clip",
+        "id": "bellows_mesh",
+        "source": {
+            "id": "carriage",
+            "channel": "translation.y",
+            "from": 0.0,
+            "to": 4.0,
+        },
+        "clamp": True,
+    }
+    client.unbind_clip("bellows_mesh")
+    assert set(client._clip_bindings) == {"chain_mesh"}
+    client.clear()
+    assert client._clip_bindings == {}
+
+
 def _mini_animation():
     """Two-frame animation, just enough for load_animation's validation path."""
     return Animation(

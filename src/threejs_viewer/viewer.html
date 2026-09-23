@@ -18522,6 +18522,16 @@ class ThreeJSViewer {
     /** @param {string} id */
     removeAxisControl(id) { this._axisControls.remove(id); }
 
+    /** Direct-call JS equivalent of the `bind_clip` WS message: drive `id`'s
+     * clip from `source.id`'s live local `source.channel`, mapping
+     * `source.from`..`source.to` onto clip progress 0..1, every render frame.
+     * @param {string} id @param {{id:string, channel:string, from:number, to:number}} source
+     * @param {{clamp?:boolean}} [opts] */
+    bindClip(id, source, opts = {}) { this._bindClip(id, source, opts.clamp !== false); }
+
+    /** @param {string} id */
+    unbindClip(id) { this._bindClip(id, null, true); }
+
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
      * its own axis constraint and base mode. Independent of the interactive gizmo
