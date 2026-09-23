@@ -3342,6 +3342,76 @@ class ViewerClient:
             raise ValueError(f"t must be a finite number (got {t!r})")
         self._send({"type": "set_clip_progress", "id": id, "t": t})
 
+    def bind_clip(
+        self,
+        id: str,
+        *,
+        source_id: str,
+        channel: Literal[
+            "translation.x",
+            "translation.y",
+            "translation.z",
+            "rotation.x",
+            "rotation.y",
+            "rotation.z",
+            "scale.x",
+            "scale.y",
+            "scale.z",
+        ],
+        from_value: float,
+        to_value: float,
+        clamp: bool = True,
+    ) -> None:
+        """Declare that ``id``'s embedded clip mixer time tracks another
+        object's own live local transform, instead of being pushed here on
+        every tick.
+
+        ``source_id`` is the object whose local transform drives the clip —
+        typically the same object a drag gizmo or a streamed transform
+        message already moves (a jog, a `set_follow_path`, an in-flight
+        gizmo drag all compose with this automatically, since the viewer
+        just reads that object's current local transform every render
+        frame). ``channel`` picks one local-space component of it;
+        ``from_value``/``to_value`` are that channel's values at clip time 0
+        and 1 respectively.
+
+        This exists because :meth:`set_clip_time` pushed once per tick rides
+        the same latest-wins coalesced WS dispatch as everything else — a
+        fast jog or drag can produce transform updates faster than they're
+        dispatched, so intermediate pushes get dropped and the clip visibly
+        skips. A binding needs no per-frame message at all: the viewer
+        resolves ``source_id``'s live transform itself every frame, so
+        there is nothing to coalesce away.
+
+        Call once (e.g. on cell load / cell switch), not per-tick — this
+        replaces the imperative push for the life of the binding. Call
+        :meth:`unbind_clip` (or :meth:`bind_clip` again, with a different
+        ``source_id``) to change or remove it; the plain :meth:`set_clip_time`
+        / :meth:`set_clip_progress` push path is still there for objects with
+        no natural geometric parent to bind to. Either side of the binding
+        may not exist yet when this is called — it just resolves once both
+        ``id``'s clip mixer and ``source_id`` are in the scene.
+        """
+        self._send(
+            {
+                "type": "bind_clip",
+                "id": id,
+                "source": {
+                    "id": source_id,
+                    "channel": channel,
+                    "from": float(from_value),
+                    "to": float(to_value),
+                },
+                "clamp": bool(clamp),
+            }
+        )
+
+    def unbind_clip(self, id: str) -> None:
+        """Remove a :meth:`bind_clip` binding, restoring the plain
+        :meth:`set_clip_time` / :meth:`set_clip_progress` push path. A no-op
+        if ``id`` has no binding."""
+        self._send({"type": "unbind_clip", "id": id})
+
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
         path — per render tick the viewer computes the pose from the REAL

@@ -1988,6 +1988,35 @@ function mixerClipDurations(mixer) {
     );
 }
 
+// ========== Declarative clip-time binding ==========
+// bind_clip (issue #225) replaces a per-tick `set_clip_time` push with a
+// standing declaration: `id`'s mixer time is a function of `source.id`'s own
+// live LOCAL transform, re-resolved every render frame in `_animate()`
+// instead of pushed over the WS. A push is subject to the same latest-wins
+// dispatch coalescing as every other WS message (AGENTS.md), so a fast jog
+// or drag can produce transform updates faster than they're dispatched and
+// intermediate set_clip_time values get dropped — the bound clip then visibly
+// skips instead of tracking the drag continuously. Resolving from state the
+// renderer already holds every frame (the same live transform a drag or a
+// streamed update already writes to `source.id`) needs no per-frame message
+// at all, so it can't be coalesced away.
+
+/** Read one named local-space channel off an Object3D's own transform (the
+ * same values a drag or a streamed transform message already writes to).
+ * @param {any} obj @param {string} channel `"translation"|"rotation"|"scale".x|y|z`
+ * @returns {number|null} null for an unrecognised channel */
+function readLocalChannel(obj, channel) {
+    const dot = channel.indexOf('.');
+    if (dot < 0) return null;
+    const prop = channel.slice(0, dot);
+    const axis = channel.slice(dot + 1);
+    if (axis !== 'x' && axis !== 'y' && axis !== 'z') return null;
+    if (prop === 'translation') return obj.position[axis];
+    if (prop === 'rotation') return obj.rotation[axis];
+    if (prop === 'scale') return obj.scale[axis];
+    return null;
+}
+
 // Channel apply functions — keyed by channel name. Signature is
 // (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
 // is null or t <= 0, all channels take the step path (current keyframe only).
@@ -10447,6 +10476,9 @@ class ThreeJSViewer {
         // Ids already warned about a set_clip_progress with no mixer.
         /** @type {Set<string>} */
         this._clipProgressWarned = new Set();
+        // id -> {source: {id, channel, from, to}, clamp} — see bind_clip.
+        /** @type {Map<string, {source: {id:string, channel:string, from:number, to:number}, clamp: boolean}>} */
+        this._clipBindings = new Map();
         this._objGeneration = 0;
         this._mixerGeneration = 0;
         this._pendingFetches = 0;
@@ -12168,6 +12200,44 @@ class ThreeJSViewer {
         driveMixerProgress(mixer, t);
     }
 
+    /** Declare (or clear) a declarative clip-time binding — see bind_clip.
+     * @param {string} id @param {{id:string, channel:string, from:number, to:number}|null|undefined} source
+     * @param {boolean} clamp */
+    _bindClip(id, source, clamp) {
+        if (!source || source.id == null) {
+            this._clipBindings.delete(id);
+            return;
+        }
+        this._clipBindings.set(id, { source, clamp: clamp !== false });
+    }
+
+    /** Resolve every declared clip binding from its source's current live
+     * local transform and drive the bound mixer — called once per render
+     * frame from `_animate()`. Silently no-ops a binding whose target has no
+     * mixer yet or whose source isn't in the scene (either can arrive after
+     * the binding, e.g. on a cell load race); it just resolves once both
+     * exist. */
+    _resolveClipBindings() {
+        if (!this._clipBindings.size) return;
+        for (const [id, binding] of this._clipBindings) {
+            const mixer = this._mixers.get(id);
+            const src = this._objects.get(binding.source.id);
+            if (!mixer || !src) continue;
+            const raw = readLocalChannel(src, binding.source.channel);
+            if (raw == null) continue;
+            const { from, to } = binding.source;
+            const span = to - from;
+            if (span === 0) continue;
+            const t = (raw - from) / span;
+            // `driveMixerProgress` itself always clamps to [0,1] (a clip is
+            // LoopRepeat; an un-clamped seek would wrap past the authored
+            // range instead of holding the end pose) — `clamp` is honoured
+            // for wire-protocol completeness/future clip types, but there is
+            // no *visible* difference today between clamp:true and :false.
+            driveMixerProgress(mixer, binding.clamp ? Math.min(1, Math.max(0, t)) : t);
+        }
+    }
+
     /** @param {string} id @param {number} value */
     _setDrawRange(id, value) {
         const obj = this._objects.get(id);
@@ -12864,6 +12934,7 @@ class ThreeJSViewer {
                 this._billboardOrderDirty = true;
                 const childMixer = this._mixers.get(childId);
                 if (childMixer) { childMixer.stopAllAction(); this._mixers.delete(childId); this._mixerGeneration++; }
+                this._clipBindings.delete(childId);
             }
             if (obj.parent) obj.parent.remove(obj);
             this._objects.delete(id);
@@ -12871,6 +12942,7 @@ class ThreeJSViewer {
             this._sceneBoundsDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
+            this._clipBindings.delete(id);
             obj.traverse(/** @param {any} child */ (child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 if (child.userData.tubeLOD) {
@@ -15680,6 +15752,17 @@ class ThreeJSViewer {
             case 'set_clip_progress':
                 this._withObject(data.id, 'set_clip_progress', () => this._setClipProgress(data.id, data.t));
                 break;
+            case 'bind_clip':
+                // Declared once (cell load / cell switch), not per-tick, so this
+                // is NOT gated behind _withObject like the imperative clip calls
+                // above — the target's mixer, and the source object, are each
+                // allowed to arrive after the binding (_resolveClipBindings
+                // no-ops until both exist).
+                this._bindClip(data.id, data.source, data.clamp);
+                break;
+            case 'unbind_clip':
+                this._bindClip(data.id, null, true);
+                break;
             case 'set_follow_path': {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
@@ -16080,6 +16163,11 @@ class ThreeJSViewer {
                 this._lastUIUpdate = now;
             }
         }
+
+        // Live jog/drag clip bindings (issue #225) — unaffected by, and runs
+        // regardless of, recorded-animation scrubbing above (that path drives
+        // clip times from `frame.clip_times` instead).
+        this._resolveClipBindings();
 
         this._controls.update();
         this._depthCue.update();
