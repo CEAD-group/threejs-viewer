@@ -715,6 +715,11 @@ class ViewerClient:
         # freshly-enabled gizmo. Cleared when the gizmo is disabled (the viewer
         # resets axes to all-true on detach).
         self._gizmo_axes: Optional[dict] = None
+        # Rotary/linear axis-control widgets added with add_axis_control — id ->
+        # its latest add_axis_control spec, so a reconnect re-adds each one (the
+        # viewer holds none of this state across a fresh WS connection).
+        self._axis_controls: Dict[str, dict] = {}
+        self._axis_control_callbacks: List = []
         # Pinned (persistent) gizmos added with add_gizmo — a list of
         # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
         # interactive gizmo above; any number can be active at once, each with its
@@ -925,6 +930,14 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-add any axis-control widgets (the viewer's own state is gone on a
+        # fresh WS connection, same as pinned gizmos above).
+        for spec in self._axis_controls.values():
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
         try:
             for message in websocket:
                 try:
@@ -942,6 +955,8 @@ class ViewerClient:
                         self._dispatch_menu_action(data)
                     elif msg_type == "transform_gizmo":
                         self._dispatch_object_move(data)
+                    elif msg_type == "axis_control_change":
+                        self._dispatch_axis_control_change(data)
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -4444,12 +4459,150 @@ class ViewerClient:
             except Exception:
                 logging.getLogger(__name__).exception("Error in object move callback")
 
+    def add_axis_control(
+        self,
+        id: str,
+        *,
+        target_id: str,
+        axis: Literal["x", "y", "z"],
+        kind: Literal["rotary", "rotary_unlimited", "linear", "linear_unlimited"],
+        value: float,
+        min: Optional[float] = None,
+        max: Optional[float] = None,
+        color: int = 0xFFFFFF,
+        radius: Optional[float] = None,
+        bbox_source_id: Optional[str] = None,
+        window: float = 1.0,
+    ) -> None:
+        """Show a rotary or linear range control: a line spanning the axis's
+        range of motion with a small flat-shaded sphere marking the current
+        value. Only the sphere is draggable/hoverable.
+
+        Anchored every render frame at ``target_id``'s live world pivot,
+        oriented along its local ``axis`` — a moving target (a jog, a drag)
+        carries the control with it for free, the same "read the live
+        transform, don't push a pose" approach as :meth:`bind_clip`.
+
+        ``kind``:
+
+        - ``"rotary"`` — an arc from ``min`` to ``max`` radians, at ``radius``.
+        - ``"rotary_unlimited"`` — a full circle at ``radius``; ``min``/``max``
+          are ignored, and dragging can turn past ±180° (the value keeps
+          accumulating rather than wrapping).
+        - ``"linear"`` — a segment from ``min`` to ``max`` metres along the axis.
+        - ``"linear_unlimited"`` — a segment spanning ``value - window`` to
+          ``value + window``, which re-centres on every value change so the
+          visible window always follows the sphere; ``min``/``max`` are ignored.
+
+        ``radius`` (rotary only) is required unless ``bbox_source_id`` is
+        given, in which case it defaults to half the world-space diagonal of
+        that object's bounding box, projected onto the plane perpendicular to
+        ``axis`` (dropping the along-axis extent) — a size that scales with
+        whatever component the control is drawn around.
+
+        Dragging the sphere reports ``{id, value, phase}`` to every callback
+        registered with :meth:`on_axis_control_change`, throttled during the
+        drag (``"move"``) with a final unthrottled report on release
+        (``"end"``) — same shape as :meth:`on_object_move`. The new value is
+        applied locally by the viewer immediately (optimistic, like the move
+        gizmo); call :meth:`update_axis_control` to correct it from Python if
+        the caller's own model disagrees (e.g. a value outside a coupled
+        joint's real range).
+        """
+        spec = {
+            "type": "add_axis_control",
+            "id": id,
+            "target_id": target_id,
+            "axis": axis,
+            "kind": kind,
+            "value": float(value),
+            "min": None if min is None else float(min),
+            "max": None if max is None else float(max),
+            "color": color,
+            "radius": radius,
+            "bbox_source_id": bbox_source_id,
+            "window": float(window),
+        }
+        self._axis_controls[id] = spec
+        self._send(spec)
+
+    def update_axis_control(
+        self,
+        id: str,
+        *,
+        value: Optional[float] = None,
+        min: Optional[float] = None,
+        max: Optional[float] = None,
+    ) -> None:
+        """Update a control added with :meth:`add_axis_control` — its value
+        and/or its range. Only the given fields change; the rest keep their
+        last value."""
+        spec = self._axis_controls.get(id)
+        if spec is not None:
+            if value is not None:
+                spec["value"] = float(value)
+            if min is not None:
+                spec["min"] = float(min)
+            if max is not None:
+                spec["max"] = float(max)
+        self._send(
+            {
+                "type": "update_axis_control",
+                "id": id,
+                "value": None if value is None else float(value),
+                "min": None if min is None else float(min),
+                "max": None if max is None else float(max),
+            }
+        )
+
+    def remove_axis_control(self, id: str) -> None:
+        """Remove a control added with :meth:`add_axis_control`. A no-op if
+        ``id`` doesn't exist."""
+        self._axis_controls.pop(id, None)
+        self._send({"type": "remove_axis_control", "id": id})
+
+    def on_axis_control_change(self, callback) -> None:
+        """Register a callback fired while the user drags an axis control's
+        sphere.
+
+        The callback receives one dict argument with keys ``id``, ``value``
+        and ``phase`` (``"move"`` mid-drag, ``"end"`` on release) — see
+        :meth:`add_axis_control`. It runs on the client's WebSocket receive
+        thread, so keep it short.
+
+        Args:
+            callback: A callable ``callback(change: dict) -> None``.
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._axis_control_callbacks.append(callback)
+
+    def _dispatch_axis_control_change(self, data: dict) -> None:
+        """Deliver an incoming ``axis_control_change`` message to registered
+        callbacks, and keep the stored spec's value in sync so a reconnect
+        re-adds the control at wherever the user last dragged it to."""
+        spec = self._axis_controls.get(data.get("id"))
+        if spec is not None and data.get("value") is not None:
+            spec["value"] = data["value"]
+        change = {
+            "id": data.get("id"),
+            "value": data.get("value"),
+            "phase": data.get("phase"),
+        }
+        for cb in list(self._axis_control_callbacks):
+            try:
+                cb(change)
+            except Exception:
+                logging.getLogger(__name__).exception("Error in axis control change callback")
+
     def clear(self) -> None:
         """Clear all objects from the scene."""
         # Pinned gizmos target now-removed objects; the viewer drops them on a
         # scene clear, so forget them here too (else a reconnect would re-pin them
         # to ids that no longer exist).
         self._gizmos = []
+        # Axis controls likewise target now-removed objects.
+        self._axis_controls = {}
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a

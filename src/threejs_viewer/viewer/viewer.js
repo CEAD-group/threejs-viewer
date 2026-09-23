@@ -8661,6 +8661,407 @@ class TransformGizmoController {
     }
 }
 
+// ========== Axis Control (rotary / linear range indicators) ==========
+// A range-display control distinct from the move/rotate TransformControls
+// gizmo above: a line showing an axis's range of motion — an arc, a full
+// circle, a segment, or a window that follows the value — with a small
+// flat-shaded sphere marking the current value. Only the sphere is
+// draggable/hoverable; the line is a visual guide (its own raycast is a
+// no-op). Anchored every frame at a target object's world pivot, oriented so
+// the control's own local +X is that target's chosen local axis in world
+// space (`Quaternion.setFromUnitVectors`, same "derive the world direction
+// from a live object's transform" approach as bind_clip, rather than a
+// pushed/stale pose) — so all the geometry math below is written once, in
+// that canonical local frame, instead of per axis-name special-casing (the
+// mistake in an earlier pass of the move-gizmo shaft/picker work: baked
+// per-axis rotations mean "radial vs long" isn't the same tuple for every
+// axis, whereas building in one canonical frame sidesteps that entirely).
+//
+//   rotary            arc from `min` to `max` radians, radius `radius`
+//   rotary_unlimited  a full circle, radius `radius`
+//   linear            segment from `min` to `max` metres along the axis
+//   linear_unlimited  segment from `value - window` to `value + window`,
+//                     recomputed on every value change so it re-centres
+//                     ("moves with the sphere")
+//
+// Sphere local position: rotary* -> (0, R cos(value), R sin(value)); linear*
+// -> (value, 0, 0). Dragging projects the pointer onto a plane (perpendicular
+// to the axis for rotary; containing the axis and facing the camera for
+// linear, the same construction TransformControlsPlane uses for a
+// single-axis translate) and reports {id, value, phase} back, same shape as
+// the move gizmo's onObjectMove.
+
+const AXIS_CONTROL_SPHERE_RADIUS = 0.05;
+const AXIS_CONTROL_ARC_SEGMENTS = 64;
+const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
+const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
+const AXIS_CONTROL_REPORT_HZ = 30;
+
+const _acUnitX = new THREE.Vector3(1, 0, 0);
+const _acScratchA = new THREE.Vector3();
+const _acScratchB = new THREE.Vector3();
+const _acScratchC = new THREE.Vector3();
+const _acPlane = new THREE.Plane();
+
+/** One rotary/linear axis-control instance. Built once; `_rebuild()` re-derives
+ * line geometry and sphere position from `value`/`min`/`max`. */
+class AxisControl {
+    /** @param {string} id @param {any} opts */
+    constructor(id, opts) {
+        this.id = id;
+        this.targetId = opts.targetId;
+        this.axis = opts.axis;                        // 'x' | 'y' | 'z'
+        this.kind = opts.kind;                         // rotary(_unlimited) | linear(_unlimited)
+        this.value = opts.value;
+        this.min = opts.min;
+        this.max = opts.max;
+        this.radius = opts.radius;
+        this.window = opts.window != null ? opts.window : AXIS_CONTROL_DEFAULT_WINDOW;
+        this._hovered = false;
+        this._dragging = false;
+
+        const hex = opts.color != null ? opts.color : 0xffffff;
+        this._baseColor = new THREE.Color(hex);
+        this._hoverColor = this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
+
+        this.group = new THREE.Group();
+        this.group.userData.isAxisControlHelper = true;
+        this.group.matrixAutoUpdate = true;
+
+        this.lineMaterial = new THREE.LineBasicMaterial({
+            color: this._baseColor.clone(), transparent: true, opacity: 0.85,
+            depthTest: false, depthWrite: false, toneMapped: false,
+        });
+        this.line = new THREE.Line(new THREE.BufferGeometry(), this.lineMaterial);
+        this.line.renderOrder = 900;
+        this.line.raycast = () => {};   // guide only — the sphere is the only pickable part
+
+        this.sphereMaterial = new THREE.MeshStandardMaterial({
+            color: this._baseColor.clone(), flatShading: true, roughness: 0.5, metalness: 0.0,
+            depthTest: false, depthWrite: false, toneMapped: false,
+        });
+        this.sphere = new THREE.Mesh(new THREE.SphereGeometry(AXIS_CONTROL_SPHERE_RADIUS, 12, 8), this.sphereMaterial);
+        this.sphere.renderOrder = 901;
+        this.sphere.userData.axisControlId = id;
+
+        this.group.add(this.line, this.sphere);
+        this._rebuild();
+    }
+
+    /** Re-derive the line geometry (kind-dependent) and the sphere's local
+     * position from the current value/min/max. Cheap (<= ARC_SEGMENTS+1
+     * verts) — called on every value/min/max change, not per frame. */
+    _rebuild() {
+        const isRotary = this.kind === 'rotary' || this.kind === 'rotary_unlimited';
+        const pts = [];
+        if (isRotary) {
+            const R = this.radius;
+            const a0 = this.kind === 'rotary_unlimited' ? 0 : this.min;
+            const a1 = this.kind === 'rotary_unlimited' ? Math.PI * 2 : this.max;
+            for (let i = 0; i <= AXIS_CONTROL_ARC_SEGMENTS; i++) {
+                const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
+                pts.push(new THREE.Vector3(0, R * Math.cos(a), R * Math.sin(a)));
+            }
+            this.sphere.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
+        } else {
+            const lo = this.kind === 'linear_unlimited' ? this.value - this.window : this.min;
+            const hi = this.kind === 'linear_unlimited' ? this.value + this.window : this.max;
+            pts.push(new THREE.Vector3(lo, 0, 0), new THREE.Vector3(hi, 0, 0));
+            this.sphere.position.set(this.value, 0, 0);
+        }
+        this.line.geometry.dispose();
+        this.line.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    }
+
+    /** @param {number} value @param {{min?:number, max?:number}} [opts] */
+    setValue(value, opts) {
+        this.value = value;
+        if (opts && opts.min != null) this.min = opts.min;
+        if (opts && opts.max != null) this.max = opts.max;
+        this._rebuild();
+    }
+
+    _setHovered(hovered) {
+        if (hovered === this._hovered) return;
+        this._hovered = hovered;
+        this.sphereMaterial.color.copy(hovered ? this._hoverColor : this._baseColor);
+    }
+
+    dispose() {
+        this.line.geometry.dispose();
+        this.lineMaterial.dispose();
+        this.sphere.geometry.dispose();
+        this.sphereMaterial.dispose();
+    }
+}
+
+class AxisControlManager {
+    /** @param {ThreeJSViewer} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** @type {Map<string, AxisControl>} */
+        this.controls = new Map();
+        this._reportHooks = /** @type {Array<(m:any)=>void>} */ ([]);
+        this._raycaster = new THREE.Raycaster();
+        this._ndc = new THREE.Vector2();
+        this._active = /** @type {AxisControl|null} */ (null);
+        // Drag-frame state, set at pointerdown: the world pivot/axis this
+        // drag is relative to (captured once so a moving target mid-drag
+        // doesn't retarget the constraint plane every frame), plus the raw
+        // (wrapped) angle for rotary's unwrap-across-±π accumulation.
+        this._dragPivot = new THREE.Vector3();
+        this._dragAxisDir = new THREE.Vector3();
+        this._dragU = new THREE.Vector3();
+        this._dragV = new THREE.Vector3();
+        this._dragRawAngle = 0;
+        this._dragAccumAngle = 0;
+        this._dragValueOffset = 0;   // linear*: grab-point offset, so the sphere doesn't jump to the cursor
+        this._lastReport = 0;
+
+        const dom = viewer._renderer.domElement;
+        this._onDown = (/** @type {PointerEvent} */ e) => this._pointerDown(e);
+        this._onMove = (/** @type {PointerEvent} */ e) => this._pointerMove(e);
+        this._onUp = (/** @type {PointerEvent} */ e) => this._pointerUp(e);
+        dom.addEventListener('pointerdown', this._onDown);
+        window.addEventListener('pointermove', this._onMove);
+        window.addEventListener('pointerup', this._onUp);
+    }
+
+    /** @param {(m:any)=>void} cb @returns {() => void} unsubscribe */
+    onChange(cb) {
+        this._reportHooks.push(cb);
+        return () => { const i = this._reportHooks.indexOf(cb); if (i >= 0) this._reportHooks.splice(i, 1); };
+    }
+
+    /** @param {string} id @param {any} opts */
+    add(id, opts) {
+        const existing = this.controls.get(id);
+        if (existing) { this.v._scene.remove(existing.group); existing.dispose(); }
+        const radius = opts.radius != null ? opts.radius
+            : (opts.bboxSourceId != null ? this._radiusFromBbox(opts.bboxSourceId, opts.axis) : 1.0);
+        const c = new AxisControl(id, { ...opts, radius });
+        this.controls.set(id, c);
+        this.v._scene.add(c.group);
+    }
+
+    /** Update one control's value/min/max (update_axis_control) — distinct
+     * from the no-arg `update()` below, which repositions every control at
+     * its target's live pivot once per render frame.
+     * @param {string} id @param {{value?:number, min?:number, max?:number}} opts */
+    setValue(id, opts) {
+        const c = this.controls.get(id);
+        if (!c) return;
+        c.setValue(opts.value != null ? opts.value : c.value, opts);
+    }
+
+    /** @param {string} id */
+    remove(id) {
+        const c = this.controls.get(id);
+        if (!c) return;
+        this.v._scene.remove(c.group);
+        c.dispose();
+        this.controls.delete(id);
+        if (this._active === c) this._active = null;
+    }
+
+    /** Drop every control (scene clear) — their targets are all gone too. */
+    clear() {
+        for (const c of this.controls.values()) { this.v._scene.remove(c.group); c.dispose(); }
+        this.controls.clear();
+        this._active = null;
+    }
+
+    /** Projected-diagonal-bounding-box radius (the component's world AABB
+     * diagonal, projected onto the plane perpendicular to `axis`, halved) —
+     * the default when a caller supplies `bboxSourceId` instead of an
+     * explicit `radius`.
+     * @param {string} sourceId @param {string} axis @returns {number} */
+    _radiusFromBbox(sourceId, axis) {
+        const obj = this.v._objects.get(sourceId);
+        if (!obj) return 1.0;
+        const box = new THREE.Box3().setFromObject(obj);
+        if (box.isEmpty()) return 1.0;
+        const size = box.getSize(_acScratchA);
+        const axisDir = _acUnitX.clone();
+        if (axis === 'y') axisDir.set(0, 1, 0); else if (axis === 'z') axisDir.set(0, 0, 1);
+        // Diagonal of the box, with the along-axis extent dropped (project
+        // onto the perpendicular plane): sqrt(diag² - alongAxis²).
+        const diagSq = size.x * size.x + size.y * size.y + size.z * size.z;
+        const along = size.dot(axisDir);
+        return Math.sqrt(Math.max(0, diagSq - along * along)) / 2;
+    }
+
+    /** Live world pivot + axis direction for a control, read off its target's
+     * current transform (never cached/pushed) — same "resolve from state the
+     * renderer already holds" approach as bind_clip.
+     * @param {AxisControl} c @returns {{pivot:THREE.Vector3, dir:THREE.Vector3}|null} */
+    _liveFrame(c) {
+        const target = this.v._objects.get(c.targetId);
+        if (!target) return null;
+        target.updateMatrixWorld();
+        const pivot = _acScratchB.setFromMatrixPosition(target.matrixWorld);
+        const localAxis = c.axis === 'y' ? new THREE.Vector3(0, 1, 0)
+            : c.axis === 'z' ? new THREE.Vector3(0, 0, 1) : _acUnitX;
+        const dir = localAxis.clone().applyQuaternion(target.getWorldQuaternion(new THREE.Quaternion())).normalize();
+        return { pivot: pivot.clone(), dir };
+    }
+
+    /** Per-frame: reposition/orient every control at its target's live pivot
+     * + axis direction (a moving target — a jog, a drag — carries its
+     * controls with it for free), then keep the hovered/dragging sphere
+     * lit. Controls whose target has left the scene just hold their last
+     * pose (matches the move gizmo's own "detach on parent loss" being the
+     * caller's job, not silently vanishing mid-frame). */
+    update() {
+        for (const c of this.controls.values()) {
+            const frame = this._liveFrame(c);
+            if (!frame) continue;
+            c.group.position.copy(frame.pivot);
+            c.group.quaternion.setFromUnitVectors(_acUnitX, frame.dir);
+        }
+    }
+
+    /** @param {number} clientX @param {number} clientY @returns {THREE.Vector2} */
+    _ndcFromClient(clientX, clientY) {
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        this._ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        this._ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        return this._ndc;
+    }
+
+    /** @param {number} clientX @param {number} clientY @returns {AxisControl|null} */
+    _pickSphere(clientX, clientY) {
+        this._raycaster.setFromCamera(
+            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
+        const spheres = [];
+        const map = new Map();
+        for (const c of this.controls.values()) { spheres.push(c.sphere); map.set(c.sphere, c); }
+        const hits = this._raycaster.intersectObjects(spheres, false);
+        return hits.length ? map.get(hits[0].object) : null;
+    }
+
+    /** @param {PointerEvent} e */
+    _pointerDown(e) {
+        if (e.button !== 0) return;
+        const hit = this._pickSphere(e.clientX, e.clientY);
+        if (!hit) return;
+        const frame = this._liveFrame(hit);
+        if (!frame) return;
+        this._active = hit;
+        hit._dragging = true;
+        this.v._controls.enabled = false;   // same synchronous suppression as the move gizmo
+        this._dragPivot.copy(frame.pivot);
+        this._dragAxisDir.copy(frame.dir);
+        // group.quaternion (the group sits directly under the scene root, so
+        // this IS its world quaternion) was just set by this frame's update(),
+        // so its own Y/Z are already the basis this control's geometry — and
+        // hence `value` — was built against.
+        this._dragU.set(0, 1, 0).applyQuaternion(hit.group.quaternion);
+        this._dragV.set(0, 0, 1).applyQuaternion(hit.group.quaternion);
+        this._dragRawAngle = this._angleOf(hit, this._dragPivot, this._dragAxisDir);
+        this._dragAccumAngle = hit.value;
+        const isRotary = hit.kind === 'rotary' || hit.kind === 'rotary_unlimited';
+        if (!isRotary) {
+            const grabRaw = this._linearRawValue(e.clientX, e.clientY);
+            this._dragValueOffset = grabRaw == null ? 0 : hit.value - grabRaw;
+        }
+        e.stopPropagation();
+        e.preventDefault();
+    }
+
+    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT sphere position
+     * about its drag axis — the reference `_pointerMove` unwraps deltas
+     * against. @param {AxisControl} c @param {THREE.Vector3} pivot @param {THREE.Vector3} axisDir */
+    _angleOf(c, pivot, axisDir) {
+        const worldPos = c.sphere.getWorldPosition(_acScratchC);
+        const rel = worldPos.sub(pivot);
+        rel.addScaledVector(axisDir, -rel.dot(axisDir));
+        return Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
+    }
+
+    /** Raycast the pointer against the camera-facing plane containing the
+     * active drag's axis (same construction TransformControlsPlane uses for
+     * a single-axis translate) and return the raw along-axis value at the
+     * hit point — unadjusted for the drag's grab offset.
+     * @param {number} clientX @param {number} clientY @returns {number|null} */
+    _linearRawValue(clientX, clientY) {
+        this._raycaster.setFromCamera(
+            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
+        const eye = _acScratchB.copy(/** @type {any} */ (this.v._camera).position).sub(this._dragPivot);
+        const planeNormal = this._dragAxisDir.clone()
+            .cross(eye.clone().cross(this._dragAxisDir)).normalize();
+        _acPlane.setFromNormalAndCoplanarPoint(planeNormal, this._dragPivot);
+        if (!this._raycaster.ray.intersectPlane(_acPlane, _acScratchA)) return null;
+        return _acScratchA.sub(this._dragPivot).dot(this._dragAxisDir);
+    }
+
+    /** @param {PointerEvent} e */
+    _pointerMove(e) {
+        const c = this._active;
+        if (!c || !c._dragging) {
+            // Not dragging: plain hover check.
+            const hit = this._pickSphere(e.clientX, e.clientY);
+            for (const other of this.controls.values()) other._setHovered(other === hit);
+            return;
+        }
+        const isRotary = c.kind === 'rotary' || c.kind === 'rotary_unlimited';
+        let value;
+        if (isRotary) {
+            this._raycaster.setFromCamera(
+                this._ndcFromClient(e.clientX, e.clientY), /** @type {any} */ (this.v._camera));
+            _acPlane.setFromNormalAndCoplanarPoint(this._dragAxisDir, this._dragPivot);
+            if (!this._raycaster.ray.intersectPlane(_acPlane, _acScratchA)) return;
+            const rel = _acScratchA.sub(this._dragPivot);
+            rel.addScaledVector(this._dragAxisDir, -rel.dot(this._dragAxisDir));
+            const raw = Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
+            // Unwrap: the shortest angular step from the last raw reading,
+            // accumulated, so dragging past ±π keeps turning instead of
+            // snapping back — required for rotary_unlimited to ever exceed
+            // one turn, and keeps a limited rotary's clamp comparing against
+            // a continuous value instead of a wrapped one.
+            let delta = raw - this._dragRawAngle;
+            if (delta > Math.PI) delta -= Math.PI * 2;
+            else if (delta < -Math.PI) delta += Math.PI * 2;
+            this._dragAccumAngle += delta;
+            this._dragRawAngle = raw;
+            value = this._dragAccumAngle;
+            if (c.kind === 'rotary') value = Math.min(c.max, Math.max(c.min, value));
+        } else {
+            const raw = this._linearRawValue(e.clientX, e.clientY);
+            if (raw == null) return;
+            value = raw + this._dragValueOffset;
+            if (c.kind === 'linear') value = Math.min(c.max, Math.max(c.min, value));
+        }
+        c.setValue(value);
+        this._report(c, false);
+    }
+
+    /** @param {PointerEvent} e */
+    _pointerUp(e) {
+        const c = this._active;
+        if (!c) return;
+        c._dragging = false;
+        this._active = null;
+        this.v._controls.enabled = true;
+        this._report(c, true);
+    }
+
+    /** @param {AxisControl} c @param {boolean} flush */
+    _report(c, flush) {
+        const now = performance.now();
+        if (!flush && now - this._lastReport < 1000 / AXIS_CONTROL_REPORT_HZ) return;
+        this._lastReport = now;
+        const payload = { id: c.id, value: c.value, phase: flush ? 'end' : 'move' };
+        const ws = this.v._ws;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'axis_control_change', ...payload }));
+        }
+        for (const cb of this._reportHooks.slice()) {
+            try { cb(payload); } catch (err) { console.error('axis control change hook error', err); }
+        }
+    }
+}
+
 // Reusable scratch vectors for the per-frame LOD skip gate, so it computes a
 // tube's world-space center/scale without allocating a Vector3 each frame.
 const _LOD_CENTER_SCRATCH = new THREE.Vector3();
@@ -9453,6 +9854,7 @@ export class ThreeJSViewer {
         // Move/rotate gizmo (opt-in; enabled from Python via enable_move_gizmo or
         // from JS via enableMoveGizmo). Inert until enabled.
         this._transformGizmo = new TransformGizmoController(this);
+        this._axisControls = new AxisControlManager(this);
 
         // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
@@ -11230,6 +11632,8 @@ export class ThreeJSViewer {
         // Pinned gizmos target now-deleted objects; drop them (and their helpers)
         // rather than waiting for the per-frame prune.
         if (this._transformGizmo) this._transformGizmo.clearGizmos();
+        // Axis controls likewise target now-deleted objects.
+        if (this._axisControls) this._axisControls.clear();
     }
 
     /** @param {Record<string, any>} transforms */
@@ -13979,6 +14383,19 @@ export class ThreeJSViewer {
             case 'set_clip_progress':
                 this._withObject(data.id, 'set_clip_progress', () => this._setClipProgress(data.id, data.t));
                 break;
+            case 'add_axis_control':
+                this._axisControls.add(data.id, {
+                    targetId: data.target_id, axis: data.axis, kind: data.kind,
+                    value: data.value, min: data.min, max: data.max, color: data.color,
+                    radius: data.radius, bboxSourceId: data.bbox_source_id, window: data.window,
+                });
+                break;
+            case 'update_axis_control':
+                this._axisControls.setValue(data.id, { value: data.value, min: data.min, max: data.max });
+                break;
+            case 'remove_axis_control':
+                this._axisControls.remove(data.id);
+                break;
             case 'set_follow_path': {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
@@ -14416,6 +14833,7 @@ export class ThreeJSViewer {
 
         // Move/rotate gizmo: keep the refined palette alive, prune stale selection.
         if (this._transformGizmo) this._transformGizmo.update();
+        this._axisControls.update();
 
         // Clipping gizmos wear the same refined look — TransformControls re-themes
         // its handles every frame, so re-apply our palette while the clip tool is open.
@@ -15543,6 +15961,9 @@ export class ThreeJSViewer {
      * @param {(m:any)=>void} cb @returns {() => void} unsubscribe
      */
     onObjectMove(cb) { return this._transformGizmo.onMove(cb); }
+
+    /** @param {(m:{id:string, value:number, phase:'move'|'end'})=>void} cb @returns {() => void} unsubscribe */
+    onAxisControlChange(cb) { return this._axisControls.onChange(cb); }
 
     /**
      * Set the move gizmo's translation snap step and mode at runtime — e.g. to
