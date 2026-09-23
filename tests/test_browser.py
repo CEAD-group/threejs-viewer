@@ -8510,6 +8510,8 @@ _AXIS_CONTROL_SPHERE_PX = """(id) => {
 
 
 def _axis_control_state(viewer_page, id):
+    # The group is anchored to its target in the render loop, not on add.
+    frames(viewer_page)
     return viewer_page.evaluate(
         "(id) => { const c = window.threejsViewer._axisControls.controls.get(id);"
         " if (!c) return null;"
