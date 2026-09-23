@@ -9854,9 +9854,10 @@ const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start p
 // Move-gizmo axis handles, redesigned to look like the axis-control widget
 // (AXIS_CONTROL_* above): a simple fat line per axis, same linewidth, instead
 // of the stock arrow, meeting at the gizmo centre (GIZMO_AXIS_LENGTH is the
-// local length from centre to tip — TransformControls scales the whole
-// helper to screen size, so this is a plain local unit, same convention the
-// stock arrows used). Plane chips are offset GIZMO_PLANE_GAP_FACTOR * axis
+// length from centre to tip in world units — the move gizmo overrides
+// TransformControls' constant-screen-size scaling, see the Gizmo
+// constructor, so it keeps its 3D size when zooming; line widths stay in
+// screen pixels). Plane chips are offset GIZMO_PLANE_GAP_FACTOR * axis
 // length from the centre (a gap from the axis lines) and are
 // GIZMO_PLANE_SIZE_FACTOR * axis length on a side.
 // GIZMO_AXIS_LINE_WIDTH_PX intentionally not aliased here: AXIS_CONTROL_LINE_WIDTH_PX
@@ -9864,7 +9865,8 @@ const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start p
 // (rather than lazily inside a function) would hit the temporal dead zone.
 const GIZMO_AXIS_LENGTH = 1.0;
 const GIZMO_PLANE_GAP_FACTOR = 0.15;
-const GIZMO_PLANE_SIZE_FACTOR = 0.75;
+const GIZMO_PLANE_SIZE_FACTOR = 0.45;
+const GIZMO_PLANE_OPACITY = 0.8;      // plane chips: mostly solid, a hint of what's behind
 const GIZMO_AXIS_PICK_RADIUS = 0.09;   // pill (capsule) hitbox radius around each axis line
 const GIZMO_CENTER_PICK_RADIUS = 0.16; // sphere hitbox radius around the (invisible) centre
 const GIZMO_PLANE_PICK_THICKNESS = 0.02;   // small box depth along the plane's normal, for a forgiving hitbox
@@ -10278,8 +10280,8 @@ function restyleGizmoHelper(helper, opts = {}) {
         m._color = (m._color || new THREE.Color()).copy(col);
         m.color.copy(col);
         if (planar) {
-            // Opaque flat chip, no outline.
-            m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
+            // Slightly translucent flat chip, no outline.
+            m._opacity = GIZMO_PLANE_OPACITY; m.opacity = GIZMO_PLANE_OPACITY; m.transparent = true;
         } else if (moveGizmo) {
             // Move-gizmo axis lines are fully opaque.
             m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
@@ -10362,6 +10364,15 @@ class Gizmo {
             const stockUpdateMatrixWorld = gizmoObj.updateMatrixWorld.bind(gizmoObj);
             gizmoObj.updateMatrixWorld = (/** @type {boolean} */ force) => {
                 stockUpdateMatrixWorld(force);
+                // The stock pass scales every handle to a constant *screen*
+                // size; the move gizmo keeps a constant *world* size instead
+                // (its fat lines stay screen-space px via LineMaterial).
+                // Undo that scale and recompute the subtree's world matrices.
+                const mode = ctrl.mode;
+                for (const grp of [gizmoObj.gizmo[mode], gizmoObj.picker[mode], gizmoObj.helper[mode]]) {
+                    if (grp) for (const h of grp.children) h.scale.setScalar(1);
+                }
+                THREE.Object3D.prototype.updateMatrixWorld.call(gizmoObj, true);
                 owner._restyleGizmo(this);
             };
         }
