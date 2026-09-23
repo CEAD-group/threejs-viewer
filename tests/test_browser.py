@@ -2853,8 +2853,9 @@ def test_view_gimbal_arms_and_bubbles_restyled(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_view_helper_setviewport_shim_no_stack_overflow(viewer_client, viewer_page):
-    """Render many frames with the animation toolbar visible (lift > 0).
-    The shim must cache the original setViewport once and never re-wrap.
+    """Render many frames with the animation toolbar visible (lift > 0) and a
+    non-stock gimbal size, so both the lift and the one-shot size rewrite run.
+    The renderer's setViewport must be the untouched original afterwards.
 
     Regression for a prior bug where the shim re-wrapped the already-wrapped
     setViewport every frame, deepening the call chain by one level per frame
@@ -2862,24 +2863,120 @@ def test_view_helper_setviewport_shim_no_stack_overflow(viewer_client, viewer_pa
     result = viewer_page.evaluate(
         """() => {
             const v = window.threejsViewer;
-            // Force toolbar visible so the lift > 0 branch runs. The render
-            // loop reads the cached CSS-pixel lift (updated by the show/hide
-            // paths) rather than offsetHeight; set it directly here.
+            const before = v._renderer.setViewport;
             v._animControlsEl.classList.add('visible');
             v._animLiftCss = 40;
-            // Trigger many render passes synchronously.
-            const origAnimate = v._animate.bind(v);
-            for (let i = 0; i < 200; i++) {
-                origAnimate();
-            }
+            v.setViewHelperSize(96);
+            for (let i = 0; i < 200; i++) v._animate();
             return {
-                cached: !!v._rendererSetViewportOriginal,
-                restored: v._renderer.setViewport === v._rendererSetViewportOriginal,
+                restored: v._renderer.setViewport === before,
+                bottom: v._viewHelper.location.bottom,
             };
         }"""
     )
-    assert result["cached"], "shim never cached the original setViewport"
-    assert result["restored"], "setViewport was not restored after _viewHelper.render()"
+    assert result["restored"], "setViewport was not restored after the gimbal render"
+    assert result["bottom"] == 40
+
+
+# --- View gimbal size (issue #233) ---
+
+
+def _gimbal_layout(page):
+    """Gimbal square, the viewport the helper renders into, the button stack,
+    and a synthetic hit-test at the posX bubble's projected screen position."""
+    return page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const r = v._renderer;
+            // Capture the viewport ViewHelper renders into (CSS px).
+            const orig = r.setViewport;
+            const calls = [];
+            r.setViewport = function (...a) { calls.push(a); return orig.apply(this, a); };
+            try { v._renderViewHelper(); } finally { r.setViewport = orig; }
+            const h = v._viewHelper;
+            const s = h.userData.interactiveSprites.find((o) => o.userData.type === 'posX');
+            const p = s.position.clone().applyQuaternion(h.quaternion);
+            const dom = r.domElement.getBoundingClientRect();
+            const dim = v.getViewHelperSize();
+            const lift = v._gizmoLiftCss();
+            const clientX = dom.right - dim + ((p.x + 2) / 4) * dim;
+            const clientY = dom.bottom - dim - lift + ((2 - p.y) / 4) * dim;
+            const hit = v._gizmoHitTest({clientX, clientY});
+            const rect = (sel) => {
+                const b = v.el.querySelector(sel).getBoundingClientRect();
+                return {left: b.left, right: b.right, top: b.top, bottom: b.bottom};
+            };
+            return {
+                dim,
+                canvasWidth: r.domElement.offsetWidth,
+                viewport: calls[0],
+                hitType: hit.hit ? hit.hit.userData.type : null,
+                gimbal: {left: dom.right - dim, top: dom.bottom - dim - lift,
+                         right: dom.right, bottom: dom.bottom - lift},
+                orbit: rect('.tjsv-view-orbit'),
+                home: rect('.tjsv-view-home'),
+                buttonWidth: v.el.querySelector('.tjsv-view-proj')
+                    .getBoundingClientRect().width,
+            };
+        }"""
+    )
+
+
+@pytest.mark.browser
+def test_view_helper_size_explicit(viewer_client, viewer_page):
+    """setViewHelperSize(px) resizes the rendered gimbal viewport, the bubble
+    hit-test follows it, and the orbit / P / Home stack stays left of the
+    bubbles; null returns to the automatic size."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    viewer_page.evaluate("() => window.threejsViewer.setViewHelperSize(112)")
+    frames(viewer_page)
+    r = _gimbal_layout(viewer_page)
+    assert r["dim"] == 112
+    assert r["viewport"] == [r["canvasWidth"] - 112, 0, 112, 112], r
+    assert r["hitType"] == "posX", r
+    g = r["gimbal"]
+    for name in ("orbit", "home"):
+        assert r[name]["right"] <= g["left"] + 112 / 4, (name, r)
+    assert abs(r["buttonWidth"] - 28 * 112 / 128) < 0.5, r
+    column_mid = (r["orbit"]["top"] + r["home"]["bottom"]) / 2
+    assert abs(column_mid - (g["top"] + g["bottom"]) / 2) <= 2, r
+
+    viewer_page.evaluate("() => window.threejsViewer.setViewHelperSize(null)")
+    frames(viewer_page)
+    r = _gimbal_layout(viewer_page)
+    assert r["dim"] == 128
+    assert r["viewport"] == [r["canvasWidth"] - 128, 0, 128, 128], r
+
+
+@pytest.mark.browser
+def test_view_helper_size_auto_compact_on_small_canvas(viewer_client, viewer_page):
+    """With no explicit size the gimbal is 128 px, and drops to 80 px when the
+    canvas' shorter side is under 500 px (a phone pane). The resize path
+    re-evaluates it both ways, and the hit-test and stack follow."""
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    frames(viewer_page)
+    assert _gimbal_layout(viewer_page)["dim"] == 128
+
+    viewer_page.set_viewport_size({"width": 412, "height": 800})
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer.getViewHelperSize() === 80", timeout=2000
+    )
+    frames(viewer_page)
+    r = _gimbal_layout(viewer_page)
+    assert r["viewport"] == [r["canvasWidth"] - 80, 0, 80, 80], r
+    assert r["hitType"] == "posX", r
+    g = r["gimbal"]
+    assert r["orbit"]["right"] <= g["left"] + 80 / 4, r
+    # The buttons scale with the square and the column stays centred on it.
+    assert abs(r["buttonWidth"] - 28 * 80 / 128) < 0.5, r
+    column_mid = (r["orbit"]["top"] + r["home"]["bottom"]) / 2
+    assert abs(column_mid - (g["top"] + g["bottom"]) / 2) <= 2, r
+
+    viewer_page.set_viewport_size({"width": 1000, "height": 700})
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer.getViewHelperSize() === 128", timeout=2000
+    )
 
 
 @pytest.mark.browser
@@ -4120,6 +4217,11 @@ def test_set_gizmo_axes_constrains_and_resets_on_detach(viewer_client, viewer_pa
         " return c.showX && c.showY && c.showZ; }",
     )
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
+    all_on = {"x": True, "y": True, "z": True}
+    assert viewer_page.evaluate("() => window.threejsViewer.getGizmoAxes()") == {
+        "translate": all_on,
+        "rotate": all_on,
+    }
 
 
 @pytest.mark.browser
@@ -4153,6 +4255,19 @@ def test_set_gizmo_axes_per_mode_follows_live_mode(viewer_client, viewer_page):
 
     viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": False}
+
+    # Public getter reports the applied masks as a copy (issue #223).
+    assert viewer_page.evaluate("() => window.threejsViewer.getGizmoAxes()") == {
+        "translate": {"x": True, "y": True, "z": True},
+        "rotate": {"x": True, "y": True, "z": False},
+    }
+    assert (
+        viewer_page.evaluate(
+            "() => { const v = window.threejsViewer; v.getGizmoAxes().rotate.z = true;"
+            " return v.getGizmoAxes().rotate.z; }"
+        )
+        is False
+    )
 
     # A pinned gizmo carries its own per-mode masks and starts in its base mode.
     viewer_client.add_gizmo(

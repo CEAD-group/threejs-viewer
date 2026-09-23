@@ -92,6 +92,14 @@ const OPPOSITE_VIEW = {
 // Duration of the eased setView() snap tween (matches the feel of the stock
 // ViewHelper animation it replaces).
 const VIEW_TWEEN_MS = 450;
+// View gimbal square in CSS px (issue #233). Stock is ViewHelper's hardcoded
+// 128; the auto size drops to the compact one when the canvas' shorter side
+// is under the threshold, so a phone pane keeps most of its area.
+const VIEW_HELPER_STOCK_SIZE = 128;
+const VIEW_HELPER_COMPACT_SIZE = 80;
+const VIEW_HELPER_COMPACT_BELOW_PX = 500;
+const VIEW_HELPER_SIZE_MIN = 32;
+const VIEW_HELPER_SIZE_MAX = 512;
 const _viewTweenQuat = new THREE.Quaternion();
 const _viewTweenDir = new THREE.Vector3();
 const _viewTweenUp = new THREE.Vector3();
@@ -126,7 +134,9 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
+ * @property {number | null} [viewHelperSize]            View gimbal square in CSS px (clamped to 32–512). Omitted/null = auto: 128, or 80 when the canvas' shorter side is under 500 px (issue #233). Overridable per page via the `view_helper_size` URL query param; `setViewHelperSize()` changes it at runtime.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
+ * @property {false | {maxEntries?: number, maxBytes?: number}} [modelCache] Session cache of parsed models keyed by URL (issue #221). Default 64 entries / 256 MB; `false` disables it. `clearModelCache()` empties it.
  * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
  */
 
@@ -1085,6 +1095,46 @@ function resolveFov(options, urlParams) {
     const urlFov = parse(urlParams.get('fov'));
     const optFov = parse(options.fov);
     return urlFov != null ? urlFov : optFov != null ? optFov : DEFAULT_FOV;
+}
+
+/**
+ * Parse a view gimbal size (CSS px). Returns null for "auto" (absent, empty,
+ * NaN or non-positive); finite positive values clamp to the allowed range.
+ * @param {string | number | null | undefined} raw
+ * @returns {number | null}
+ */
+function parseViewHelperSize(raw) {
+    if (raw === null || raw === undefined || raw === '') return null;
+    const n = typeof raw === 'number' ? raw : parseFloat(raw);
+    if (!(n > 0)) return null;
+    return Math.round(Math.min(VIEW_HELPER_SIZE_MAX, Math.max(VIEW_HELPER_SIZE_MIN, n)));
+}
+
+/**
+ * Resolve the explicit view gimbal size: URL `view_helper_size` param >
+ * `viewHelperSize` option > null (auto, see `autoViewHelperSize`).
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {number | null}
+ */
+function resolveViewHelperSize(options, urlParams) {
+    const fromUrl = parseViewHelperSize(urlParams.get('view_helper_size'));
+    return fromUrl != null ? fromUrl : parseViewHelperSize(options.viewHelperSize);
+}
+
+/**
+ * Automatic view gimbal size for a canvas: compact when its shorter side is
+ * under VIEW_HELPER_COMPACT_BELOW_PX, stock otherwise (and for a hidden,
+ * zero-size canvas, which has no meaningful size yet).
+ * @param {number} width
+ * @param {number} height
+ * @returns {number}
+ */
+function autoViewHelperSize(width, height) {
+    if (!(width > 0 && height > 0)) return VIEW_HELPER_STOCK_SIZE;
+    return Math.min(width, height) < VIEW_HELPER_COMPACT_BELOW_PX
+        ? VIEW_HELPER_COMPACT_SIZE
+        : VIEW_HELPER_STOCK_SIZE;
 }
 
 /**
@@ -6459,6 +6509,317 @@ function applyModelGroupDrawRange(obj, value) {
     }
 }
 
+// ========== Parsed-model cache (issue #221) ==========
+//
+// A model URL that was parsed once in this page session is not fetched or
+// decoded again: the settled parse is kept as a template that is never added
+// to the scene, and every add gets a clone of it. The key is the exact URL
+// (plus format), so it assumes equal URL means equal bytes, which holds for a
+// content-addressed emitter; a producer whose URLs are single-use (the Python
+// sidecar's uuid blob keys) opts out per message with `cache: false`.
+//
+// A clone shares the template's vertex data and textures but owns its
+// geometry wrappers (so set_draw_range stays per object) and its materials
+// (so set_color/set_opacity/debug swaps stay per object), which makes a cached
+// add behave exactly like an uncached one. The shared GL buffers and textures
+// are released when the last clone of an entry is deleted; the CPU copy stays
+// in the cache until LRU eviction.
+
+const MODEL_CACHE_MAX_ENTRIES = 64;
+const MODEL_CACHE_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * A new BufferGeometry that shares `src`'s attribute objects (vertex data
+ * and GL buffers) but has its own draw range, groups and bounds.
+ * @param {THREE.BufferGeometry} src
+ * @returns {THREE.BufferGeometry}
+ */
+function shareGeometry(src) {
+    const g = new THREE.BufferGeometry();
+    g.name = src.name;
+    if (src.index) g.setIndex(src.index);
+    for (const name in src.attributes) g.setAttribute(name, src.attributes[name]);
+    for (const name in src.morphAttributes) g.morphAttributes[name] = src.morphAttributes[name].slice();
+    g.morphTargetsRelative = src.morphTargetsRelative;
+    for (const group of src.groups) g.addGroup(group.start, group.count, group.materialIndex);
+    g.setDrawRange(src.drawRange.start, src.drawRange.count);
+    if (src.boundingBox) g.boundingBox = src.boundingBox.clone();
+    if (src.boundingSphere) g.boundingSphere = src.boundingSphere.clone();
+    g.userData = { ...src.userData };
+    return g;
+}
+
+/**
+ * Rough CPU footprint of a parsed model: unique vertex/index arrays plus
+ * RGBA8 texture images.
+ * @param {THREE.Object3D} root
+ * @returns {number}
+ */
+function estimateModelBytes(root) {
+    const arrays = new Set();
+    const textures = new Set();
+    let bytes = 0;
+    root.traverse(/** @param {any} o */ (o) => {
+        const g = o.geometry;
+        if (g) {
+            const attrs = [g.index, ...Object.values(g.attributes),
+                ...Object.values(g.morphAttributes).flat()];
+            for (const a of attrs) {
+                if (!a) continue;
+                const arr = a.isInterleavedBufferAttribute ? a.data.array : a.array;
+                if (arr && !arrays.has(arr)) { arrays.add(arr); bytes += arr.byteLength; }
+            }
+        }
+        for (const m of materialList(o.material)) {
+            for (const key in m) {
+                const t = m[key];
+                if (t && t.isTexture && !textures.has(t)) {
+                    textures.add(t);
+                    const img = t.image;
+                    if (img && img.width && img.height) bytes += img.width * img.height * 4;
+                }
+            }
+        }
+    });
+    return bytes;
+}
+
+/**
+ * @param {any} material
+ * @returns {any[]}
+ */
+function materialList(material) {
+    if (!material) return [];
+    return Array.isArray(material) ? material : [material];
+}
+
+/**
+ * @typedef {Object} ModelCacheEntry
+ * @property {string} key
+ * @property {Promise<ModelCacheEntry>} promise   Settles when the parse lands
+ * @property {any} template                       Parsed root, never in the scene
+ * @property {THREE.AnimationClip[]} animations
+ * @property {boolean} shareable                  False for skinned models, which are handed out once instead of cloned
+ * @property {number} bytes
+ * @property {number} refs                        Live clones in the scene
+ * @property {Set<THREE.BufferGeometry>} wrappers Geometry wrappers created for clones
+ * @property {boolean} settled
+ * @property {boolean} evicted
+ */
+
+class ModelCache {
+    /**
+     * @param {{maxEntries?: number, maxBytes?: number} | false | undefined} opts
+     */
+    constructor(opts) {
+        const o = opts === false ? { maxEntries: 0 } : (opts || {});
+        this.maxEntries = o.maxEntries != null ? o.maxEntries : MODEL_CACHE_MAX_ENTRIES;
+        this.maxBytes = o.maxBytes != null ? o.maxBytes : MODEL_CACHE_MAX_BYTES;
+        /** @type {Map<string, ModelCacheEntry>} insertion order = LRU order */
+        this._entries = new Map();
+        /** @type {WeakMap<THREE.Object3D, ModelCacheEntry>} clone root -> entry */
+        this._instances = new WeakMap();
+        /** @type {WeakSet<THREE.BufferGeometry>} geometries whose buffers the cache owns */
+        this._sharedGeometries = new WeakSet();
+        this.hits = 0;
+        this.misses = 0;
+    }
+
+    /**
+     * Resolve a parsed model for `key`, reusing a settled or in-flight parse.
+     * `load` runs only on a miss and must resolve `{template, animations}`.
+     * A caller that joined a load which then failed (its owner was deleted,
+     * say) retries with its own `load`, so a joiner never inherits another
+     * object's abort.
+     * @param {string} key
+     * @param {() => Promise<{template: any, animations: THREE.AnimationClip[]}>} load
+     * @param {boolean} cacheable
+     * @returns {Promise<ModelCacheEntry>}
+     */
+    async acquire(key, load, cacheable) {
+        const existing = cacheable ? this._entries.get(key) : undefined;
+        if (existing) {
+            this._entries.delete(key);
+            this._entries.set(key, existing);
+            try {
+                const entry = await existing.promise;
+                if (entry.shareable) {
+                    this.hits++;
+                    return entry;
+                }
+            } catch (_) {
+                // Fall through to a load of our own.
+            }
+        }
+        this.misses++;
+        /** @type {ModelCacheEntry} */
+        const entry = {
+            key, promise: /** @type {any} */ (null), template: null, animations: [],
+            shareable: false, bytes: 0, refs: 0, wrappers: new Set(),
+            settled: false, evicted: true,
+        };
+        const store = cacheable && this.maxEntries > 0 && !this._entries.has(key);
+        entry.promise = load().then(({ template, animations }) => {
+            entry.template = template;
+            entry.animations = animations;
+            let skinned = false;
+            template.traverse(/** @param {any} o */ (o) => { if (o.isSkinnedMesh) skinned = true; });
+            entry.shareable = store && !skinned;
+            if (entry.shareable) {
+                // Compute bounds once so a clone copies them instead of
+                // re-scanning every vertex on each add.
+                template.traverse(/** @param {any} o */ (o) => {
+                    if (!o.geometry) return;
+                    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+                    if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+                });
+                entry.bytes = estimateModelBytes(template);
+            }
+            entry.settled = true;
+            return entry;
+        });
+        if (store) {
+            entry.evicted = false;
+            this._entries.set(key, entry);
+        }
+        try {
+            await entry.promise;
+        } catch (e) {
+            if (this._entries.get(key) === entry) this._entries.delete(key);
+            throw e;
+        }
+        if (!entry.shareable) {
+            if (this._entries.get(key) === entry) this._entries.delete(key);
+            entry.evicted = true;
+        } else {
+            this._evict();
+        }
+        return entry;
+    }
+
+    /**
+     * An object for the scene: the template itself for a non-shareable entry
+     * (single use, owned by the scene like an uncached load), otherwise a
+     * clone with its own geometry wrappers and materials.
+     * @param {ModelCacheEntry} entry
+     * @returns {any}
+     */
+    instantiate(entry) {
+        if (!entry.shareable) return entry.template;
+        const root = entry.template.clone(true);
+        /** @type {Map<any, any>} */
+        const geometries = new Map();
+        /** @type {Map<any, any>} */
+        const materials = new Map();
+        /** @param {any} m */
+        const cloneMat = (m) => {
+            let c = materials.get(m);
+            if (!c) { c = m.clone(); materials.set(m, c); }
+            return c;
+        };
+        root.traverse(/** @param {any} o */ (o) => {
+            if (o.geometry) {
+                let g = geometries.get(o.geometry);
+                if (!g) {
+                    g = shareGeometry(o.geometry);
+                    geometries.set(o.geometry, g);
+                    entry.wrappers.add(g);
+                    this._sharedGeometries.add(g);
+                }
+                o.geometry = g;
+            }
+            if (o.material) {
+                o.material = Array.isArray(o.material) ? o.material.map(cloneMat) : cloneMat(o.material);
+            }
+        });
+        entry.refs++;
+        this._instances.set(root, entry);
+        return root;
+    }
+
+    /**
+     * True when `geometry` shares cache-owned buffers, so deleting its
+     * object must not dispose it.
+     * @param {any} geometry
+     */
+    ownsGeometry(geometry) {
+        return this._sharedGeometries.has(geometry);
+    }
+
+    /**
+     * Drop one clone's reference. Called for every object `_deleteObject`
+     * traverses; a no-op for anything that is not a clone root.
+     * @param {THREE.Object3D} obj
+     */
+    release(obj) {
+        const entry = this._instances.get(obj);
+        if (!entry) return;
+        this._instances.delete(obj);
+        entry.refs--;
+        if (entry.refs > 0) return;
+        // Last clone gone: free the GL buffers and textures. The CPU arrays
+        // stay on the template, and three re-uploads them on the next add.
+        for (const g of entry.wrappers) g.dispose();
+        entry.wrappers.clear();
+        this._disposeTextures(entry);
+        if (entry.evicted) this._disposeTemplate(entry);
+    }
+
+    /** Evict every settled entry; live clones keep rendering until deleted. */
+    clear() {
+        for (const entry of [...this._entries.values()]) {
+            if (entry.settled) this._drop(entry);
+        }
+    }
+
+    /** @returns {{entries: number, bytes: number, hits: number, misses: number}} */
+    stats() {
+        let bytes = 0;
+        for (const e of this._entries.values()) bytes += e.bytes;
+        return { entries: this._entries.size, bytes, hits: this.hits, misses: this.misses };
+    }
+
+    _evict() {
+        let bytes = 0;
+        for (const e of this._entries.values()) bytes += e.bytes;
+        for (const entry of [...this._entries.values()]) {
+            if (this._entries.size <= 1) break;
+            if (this._entries.size <= this.maxEntries && bytes <= this.maxBytes) break;
+            if (!entry.settled) continue;
+            bytes -= entry.bytes;
+            this._drop(entry);
+        }
+    }
+
+    /** @param {ModelCacheEntry} entry */
+    _drop(entry) {
+        if (this._entries.get(entry.key) === entry) this._entries.delete(entry.key);
+        entry.evicted = true;
+        if (entry.refs === 0) this._disposeTemplate(entry);
+    }
+
+    /** @param {ModelCacheEntry} entry */
+    _disposeTextures(entry) {
+        entry.template.traverse(/** @param {any} o */ (o) => {
+            for (const m of materialList(o.material)) {
+                for (const key in m) {
+                    const t = m[key];
+                    if (t && t.isTexture) t.dispose();
+                }
+            }
+        });
+    }
+
+    /** @param {ModelCacheEntry} entry */
+    _disposeTemplate(entry) {
+        this._disposeTextures(entry);
+        entry.template.traverse(/** @param {any} o */ (o) => {
+            if (o.geometry) o.geometry.dispose();
+            for (const m of materialList(o.material)) m.dispose();
+        });
+    }
+}
+
 // ========== Swept oriented tool body (5-axis shank/holder) ==========
 //
 // add_swept_tool decouples the extrusion axis from the path tangent: at each
@@ -8672,6 +9033,13 @@ class TransformGizmoController {
      * @param {GizmoAxesMask|null} [mask] */
     setAxes(mask) { this._applyAxes(this._primary, mask); }
 
+    /** The interactive gizmo's resolved per-mode masks, copied so a caller can't mutate them.
+     * @returns {{translate:{x:boolean,y:boolean,z:boolean}, rotate:{x:boolean,y:boolean,z:boolean}}} */
+    getAxes() {
+        const a = this._primary.axes;
+        return { translate: { ...a.translate }, rotate: { ...a.rotate } };
+    }
+
     // One-time structural refinement of a gizmo's stock handles (the per-frame
     // `_restyleGizmo` only re-themes/resizes what survives this). Two parts:
     //   1. Slim the rotate gizmo down to just the three coloured axis rings —
@@ -9526,6 +9894,10 @@ export class ThreeJSViewer {
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
 
+        // View gimbal size (issue #233): explicit px, or null for auto.
+        // Precedence: URL `view_helper_size` param > option > auto.
+        this._viewHelperSizeOpt = resolveViewHelperSize(options, urlParams);
+
         // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
         this._toolbarVisible = resolveToolbarVisible(options, urlParams);
 
@@ -9552,6 +9924,8 @@ export class ThreeJSViewer {
         // onto it via _withObject().
         /** @type {Map<string, {promise: Promise<void>, resolve: () => void, reject: (err: any) => void}>} */
         this._inflightLoads = new Map();
+        // Parsed models by URL for the page session (issue #221).
+        this._modelCache = new ModelCache(this._options.modelCache);
         // Per-id AbortControllers for in-flight blob fetches (issue #157).
         // A delete or a re-push of the same id cancels them, so the viewer
         // never requests a blob its producer has already dropped.
@@ -10094,7 +10468,8 @@ export class ThreeJSViewer {
         // can see when a click will actually land. Pointerdown inside the gizmo
         // rect is suppressed at capture to prevent click-to-pivot from firing
         // on near-misses.
-        this._gizmoDim = 128;
+        this._gizmoDim = 0;
+        this._syncViewHelperSize(w, h);
         // Bubbles 20% smaller than the earlier 1.4 / 1.75 pair; arms and
         // bubble distance at stock length (1.3 read as too long on review).
         this._gizmoBaseScale = 1.12;
@@ -11140,24 +11515,33 @@ export class ThreeJSViewer {
                 console.error(`Unknown format: ${format}`);
                 return undefined;
             }
+            // add_model_binary supplies its own fetch-then-parse `load` and
+            // keys the cache on the sidecar URL rather than the per-load
+            // object URL it parses from.
+            const key = `${format} ${objData.cacheKey || objData.model}`;
+            const load = objData.load || (() => this._parseModel(loader, objData.model, format));
             try {
-                const result = await this._loadModel(loader, objData.model, format, objData.yUp === true);
-                if (!this._isLoadTokenCurrent(id, token)) {
+                const entry = await this._modelCache.acquire(key, load, objData.cache !== false);
+                const sceneMoved = objData.sceneGeneration !== undefined
+                    && objData.sceneGeneration !== this._sceneGeneration;
+                if (sceneMoved || !this._isLoadTokenCurrent(id, token)) {
                     console.log(`Discarding stale model load for '${id}'`);
                     return undefined;
                 }
-                obj = result.obj;
-                if (result.animations.length > 0) {
+                obj = this._instantiateModel(entry, format, objData.yUp === true);
+                if (entry.animations.length > 0) {
                     const mixerRoot = obj.userData.gltfScene || obj;
                     const mixer = new THREE.AnimationMixer(mixerRoot);
                     // Deferred bind: hold the authored bind pose until the
                     // first clip-drive message (issue #135).
-                    prepareModelMixer(mixer, result.animations);
+                    prepareModelMixer(mixer, entry.animations);
                     this._mixers.set(id, mixer);
                     this._mixerGeneration++;
-                    console.log(`Model ${id}: ${result.animations.length} animation clip(s) available`);
+                    console.log(`Model ${id}: ${entry.animations.length} animation clip(s) available`);
                 }
             } catch (e) {
+                // The binary path classifies its own failures (issue #157).
+                if (objData.load) throw e;
                 console.error(`Failed to load model: ${e}`);
                 return undefined;
             }
@@ -11176,56 +11560,72 @@ export class ThreeJSViewer {
     }
 
     /**
+     * Load and parse a model into the cacheable template: everything that
+     * depends only on the bytes. Per-add wrapping lives in _instantiateModel.
      * @param {any} loader
      * @param {string} url
      * @param {string} format
-     * @param {boolean} yUp
+     * @returns {Promise<{template: any, animations: THREE.AnimationClip[]}>}
      */
-    _loadModel(loader, url, format, yUp) {
+    _parseModel(loader, url, format) {
         return new Promise((resolve, reject) => {
             loader.load(
                 url,
                 /** @param {any} result */
                 (result) => {
                     /** @type {any} */
-                    let obj;
+                    let template;
                     let animations = [];
                     if (format === 'gltf' || format === 'glb') {
-                        if (yUp) {
-                            const correction = new THREE.Group();
-                            correction.rotation.x = Math.PI / 2;
-                            correction.add(result.scene);
-                            obj = new THREE.Group();
-                            obj.add(correction);
-                            obj.userData.gltfScene = result.scene;
-                        } else {
-                            obj = new THREE.Group();
-                            obj.add(result.scene);
-                            obj.userData.gltfScene = result.scene;
-                        }
+                        template = result.scene;
                         animations = result.animations || [];
                     } else if (format === 'dae') {
-                        obj = new THREE.Group();
+                        template = new THREE.Group();
                         result.scene.traverse(/** @param {any} child */ (child) => {
-                            if (child.isMesh) obj.add(child.clone());
+                            if (child.isMesh) template.add(child.clone());
                         });
                     } else if (format === 'stl' || format === 'ply') {
                         const material = new THREE.MeshStandardMaterial({ color: 0x4a90d9 });
-                        obj = new THREE.Mesh(result, material);
+                        template = new THREE.Mesh(result, material);
                     } else {
-                        obj = result;
+                        template = result;
                     }
-                    // Enable set_draw_range / draw_ranges on loaded models
-                    // (issue #104): stamp descendant meshes like
-                    // add_mesh_binary does, and mark a group root so the
-                    // dispatchers traverse it.
-                    stampModelDrawRangeMeshes(obj);
-                    resolve({ obj, animations });
+                    resolve({ template, animations });
                 },
                 undefined,
                 reject
             );
         });
+    }
+
+    /**
+     * Turn a parsed model into the object one add registers.
+     * @param {ModelCacheEntry} entry
+     * @param {string} format
+     * @param {boolean} yUp
+     * @returns {any}
+     */
+    _instantiateModel(entry, format, yUp) {
+        const root = this._modelCache.instantiate(entry);
+        /** @type {any} */
+        let obj = root;
+        if (format === 'gltf' || format === 'glb') {
+            obj = new THREE.Group();
+            if (yUp) {
+                const correction = new THREE.Group();
+                correction.rotation.x = Math.PI / 2;
+                correction.add(root);
+                obj.add(correction);
+            } else {
+                obj.add(root);
+            }
+            obj.userData.gltfScene = root;
+        }
+        // Enable set_draw_range / draw_ranges on loaded models (issue #104):
+        // stamp descendant meshes like add_mesh_binary does, and mark a group
+        // root so the dispatchers traverse it.
+        stampModelDrawRangeMeshes(obj);
+        return obj;
     }
 
     /** @param {string} id @param {number} time */
@@ -11954,6 +12354,7 @@ export class ThreeJSViewer {
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse(/** @param {any} child */ (child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
+                this._modelCache.release(child);
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
                 }
@@ -11967,7 +12368,7 @@ export class ThreeJSViewer {
                 if (child.userData.originalMaterial !== undefined) {
                     delete child.userData.originalMaterial;
                 }
-                if (child.geometry) child.geometry.dispose();
+                if (child.geometry && !this._modelCache.ownsGeometry(child.geometry)) child.geometry.dispose();
                 if (child.material) {
                     if (Array.isArray(child.material)) {
                         child.material.forEach(/** @param {any} m */ m => m.dispose());
@@ -13394,42 +13795,61 @@ export class ThreeJSViewer {
                 // surface their stale/deleted rejection.
                 deferred.promise.catch(() => {});
                 this._inflightLoads.set(data.id, deferred);
-                const loadToken = this._loadTokenOf(data.id);
+                let loadToken = this._loadTokenOf(data.id);
                 const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
                     let fetched = false;
                     try {
-                        const meshBytes = await fetchArrayBuffer(
-                            data.blob_url, `add_model_binary '${data.id}'`, abortCtl.signal);
-                        fetched = true;
-                        if (this._sceneGeneration !== capturedScene) {
-                            console.log('Discarding stale model fetch');
-                            deferred.reject(new Error('stale'));
-                            return;
-                        }
-                        const blob = new Blob([meshBytes]);
-                        const blobUrl = URL.createObjectURL(blob);
-                        console.log(`Loading model ${data.id} (${data.format}) via HTTP`);
+                        const format = data.format || 'stl';
+                        // Runs only on a cache miss (issue #221): a URL this
+                        // page already parsed is neither fetched nor decoded.
+                        const load = async () => {
+                            // _addObject has claimed its token by now; a later
+                            // bump means this fetch was superseded.
+                            loadToken = this._loadTokenOf(data.id);
+                            const meshBytes = await fetchArrayBuffer(
+                                data.blob_url, `add_model_binary '${data.id}'`, abortCtl.signal);
+                            fetched = true;
+                            if (this._sceneGeneration !== capturedScene) {
+                                throw Object.assign(new Error('stale'), { stale: true });
+                            }
+                            console.log(`Loading model ${data.id} (${format}) via HTTP`);
+                            const blobUrl = URL.createObjectURL(new Blob([meshBytes]));
+                            try {
+                                return await this._parseModel(this._loaders[
+                                    /** @type {keyof typeof this._loaders} */ (format)], blobUrl, format);
+                            } finally {
+                                URL.revokeObjectURL(blobUrl);
+                            }
+                        };
                         // Read the registered object from _addObject's
-                        // return rather than _objects.get(id) — under a
+                        // return rather than _objects.get(id): under a
                         // delete-and-re-add race the latter could return
                         // a *newer* same-id object that some other load
-                        // registered while we awaited _loadModel, and we
-                        // would then stamp our stale blobUrl onto it.
+                        // registered while we awaited the parse.
                         const obj = await this._addObject(data.id, {
-                            model: blobUrl,
-                            format: data.format || 'stl',
+                            model: data.blob_url,
+                            cacheKey: data.blob_url,
+                            cache: data.cache,
+                            load,
+                            sceneGeneration: capturedScene,
+                            format,
                             yUp: data.yUp === true,
                             visible: data.visible,
                         }, data.parent, { preserveInflight: true });
+                        fetched = true;
                         if (obj) {
-                            obj.userData.blobUrl = blobUrl;
                             if (data.transform) this._updateTransform(data.id, data.transform);
                             deferred.resolve();
                         } else {
                             deferred.reject(new Error('stale'));
                         }
                     } catch (e) {
+                        if (/** @type {any} */ (e).stale) {
+                            console.log('Discarding stale model fetch');
+                            deferred.reject(e);
+                            return;
+                        }
                         this._reportLoadFailure(e, 'model',
                             () => console.error(`Error loading model '${data.id}' via HTTP:`, e),
                             { id: data.id, token: fetched ? undefined : loadToken,
@@ -15286,6 +15706,7 @@ export class ThreeJSViewer {
         } else {
             this._viewHelper.render(this._renderer);
         }
+        this._renderViewHelper();
 
         // LOD: dispatch to Web Worker after render (non-blocking)
         if (this._lodDirty && !this._lodWorkerBusy && performance.now() - this._lodLastRunTime >= this._lodThrottleMs) {
@@ -15382,6 +15803,7 @@ export class ThreeJSViewer {
         // Selection silhouettes read this by reference (issue #165).
         this._highlightResolution.value.set(width, height);
         this._depthCue.onResize(width, height);
+        this._syncViewHelperSize(width, height);
     }
 
     /** @param {THREE.Object3D} object */
@@ -15399,6 +15821,72 @@ export class ThreeJSViewer {
     }
 
     // ========== ViewHelper (corner gizmo) ==========
+
+    /**
+     * Set the view gimbal size in CSS px (issue #233), clamped to 32-512.
+     * `null` restores the automatic size: 128, or 80 when the canvas' shorter
+     * side is under 500 px. Hit-testing, the animation-toolbar lift and the
+     * orbit / P / Home button stack all follow it.
+     * @param {number | null} size
+     */
+    setViewHelperSize(size) {
+        this._viewHelperSizeOpt = parseViewHelperSize(size);
+        const dom = this._renderer.domElement;
+        this._syncViewHelperSize(dom.clientWidth, dom.clientHeight);
+    }
+
+    /** @returns {number} the view gimbal size currently applied, in CSS px. */
+    getViewHelperSize() {
+        return this._gizmoDim;
+    }
+
+    /**
+     * Apply the explicit or automatic gimbal size for a canvas of the given
+     * size. Drives `_gizmoDim` (render + hit-test) and the
+     * --tjsv-view-helper-size / --tjsv-view-scale CSS vars the button stack
+     * is sized and laid out from.
+     * @param {number} width
+     * @param {number} height
+     */
+    _syncViewHelperSize(width, height) {
+        const size = this._viewHelperSizeOpt ?? autoViewHelperSize(width, height);
+        if (size === this._gizmoDim) return;
+        this._gizmoDim = size;
+        this.el.style.setProperty('--tjsv-view-helper-size', `${size}px`);
+        // Unitless, because calc() cannot divide a length by a length.
+        this.el.style.setProperty('--tjsv-view-scale', String(size / 128));
+    }
+
+    /**
+     * Render the gimbal in the bottom-right corner, lifted above the
+     * animation toolbar. The lift goes through the helper's own
+     * `location.bottom` (CSS px, like every setViewport argument). The size
+     * cannot: ViewHelper hardcodes `dim = 128` in its first setViewport call,
+     * so a one-shot wrapper rewrites that single call and puts the original
+     * back before the helper restores the main viewport.
+     */
+    _renderViewHelper() {
+        const r = this._renderer;
+        // `location` is newer than the bundled @types/three.
+        const helper = /** @type {any} */ (this._viewHelper);
+        const size = this._gizmoDim;
+        const lift = this._animLiftCss || 0;
+        helper.location.bottom = lift;
+        if (size === VIEW_HELPER_STOCK_SIZE) {
+            helper.render(r);
+            return;
+        }
+        const orig = r.setViewport;
+        r.setViewport = (/** @type {any[]} */ ..._args) => {
+            r.setViewport = orig;
+            orig.call(r, r.domElement.offsetWidth - size, lift, size, size);
+        };
+        try {
+            helper.render(r);
+        } finally {
+            r.setViewport = orig;
+        }
+    }
 
     /**
      * Restyle the stock ViewHelper after construction: the axis sprites get
@@ -15617,7 +16105,7 @@ export class ThreeJSViewer {
 
     /**
      * Hit-test a pointer event against the ViewHelper's axis sprites. Returns
-     * whether the pointer is inside the 128×128 gizmo rect at all, plus the
+     * whether the pointer is inside the gizmo square at all, plus the
      * hovered sprite (null if no sprite under cursor).
      * @param {PointerEvent | MouseEvent} e
      * @returns {{ insideRect: boolean, hit: any }}
@@ -15996,6 +16484,20 @@ export class ThreeJSViewer {
      * @param {boolean} enabled
      */
     setDblclickFrame(enabled) { this._dblclickFrame = !!enabled; }
+
+    // ========== Parsed-model cache (issue #221) ==========
+
+    /**
+     * Drop every cached model parse, so the next add of any URL fetches and
+     * decodes again. Models already in the scene keep rendering.
+     */
+    clearModelCache() { this._modelCache.clear(); }
+
+    /**
+     * Cache occupancy and hit counts since page load.
+     * @returns {{entries: number, bytes: number, hits: number, misses: number}}
+     */
+    getModelCacheStats() { return this._modelCache.stats(); }
 
     /**
      * Register a hook fired on a stationary single click on the canvas
@@ -16376,6 +16878,15 @@ export class ThreeJSViewer {
      * @param {GizmoAxesMask|null} [mask]
      */
     setGizmoAxes(mask) { this._transformGizmo.setAxes(mask); }
+
+    /**
+     * The move gizmo's axis masks as applied, one explicit `{x, y, z}` per mode,
+     * e.g. `{translate: {x:true, y:true, z:true}, rotate: {x:true, y:true, z:false}}`.
+     * Reflects the all-axes reset on detach, so a caller can diff against it
+     * before calling `setGizmoAxes`.
+     * @returns {{translate:{x:boolean,y:boolean,z:boolean}, rotate:{x:boolean,y:boolean,z:boolean}}}
+     */
+    getGizmoAxes() { return this._transformGizmo.getAxes(); }
 
     /**
      * Register a hook fired as the gizmo moves/rotates its target. Payload:

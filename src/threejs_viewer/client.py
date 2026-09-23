@@ -560,6 +560,7 @@ class ViewerClient:
         tone_mapping: Optional[str] = None,
         fov: Optional[float] = None,
         toolbar: Optional[bool] = None,
+        view_helper_size: Optional[float] = None,
     ):
         """Create a viewer client.
 
@@ -598,8 +599,12 @@ class ViewerClient:
                 depth cues, framing) with their keyboard shortcuts, which
                 keep working either way. Toggle at runtime with
                 :meth:`set_toolbar_visible`.
+            view_helper_size: Size of the corner view gimbal in CSS pixels.
+                ``None`` (default) lets the viewer pick: 128, or 80 when the
+                canvas' shorter side is under 500 px (phones). Must be finite
+                and positive; the viewer clamps it to 32-512.
 
-        The lighting kwargs, ``fov`` and ``toolbar`` are forwarded to the viewer as
+        The lighting kwargs, ``fov``, ``toolbar`` and ``view_helper_size`` are forwarded to the viewer as
         snake-case query parameters on ``viewer_url``. They act as authoritative
         initial values — the lighting ones win over any value the user
         previously persisted via the in-browser Lighting panel. Leave them as
@@ -653,6 +658,11 @@ class ViewerClient:
         if toolbar is not None and not isinstance(toolbar, bool):
             raise ValueError(f"toolbar must be a bool or None, got {toolbar!r}")
         self.toolbar = toolbar
+        self.view_helper_size = _validate_finite("view_helper_size", view_helper_size)
+        if self.view_helper_size is not None and self.view_helper_size <= 0:
+            raise ValueError(
+                f"view_helper_size must be positive (got {view_helper_size!r})"
+            )
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
@@ -785,7 +795,7 @@ class ViewerClient:
         Always includes `ws_port`; adds `ws_host` when ``host`` is not
         ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
-        `ambient_intensity`, `fov`, and/or `toolbar` query params when the caller passed
+        `ambient_intensity`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
@@ -809,6 +819,8 @@ class ViewerClient:
             params.append(("fov", str(self.fov)))
         if self.toolbar is not None:
             params.append(("toolbar", "true" if self.toolbar else "false"))
+        if self.view_helper_size is not None:
+            params.append(("view_helper_size", str(self.view_helper_size)))
         return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
     def _start_servers(self, http_port: Optional[int] = None) -> None:
@@ -1617,6 +1629,10 @@ class ViewerClient:
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
             visible: Initial visibility
+
+        The viewer caches the parsed model by URL for the page session, so
+        adding the same URL again skips the fetch and the decode. Give a
+        file whose contents changed a new URL (e.g. a ``?v=<hash>`` query).
         """
         transform = {}
         if position:
@@ -1700,7 +1716,14 @@ class ViewerClient:
                 raise FileNotFoundError(f"Mesh file not found: {path}")
             mesh_bytes = path.read_bytes()
 
-        header = {"type": "add_model_binary", "id": id, "format": format}
+        # Each push gets a fresh blob URL, so a viewer cache entry for it
+        # could never be hit again.
+        header = {
+            "type": "add_model_binary",
+            "id": id,
+            "format": format,
+            "cache": False,
+        }
         if parent:
             header["parent"] = parent
         if y_up:
