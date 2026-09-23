@@ -1790,6 +1790,78 @@ def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_p
     _wait_for_scale(viewer_page, 0.857)
 
 
+def _set_local_y(viewer_page, obj_id, y):
+    """Move an object's own local transform directly, standing in for a drag /
+    streamed transform update — bind_clip only cares about the *value*, not how
+    it got there."""
+    viewer_page.evaluate(
+        f"(y) => {{ window.threejsViewer._objects.get('{obj_id}').position.y = y; }}",
+        y,
+    )
+
+
+@pytest.mark.browser
+def test_bind_clip_tracks_source_transform_live(viewer_client, viewer_page):
+    """bind_clip (issue #225): once bound, moving the source object's own local
+    transform drives the target's clip every render frame with no further WS
+    message — no set_clip_time/set_clip_progress call in this test at all."""
+    _load_animated_glb(viewer_client)
+    viewer_client.add_box("carriage", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('carriage')")
+
+    viewer_client.bind_clip(
+        "anim",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=2.0,
+    )
+
+    _set_local_y(viewer_page, "carriage", 0.0)
+    _wait_for_scale(viewer_page, 0.059)  # t=0 keyframe
+
+    _set_local_y(viewer_page, "carriage", 2.0)
+    _wait_for_scale(viewer_page, 0.857)  # t=1 keyframe
+
+    _set_local_y(viewer_page, "carriage", 1.0)
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)  # midpoint, no message sent
+
+    # Past to_value clamps to the end pose by default.
+    _set_local_y(viewer_page, "carriage", 5.0)
+    _wait_for_scale(viewer_page, 0.857)
+
+
+@pytest.mark.browser
+def test_unbind_clip_restores_imperative_push(viewer_client, viewer_page):
+    """unbind_clip stops the live tracking and restores the plain
+    set_clip_time/set_clip_progress push path for the same object."""
+    _load_animated_glb(viewer_client)
+    viewer_client.add_box("carriage", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('carriage')")
+
+    viewer_client.bind_clip(
+        "anim",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=2.0,
+    )
+    _set_local_y(viewer_page, "carriage", 2.0)
+    _wait_for_scale(viewer_page, 0.857)
+
+    viewer_client.unbind_clip("anim")
+    # Moving the (now unbound) source no longer touches the clip.
+    _set_local_y(viewer_page, "carriage", 0.0)
+    time.sleep(0.2)
+    assert abs(_node_scale(viewer_page) - 0.857) < 1e-3, (
+        "clip kept tracking the source after unbind_clip"
+    )
+
+    # The imperative path works again on the same object.
+    viewer_client.set_clip_progress("anim", 0.0)
+    _wait_for_scale(viewer_page, 0.059)
+
+
 @pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
