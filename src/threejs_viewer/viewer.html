@@ -11064,8 +11064,11 @@ class AxisControl {
         const handleFlat = [];
         if (isRotary) {
             const R = this.radius;
-            const a0 = this.kind === 'rotary_unlimited' ? 0 : this.min;
-            const a1 = this.kind === 'rotary_unlimited' ? Math.PI * 2 : this.max;
+            // The guide never draws more than one turn: a wider range would
+            // only overdraw itself. The value and its clamp keep the full range.
+            const fullTurn = this.kind === 'rotary_unlimited' || this.max - this.min >= Math.PI * 2;
+            const a0 = fullTurn ? 0 : this.min;
+            const a1 = fullTurn ? Math.PI * 2 : this.max;
             for (let i = 0; i <= AXIS_CONTROL_ARC_SEGMENTS; i++) {
                 const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
                 flat.push(0, R * Math.cos(a), R * Math.sin(a));

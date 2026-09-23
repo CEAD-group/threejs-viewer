@@ -4548,6 +4548,8 @@ class ViewerClient:
         ``kind``:
 
         - ``"rotary"`` — an arc from ``min`` to ``max`` radians, at ``radius``.
+          A range of a full turn or more draws one closed circle; the value
+          still spans (and is clamped to) the whole range.
         - ``"rotary_unlimited"`` — a full circle at ``radius``; ``min``/``max``
           are ignored, and dragging can turn past ±180° (the value keeps
           accumulating rather than wrapping).
