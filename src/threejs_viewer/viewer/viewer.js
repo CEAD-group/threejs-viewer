@@ -14574,8 +14574,8 @@ export class ThreeJSViewer {
         // Clipping gizmos wear the same refined look — TransformControls re-themes
         // its handles every frame, so re-apply our palette while the clip tool is open.
         if (this._clipGizmo.enabled) {
-            restyleGizmoHelper(this._clipGizmoHelper, this._clipRotSizedPlanes);
-            restyleGizmoHelper(this._clipMoveGizmoHelper, this._clipMoveSizedPlanes);
+            restyleGizmoHelper(this._clipGizmoHelper, this._clipRotSizedPlanes, this._clipGizmo);
+            restyleGizmoHelper(this._clipMoveGizmoHelper, this._clipMoveSizedPlanes, this._clipMoveGizmo);
         }
 
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
