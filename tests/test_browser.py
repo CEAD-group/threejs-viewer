@@ -1790,6 +1790,116 @@ def test_binary_clip_times_channel_drives_deferred_mixer(viewer_client, viewer_p
     _wait_for_scale(viewer_page, 0.857)
 
 
+def _set_local_y(viewer_page, obj_id, y):
+    """Move an object's own local transform directly, standing in for a drag /
+    streamed transform update — bind_clip only cares about the *value*, not how
+    it got there."""
+    viewer_page.evaluate(
+        f"(y) => {{ window.threejsViewer._objects.get('{obj_id}').position.y = y; }}",
+        y,
+    )
+
+
+@pytest.mark.browser
+def test_bind_clip_tracks_source_transform_live(viewer_client, viewer_page):
+    """bind_clip (issue #225): once bound, moving the source object's own local
+    transform drives the target's clip every render frame with no further WS
+    message — no set_clip_time/set_clip_progress call in this test at all."""
+    _load_animated_glb(viewer_client)
+    viewer_client.add_box("carriage", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('carriage')")
+
+    viewer_client.bind_clip(
+        "anim",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=2.0,
+    )
+
+    _set_local_y(viewer_page, "carriage", 0.0)
+    _wait_for_scale(viewer_page, 0.059)  # t=0 keyframe
+
+    _set_local_y(viewer_page, "carriage", 2.0)
+    _wait_for_scale(viewer_page, 0.857)  # t=1 keyframe
+
+    _set_local_y(viewer_page, "carriage", 1.0)
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)  # midpoint, no message sent
+
+    # Past to_value clamps to the end pose by default.
+    _set_local_y(viewer_page, "carriage", 5.0)
+    _wait_for_scale(viewer_page, 0.857)
+
+
+@pytest.mark.browser
+def test_unbind_clip_restores_imperative_push(viewer_client, viewer_page):
+    """unbind_clip stops the live tracking and restores the plain
+    set_clip_time/set_clip_progress push path for the same object."""
+    _load_animated_glb(viewer_client)
+    viewer_client.add_box("carriage", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('carriage')")
+
+    viewer_client.bind_clip(
+        "anim",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=2.0,
+    )
+    _set_local_y(viewer_page, "carriage", 2.0)
+    _wait_for_scale(viewer_page, 0.857)
+
+    viewer_client.unbind_clip("anim")
+    # Moving the (now unbound) source no longer touches the clip.
+    _set_local_y(viewer_page, "carriage", 0.0)
+    frames(viewer_page, 4)
+    assert abs(_node_scale(viewer_page) - 0.857) < 1e-3, (
+        "clip kept tracking the source after unbind_clip"
+    )
+
+    # The imperative path works again on the same object.
+    viewer_client.set_clip_progress("anim", 0.0)
+    _wait_for_scale(viewer_page, 0.059)
+
+
+@pytest.mark.browser
+def test_bind_clip_survives_readd_and_reads_matrix_sources(viewer_client, viewer_page):
+    """A binding survives a same-id re-add of its target (whose new mixer must
+    not be dropped by the re-add), follows a source whose pose is written as a
+    matrix (animation channels, follow paths), and is dropped by clear()."""
+    _load_animated_glb(viewer_client)
+    viewer_client.add_box("carriage", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('carriage')")
+    viewer_client.bind_clip(
+        "anim",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=2.0,
+    )
+    _set_local_y(viewer_page, "carriage", 2.0)
+    _wait_for_scale(viewer_page, 0.857)
+
+    # Re-push the target under the same id: the binding keeps driving it.
+    _load_animated_glb(viewer_client)
+    _wait_for(viewer_page, "() => window.threejsViewer._mixers.has('anim')")
+    _set_local_y(viewer_page, "carriage", 0.0)
+    _wait_for_scale(viewer_page, 0.059)
+
+    # A matrix-driven source (matrixAutoUpdate off, position left stale).
+    viewer_page.evaluate(
+        """() => {
+            const o = window.threejsViewer._objects.get('carriage');
+            o.matrixAutoUpdate = false;
+            o.matrix.makeTranslation(0, 1, 0);
+        }"""
+    )
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)
+
+    viewer_client.clear()
+    _wait_for(viewer_page, "() => window.threejsViewer._clipBindings.size === 0")
+
+
 @pytest.mark.browser
 def test_clear_scene(viewer_client, viewer_page):
     """clear() removes all objects."""
@@ -9459,3 +9569,142 @@ def test_axis_control_press_is_not_an_object_click(viewer_client, viewer_page):
         "() => window.threejsViewer._controls.target.toArray()"
     )
     assert target_after == pytest.approx(target_before, abs=1e-9)
+
+
+@pytest.mark.browser
+def test_axis_control_rotary_guide_caps_at_one_turn(viewer_client, viewer_page):
+    """A rotary range of several turns draws a single circle (the arc steps by
+    2*pi/64), while the value keeps the whole range."""
+    viewer_client.add_group("m")
+    viewer_client.add_axis_control(
+        "j",
+        target_id="m",
+        axis="z",
+        kind="rotary",
+        value=7.0,
+        min=0.0,
+        max=math.radians(18000),
+        radius=1.0,
+    )
+    settle(viewer_client)
+    r = viewer_page.evaluate(
+        """() => {
+            const c = window.threejsViewer._axisControls.controls.get('j');
+            const a = c.line.geometry.attributes.instanceStart;
+            const ang = i => Math.atan2(a.getZ(i), a.getY(i));
+            let step = ang(1) - ang(0);
+            if (step < 0) step += 2 * Math.PI;
+            return { step, value: c.value };
+        }"""
+    )
+    assert r["step"] == pytest.approx(2 * math.pi / 64, abs=1e-6)
+    assert r["value"] == pytest.approx(7.0)
+
+
+@pytest.mark.browser
+def test_grid_center_lines_only_with_center_color(viewer_client, viewer_page):
+    viewer_client.add_grid("plain")
+    viewer_client.add_grid("axes", center_color=0xAA4444)
+    settle(viewer_client)
+    flags = viewer_page.evaluate(
+        "() => ['plain', 'axes'].map(id => window.threejsViewer._objects.get(id)"
+        ".material.uniforms.uCenterLines.value)"
+    )
+    assert flags == [0.0, 1.0]
+
+
+@pytest.mark.browser
+def test_enable_move_gizmo_scale_keeps_gizmo_state(viewer_client, viewer_page):
+    """A new scale on the interactive gizmo is a live multiplier: same gizmo,
+    same attached object and axis masks."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("box")
+    viewer_client.set_gizmo_axes(x=False, y=False)
+    _wait_for(
+        viewer_page,
+        "() => { const c = window.threejsViewer._transformGizmo.control;"
+        " return c.object && !c.showX && !c.showY && c.showZ; }",
+    )
+    viewer_page.evaluate(
+        "() => { window.__g = window.threejsViewer._transformGizmo._primary; }"
+    )
+    viewer_client.enable_move_gizmo("box", scale=2.0)
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo._primary.scale === 2"
+    )
+    r = viewer_page.evaluate(
+        """() => {
+            const t = window.threejsViewer._transformGizmo;
+            const c = t.control;
+            return { same: t._primary === window.__g, id: t.objectId,
+                     axes: [c.showX, c.showY, c.showZ] };
+        }"""
+    )
+    assert r == {"same": True, "id": "box", "axes": [False, False, True]}
+
+
+@pytest.mark.browser
+def test_gizmo_windows_modifier_keys(viewer_client, viewer_page):
+    """On Windows Shift is the rotate override and Ctrl the snap key
+    (window.__gizmoWindowsKeys forces the platform)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo.objectId === 'box'"
+    )
+    viewer_page.evaluate("() => { window.__gizmoWindowsKeys = true; }")
+    assert viewer_page.evaluate("() => window.threejsViewer.gizmoModifierKeys()") == {
+        "rotate": "Shift",
+        "snap": "Control",
+    }
+    key = """([key, down, mods]) => {
+        window.threejsViewer.container.dispatchEvent(new KeyboardEvent(
+            down ? 'keydown' : 'keyup', { key, bubbles: true, ...mods }));
+        const g = window.threejsViewer._transformGizmo;
+        return { mode: g.control.getMode(), snap: g.control.translationSnap };
+    }"""
+    r = viewer_page.evaluate(key, ["Shift", True, {"shiftKey": True}])
+    assert r["mode"] == "rotate" and r["snap"] is None
+    r = viewer_page.evaluate(key, ["Shift", False, {}])
+    assert r["mode"] == "translate"
+    r = viewer_page.evaluate(key, ["Control", True, {"ctrlKey": True}])
+    assert r["mode"] == "translate" and r["snap"] == 1.0
+    viewer_page.evaluate(key, ["Control", False, {}])
+    viewer_page.evaluate("() => { window.__gizmoWindowsKeys = false; }")
+    assert viewer_page.evaluate("() => window.threejsViewer.gizmoModifierKeys()") == {
+        "rotate": "Alt",
+        "snap": "Shift",
+    }
+
+
+@pytest.mark.browser
+def test_rail_panel_opens_upward_and_tabs_stay_on_top(viewer_client, viewer_page):
+    """A low tab's tall panel is lifted to use the rail space above it, stays
+    inside the rail, and never covers another menu's tab."""
+    viewer_client.add_menu("a", [{"type": "label", "label": "A"}], label="First")
+    viewer_client.add_menu("b", [{"type": "label", "label": "B"}], label="Second")
+    items = [{"type": "button", "id": f"i{i}", "label": f"Item {i}"} for i in range(8)]
+    viewer_client.add_menu("tall", items, label="Tall menu")
+    settle(viewer_client)
+    viewer_page.evaluate("() => window.threejsViewer.getMenu('tall').open()")
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const m = v.getMenu('tall');
+            const rail = v.el.querySelector('.tjsv-rail').getBoundingClientRect();
+            const body = m.el.querySelector('.tjsv-rail-body') || m.el.lastElementChild;
+            const tab = m.el.querySelector('button').getBoundingClientRect();
+            const b = body.getBoundingClientRect();
+            const other = v.getMenu('b').el.querySelector('button').getBoundingClientRect();
+            const hit = document.elementFromPoint(other.left + other.width / 2, other.top + other.height / 2);
+            return { bodyTop: b.top, bodyBottom: b.bottom, tabTop: tab.top,
+                     railBottom: rail.bottom,
+                     otherTabOnTop: !!hit && v.getMenu('b').el.contains(hit) };
+        }"""
+    )
+    assert r["bodyTop"] < r["tabTop"], r
+    assert r["bodyBottom"] <= r["railBottom"] + 0.5, r
+    assert r["otherTabOnTop"] is True, r

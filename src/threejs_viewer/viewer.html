@@ -55,8 +55,13 @@
             transform: translateX(var(--tjsv-body-w, 190px));
             transition: transform 0.18s ease;
             pointer-events: none;   /* children re-enable; the gap stays click-through */
+            /* The transform makes each panel its own stacking context, so without this
+               an open body covers the tabs of every panel before it in the DOM. A
+               closed panel shows only its tab (its body is off-screen), so it can sit
+               above the open one: no tab is ever hidden by an open body. */
+            z-index: 2;
         }
-        .threejs-viewer .tjsv-rail-panel.open { transform: translateX(0); }
+        .threejs-viewer .tjsv-rail-panel.open { transform: translateX(0); z-index: 1; }
         .threejs-viewer .tjsv-rail-panel[hidden] { display: none; }
         .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn {
             pointer-events: auto;
@@ -101,12 +106,12 @@
             pointer-events: auto;
             width: var(--tjsv-body-w, 190px);
             box-sizing: border-box;
-            max-height: calc(100% - 8px);
             overflow-y: auto;
             background: rgba(30, 30, 30, 0.94);
             border: 1px solid var(--tjsv-border);
             border-right: none;
-            /* Square top-left (flush against the tab it opens beside); bottom-left rounded. */
+            /* Resting shape: square top-left, flush against its tab. When open,
+               MenuController._placeBody sets max-height, the upward lift and the corners. */
             border-radius: 0 0 0 4px;
             backdrop-filter: blur(3px);
             /* Extra right padding: a stacked tab below can overlap an open body's
@@ -2003,6 +2008,47 @@ function mixerClipDurations(mixer) {
     );
 }
 
+// ========== Declarative clip-time binding ==========
+// bind_clip (issue #225) replaces a per-tick `set_clip_time` push with a
+// standing declaration: `id`'s mixer time is a function of `source.id`'s own
+// live LOCAL transform, re-resolved every render frame in `_animate()`
+// instead of pushed over the WS. A push is subject to the same latest-wins
+// dispatch coalescing as every other WS message (AGENTS.md), so a fast jog
+// or drag can produce transform updates faster than they're dispatched and
+// intermediate set_clip_time values get dropped — the bound clip then visibly
+// skips instead of tracking the drag continuously. Resolving from state the
+// renderer already holds every frame (the same live transform a drag or a
+// streamed update already writes to `source.id`) needs no per-frame message
+// at all, so it can't be coalesced away.
+
+/** Read one named local-space channel off an Object3D's own transform (the
+ * same values a drag or a streamed transform message already writes to).
+ * @param {any} obj @param {string} channel `"translation"|"rotation"|"scale".x|y|z`
+ * @returns {number|null} null for an unrecognised channel */
+function readLocalChannel(obj, channel) {
+    const dot = channel.indexOf('.');
+    if (dot < 0) return null;
+    const prop = channel.slice(0, dot);
+    const axis = channel.slice(dot + 1);
+    if (axis !== 'x' && axis !== 'y' && axis !== 'z') return null;
+    // Animation channels and follow paths write obj.matrix with
+    // matrixAutoUpdate off, leaving position/rotation/scale stale.
+    let pos = obj.position, rot = obj.rotation, scl = obj.scale;
+    if (obj.matrixAutoUpdate === false) {
+        obj.matrix.decompose(_readChannelPos, _readChannelQuat, _readChannelScale);
+        pos = _readChannelPos; scl = _readChannelScale;
+        rot = _readChannelEuler.setFromQuaternion(_readChannelQuat, obj.rotation.order);
+    }
+    if (prop === 'translation') return pos[axis];
+    if (prop === 'rotation') return rot[axis];
+    if (prop === 'scale') return scl[axis];
+    return null;
+}
+const _readChannelPos = new THREE.Vector3();
+const _readChannelQuat = new THREE.Quaternion();
+const _readChannelScale = new THREE.Vector3();
+const _readChannelEuler = new THREE.Euler();
+
 // Channel apply functions — keyed by channel name. Signature is
 // (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
 // is null or t <= 0, all channels take the step path (current keyframe only).
@@ -3190,6 +3236,7 @@ uniform float uHalfExtent;
 uniform float uLineWidth;
 uniform vec3 uColor;
 uniform vec3 uCenterColor;
+uniform float uCenterLines;
 uniform vec3 uBackgroundColor;
 uniform float uBackgroundOpacity;
 uniform float uFadeStart;
@@ -3206,9 +3253,11 @@ void main() {
     float cellPx = 1.0 / max(fw.x, fw.y);
     lineA *= smoothstep(2.0, 4.0, cellPx);
 
-    // Axis lines through the local origin: distinct colour, slightly wider.
+    // Axis lines through the local origin: a distinct colour at the same width,
+    // and only when a centre colour was asked for (uCenterLines).
     vec2 axisDist = abs(coord) / fw;
-    float centerA = 1.0 - smoothstep(halfW + 0.5, halfW + 1.5, min(axisDist.x, axisDist.y));
+    float centerA = uCenterLines
+        * (1.0 - smoothstep(halfW - 0.5, halfW + 0.5, min(axisDist.x, axisDist.y)));
 
     vec3 lineColor = mix(uColor, uCenterColor, centerA);
     float alpha = max(lineA, centerA);
@@ -3252,6 +3301,7 @@ function buildFloorGridMesh(data) {
             uLineWidth: { value: data.lineWidth > 0 ? data.lineWidth : 1.5 },
             uColor: { value: new THREE.Color(data.color ?? 0x555555) },
             uCenterColor: { value: new THREE.Color(data.centerColor ?? data.color ?? 0x555555) },
+            uCenterLines: { value: data.centerColor != null ? 1.0 : 0.0 },
             uBackgroundColor: { value: new THREE.Color(data.backgroundColor ?? 0x000000) },
             uBackgroundOpacity: { value: Math.min(Math.max(data.backgroundOpacity ?? 0, 0), 1) },
             // Cap below 1.0: smoothstep(edge0, edge1, x) is undefined when
@@ -7107,6 +7157,8 @@ function playEyeTransition(mark, on) {
 }
 const RAIL_BASE_TOP = 16;
 const RAIL_GAP = 6;
+const RAIL_BODY_BOTTOM = 8;   // clearance kept under an open panel body
+const RAIL_BODY_RADIUS = 4;
 
 class MenuController {
     /**
@@ -7130,10 +7182,16 @@ class MenuController {
             // A panel-mode menu stays open across outside clicks.
         };
         document.addEventListener('pointerdown', this._onDocPointerDown);
+        // An open body re-places whenever its content or the viewport resizes.
+        this._resizeObs = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
+            for (const m of this._menus.values()) if (m.open) this._placeBody(m);
+        });
+        if (this._resizeObs && hosts.rail) this._resizeObs.observe(hosts.rail);
     }
 
     dispose() {
         document.removeEventListener('pointerdown', this._onDocPointerDown);
+        if (this._resizeObs) this._resizeObs.disconnect();
         for (const id of [...this._menus.keys()]) this.remove(id);
     }
 
@@ -7184,6 +7242,7 @@ class MenuController {
     remove(id) {
         const m = this._menus.get(id);
         if (!m) return false;
+        if (this._resizeObs) this._resizeObs.unobserve(m.body);
         m.root.remove();
         this._menus.delete(id);
         this._layoutRail();
@@ -7200,8 +7259,32 @@ class MenuController {
         for (const m of this._menus.values()) {
             if (m.root.hidden) continue;
             m.root.style.setProperty('--tjsv-rail-top', `${top}px`);
+            m.railTop = top;
             top += m.button.getBoundingClientRect().height + RAIL_GAP;
         }
+        for (const m of this._menus.values()) if (m.open) this._placeBody(m);
+    }
+
+    /**
+     * Lift an open body as high as the rail allows while it still spans its
+     * whole tab, so a tab low on the rail opens a panel that uses the space
+     * above it. The body is capped to the rail height (it scrolls past that),
+     * and only the corners not flush against the tab are rounded.
+     * @param {any} m
+     */
+    _placeBody(m) {
+        const rail = this._hosts.rail;
+        if (!rail || !m.body) return;
+        const tabTop = m.railTop ?? RAIL_BASE_TOP;
+        const tabH = m.button.offsetHeight;
+        const maxH = Math.max(tabH, rail.clientHeight - RAIL_BASE_TOP - RAIL_BODY_BOTTOM);
+        m.body.style.maxHeight = `${maxH}px`;
+        const bodyH = m.body.offsetHeight;
+        const lift = Math.max(0, Math.min(tabTop - RAIL_BASE_TOP, bodyH - tabH));
+        m.body.style.marginTop = `${-lift}px`;
+        const r = RAIL_BODY_RADIUS;
+        const flushBottom = lift > 0 && lift >= bodyH - tabH;
+        m.body.style.borderRadius = `${lift > 0 ? r : 0}px 0 0 ${flushBottom ? 0 : r}px`;
     }
 
     /** @param {any} m */
@@ -7248,6 +7331,7 @@ class MenuController {
         const body = document.createElement('div');
         body.className = 'tjsv-menu';
         m.body = body;
+        if (this._resizeObs) this._resizeObs.observe(body);
 
         // The rail tab: a vertical label. The viewer's own menu is the top
         // tab and shows only the connection-status dot.
@@ -7599,7 +7683,7 @@ class MenuController {
         m.open = want;
         m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
-        if (want) this.refresh(m);
+        if (want) { this.refresh(m); this._placeBody(m); }
     }
 
     /** @returns {boolean} */
@@ -9847,6 +9931,24 @@ class PolylinePickController {
 // so the move gizmo and the axis-control widget agree on what X/Y/Z look like.
 const GIZMO_PALETTE = { x: 0xAE4346, y: 0x5D9C74, z: 0x4369A2, n: 0xcfd3da };
 const GIZMO_HOVER_PALETTE = { x: 0xC74E52, y: 0x6DB587, z: 0x4D7ABD };
+// Gizmo modifier keys. On Windows a bare Alt press moves focus to the browser's
+// menu bar, so there Shift is the rotate override and Ctrl the snap toggle;
+// elsewhere Alt / Shift (Shift dodges macOS's Ctrl-click = right-click).
+// Anchored regex: an unanchored /win/ also matches "Darwin".
+// `window.__gizmoWindowsKeys` (true/false) overrides the detection, for tests.
+function gizmoOnWindows() {
+    if (typeof window !== 'undefined' && typeof /** @type {any} */ (window).__gizmoWindowsKeys === 'boolean') {
+        return /** @type {any} */ (window).__gizmoWindowsKeys;
+    }
+    return typeof navigator !== 'undefined'
+        && /^win/i.test(/** @type {any} */ (navigator).userAgentData?.platform || navigator.platform || '');
+}
+/** @returns {{rotate: string, snap: string}} */
+const gizmoKeys = () => (gizmoOnWindows() ? { rotate: 'Shift', snap: 'Control' } : { rotate: 'Alt', snap: 'Shift' });
+/** @param {KeyboardEvent|PointerEvent} e */
+const gizmoRotateHeld = (e) => (gizmoOnWindows() ? e.shiftKey : e.altKey);
+/** @param {KeyboardEvent|PointerEvent} e */
+const gizmoSnapHeld = (e) => (gizmoOnWindows() ? e.ctrlKey : e.shiftKey);
 const GIZMO_SIZE = 0.7;            // TransformControls screen-size factor; the axis lines are ~0.12 of the viewport height at this size
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
@@ -9864,7 +9966,7 @@ const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start p
 // (rather than lazily inside a function) would hit the temporal dead zone.
 const GIZMO_AXIS_LENGTH = 1.0;
 const GIZMO_PLANE_GAP_FACTOR = 0.15;
-const GIZMO_PLANE_SIZE_FACTOR = 0.75;
+const GIZMO_PLANE_SIZE_FACTOR = 0.45;
 const GIZMO_PLANE_OPACITY = 0.8;      // plane chips: mostly solid, a hint of what's behind
 const GIZMO_AXIS_PICK_RADIUS = 0.09;   // pill (capsule) hitbox radius around each axis line
 const GIZMO_CENTER_PICK_RADIUS = 0.16; // sphere hitbox radius around the (invisible) centre
@@ -10392,7 +10494,7 @@ class TransformGizmoController {
         this._snapDelta = new THREE.Vector3();                    // reusable scratch for the per-frame relative-snap delta
         this._lastReport = 0;
         this._interacted = false;                                 // a handle drag just happened
-        this._shiftHeld = false;                                  // last-seen Shift state (drives snap at drag-start)
+        this._snapHeld = false;                                   // last-seen snap-key state (drives snap at drag-start)
         this._raycaster = new THREE.Raycaster();
         this._ndc = new THREE.Vector2();
         this._downX = 0; this._downY = 0;
@@ -10418,29 +10520,28 @@ class TransformGizmoController {
     /** @returns {Gizmo[]} the interactive gizmo plus every pinned one. */
     _allGizmos() { return [this._primary, ...this._extra]; }
 
-    /** Alt → rotate mode (never mid-drag); Shift → toggle snap from the gizmo's
-     * resting state (live, read per move). Applied across every attached gizmo so
-     * modifiers are global. */
+    /** The rotate key → rotate mode (never mid-drag); the snap key → toggle snap
+     * from the gizmo's resting state (live, read per move). See gizmoKeys().
+     * Applied across every attached gizmo so modifiers are global. */
     _syncModifiers(e) {
         if (!this.enabled) return;
-        this._shiftHeld = e.shiftKey;
+        this._snapHeld = gizmoSnapHeld(e);
         for (const g of this._allGizmos()) {
             if (!g.object) continue;
             if (!g.control.dragging) {
-                // Alt is a momentary override → rotate; releasing it falls back to
-                // this gizmo's caller-set base mode (`g.mode`), not a hard-coded
-                // 'translate', so an Alt tap can't clobber a setGizmoMode('rotate').
-                const want = e.altKey ? 'rotate' : g.mode;
+                // The rotate key is a momentary override; releasing it falls back
+                // to this gizmo's caller-set base mode (`g.mode`), not a hard-coded
+                // 'translate', so a tap can't clobber a setGizmoMode('rotate').
+                const want = gizmoRotateHeld(e) ? 'rotate' : g.mode;
                 if (want !== g.control.getMode()) {
                     this._setControlMode(g, want);
                     this._restyleGizmo(g);
                 }
             }
-            // Shift toggles snap relative to the gizmo's resting state: a normal
-            // gizmo is free at rest and Shift enables snap; a `snapDefault` gizmo
-            // snaps at rest and Shift releases it for free placement. (Same key,
-            // inverted — and Shift dodges the Mac "Ctrl-click = right-click" trap.)
-            this._applySnap(g, g.snapDefault ? !e.shiftKey : e.shiftKey);
+            // The snap key toggles snap relative to the gizmo's resting state: a
+            // normal gizmo is free at rest and the key enables snap; a
+            // `snapDefault` gizmo snaps at rest and the key releases it.
+            this._applySnap(g, g.snapDefault ? !this._snapHeld : this._snapHeld);
         }
     }
 
@@ -10464,11 +10565,11 @@ class TransformGizmoController {
         if (dragging) {
             this._interacted = true;
             // Engage the resting snap state up front, using the live snap step and
-            // last-seen Shift state — so a `snapDefault` gizmo snaps from the very
-            // first drag even if no key was ever pressed (and even though the step
-            // may have been set after the gizmo was pinned). _syncModifiers keeps
-            // it live if Shift is toggled mid-drag.
-            this._applySnap(g, g.snapDefault ? !this._shiftHeld : this._shiftHeld);
+            // last-seen snap-key state — so a `snapDefault` gizmo snaps from the
+            // very first drag even if no key was ever pressed (and even though the
+            // step may have been set after the gizmo was pinned). _syncModifiers
+            // keeps it live if the key is toggled mid-drag.
+            this._applySnap(g, g.snapDefault ? !this._snapHeld : this._snapHeld);
             // Snapshot the grab-time pose: the origin for relative translation snap
             // and the `positionStart`/`quaternionStart` reported on release, and
             // drop a translucent ghost there so the original location stays visible.
@@ -10786,6 +10887,8 @@ class TransformGizmoController {
 
     /** @param {any} [opts] */
     enable(opts = {}) {
+        // Applied per frame on top of the constant screen size; no rebuild.
+        if (typeof opts.scale === 'number' && opts.scale > 0) this._primary.scale = opts.scale;
         if (opts.mode === 'rotate' || opts.mode === 'translate') this._primary.mode = opts.mode;
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
@@ -11026,8 +11129,11 @@ class AxisControl {
         const handleFlat = [];
         if (isRotary) {
             const R = this.radius;
-            const a0 = this.kind === 'rotary_unlimited' ? 0 : this.min;
-            const a1 = this.kind === 'rotary_unlimited' ? Math.PI * 2 : this.max;
+            // The guide never draws more than one turn: a wider range would
+            // only overdraw itself. The value and its clamp keep the full range.
+            const fullTurn = this.kind === 'rotary_unlimited' || this.max - this.min >= Math.PI * 2;
+            const a0 = fullTurn ? 0 : this.min;
+            const a1 = fullTurn ? Math.PI * 2 : this.max;
             for (let i = 0; i <= AXIS_CONTROL_ARC_SEGMENTS; i++) {
                 const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
                 flat.push(0, R * Math.cos(a), R * Math.sin(a));
@@ -11515,6 +11621,10 @@ class ThreeJSViewer {
         // Ids already warned about a set_clip_progress with no mixer.
         /** @type {Set<string>} */
         this._clipProgressWarned = new Set();
+        // id -> {source: {id, channel, from, to}} — see bind_clip. Kept across
+        // a delete/re-add of either id (same id = same logical object).
+        /** @type {Map<string, {source: {id:string, channel:string, from:number, to:number}}>} */
+        this._clipBindings = new Map();
         this._objGeneration = 0;
         this._mixerGeneration = 0;
         this._pendingFetches = 0;
@@ -13079,6 +13189,8 @@ class ThreeJSViewer {
      */
     async _addObject(id, objData, parentId, deleteOpts) {
         let obj;
+        /** @type {THREE.AnimationMixer|null} */
+        let newMixer = null;
         const token = this._claimLoadToken(id);
 
         if (objData.primitive) {
@@ -13139,12 +13251,10 @@ class ThreeJSViewer {
                 obj = this._instantiateModel(entry, format, objData.yUp === true);
                 if (entry.animations.length > 0) {
                     const mixerRoot = obj.userData.gltfScene || obj;
-                    const mixer = new THREE.AnimationMixer(mixerRoot);
+                    newMixer = new THREE.AnimationMixer(mixerRoot);
                     // Deferred bind: hold the authored bind pose until the
                     // first clip-drive message (issue #135).
-                    prepareModelMixer(mixer, entry.animations);
-                    this._mixers.set(id, mixer);
-                    this._mixerGeneration++;
+                    prepareModelMixer(newMixer, entry.animations);
                     console.log(`Model ${id}: ${entry.animations.length} animation clip(s) available`);
                 }
             } catch (e) {
@@ -13161,6 +13271,8 @@ class ThreeJSViewer {
         this._applyTransform(obj, objData.transform);
         this._applyInitialVisibility(id, obj, objData.visible);
         this._deleteObject(id, deleteOpts);
+        // After the delete, which drops the previous object's mixer for this id.
+        if (newMixer) { this._mixers.set(id, newMixer); this._mixerGeneration++; }
         this._addToParentOrScene(obj, parentId);
         this._registerObject(id, obj);
         if (this._clipEnabled) this._applyClipToObject(obj);
@@ -13255,6 +13367,38 @@ class ThreeJSViewer {
             return;
         }
         driveMixerProgress(mixer, t);
+    }
+
+    /** Declare (or clear) a declarative clip-time binding — see bind_clip.
+     * @param {string} id @param {{id:string, channel:string, from:number, to:number}|null|undefined} source */
+    _bindClip(id, source) {
+        if (!source || source.id == null) {
+            this._clipBindings.delete(id);
+            return;
+        }
+        this._clipBindings.set(id, { source });
+    }
+
+    /** Resolve every declared clip binding from its source's current live
+     * local transform and drive the bound mixer — called once per render
+     * frame from `_animate()`. Silently no-ops a binding whose target has no
+     * mixer yet or whose source isn't in the scene (either can arrive after
+     * the binding, e.g. on a cell load race); it just resolves once both
+     * exist. */
+    _resolveClipBindings() {
+        if (!this._clipBindings.size) return;
+        for (const [id, binding] of this._clipBindings) {
+            const mixer = this._mixers.get(id);
+            const src = this._objects.get(binding.source.id);
+            if (!mixer || !src) continue;
+            const raw = readLocalChannel(src, binding.source.channel);
+            if (raw == null) continue;
+            const { from, to } = binding.source;
+            const span = to - from;
+            if (span === 0) continue;
+            // driveMixerProgress clamps to [0, 1]: past either end holds the end pose.
+            driveMixerProgress(mixer, (raw - from) / span);
+        }
     }
 
     /** @param {string} id @param {number} value */
@@ -14015,6 +14159,7 @@ class ThreeJSViewer {
         }
         this._followPaths.clear();
         this._pendingReparent.clear();
+        this._clipBindings.clear();
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
@@ -16816,6 +16961,17 @@ class ThreeJSViewer {
             case 'remove_axis_control':
                 this._axisControls.remove(data.id);
                 break;
+            case 'bind_clip':
+                // Declared once (cell load / cell switch), not per-tick, so this
+                // is NOT gated behind _withObject like the imperative clip calls
+                // above — the target's mixer, and the source object, are each
+                // allowed to arrive after the binding (_resolveClipBindings
+                // no-ops until both exist).
+                this._bindClip(data.id, data.source);
+                break;
+            case 'unbind_clip':
+                this._bindClip(data.id, null);
+                break;
             case 'set_follow_path': {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
@@ -17015,6 +17171,7 @@ class ThreeJSViewer {
                         snapDefault: data.snapDefault,
                         color: data.color,
                         hoverColor: data.hoverColor,
+                        scale: data.scale,
                     });
                 } else {
                     this._transformGizmo.disable();
@@ -17221,6 +17378,11 @@ class ThreeJSViewer {
                 this._lastUIUpdate = now;
             }
         }
+
+        // Live jog/drag clip bindings (issue #225) — unaffected by, and runs
+        // regardless of, recorded-animation scrubbing above (that path drives
+        // clip times from `frame.clip_times` instead).
+        this._resolveClipBindings();
 
         this._controls.update();
         this._depthCue.update();
@@ -18436,6 +18598,15 @@ class ThreeJSViewer {
     /** @param {string} id */
     removeAxisControl(id) { this._axisControls.remove(id); }
 
+    /** Direct-call JS equivalent of the `bind_clip` WS message: drive `id`'s
+     * clip from `source.id`'s live local `source.channel`, mapping
+     * `source.from`..`source.to` onto clip progress 0..1, every render frame.
+     * @param {string} id @param {{id:string, channel:string, from:number, to:number}} source */
+    bindClip(id, source) { this._bindClip(id, source); }
+
+    /** @param {string} id */
+    unbindClip(id) { this._bindClip(id, null); }
+
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
      * its own axis constraint and base mode. Independent of the interactive gizmo
@@ -18515,6 +18686,11 @@ class ThreeJSViewer {
      * @param {number|null} step @param {{relative?:boolean}} [opts]
      */
     setGizmoTranslateSnap(step, opts) { this._transformGizmo.setTranslateSnap(step, opts || {}); }
+
+    /** The gizmo's modifier keys on this platform, as `KeyboardEvent.key` names:
+     * `{rotate, snap}` — Shift / Control on Windows, Alt / Shift elsewhere.
+     * @returns {{rotate: string, snap: string}} */
+    gizmoModifierKeys() { return gizmoKeys(); }
 
     /**
      * Register a hook fired on every gizmo `objectChange` — synchronously, on each

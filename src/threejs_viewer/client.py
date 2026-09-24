@@ -42,6 +42,11 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
 _ALLOWED_AXIS_CONTROL_AXES = frozenset({"x", "y", "z"})
+_ALLOWED_CLIP_CHANNELS = frozenset(
+    f"{prop}.{axis}"
+    for prop in ("translation", "rotation", "scale")
+    for axis in ("x", "y", "z")
+)
 _ALLOWED_AXIS_CONTROL_KINDS = frozenset(
     {"rotary", "rotary_unlimited", "linear", "linear_unlimited"}
 )
@@ -734,6 +739,10 @@ class ViewerClient:
         # viewer holds none of this state across a fresh WS connection).
         self._axis_controls: Dict[str, dict] = {}
         self._axis_control_callbacks: List = []
+        # Clip bindings declared with bind_clip — id -> its bind_clip message, so
+        # a reconnect re-declares each one (the viewer resolves them per frame
+        # but holds none of them across a fresh WS connection).
+        self._clip_bindings: Dict[str, dict] = {}
         # Pinned (persistent) gizmos added with add_gizmo — a list of
         # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
         # interactive gizmo above; any number can be active at once, each with its
@@ -949,6 +958,14 @@ class ViewerClient:
         # Re-add any axis-control widgets (the viewer's own state is gone on a
         # fresh WS connection, same as pinned gizmos above).
         for spec in self._axis_controls.values():
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
+        # Re-declare clip bindings. Objects are not replayed; the viewer resolves
+        # a binding once both ids exist, whenever they arrive.
+        for spec in self._clip_bindings.values():
             try:
                 websocket.send(json.dumps(spec))
             except Exception:
@@ -1357,9 +1374,9 @@ class ViewerClient:
         a first-class tracked object: it has an id, can be deleted, moved,
         parented, and hidden, and multiple grids can coexist. The grid is
         rendered as a single plane with a shader — crisp anti-aliased lines
-        whose width is screen-space stable (in pixels, not world units), a
-        distinct colour for the two axis lines through the local origin, and
-        a radial alpha fade toward the plane edge so the finite plane reads
+        whose width is screen-space stable (in pixels, not world units), an
+        optional distinct colour for the two axis lines through the local
+        origin, and a radial alpha fade toward the plane edge so the finite plane reads
         as an infinite floor. Where cells shrink below a few pixels (grazing
         angles, far distance) the grid thins out instead of collapsing into
         a solid sheet.
@@ -1376,7 +1393,8 @@ class ViewerClient:
             line_width: Grid line width in screen pixels.
             color: Grid line colour (0xRRGGBB).
             center_color: Colour of the two axis lines through the local
-                origin. ``None`` uses ``color``.
+                origin, drawn at the same width as the other lines. ``None``
+                (default) draws them as ordinary grid lines.
             background_color: Fill colour of the plane between the lines.
                 Only visible with ``background_opacity > 0``.
             background_opacity: Opacity of the plane fill in [0, 1].
@@ -3397,6 +3415,96 @@ class ViewerClient:
             raise ValueError(f"t must be a finite number (got {t!r})")
         self._send({"type": "set_clip_progress", "id": id, "t": t})
 
+    def bind_clip(
+        self,
+        id: str,
+        *,
+        source_id: str,
+        channel: Literal[
+            "translation.x",
+            "translation.y",
+            "translation.z",
+            "rotation.x",
+            "rotation.y",
+            "rotation.z",
+            "scale.x",
+            "scale.y",
+            "scale.z",
+        ],
+        from_value: float,
+        to_value: float,
+    ) -> None:
+        """Declare that ``id``'s embedded clip mixer time tracks another
+        object's own live local transform, instead of being pushed here on
+        every tick.
+
+        ``source_id`` is the object whose local transform drives the clip —
+        typically the same object a drag gizmo or a streamed transform
+        message already moves (a jog, a `set_follow_path`, an in-flight
+        gizmo drag all compose with this automatically, since the viewer
+        just reads that object's current local transform every render
+        frame). ``channel`` picks one local-space component of it;
+        ``from_value``/``to_value`` are that channel's values at clip time 0
+        and 1 respectively.
+
+        This exists because :meth:`set_clip_time` pushed once per tick rides
+        the same latest-wins coalesced WS dispatch as everything else — a
+        fast jog or drag can produce transform updates faster than they're
+        dispatched, so intermediate pushes get dropped and the clip visibly
+        skips. A binding needs no per-frame message at all: the viewer
+        resolves ``source_id``'s live transform itself every frame, so
+        there is nothing to coalesce away.
+
+        Call once (e.g. on cell load / cell switch), not per-tick — this
+        replaces the imperative push for the life of the binding. Call
+        :meth:`unbind_clip` (or :meth:`bind_clip` again, with a different
+        ``source_id``) to change or remove it; the plain :meth:`set_clip_time`
+        / :meth:`set_clip_progress` push path is still there for objects with
+        no natural geometric parent to bind to. Either side of the binding
+        may not exist yet when this is called — it just resolves once both
+        ``id``'s clip mixer and ``source_id`` are in the scene. The binding
+        survives a delete and re-add of either id; :meth:`clear` drops it.
+
+        Values outside ``from_value``..``to_value`` hold the clip's end pose.
+        The source is read from its local transform, including one written
+        by an animation channel or :meth:`set_follow_path`. A ``rotation.*``
+        channel reads an XYZ Euler angle, which wraps at ±π; bind a rotary
+        source only over a range that stays inside one half-turn either side
+        of zero.
+
+        Raises:
+            ValueError: For an unknown ``channel``, a non-finite value, or
+                ``from_value == to_value``.
+        """
+        if channel not in _ALLOWED_CLIP_CHANNELS:
+            allowed = ", ".join(sorted(_ALLOWED_CLIP_CHANNELS))
+            raise ValueError(f"channel must be one of: {allowed} (got {channel!r})")
+        from_value = _validate_finite("from_value", from_value)
+        to_value = _validate_finite("to_value", to_value)
+        if from_value == to_value:
+            raise ValueError("from_value and to_value must differ")
+        spec = {
+            "type": "bind_clip",
+            "id": id,
+            "source": {
+                "id": source_id,
+                "channel": channel,
+                "from": from_value,
+                "to": to_value,
+            },
+        }
+        self._clip_bindings[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def unbind_clip(self, id: str) -> None:
+        """Remove a :meth:`bind_clip` binding, restoring the plain
+        :meth:`set_clip_time` / :meth:`set_clip_progress` push path. A no-op
+        if ``id`` has no binding."""
+        self._clip_bindings.pop(id, None)
+        if self._ws is not None:
+            self._send({"type": "unbind_clip", "id": id})
+
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
         path — per render tick the viewer computes the pose from the REAL
@@ -4210,19 +4318,23 @@ class ViewerClient:
         snap_default: bool = False,
         color: Optional[int] = None,
         hover_color: Optional[int] = None,
+        scale: Optional[float] = None,
     ) -> None:
         """Show an interactive move/rotate gizmo for transforming objects.
 
         The gizmo is built on three.js ``TransformControls``. Once enabled,
-        **hold Alt** while dragging to rotate (otherwise it translates), and
-        **hold Shift** to snap — translations to a ``translate_snap`` grid,
-        rotations to ``rotate_snap_deg`` increments. Snapping is sampled live,
-        so Shift can be toggled mid-drag.
+        **hold the rotate key** while dragging to rotate (otherwise it
+        translates), and **hold the snap key** to snap — translations to a
+        ``translate_snap`` grid, rotations to ``rotate_snap_deg`` increments.
+        The rotate key is Alt and the snap key Shift, except on Windows, where
+        they are Shift and Ctrl (a bare Alt press there moves focus to the
+        browser's menu bar). Snapping is sampled live, so the snap key can be
+        toggled mid-drag.
 
         With ``translate_snap_relative=True`` the translation snap quantises the
         drag *delta* from the grab-time position (so an item at ``347`` nudged a
         step lands at ``447``, not on the nearest absolute grid line), and is
-        applied on every drag frame rather than only while Shift is held. The
+        applied on every drag frame rather than only while the snap key is held. The
         native absolute Shift-to-snap grid is suppressed in this mode. The step is
         applied in the target's *local* frame (its parent's axes); for a target
         whose parent is identity or translation-only — the common case — that is
@@ -4243,29 +4355,32 @@ class ViewerClient:
             id: Object id to attach to immediately, or ``None`` to wait for a
                 click (when ``click_select`` is on).
             mode: Initial mode, ``"translate"`` (default) or ``"rotate"``.
-                Alt overrides this live while held.
-            translate_snap: Grid size (world units) used while Shift is held
+                The rotate key overrides this live while held.
+            translate_snap: Grid size (world units) used while the snap key is held
                 (or always, when ``translate_snap_relative`` is set). Must be a
                 positive, finite number.
             translate_snap_relative: When ``True``, snap the drag delta relative
                 to the grab-time position instead of an absolute world grid, and
-                apply it on every drag frame (not only while Shift is held).
-            rotate_snap_deg: Rotation increment in degrees used while Shift is
-                held. Must be a positive, finite number.
+                apply it on every drag frame (not only while the snap key is held).
+            rotate_snap_deg: Rotation increment in degrees used while the snap
+                key is held. Must be a positive, finite number.
             click_select: When ``True`` (default), clicking an object attaches
                 the gizmo to it.
             snap_default: When ``True``, snap is the resting state and holding
-                Shift moves freely (the inverse of the default free / Shift-to-snap).
+                the snap key moves freely (the inverse of the default free / key-to-snap).
             color: Override the gizmo's per-axis palette with one colour for
                 every axis/plane. ``None`` (default) keeps the distinct X/Y/Z
                 palette (matching the corner view gimbal).
             hover_color: Override the colour a handle turns while
                 hovered/dragging. ``None`` (default) auto-derives a lightened
                 variant of its base colour.
+            scale: Multiplier on the gizmo's constant on-screen size (handles
+                and pick areas scale together). ``None`` keeps the current
+                size (``1.0`` initially).
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
-                snap values.
+                snap or scale values.
         """
         if mode not in _ALLOWED_GIZMO_MODES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
@@ -4280,6 +4395,13 @@ class ViewerClient:
             raise ValueError(
                 f"rotate_snap_deg must be a positive number (got {rotate_snap_deg!r})"
             )
+        if scale is None:
+            # Keep the size from an earlier enable, so a reconnect replays it.
+            scale = (self._move_gizmo or {}).get("scale")
+        else:
+            scale = _validate_finite("scale", scale)
+            if scale <= 0:
+                raise ValueError(f"scale must be > 0 (got {scale!r})")
         self._move_gizmo = {
             "type": "set_move_gizmo",
             "enabled": True,
@@ -4293,6 +4415,8 @@ class ViewerClient:
             "color": color,
             "hoverColor": hover_color,
         }
+        if scale is not None:
+            self._move_gizmo["scale"] = scale
         if self._ws is not None:
             self._send(self._move_gizmo)
 
@@ -4341,10 +4465,10 @@ class ViewerClient:
         - all ``True`` (default) → the full 3-DOF gizmo.
 
         As with the interactive gizmo, dragging reports the new transform to every
-        callback registered with :meth:`on_object_move`, holding Alt rotates, and a
+        callback registered with :meth:`on_object_move`, holding the rotate key rotates, and a
         translucent ghost marks the start pose until release. By default the gizmo
-        moves freely and holding Shift snaps; pass ``snap_default=True`` to flip
-        that — snap becomes the resting state and holding Shift releases it for free
+        moves freely and holding the snap key snaps; pass ``snap_default=True`` to flip
+        that — snap becomes the resting state and holding the key releases it for free
         placement. Pinned gizmos are re-created automatically if the browser
         reconnects, and are removed by :meth:`clear_gizmos`,
         :meth:`disable_move_gizmo`, or clearing the scene.
@@ -4364,13 +4488,13 @@ class ViewerClient:
                 :meth:`set_gizmo_axes`).
             rotate: Optional axis mask for the rotate rings only, replacing
                 ``x``/``y``/``z`` in rotate mode.
-            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Alt
-                overrides this live while held.
+            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. The
+                rotate key overrides this live while held.
             space: Handle orientation, ``"world"`` (default — axes stay aligned
                 to the world) or ``"local"`` (the gizmo turns with the object's
                 own rotation, so the arrows follow a tilted object).
-            snap_default: When ``True``, snap is the resting state (and Shift moves
-                freely) instead of the default free-with-Shift-to-snap.
+            snap_default: When ``True``, snap is the resting state (and the snap key
+                moves freely) instead of the default free-with-key-to-snap.
             color: Override this gizmo's per-axis palette with one colour for
                 every axis/plane (see :meth:`enable_move_gizmo`).
             hover_color: Override the colour this gizmo's handles turn while
@@ -4439,8 +4563,8 @@ class ViewerClient:
         that mask replaces ``x``/``y``/``z`` for its mode. For example
         ``set_gizmo_axes(rotate={"z": False})`` keeps all three arrows and the
         X/Y rings but hides the Z ring, for a rotation that is derived rather
-        than dragged. The mask follows the live mode, so it also holds while Alt
-        switches the gizmo to rotate.
+        than dragged. The mask follows the live mode, so it also holds while the
+        rotate key switches the gizmo to rotate.
 
         The constraint applies to whichever object the gizmo is (or becomes)
         attached to, and is re-sent automatically if the browser reconnects. The
@@ -4490,7 +4614,7 @@ class ViewerClient:
         - ``quaternion_start`` — ``[x, y, z, w]`` local rotation at drag-start.
         - ``mode`` — the *effective* mode of this drag: ``"translate"``,
           ``"rotate"`` or ``"scale"``. Read off the live control, so a
-          momentary **Alt** rotate override reports ``"rotate"`` even though
+          momentary rotate-key override reports ``"rotate"`` even though
           the gizmo's base mode is still translate — branch on this (not on
           the mode you configured) when interpreting the drag.
         - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).
@@ -4556,6 +4680,8 @@ class ViewerClient:
         ``kind``:
 
         - ``"rotary"`` — an arc from ``min`` to ``max`` radians, at ``radius``.
+          A range of a full turn or more draws one closed circle; the value
+          still spans (and is clamped to) the whole range.
         - ``"rotary_unlimited"`` — a full circle at ``radius``; ``min``/``max``
           are ignored, and dragging can turn past ±180° (the value keeps
           accumulating rather than wrapping).
@@ -4727,8 +4853,9 @@ class ViewerClient:
         # scene clear, so forget them here too (else a reconnect would re-pin them
         # to ids that no longer exist).
         self._gizmos = []
-        # Axis controls likewise target now-removed objects.
+        # Axis controls and clip bindings likewise target now-removed objects.
         self._axis_controls = {}
+        self._clip_bindings = {}
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a
