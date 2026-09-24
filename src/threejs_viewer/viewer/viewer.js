@@ -9516,9 +9516,12 @@ class AxisControl {
         // pixel size and is kept current in AxisControlManager.update() —
         // devicePixelRatio-independent as long as it matches the renderer's
         // own drawing-buffer size, same as every other fat line here.
+        // `transparent` puts the lines in three's transparent list, drawn after
+        // the opaque one; there renderOrder 900 lands them over a transparent
+        // floor grid, which as an opaque line they sat underneath.
         this.lineMaterial = new LineMaterial({
             color: this._baseColor.clone(), linewidth: AXIS_CONTROL_LINE_WIDTH_PX,
-            depthTest: false, depthWrite: false, toneMapped: false,
+            depthTest: false, depthWrite: false, toneMapped: false, transparent: true,
             resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
         });
         this.line = new Line2(new LineGeometry(), this.lineMaterial);
@@ -9532,7 +9535,7 @@ class AxisControl {
         // `_setHovered`).
         this.handleLineMaterial = new LineMaterial({
             color: this._baseColor.clone(), linewidth: AXIS_CONTROL_HANDLE_WIDTH_PX,
-            depthTest: false, depthWrite: false, toneMapped: false,
+            depthTest: false, depthWrite: false, toneMapped: false, transparent: true,
             resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
         });
         this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
