@@ -4290,6 +4290,7 @@ class ViewerClient:
         snap_default: bool = False,
         color: Optional[int] = None,
         hover_color: Optional[int] = None,
+        scale: Optional[float] = None,
     ) -> None:
         """Show an interactive move/rotate gizmo for transforming objects.
 
@@ -4342,6 +4343,9 @@ class ViewerClient:
             hover_color: Override the colour a handle turns while
                 hovered/dragging. ``None`` (default) auto-derives a lightened
                 variant of its base colour.
+            scale: Size multiplier for the handles (axis length, plane size,
+                pick radii). The gizmo is world-sized, so ``1.0`` is a 1 m
+                axis. ``None`` keeps the current size.
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
@@ -4373,6 +4377,8 @@ class ViewerClient:
             "color": color,
             "hoverColor": hover_color,
         }
+        if scale is not None:
+            self._move_gizmo["scale"] = float(scale)
         if self._ws is not None:
             self._send(self._move_gizmo)
 

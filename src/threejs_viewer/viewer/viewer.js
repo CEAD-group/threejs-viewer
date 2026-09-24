@@ -8380,7 +8380,7 @@ const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start p
 // (rather than lazily inside a function) would hit the temporal dead zone.
 const GIZMO_AXIS_LENGTH = 1.0;
 const GIZMO_PLANE_GAP_FACTOR = 0.15;
-const GIZMO_PLANE_SIZE_FACTOR = 0.75;
+const GIZMO_PLANE_SIZE_FACTOR = 0.45;
 const GIZMO_PLANE_OPACITY = 0.8;      // plane chips: mostly solid, a hint of what's behind
 const GIZMO_AXIS_PICK_RADIUS = 0.09;   // pill (capsule) hitbox radius around each axis line
 const GIZMO_CENTER_PICK_RADIUS = 0.16; // sphere hitbox radius around the (invisible) centre
@@ -9310,6 +9310,10 @@ class TransformGizmoController {
 
     /** @param {any} [opts] */
     enable(opts = {}) {
+        // The handles are built at a fixed size, so a new size is a new gizmo.
+        if (typeof opts.scale === 'number' && opts.scale > 0 && opts.scale !== this._primary.scale) {
+            this._rebuildPrimary(opts.scale);
+        }
         if (opts.mode === 'rotate' || opts.mode === 'translate') this._primary.mode = opts.mode;
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
@@ -9324,6 +9328,24 @@ class TransformGizmoController {
             const obj = this.v._objects.get(opts.id);
             if (obj) this.attach(obj, opts.id);
         }
+    }
+
+    /** Replace the interactive gizmo with one built at `scale`, keeping its
+     * mode, axis masks, snap convention, colours and attached object.
+     * @param {number} scale */
+    _rebuildPrimary(scale) {
+        const old = this._primary;
+        const object = old.object, id = old.id;
+        if (object) this.detach();
+        const g = new Gizmo(this, { scale });
+        g.mode = old.mode;
+        g.axes = old.axes;
+        g.snapDefault = old.snapDefault;
+        g.color = old.color;
+        g.hoverColor = old.hoverColor;
+        old.dispose();
+        this._primary = g;
+        if (object) this.attach(object, id);
     }
 
     /** Register the window/dom listeners and mark enabled. Idempotent. */
@@ -15542,6 +15564,7 @@ export class ThreeJSViewer {
                         snapDefault: data.snapDefault,
                         color: data.color,
                         hoverColor: data.hoverColor,
+                        scale: data.scale,
                     });
                 } else {
                     this._transformGizmo.disable();
