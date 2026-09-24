@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.0.59
+
+### Axis-control range widgets (#230)
+
+- **`add_axis_control` / `update_axis_control` / `remove_axis_control` / `on_axis_control_change`** (JS `addAxisControl` / `updateAxisControl` / `removeAxisControl` / `onAxisControlChange`): a fat guide line shows an axis's range of motion and a short, thicker section marks the value. Kinds `rotary` (arc `min`..`max` radians), `rotary_unlimited` (full circle, the value accumulates past ±180°), `linear` (`min`..`max` along the axis) and `linear_unlimited` (`value ± window`, re-centred on every change). A rotary range of a full turn or more draws one circle.
+- A control is anchored every frame at its target's live world pivot and local axis, so a moving target carries it. Dragging the handle reports `{id, value, phase}` (`move` at up to 30 Hz, then `end`); the viewer applies the value immediately and `update_axis_control` can correct it. `bbox_source_id` without `radius` derives a rotary radius from that object's bounding box once it is in the scene.
+- Controls draw over the scene, stay out of framing bounds and the clipping planes, and are hidden while their target does not exist. A press on a handle does not move the orbit pivot, select an object, fire `object_clicked` or trigger dblclick framing. See `examples/36_axis_control.py`.
+
+### Move gizmo restyled (#230, #238)
+
+- **Fat-line handles in the axis-control style**: one line per translate axis, flat translucent plane chips, half-circle rotate arcs, with invisible hitboxes hugging each. Hovering a plane highlights the two axes that span it.
+- **New palette** (`0xAE4346` / `0x5D9C74` / `0x4369A2`), shared with the axis controls and the corner view gimbal, which is recoloured to match. `color=` / `hover_color=` on `add_gizmo` and `enable_move_gizmo` override it.
+- The gizmo keeps its constant on-screen size; `scale=` on `add_gizmo` and `enable_move_gizmo` multiplies it.
+- Gizmo helpers render in an overlay pass after the scene (and after eye-dome lighting), so handles are never hidden behind geometry.
+- **On Windows, Shift rotates and Ctrl snaps**, because a bare Alt press there moves focus to the browser menu bar. macOS and Linux keep Alt / Shift. `viewer.gizmoModifierKeys()` returns the key names.
+
+### Declarative clip binding (#225, #238)
+
+- **`bind_clip(id, source_id, channel, from_value, to_value)` / `unbind_clip(id)`** (JS `viewer.bindClip` / `unbindClip`): `id`'s embedded clip tracks one local transform channel of `source_id`, mapped `from_value..to_value` onto clip progress 0..1 and re-read every rendered frame. A fast drag or jog no longer skips clip poses the way a per-tick `set_clip_time` push can. Either object may arrive after the binding; bindings survive a re-add of either id, are replayed on reconnect and dropped by `clear()`.
+- **Fix:** re-adding an animated model under the same id no longer drops its new animation mixer.
+
+### Rail menus open upward (#238)
+
+- An open panel on a low tab lifts to use the rail space above it instead of running off the bottom, is capped to the rail height (scrolling past that), and never covers another menu's tab.
+
+### Floor grid centre lines (#238)
+
+- **`add_grid` draws the origin lines only when `center_color` is given**, at the normal line width. Without it they are ordinary grid lines that fade with the rest; before, they were always drawn wider and exempt from the fade.
+
 ## 0.0.58
 
 ### Configurable view gimbal size, compact on phones (#233)
