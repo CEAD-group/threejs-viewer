@@ -4295,15 +4295,18 @@ class ViewerClient:
         """Show an interactive move/rotate gizmo for transforming objects.
 
         The gizmo is built on three.js ``TransformControls``. Once enabled,
-        **hold Alt** while dragging to rotate (otherwise it translates), and
-        **hold Shift** to snap — translations to a ``translate_snap`` grid,
-        rotations to ``rotate_snap_deg`` increments. Snapping is sampled live,
-        so Shift can be toggled mid-drag.
+        **hold the rotate key** while dragging to rotate (otherwise it
+        translates), and **hold the snap key** to snap — translations to a
+        ``translate_snap`` grid, rotations to ``rotate_snap_deg`` increments.
+        The rotate key is Alt and the snap key Shift, except on Windows, where
+        they are Shift and Ctrl (a bare Alt press there moves focus to the
+        browser's menu bar). Snapping is sampled live, so the snap key can be
+        toggled mid-drag.
 
         With ``translate_snap_relative=True`` the translation snap quantises the
         drag *delta* from the grab-time position (so an item at ``347`` nudged a
         step lands at ``447``, not on the nearest absolute grid line), and is
-        applied on every drag frame rather than only while Shift is held. The
+        applied on every drag frame rather than only while the snap key is held. The
         native absolute Shift-to-snap grid is suppressed in this mode. The step is
         applied in the target's *local* frame (its parent's axes); for a target
         whose parent is identity or translation-only — the common case — that is
@@ -4324,19 +4327,19 @@ class ViewerClient:
             id: Object id to attach to immediately, or ``None`` to wait for a
                 click (when ``click_select`` is on).
             mode: Initial mode, ``"translate"`` (default) or ``"rotate"``.
-                Alt overrides this live while held.
-            translate_snap: Grid size (world units) used while Shift is held
+                The rotate key overrides this live while held.
+            translate_snap: Grid size (world units) used while the snap key is held
                 (or always, when ``translate_snap_relative`` is set). Must be a
                 positive, finite number.
             translate_snap_relative: When ``True``, snap the drag delta relative
                 to the grab-time position instead of an absolute world grid, and
-                apply it on every drag frame (not only while Shift is held).
-            rotate_snap_deg: Rotation increment in degrees used while Shift is
-                held. Must be a positive, finite number.
+                apply it on every drag frame (not only while the snap key is held).
+            rotate_snap_deg: Rotation increment in degrees used while the snap
+                key is held. Must be a positive, finite number.
             click_select: When ``True`` (default), clicking an object attaches
                 the gizmo to it.
             snap_default: When ``True``, snap is the resting state and holding
-                Shift moves freely (the inverse of the default free / Shift-to-snap).
+                the snap key moves freely (the inverse of the default free / key-to-snap).
             color: Override the gizmo's per-axis palette with one colour for
                 every axis/plane. ``None`` (default) keeps the distinct X/Y/Z
                 palette (matching the corner view gimbal).
@@ -4427,10 +4430,10 @@ class ViewerClient:
         - all ``True`` (default) → the full 3-DOF gizmo.
 
         As with the interactive gizmo, dragging reports the new transform to every
-        callback registered with :meth:`on_object_move`, holding Alt rotates, and a
+        callback registered with :meth:`on_object_move`, holding the rotate key rotates, and a
         translucent ghost marks the start pose until release. By default the gizmo
-        moves freely and holding Shift snaps; pass ``snap_default=True`` to flip
-        that — snap becomes the resting state and holding Shift releases it for free
+        moves freely and holding the snap key snaps; pass ``snap_default=True`` to flip
+        that — snap becomes the resting state and holding the key releases it for free
         placement. Pinned gizmos are re-created automatically if the browser
         reconnects, and are removed by :meth:`clear_gizmos`,
         :meth:`disable_move_gizmo`, or clearing the scene.
@@ -4450,13 +4453,13 @@ class ViewerClient:
                 :meth:`set_gizmo_axes`).
             rotate: Optional axis mask for the rotate rings only, replacing
                 ``x``/``y``/``z`` in rotate mode.
-            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. Alt
-                overrides this live while held.
+            mode: Base mode, ``"translate"`` (default) or ``"rotate"``. The
+                rotate key overrides this live while held.
             space: Handle orientation, ``"world"`` (default — axes stay aligned
                 to the world) or ``"local"`` (the gizmo turns with the object's
                 own rotation, so the arrows follow a tilted object).
-            snap_default: When ``True``, snap is the resting state (and Shift moves
-                freely) instead of the default free-with-Shift-to-snap.
+            snap_default: When ``True``, snap is the resting state (and the snap key
+                moves freely) instead of the default free-with-key-to-snap.
             color: Override this gizmo's per-axis palette with one colour for
                 every axis/plane (see :meth:`enable_move_gizmo`).
             hover_color: Override the colour this gizmo's handles turn while
@@ -4521,8 +4524,8 @@ class ViewerClient:
         that mask replaces ``x``/``y``/``z`` for its mode. For example
         ``set_gizmo_axes(rotate={"z": False})`` keeps all three arrows and the
         X/Y rings but hides the Z ring, for a rotation that is derived rather
-        than dragged. The mask follows the live mode, so it also holds while Alt
-        switches the gizmo to rotate.
+        than dragged. The mask follows the live mode, so it also holds while the
+        rotate key switches the gizmo to rotate.
 
         The constraint applies to whichever object the gizmo is (or becomes)
         attached to, and is re-sent automatically if the browser reconnects. The
@@ -4572,7 +4575,7 @@ class ViewerClient:
         - ``quaternion_start`` — ``[x, y, z, w]`` local rotation at drag-start.
         - ``mode`` — the *effective* mode of this drag: ``"translate"``,
           ``"rotate"`` or ``"scale"``. Read off the live control, so a
-          momentary **Alt** rotate override reports ``"rotate"`` even though
+          momentary rotate-key override reports ``"rotate"`` even though
           the gizmo's base mode is still translate — branch on this (not on
           the mode you configured) when interpreting the drag.
         - ``phase`` — ``"move"`` (throttled, mid-drag) or ``"end"`` (on release).

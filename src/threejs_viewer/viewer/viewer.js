@@ -8362,6 +8362,18 @@ class PolylinePickController {
 // so the move gizmo and the axis-control widget agree on what X/Y/Z look like.
 const GIZMO_PALETTE = { x: 0xAE4346, y: 0x5D9C74, z: 0x4369A2, n: 0xcfd3da };
 const GIZMO_HOVER_PALETTE = { x: 0xC74E52, y: 0x6DB587, z: 0x4D7ABD };
+// Gizmo modifier keys. On Windows a bare Alt press moves focus to the browser's
+// menu bar, so there Shift is the rotate override and Ctrl the snap toggle;
+// elsewhere Alt / Shift (Shift dodges macOS's Ctrl-click = right-click).
+const GIZMO_ON_WINDOWS = typeof navigator !== 'undefined'
+    && /win/i.test(/** @type {any} */ (navigator).userAgentData?.platform || navigator.platform || '');
+const GIZMO_KEYS = GIZMO_ON_WINDOWS
+    ? { rotate: 'Shift', snap: 'Control' }
+    : { rotate: 'Alt', snap: 'Shift' };
+/** @param {KeyboardEvent|PointerEvent} e */
+const gizmoRotateHeld = (e) => (GIZMO_ON_WINDOWS ? e.shiftKey : e.altKey);
+/** @param {KeyboardEvent|PointerEvent} e */
+const gizmoSnapHeld = (e) => (GIZMO_ON_WINDOWS ? e.ctrlKey : e.shiftKey);
 const GIZMO_SIZE = 0.5;            // TransformControls screen-size factor (1 = stock; half keeps handles out of the way)
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
@@ -8916,7 +8928,7 @@ class TransformGizmoController {
         this._snapDelta = new THREE.Vector3();                    // reusable scratch for the per-frame relative-snap delta
         this._lastReport = 0;
         this._interacted = false;                                 // a handle drag just happened
-        this._shiftHeld = false;                                  // last-seen Shift state (drives snap at drag-start)
+        this._snapHeld = false;                                   // last-seen snap-key state (drives snap at drag-start)
         this._raycaster = new THREE.Raycaster();
         this._ndc = new THREE.Vector2();
         this._downX = 0; this._downY = 0;
@@ -8942,29 +8954,28 @@ class TransformGizmoController {
     /** @returns {Gizmo[]} the interactive gizmo plus every pinned one. */
     _allGizmos() { return [this._primary, ...this._extra]; }
 
-    /** Alt → rotate mode (never mid-drag); Shift → toggle snap from the gizmo's
-     * resting state (live, read per move). Applied across every attached gizmo so
-     * modifiers are global. */
+    /** The rotate key → rotate mode (never mid-drag); the snap key → toggle snap
+     * from the gizmo's resting state (live, read per move). See GIZMO_KEYS.
+     * Applied across every attached gizmo so modifiers are global. */
     _syncModifiers(e) {
         if (!this.enabled) return;
-        this._shiftHeld = e.shiftKey;
+        this._snapHeld = gizmoSnapHeld(e);
         for (const g of this._allGizmos()) {
             if (!g.object) continue;
             if (!g.control.dragging) {
-                // Alt is a momentary override → rotate; releasing it falls back to
-                // this gizmo's caller-set base mode (`g.mode`), not a hard-coded
-                // 'translate', so an Alt tap can't clobber a setGizmoMode('rotate').
-                const want = e.altKey ? 'rotate' : g.mode;
+                // The rotate key is a momentary override; releasing it falls back
+                // to this gizmo's caller-set base mode (`g.mode`), not a hard-coded
+                // 'translate', so a tap can't clobber a setGizmoMode('rotate').
+                const want = gizmoRotateHeld(e) ? 'rotate' : g.mode;
                 if (want !== g.control.getMode()) {
                     this._setControlMode(g, want);
                     this._restyleGizmo(g);
                 }
             }
-            // Shift toggles snap relative to the gizmo's resting state: a normal
-            // gizmo is free at rest and Shift enables snap; a `snapDefault` gizmo
-            // snaps at rest and Shift releases it for free placement. (Same key,
-            // inverted — and Shift dodges the Mac "Ctrl-click = right-click" trap.)
-            this._applySnap(g, g.snapDefault ? !e.shiftKey : e.shiftKey);
+            // The snap key toggles snap relative to the gizmo's resting state: a
+            // normal gizmo is free at rest and the key enables snap; a
+            // `snapDefault` gizmo snaps at rest and the key releases it.
+            this._applySnap(g, g.snapDefault ? !this._snapHeld : this._snapHeld);
         }
     }
 
@@ -8988,11 +8999,11 @@ class TransformGizmoController {
         if (dragging) {
             this._interacted = true;
             // Engage the resting snap state up front, using the live snap step and
-            // last-seen Shift state — so a `snapDefault` gizmo snaps from the very
-            // first drag even if no key was ever pressed (and even though the step
-            // may have been set after the gizmo was pinned). _syncModifiers keeps
-            // it live if Shift is toggled mid-drag.
-            this._applySnap(g, g.snapDefault ? !this._shiftHeld : this._shiftHeld);
+            // last-seen snap-key state — so a `snapDefault` gizmo snaps from the
+            // very first drag even if no key was ever pressed (and even though the
+            // step may have been set after the gizmo was pinned). _syncModifiers
+            // keeps it live if the key is toggled mid-drag.
+            this._applySnap(g, g.snapDefault ? !this._snapHeld : this._snapHeld);
             // Snapshot the grab-time pose: the origin for relative translation snap
             // and the `positionStart`/`quaternionStart` reported on release, and
             // drop a translucent ghost there so the original location stays visible.
@@ -17089,6 +17100,11 @@ export class ThreeJSViewer {
      * @param {number|null} step @param {{relative?:boolean}} [opts]
      */
     setGizmoTranslateSnap(step, opts) { this._transformGizmo.setTranslateSnap(step, opts || {}); }
+
+    /** The gizmo's modifier keys on this platform, as `KeyboardEvent.key` names:
+     * `{rotate, snap}` — Shift / Control on Windows, Alt / Shift elsewhere.
+     * @returns {{rotate: string, snap: string}} */
+    gizmoModifierKeys() { return { ...GIZMO_KEYS }; }
 
     /**
      * Register a hook fired on every gizmo `objectChange` — synchronously, on each
