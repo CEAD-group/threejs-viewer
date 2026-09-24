@@ -55,8 +55,13 @@
             transform: translateX(var(--tjsv-body-w, 190px));
             transition: transform 0.18s ease;
             pointer-events: none;   /* children re-enable; the gap stays click-through */
+            /* The transform makes each panel its own stacking context, so without this
+               an open body covers the tabs of every panel before it in the DOM. A
+               closed panel shows only its tab (its body is off-screen), so it can sit
+               above the open one: no tab is ever hidden by an open body. */
+            z-index: 2;
         }
-        .threejs-viewer .tjsv-rail-panel.open { transform: translateX(0); }
+        .threejs-viewer .tjsv-rail-panel.open { transform: translateX(0); z-index: 1; }
         .threejs-viewer .tjsv-rail-panel[hidden] { display: none; }
         .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn {
             pointer-events: auto;
