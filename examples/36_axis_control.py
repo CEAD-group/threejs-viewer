@@ -88,7 +88,7 @@ v.add_axis_control(
     kind="rotary",
     value=math.radians(45),
     min=math.radians(0),
-    max=math.radians(18000),
+    max=math.radians(180),
     color=RED,
     hover_color=RED_HOVER,
     radius=1.0,
