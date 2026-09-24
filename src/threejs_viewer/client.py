@@ -1365,9 +1365,9 @@ class ViewerClient:
         a first-class tracked object: it has an id, can be deleted, moved,
         parented, and hidden, and multiple grids can coexist. The grid is
         rendered as a single plane with a shader — crisp anti-aliased lines
-        whose width is screen-space stable (in pixels, not world units), a
-        distinct colour for the two axis lines through the local origin, and
-        a radial alpha fade toward the plane edge so the finite plane reads
+        whose width is screen-space stable (in pixels, not world units), an
+        optional distinct colour for the two axis lines through the local
+        origin, and a radial alpha fade toward the plane edge so the finite plane reads
         as an infinite floor. Where cells shrink below a few pixels (grazing
         angles, far distance) the grid thins out instead of collapsing into
         a solid sheet.
@@ -1384,7 +1384,8 @@ class ViewerClient:
             line_width: Grid line width in screen pixels.
             color: Grid line colour (0xRRGGBB).
             center_color: Colour of the two axis lines through the local
-                origin. ``None`` uses ``color``.
+                origin, drawn at the same width as the other lines. ``None``
+                (default) draws them as ordinary grid lines.
             background_color: Fill colour of the plane between the lines.
                 Only visible with ``background_opacity > 0``.
             background_opacity: Opacity of the plane fill in [0, 1].

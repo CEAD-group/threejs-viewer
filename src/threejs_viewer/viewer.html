@@ -3219,6 +3219,7 @@ uniform float uHalfExtent;
 uniform float uLineWidth;
 uniform vec3 uColor;
 uniform vec3 uCenterColor;
+uniform float uCenterLines;
 uniform vec3 uBackgroundColor;
 uniform float uBackgroundOpacity;
 uniform float uFadeStart;
@@ -3235,9 +3236,11 @@ void main() {
     float cellPx = 1.0 / max(fw.x, fw.y);
     lineA *= smoothstep(2.0, 4.0, cellPx);
 
-    // Axis lines through the local origin: distinct colour, slightly wider.
+    // Axis lines through the local origin: a distinct colour at the same width,
+    // and only when a centre colour was asked for (uCenterLines).
     vec2 axisDist = abs(coord) / fw;
-    float centerA = 1.0 - smoothstep(halfW + 0.5, halfW + 1.5, min(axisDist.x, axisDist.y));
+    float centerA = uCenterLines
+        * (1.0 - smoothstep(halfW - 0.5, halfW + 0.5, min(axisDist.x, axisDist.y)));
 
     vec3 lineColor = mix(uColor, uCenterColor, centerA);
     float alpha = max(lineA, centerA);
@@ -3281,6 +3284,7 @@ function buildFloorGridMesh(data) {
             uLineWidth: { value: data.lineWidth > 0 ? data.lineWidth : 1.5 },
             uColor: { value: new THREE.Color(data.color ?? 0x555555) },
             uCenterColor: { value: new THREE.Color(data.centerColor ?? data.color ?? 0x555555) },
+            uCenterLines: { value: data.centerColor != null ? 1.0 : 0.0 },
             uBackgroundColor: { value: new THREE.Color(data.backgroundColor ?? 0x000000) },
             uBackgroundOpacity: { value: Math.min(Math.max(data.backgroundOpacity ?? 0, 0), 1) },
             // Cap below 1.0: smoothstep(edge0, edge1, x) is undefined when
