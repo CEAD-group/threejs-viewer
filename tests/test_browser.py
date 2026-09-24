@@ -8939,10 +8939,8 @@ def test_remove_axis_control(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_axis_control_drives_mounted_child_transform_scratch(
-    viewer_client, viewer_page
-):
-    """SCRATCH: mirrors examples/36_axis_control.py's mount+child pattern —
+def test_axis_control_drives_mounted_child_transform(viewer_client, viewer_page):
+    """Mirrors examples/36_axis_control.py's mount+child pattern:
     a control anchored on a static mount group (never moved), with
     batch_update writing the reported value onto a child box's local
     position on the control's axis, and no drift across repeated drags."""
@@ -8976,13 +8974,14 @@ def test_axis_control_drives_mounted_child_transform_scratch(
             "() => window.threejsViewer._axisControls.controls.get('elz').value"
         )
 
-    _drag_axis_control(viewer_page, "elz", 40, 0)
+    # Short drags so neither lands on the max=2.0 clamp.
+    _drag_axis_control(viewer_page, "elz", 4, 0)
     _wait_for(
         viewer_page,
         "() => window.threejsViewer._axisControls.controls.get('elz').value !== 0",
     )
     v1 = control_value()
-    assert v1 > 0.1, f"drag did not move value ({v1})"
+    assert 0.1 < v1 < 1.5, f"drag moved value to {v1}"
     _wait_for(
         viewer_page,
         f"() => Math.abs(window.threejsViewer._objects.get('child').position.x - {v1}) < 1e-3",
@@ -8993,7 +8992,7 @@ def test_axis_control_drives_mounted_child_transform_scratch(
     # control's value exactly on the child's local position again (not
     # doubled, which is what would happen if the control were attached
     # directly to the moving child instead of the static mount).
-    _drag_axis_control(viewer_page, "elz", 10, 0)
+    _drag_axis_control(viewer_page, "elz", 2, 0)
     _wait_for(
         viewer_page,
         f"() => window.threejsViewer._axisControls.controls.get('elz').value > {v1}",

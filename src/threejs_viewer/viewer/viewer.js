@@ -15695,28 +15695,6 @@ export class ThreeJSViewer {
             this._renderer.clearDepth();
             this._renderer.render(this._gizmoScene, this._camera);
         }
-        // Lift the ViewHelper above the animation toolbar when it's visible.
-        // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
-        // call to add a Y offset matching the toolbar height.
-        const lift = (this._animLiftCss || 0) * window.devicePixelRatio;
-        if (lift > 0) {
-            // Cache the true original once so we don't re-wrap the wrapped
-            // setViewport each frame (which would deepen the call chain by
-            // one level per frame and eventually blow the stack).
-            if (!this._rendererSetViewportOriginal) {
-                this._rendererSetViewportOriginal = this._renderer.setViewport.bind(this._renderer);
-            }
-            const orig = this._rendererSetViewportOriginal;
-            const r = this._renderer;
-            r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
-            try {
-                this._viewHelper.render(this._renderer);
-            } finally {
-                r.setViewport = orig;
-            }
-        } else {
-            this._viewHelper.render(this._renderer);
-        }
         this._renderViewHelper();
 
         // LOD: dispatch to Web Worker after render (non-blocking)
