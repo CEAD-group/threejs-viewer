@@ -9157,8 +9157,8 @@ def test_axis_control_linear_drag_reports_value(viewer_client, viewer_page):
 
     _drag_axis_control(viewer_page, "elz", 40, 0)
 
-    assert changes, "drag produced no reports"
-    assert changes[-1]["phase"] == "end"
+    # The final report crosses the WS after mouse.up returns.
+    assert _wait_until(lambda: changes and changes[-1]["phase"] == "end"), changes
     assert changes[-1]["id"] == "elz"
     new_value = viewer_page.evaluate(
         "() => window.threejsViewer._axisControls.controls.get('elz').value"
@@ -9191,8 +9191,8 @@ def test_axis_control_rotary_drag_reports_value(viewer_client, viewer_page):
 
     _drag_axis_control(viewer_page, "j1", 30, 0, steps=15)
 
-    assert changes, "drag produced no reports"
-    assert changes[-1]["phase"] == "end"
+    # The final report crosses the WS after mouse.up returns.
+    assert _wait_until(lambda: changes and changes[-1]["phase"] == "end"), changes
     new_value = viewer_page.evaluate(
         "() => window.threejsViewer._axisControls.controls.get('j1').value"
     )
