@@ -23,7 +23,7 @@ chips are flat quads spaced a little out from the gizmo centre.
 
 These gizmos pin with ``snap_default=True``, so drags snap to the grid (``0.5`` /
 15°) by default — hold **Shift** to move freely (the inverse of the usual
-free / Shift-to-snap). Hold **Alt** to rotate instead of translate. Each release
+free / Shift-to-snap). Hold **Ctrl** to rotate instead of translate. Each release
 is reported back here through ``on_object_move`` and logged.
 
 Run: uv run python examples/24_gizmo_dimensions.py
@@ -119,7 +119,7 @@ print(__doc__)
 print("6 pinned gizmos · columns = 1D/2D/3D · back row = world, front = local.")
 print("Drag a block; a ghost stays at the start until you release.")
 print(
-    "  Snap on by default (0.5 / 15°) · Shift = free · Alt = rotate. Press F to frame."
+    "  Snap on by default (0.5 / 15°) · Shift = free · Ctrl = rotate. Press F to frame."
 )
 print("Ctrl+C here to quit.")
 

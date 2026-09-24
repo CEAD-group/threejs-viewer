@@ -13,7 +13,7 @@ The gizmo is three.js ``TransformControls``, restyled for a cleaner look
     default; you can also pass ``id=`` to attach to a specific object up front).
   * **Drag** an axis arrow to move along it, or a plane handle to slide in that
     plane.
-  * **Hold Alt** while dragging to **rotate** instead of translate.
+  * **Hold Ctrl** while dragging to **rotate** instead of translate.
   * **Hold Shift** to **snap** — translations to a grid (``translate_snap``,
     here ``0.5``), rotations to fixed increments (``rotate_snap_deg``, here
     ``15``). Snapping is live, so you can toggle Shift mid-drag.
@@ -81,7 +81,7 @@ v.enable_move_gizmo(translate_snap=0.5, rotate_snap_deg=15)
 print(__doc__)
 print("Gizmo enabled. Click an object to attach, then drag.")
 print(
-    "  Alt = rotate · Shift = snap (0.5 units / 15°) · click another object to switch."
+    "  Ctrl = rotate · Shift = snap (0.5 units / 15°) · click another object to switch."
 )
 print("Press F to frame the scene. Ctrl+C here to quit.")
 

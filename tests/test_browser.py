@@ -4176,11 +4176,12 @@ def test_attach_move_gizmo_reaches_untracked_object(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_move_gizmo_alt_is_momentary(viewer_client, viewer_page):
-    """Alt is a momentary rotate override: from a translate base it switches to
-    rotate while held and back on release; from a caller-set rotate base an Alt
-    tap leaves the base untouched (regression — Alt release used to hard-reset to
-    translate, clobbering setGizmoMode('rotate'))."""
+def test_move_gizmo_ctrl_is_momentary(viewer_client, viewer_page):
+    """Ctrl is a momentary rotate override: from a translate base it switches to
+    rotate while held and back on release; from a caller-set rotate base a Ctrl
+    tap leaves the base untouched (regression — release used to hard-reset to
+    translate, clobbering setGizmoMode('rotate')). Ctrl, not Alt (issue #226 item
+    2): Alt opens the Windows program menu and steals focus mid-drag."""
     viewer_client.add_box("box")
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_client.enable_move_gizmo("box")  # base mode = translate
@@ -4190,27 +4191,30 @@ def test_move_gizmo_alt_is_momentary(viewer_client, viewer_page):
         " return g.enabled && g.objectId === 'box'; }",
     )
 
-    # Dispatch an Alt keydown/keyup (with altKey set) to the gizmo's window
+    # Dispatch a Ctrl keydown/keyup (with ctrlKey set) to the gizmo's window
     # listener and read back the effective control mode + the persistent base.
-    alt = """(down) => {
+    ctrl = """(down) => {
         const el = window.threejsViewer.container;
         el.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', {
-            key: 'Alt', code: 'AltLeft', altKey: down, bubbles: true }));
+            key: 'Control', code: 'ControlLeft', ctrlKey: down, bubbles: true }));
         const g = window.threejsViewer._transformGizmo;
         return { control: g.control.getMode(), base: g.mode };
     }"""
 
-    # Translate base: Alt down → rotate, Alt up → translate (normal toggle intact).
-    assert viewer_page.evaluate(alt, True) == {"control": "rotate", "base": "translate"}
-    assert viewer_page.evaluate(alt, False) == {
+    # Translate base: Ctrl down → rotate, Ctrl up → translate (normal toggle intact).
+    assert viewer_page.evaluate(ctrl, True) == {
+        "control": "rotate",
+        "base": "translate",
+    }
+    assert viewer_page.evaluate(ctrl, False) == {
         "control": "translate",
         "base": "translate",
     }
 
-    # Caller sets a rotate base; an Alt tap must not clobber it back to translate.
+    # Caller sets a rotate base; a Ctrl tap must not clobber it back to translate.
     viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
-    assert viewer_page.evaluate(alt, True) == {"control": "rotate", "base": "rotate"}
-    assert viewer_page.evaluate(alt, False) == {"control": "rotate", "base": "rotate"}
+    assert viewer_page.evaluate(ctrl, True) == {"control": "rotate", "base": "rotate"}
+    assert viewer_page.evaluate(ctrl, False) == {"control": "rotate", "base": "rotate"}
 
 
 _GIZMO_AXES = (
@@ -4256,7 +4260,7 @@ def test_set_gizmo_axes_constrains_and_resets_on_detach(viewer_client, viewer_pa
 @pytest.mark.browser
 def test_set_gizmo_axes_per_mode_follows_live_mode(viewer_client, viewer_page):
     """A rotate-only mask hides one ring but no arrow (issue #220), and follows
-    the live mode through setGizmoMode and the Alt momentary override."""
+    the live mode through setGizmoMode and the Ctrl momentary override."""
     viewer_client.add_box("box")
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_client.enable_move_gizmo("box")
@@ -4272,14 +4276,14 @@ def test_set_gizmo_axes_per_mode_follows_live_mode(viewer_client, viewer_page):
     # Translate base: every arrow stays.
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
 
-    alt = """(down) => {
+    ctrl = """(down) => {
         window.threejsViewer.container.dispatchEvent(new KeyboardEvent(
             down ? 'keydown' : 'keyup',
-            { key: 'Alt', code: 'AltLeft', altKey: down, bubbles: true }));
+            { key: 'Control', code: 'ControlLeft', ctrlKey: down, bubbles: true }));
     }"""
-    viewer_page.evaluate(alt, True)
+    viewer_page.evaluate(ctrl, True)
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": False}
-    viewer_page.evaluate(alt, False)
+    viewer_page.evaluate(ctrl, False)
     assert viewer_page.evaluate(_GIZMO_AXES) == {"x": True, "y": True, "z": True}
 
     viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
@@ -4310,7 +4314,7 @@ def test_set_gizmo_axes_per_mode_follows_live_mode(viewer_client, viewer_page):
         " return { x: c.showX, y: c.showY, z: c.showZ }; }"
     )
     assert viewer_page.evaluate(pinned) == {"x": False, "y": False, "z": True}
-    viewer_page.evaluate(alt, False)  # modifier sync falls back to the rotate base
+    viewer_page.evaluate(ctrl, False)  # modifier sync falls back to the rotate base
     assert viewer_page.evaluate(pinned) == {"x": False, "y": False, "z": True}
     viewer_page.evaluate(
         "() => { const t = window.threejsViewer._transformGizmo;"
@@ -4568,7 +4572,8 @@ def test_add_gizmo_multi_dof_and_plane_margin(viewer_client, viewer_page):
 def test_add_gizmo_space_and_refined_handles(viewer_client, viewer_page):
     """space='local' orients the handles to the object (TransformControls space),
     'world' (default) keeps them world-aligned; and the one-time handle refinement
-    strips the bulky rotate handles (E / XYZE) and shades the translate cones."""
+    strips the bulky rotate handles (E / XYZE) and shades the translate shaft
+    (the arrowhead cones are dropped entirely, issue #226 item 7)."""
     viewer_client.add_box("w")
     viewer_client.add_box("l")
     _wait_for(
@@ -4592,7 +4597,8 @@ def test_add_gizmo_space_and_refined_handles(viewer_client, viewer_page):
             const g = window.threejsViewer._transformGizmo._extra[0];
             const gm = g.control._gizmo;
             const rotNames = grp => grp.children.map(o => o.name);
-            // Translate arrows (single-axis, coloured) are swapped to a lit material.
+            // Translate shafts (single-axis, coloured; arrowhead cones are
+            // removed entirely) are swapped to a lit material.
             let litArrows = 0, basicArrows = 0;
             gm.gizmo.translate.children.forEach(o => {
                 if (!o.name || o.name.length !== 1) return;  // arrows only
@@ -4613,7 +4619,7 @@ def test_add_gizmo_space_and_refined_handles(viewer_client, viewer_page):
     assert "E" not in refined["pickerRot"] and "XYZE" not in refined["pickerRot"]
     assert set(refined["gizmoRot"]) == {"X", "Y", "Z"}
     assert "AXIS" not in refined["helperRot"]
-    # The cones are lit (shaded) now, not flat MeshBasicMaterial.
+    # The shafts are lit (shaded) now, not flat MeshBasicMaterial.
     assert refined["litArrows"] >= 3 and refined["basicArrows"] == 0
 
 
@@ -4726,8 +4732,16 @@ _GIZMO_CHIP_SCAN = """() => {
   return {counts, total};
 }"""
 
-# Probe every visible mesh of one arrow (shaft + end cones): dispatch a
-# pointermove at each mesh's projected centre and collect what hover resolves.
+# Probe every visible mesh of one arrow (just the shaft now — the arrowhead
+# cones are removed, issue #226 item 7): dispatch a pointermove near the OUTER
+# end of each mesh's bounding box along its longest dimension (not the exact
+# centroid). This isn't just for tie-breaking margin: a sweep along the shaft
+# in the 3/4 pose below found the neighbouring plane chip's enlarged picker
+# (GIZMO_PLANE_SCALE + margin) already won hit-priority over roughly the
+# middle 60% of the shaft's length even before this redesign — arrowhead
+# cones used to sit past the shaft's far end (0.5-0.6), safely beyond the
+# chip's reach, which is what made that stretch hittable at all. With the
+# cones gone the reliably-arrow-only zone is the outer ~5% near the tip.
 _GIZMO_ARROW_PROBE = """(name) => {
   const v = window.threejsViewer;
   const g = v._transformGizmo._primary;
@@ -4740,7 +4754,13 @@ _GIZMO_ARROW_PROBE = """(name) => {
   control._gizmo.gizmo.translate.traverse(o => {
     if (o.name !== name || !o.geometry) return;
     o.geometry.computeBoundingBox();
-    const c = o.geometry.boundingBox.getCenter(new V());
+    const bb = o.geometry.boundingBox;
+    const size = bb.getSize(new V());
+    const c = bb.getCenter(new V());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (size.x === maxDim) c.x = bb.max.x - size.x * 0.04;
+    else if (size.y === maxDim) c.y = bb.max.y - size.y * 0.04;
+    else c.z = bb.max.z - size.z * 0.04;
     c.applyMatrix4(o.matrixWorld).project(v._camera);
     const sx = rect.left + (c.x * 0.5 + 0.5) * rect.width;
     const sy = rect.top + (-c.y * 0.5 + 0.5) * rect.height;
@@ -4784,7 +4804,7 @@ def test_gizmo_plane_chip_hover_beats_arrow_pickers(viewer_client, viewer_page):
     assert xy >= 0.3 * total, f"chip hover coverage too low: {counts} of {total}"
 
     # Slimming must not make the arrows unhittable: each axis still resolves at
-    # (at least one of) its shaft/cone centres.
+    # its shaft's centre.
     for name in ("X", "Y", "Z"):
         hits = viewer_page.evaluate(_GIZMO_ARROW_PROBE, name)
         assert name in hits, f"arrow {name} no longer hittable anywhere: {hits}"
@@ -5583,10 +5603,10 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
 @pytest.mark.browser
 def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
     """Every gizmo report carries the *effective* mode of the drag, read off
-    the live control — so an Alt momentary rotate override is observable by
+    the live control — so a Ctrl momentary rotate override is observable by
     consumers even though the base mode stays translate (issue #84: without
     the field, embedders branched on the base mode and silently discarded
-    Alt rotate-drags)."""
+    Ctrl rotate-drags)."""
     viewer_client.add_box("box", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('box')")
     viewer_page.evaluate(_GIZMO_TOPDOWN)
@@ -5610,9 +5630,9 @@ def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
     assert all(m == "translate" for m, _ in modes), modes
     assert modes[-1][1] == "end"
 
-    # Hold Alt: the live control flips to rotate while the base mode stays
+    # Hold Ctrl: the live control flips to rotate while the base mode stays
     # translate; a report issued during the override must say rotate.
-    viewer_page.keyboard.down("Alt")
+    viewer_page.keyboard.down("Control")
     _wait_for(
         viewer_page,
         "() => { const tg = window.threejsViewer._transformGizmo;"
@@ -5624,10 +5644,10 @@ def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
         " const tg = window.threejsViewer._transformGizmo;"
         " tg._report(tg._extra[0], true); }"
     )
-    viewer_page.keyboard.up("Alt")
+    viewer_page.keyboard.up("Control")
     modes = viewer_page.evaluate("() => window.__modes")
     assert modes == [["rotate", "end"]], (
-        f"Alt override not visible in the report: {modes}"
+        f"Ctrl override not visible in the report: {modes}"
     )
 
 
