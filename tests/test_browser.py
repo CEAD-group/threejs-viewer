@@ -1852,7 +1852,7 @@ def test_unbind_clip_restores_imperative_push(viewer_client, viewer_page):
     viewer_client.unbind_clip("anim")
     # Moving the (now unbound) source no longer touches the clip.
     _set_local_y(viewer_page, "carriage", 0.0)
-    time.sleep(0.2)
+    frames(viewer_page, 4)
     assert abs(_node_scale(viewer_page) - 0.857) < 1e-3, (
         "clip kept tracking the source after unbind_clip"
     )
@@ -1860,6 +1860,44 @@ def test_unbind_clip_restores_imperative_push(viewer_client, viewer_page):
     # The imperative path works again on the same object.
     viewer_client.set_clip_progress("anim", 0.0)
     _wait_for_scale(viewer_page, 0.059)
+
+
+@pytest.mark.browser
+def test_bind_clip_survives_readd_and_reads_matrix_sources(viewer_client, viewer_page):
+    """A binding survives a same-id re-add of its target (whose new mixer must
+    not be dropped by the re-add), follows a source whose pose is written as a
+    matrix (animation channels, follow paths), and is dropped by clear()."""
+    _load_animated_glb(viewer_client)
+    viewer_client.add_box("carriage", position=[0, 0, 0])
+    _wait_for(viewer_page, "() => window.threejsViewer._objects.has('carriage')")
+    viewer_client.bind_clip(
+        "anim",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=2.0,
+    )
+    _set_local_y(viewer_page, "carriage", 2.0)
+    _wait_for_scale(viewer_page, 0.857)
+
+    # Re-push the target under the same id: the binding keeps driving it.
+    _load_animated_glb(viewer_client)
+    _wait_for(viewer_page, "() => window.threejsViewer._mixers.has('anim')")
+    _set_local_y(viewer_page, "carriage", 0.0)
+    _wait_for_scale(viewer_page, 0.059)
+
+    # A matrix-driven source (matrixAutoUpdate off, position left stale).
+    viewer_page.evaluate(
+        """() => {
+            const o = window.threejsViewer._objects.get('carriage');
+            o.matrixAutoUpdate = false;
+            o.matrix.makeTranslation(0, 1, 0);
+        }"""
+    )
+    _wait_for_scale(viewer_page, (0.059 + 0.857) / 2)
+
+    viewer_client.clear()
+    _wait_for(viewer_page, "() => window.threejsViewer._clipBindings.size === 0")
 
 
 @pytest.mark.browser
@@ -2640,7 +2678,7 @@ def test_frame_all_excludes_move_gizmo(viewer_client, viewer_page):
     is invisible but whose object is visible, so the frameable-bounds
     traversal used to union it and fly the camera hundreds of km out.
     Covers both the primary interactive gizmo and a pinned add_gizmo extra
-    (both tag their helper root with userData.isGizmoHelper).
+    (both live in the overlay `_gizmoScene`, which framing never walks).
     """
     viewer_client.add_box("box", width=1, height=1, depth=1, position=[0, 0, 0])
     viewer_client.enable_move_gizmo("box")
@@ -2660,14 +2698,14 @@ def test_frame_all_excludes_move_gizmo(viewer_client, viewer_page):
                 dist: v._camera.position.distanceTo(v._controls.target),
                 size: { x: size.x, y: size.y, z: size.z },
                 helperVisible: v._transformGizmo.helper.visible,
-                primaryTagged: v._transformGizmo.helper.userData.isGizmoHelper === true,
-                extraTagged: v._transformGizmo._extra[0].helper.userData.isGizmoHelper === true,
+                primaryInOverlay: v._transformGizmo.helper.parent === v._gizmoScene,
+                extraInOverlay: v._transformGizmo._extra[0].helper.parent === v._gizmoScene,
             };
         }"""
     )
     assert state["helperVisible"] is True, state
-    assert state["primaryTagged"] is True, state
-    assert state["extraTagged"] is True, state
+    assert state["primaryInOverlay"] is True, state
+    assert state["extraInOverlay"] is True, state
     # The frameable bbox must span the 1-unit box, not the ~±50k gizmo plane.
     for axis in ("x", "y", "z"):
         assert 0.5 < state["size"][axis] < 2, state
@@ -4674,8 +4712,8 @@ _GIZMO_THREEQUARTER = """() => {
   v._controls.update(); v._camera.updateMatrixWorld(true);
 }"""
 
-# Project the visible XY chip's bbox to screen pixels, dispatch a pointermove
-# grid over it, and tally which handle wins each cell (control.axis).
+# Dispatch a pointermove at a grid of points inside the visible XY chip face
+# and tally which handle wins each (control.axis).
 _GIZMO_CHIP_SCAN = """() => {
   const v = window.threejsViewer;
   const g = v._transformGizmo._primary;
@@ -4684,30 +4722,21 @@ _GIZMO_CHIP_SCAN = """() => {
   const canvas = v._renderer.domElement;
   const rect = canvas.getBoundingClientRect();
   const V = v._camera.position.constructor;
-  let box = null;
-  control._gizmo.gizmo.translate.traverse(o => {
-    if (o.name !== 'XY' || !o.geometry || !o.material || box) return;
-    o.geometry.computeBoundingBox();
-    const bb = o.geometry.boundingBox;
-    let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
-    for (const x of [bb.min.x, bb.max.x])
-      for (const y of [bb.min.y, bb.max.y])
-        for (const z of [bb.min.z, bb.max.z]) {
-          const p = new V(x, y, z).applyMatrix4(o.matrixWorld).project(v._camera);
-          const sx = rect.left + (p.x * 0.5 + 0.5) * rect.width;
-          const sy = rect.top + (-p.y * 0.5 + 0.5) * rect.height;
-          minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
-          minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
-        }
-    box = {minX, minY, maxX, maxY};
-  });
-  if (!box) return null;
+  const chip = control._gizmo.gizmo.translate.children.find(o => o.name === 'XY' && o.isMesh);
+  if (!chip) return null;
+  chip.geometry.computeBoundingBox();
+  const bb = chip.geometry.boundingBox;
   const counts = {};
   let total = 0;
-  for (let y = box.minY; y <= box.maxY; y += 3) {
-    for (let x = box.minX; x <= box.maxX; x += 3) {
-      canvas.dispatchEvent(new PointerEvent('pointermove',
-        {clientX: x, clientY: y, pointerType: 'mouse', bubbles: true}));
+  for (let i = 1; i < 10; i++) {
+    for (let j = 1; j < 10; j++) {
+      const p = new V(bb.min.x + (bb.max.x - bb.min.x) * i / 10,
+                      bb.min.y + (bb.max.y - bb.min.y) * j / 10,
+                      (bb.min.z + bb.max.z) / 2).applyMatrix4(chip.matrixWorld).project(v._camera);
+      canvas.dispatchEvent(new PointerEvent('pointermove', {
+        clientX: rect.left + (p.x * 0.5 + 0.5) * rect.width,
+        clientY: rect.top + (-p.y * 0.5 + 0.5) * rect.height,
+        pointerType: 'mouse', bubbles: true}));
       total++;
       const a = control.axis || 'none';
       counts[a] = (counts[a] || 0) + 1;
@@ -4716,8 +4745,8 @@ _GIZMO_CHIP_SCAN = """() => {
   return {counts, total};
 }"""
 
-# Probe every visible mesh of one arrow (shaft + end cones): dispatch a
-# pointermove at each mesh's projected centre and collect what hover resolves.
+# Dispatch a pointermove near the tip (90% along) of one axis line and
+# return what hover resolves to.
 _GIZMO_ARROW_PROBE = """(name) => {
   const v = window.threejsViewer;
   const g = v._transformGizmo._primary;
@@ -4726,20 +4755,166 @@ _GIZMO_ARROW_PROBE = """(name) => {
   const canvas = v._renderer.domElement;
   const rect = canvas.getBoundingClientRect();
   const V = v._camera.position.constructor;
-  const hits = [];
-  control._gizmo.gizmo.translate.traverse(o => {
-    if (o.name !== name || !o.geometry) return;
-    o.geometry.computeBoundingBox();
-    const c = o.geometry.boundingBox.getCenter(new V());
-    c.applyMatrix4(o.matrixWorld).project(v._camera);
-    const sx = rect.left + (c.x * 0.5 + 0.5) * rect.width;
-    const sy = rect.top + (-c.y * 0.5 + 0.5) * rect.height;
-    canvas.dispatchEvent(new PointerEvent('pointermove',
-      {clientX: sx, clientY: sy, pointerType: 'mouse', bubbles: true}));
-    hits.push(control.axis || 'none');
-  });
-  return hits;
+  const line = control._gizmo.gizmo.translate.children.find(o => o.name === name && o.isLine2);
+  const p = new V(name === 'X' ? 0.9 : 0, name === 'Y' ? 0.9 : 0, name === 'Z' ? 0.9 : 0)
+    .applyMatrix4(line.matrixWorld).project(v._camera);
+  canvas.dispatchEvent(new PointerEvent('pointermove', {
+    clientX: rect.left + (p.x * 0.5 + 0.5) * rect.width,
+    clientY: rect.top + (-p.y * 0.5 + 0.5) * rect.height,
+    pointerType: 'mouse', bubbles: true}));
+  return control.axis || 'none';
 }"""
+
+
+@pytest.mark.browser
+def test_add_gizmo_space_and_refined_handles(viewer_client, viewer_page):
+    """space='local' orients the handles to the object, 'world' (default) keeps
+    them world-aligned; and the one-time refinement strips the bulky rotate
+    handles (E / XYZE / AXIS) and swaps the translate arrows for fat lines."""
+    viewer_client.add_box("w")
+    viewer_client.add_box("l")
+    settle(viewer_client)
+    viewer_client.add_gizmo("w")  # default -> world
+    viewer_client.add_gizmo("l", space="local")
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._transformGizmo._extra.length === 2",
+    )
+    spaces = viewer_page.evaluate(
+        "() => window.threejsViewer._transformGizmo._extra.map(g => g.control.space)"
+    )
+    assert spaces == ["world", "local"]
+
+    refined = viewer_page.evaluate(
+        """() => {
+            const gm = window.threejsViewer._transformGizmo._extra[0].control._gizmo;
+            const names = grp => grp.children.map(o => o.name);
+            const t = gm.gizmo.translate.children;
+            return {
+                gizmoRot: names(gm.gizmo.rotate),
+                pickerRot: names(gm.picker.rotate),
+                helperRot: names(gm.helper.rotate),
+                axisLines: t.filter(o => ['X', 'Y', 'Z'].includes(o.name) && o.isLine2).length,
+                planes: t.filter(o => ['XY', 'YZ', 'XZ'].includes(o.name) && o.isMesh).length,
+            };
+        }"""
+    )
+    assert set(refined["gizmoRot"]) == {"X", "Y", "Z"}
+    assert set(refined["pickerRot"]) == {"X", "Y", "Z"}
+    assert "AXIS" not in refined["helperRot"]
+    assert refined["axisLines"] == 3 and refined["planes"] == 3, refined
+
+
+@pytest.mark.browser
+def test_gizmo_plane_chip_and_axis_hover(viewer_client, viewer_page):
+    """From a 3/4 view, hovering the XY chip resolves to the chip (the axis
+    pickers do not shadow it) and hovering an axis line resolves to that axis."""
+    viewer_client.add_box("box", position=[0, 0, 0])
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo.objectId === 'box'"
+    )
+    viewer_page.evaluate(_GIZMO_THREEQUARTER)
+    frames(viewer_page)
+    scan = viewer_page.evaluate(_GIZMO_CHIP_SCAN)
+    assert scan is not None, "XY chip handle not found"
+    counts = scan["counts"]
+    # Inside the chip face only plane chips may win (the XZ chip stands in
+    # front of part of it from this view); the axis pickers must not.
+    axes = counts.get("X", 0) + counts.get("Y", 0) + counts.get("Z", 0)
+    assert axes <= 0.05 * scan["total"], counts
+    assert counts.get("XY", 0) >= 0.3 * scan["total"], counts
+    # Each axis line is hittable near its tip (Y is behind the XZ chip from
+    # the 3/4 view, so X and Y are probed top-down).
+    assert viewer_page.evaluate(_GIZMO_ARROW_PROBE, "Z") == "Z"
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page)
+    for name in ("X", "Y"):
+        assert viewer_page.evaluate(_GIZMO_ARROW_PROBE, name) == name
+
+
+_GIZMO_X_PX_LENGTH = """(idx) => {
+  const v = window.threejsViewer;
+  const tg = v._transformGizmo;
+  const g = idx < 0 ? tg._primary : tg._extra[idx];
+  g.helper.updateMatrixWorld(true);
+  const line = g.control._gizmo.gizmo.translate.children.find(o => o.name === 'X' && o.isLine2);
+  const V = v._camera.position.constructor;
+  const a = new V(0, 0, 0).applyMatrix4(line.matrixWorld).project(v._camera);
+  const b = new V(1, 0, 0).applyMatrix4(line.matrixWorld).project(v._camera);
+  const w = v._renderer.domElement.clientWidth, h = v._renderer.domElement.clientHeight;
+  return Math.hypot((b.x - a.x) * w / 2, (b.y - a.y) * h / 2);
+}"""
+
+
+@pytest.mark.browser
+def test_move_gizmo_screen_constant_size_and_scale(viewer_client, viewer_page):
+    """The handles keep a constant on-screen size as the camera dollies out,
+    and a gizmo's `scale` multiplies that size."""
+    viewer_client.add_box("a", position=[0, 0, 0])
+    viewer_client.add_box("b", position=[0, 0, 0])
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("a")
+    viewer_client.add_gizmo("b", scale=2.0)
+    _wait_for(
+        viewer_page,
+        "() => { const t = window.threejsViewer._transformGizmo;"
+        " return t.objectId === 'a' && t._extra.length === 1; }",
+    )
+    near_cam = """() => {
+      const v = window.threejsViewer;
+      v._camera.position.set(0, -%s, 0.001); v._camera.up.set(0, 0, 1);
+      v._controls.target.set(0, 0, 0); v._camera.lookAt(0, 0, 0);
+      v._controls.update(); v._camera.updateMatrixWorld(true);
+    }"""
+    viewer_page.evaluate(near_cam % 5)
+    frames(viewer_page)
+    near = viewer_page.evaluate(_GIZMO_X_PX_LENGTH, -1)
+    doubled = viewer_page.evaluate(_GIZMO_X_PX_LENGTH, 0)
+    viewer_page.evaluate(near_cam % 50)
+    frames(viewer_page)
+    far = viewer_page.evaluate(_GIZMO_X_PX_LENGTH, -1)
+    assert near > 20, near
+    assert far == pytest.approx(near, rel=0.05), (near, far)
+    assert doubled == pytest.approx(2 * near, rel=0.05), (near, doubled)
+
+
+@pytest.mark.browser
+def test_move_gizmo_palette_matches_view_helper(viewer_client, viewer_page):
+    """The gizmo axis lines and the corner gimbal's arms and bubbles use one
+    palette, so X / Y / Z look the same in both (issue #191)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo.objectId === 'box'"
+    )
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const lines = v._transformGizmo.control._gizmo.gizmo.translate.children;
+            const line = n => lines.find(o => o.name === n && o.isLine2).material.color.getHex();
+            const arms = v._viewHelper.children
+                .filter(c => c.isMesh && !(c.userData && c.userData.type))
+                .map(c => c.material.color.getHex()).sort((a, b) => a - b);
+            const bubble = t => {
+                const s = v._viewHelper.children.find(c => c.userData && c.userData.type === t);
+                const d = s.material.map.image.getContext('2d').getImageData(32, 32, 1, 1).data;
+                return (d[0] << 16) | (d[1] << 8) | d[2];
+            };
+            return {
+                lines: [line('X'), line('Y'), line('Z')],
+                arms,
+                bubbles: [bubble('posX'), bubble('posY'), bubble('posZ')],
+            };
+        }"""
+    )
+    palette = [0xAE4346, 0x5D9C74, 0x4369A2]
+    assert r["lines"] == palette, r
+    assert r["arms"] == sorted(palette), r
+    assert r["bubbles"] == palette, r
 
 
 @pytest.mark.browser
@@ -8563,6 +8738,202 @@ def test_fat_polyline_segments_uses_line_segments2(viewer_client, viewer_page):
         pytest.fail(f"fat segments color update did not land; last={blue}")
 
 
+# === Parsed-model cache (issue #221) ===
+
+
+def _cache_blob(viewer_client, key, payload):
+    """Serve `payload` at a fixed sidecar key, like a content-addressed
+    emitter would, and return its URL."""
+    viewer_client._blob_store[key] = payload
+    return f"http://{viewer_client.host}:{viewer_client._http_port}{key}"
+
+
+def _count_fetches(viewer_page):
+    viewer_page.evaluate(
+        """() => {
+            window.__fetchLog = [];
+            if (!window.__origFetch) window.__origFetch = window.fetch;
+            window.fetch = (url, ...rest) => {
+                window.__fetchLog.push(String(url));
+                return window.__origFetch(url, ...rest);
+            };
+        }"""
+    )
+
+
+def _fetches_of(viewer_page, url):
+    return viewer_page.evaluate(
+        "(url) => window.__fetchLog.filter(u => u === url).length", url
+    )
+
+
+def _add_cached_glb(viewer_page, obj_id, url):
+    viewer_page.evaluate(
+        """([id, url]) => window.threejsViewer.handleMessage(
+            { type: 'add_model_binary', id, format: 'glb', blob_url: url })""",
+        [obj_id, url],
+    )
+
+
+@pytest.mark.browser
+def test_model_cache_reuses_parse_per_url(viewer_client, viewer_page):
+    """A blob URL parsed once is not fetched or decoded again: the second add
+    clones the cached template. Clones share vertex data but own their
+    geometry wrapper (draw range) and materials (colour), and deleting one
+    leaves the other's shared buffers alone."""
+    url = _cache_blob(viewer_client, "/cache_two_tri", _two_triangle_glb())
+    _count_fetches(viewer_page)
+    _add_cached_glb(viewer_page, "ca", url)
+    settle(viewer_client)
+    _add_cached_glb(viewer_page, "cb", url)
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, url) == 1
+
+    state = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const mesh = (id) => v._objects.get(id).userData.drawRangeMeshes[0];
+            const a = mesh('ca'), b = mesh('cb');
+            window.__disposed = [];
+            b.geometry.addEventListener('dispose', () => window.__disposed.push('b'));
+            return {
+                both: v._objects.has('ca') && v._objects.has('cb'),
+                sameGeom: a.geometry === b.geometry,
+                sameVerts: a.geometry.attributes.position === b.geometry.attributes.position,
+                sameMat: a.material === b.material,
+                stats: v.getModelCacheStats(),
+            };
+        }"""
+    )
+    assert state["both"]
+    assert state["sameVerts"] and not state["sameGeom"] and not state["sameMat"]
+    assert state["stats"]["entries"] == 1
+    assert state["stats"]["hits"] >= 1
+
+    viewer_client.set_draw_range("ca", 0.5)
+    viewer_client.set_color("ca", 0xFF0000)
+    settle(viewer_client)
+    per_object = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const mesh = (id) => v._objects.get(id).userData.drawRangeMeshes[0];
+            return {
+                aCount: mesh('ca').geometry.drawRange.count,
+                bCount: mesh('cb').geometry.drawRange.count,
+                aColor: mesh('ca').material.color.getHex(),
+                bColor: mesh('cb').material.color.getHex(),
+            };
+        }"""
+    )
+    assert per_object["aCount"] == 3
+    assert per_object["bCount"] != 3
+    assert per_object["aColor"] == 0xFF0000
+    assert per_object["bColor"] != 0xFF0000
+
+    viewer_client.delete("ca")
+    settle(viewer_client)
+    frames(viewer_page)
+    after = viewer_page.evaluate(
+        """() => ({
+            disposed: window.__disposed.slice(),
+            bLive: window.threejsViewer._objects.has('cb'),
+        })"""
+    )
+    assert after == {"disposed": [], "bLive": True}
+
+    # The last clone going away frees the shared GPU buffers.
+    viewer_client.delete("cb")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.__disposed") == ["b"]
+
+    # The CPU copy stays cached: a re-add is still a hit.
+    _add_cached_glb(viewer_page, "cc", url)
+    settle(viewer_client)
+    frames(viewer_page)
+    assert _fetches_of(viewer_page, url) == 1
+    assert viewer_page.evaluate("() => window.threejsViewer._objects.has('cc')")
+
+
+@pytest.mark.browser
+def test_model_cache_dedupes_concurrent_adds(viewer_client, viewer_page):
+    """Adds of one URL that arrive before its first parse lands share that
+    fetch and parse."""
+    url = _cache_blob(viewer_client, "/cache_concurrent", _two_triangle_glb())
+    _count_fetches(viewer_page)
+    for obj_id in ("k1", "k2", "k3"):
+        _add_cached_glb(viewer_page, obj_id, url)
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, url) == 1
+    assert viewer_page.evaluate(
+        "() => ['k1', 'k2', 'k3'].every(id => window.threejsViewer._objects.has(id))"
+    )
+
+
+@pytest.mark.browser
+def test_model_cache_eviction_and_clear(viewer_client, viewer_page):
+    """The cache is an LRU bounded by entry count; an evicted URL is fetched
+    again, as is every URL after clearModelCache()."""
+    glb = _two_triangle_glb()
+    urls = [_cache_blob(viewer_client, f"/cache_evict_{i}", glb) for i in range(3)]
+    viewer_page.evaluate("() => { window.threejsViewer._modelCache.maxEntries = 2; }")
+    _count_fetches(viewer_page)
+    for i, url in enumerate(urls):
+        _add_cached_glb(viewer_page, f"e{i}", url)
+        settle(viewer_client)
+    stats = "() => window.threejsViewer.getModelCacheStats().entries"
+    assert viewer_page.evaluate(stats) == 2
+
+    # Oldest evicted: fetched again. Newest still cached.
+    _add_cached_glb(viewer_page, "e0b", urls[0])
+    _add_cached_glb(viewer_page, "e2b", urls[2])
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, urls[0]) == 2
+    assert _fetches_of(viewer_page, urls[2]) == 1
+    # Evicting an entry whose clones are still live leaves them rendering.
+    assert viewer_page.evaluate(
+        "() => ['e0', 'e1', 'e2', 'e0b', 'e2b']"
+        ".every(id => window.threejsViewer._objects.has(id))"
+    )
+
+    viewer_page.evaluate("() => window.threejsViewer.clearModelCache()")
+    assert viewer_page.evaluate(stats) == 0
+    _add_cached_glb(viewer_page, "e2c", urls[2])
+    settle(viewer_client)
+    assert _fetches_of(viewer_page, urls[2]) == 2
+
+
+@pytest.mark.browser
+def test_model_cache_clip_mixers_per_clone(viewer_client, viewer_page):
+    """Two clones of an animated GLB each get their own mixer over the shared
+    clips, so driving one leaves the other in its bind pose."""
+    url = _cache_blob(viewer_client, "/cache_anim", _scale_animated_glb())
+    _add_cached_glb(viewer_page, "m1", url)
+    settle(viewer_client)
+    _add_cached_glb(viewer_page, "m2", url)
+    settle(viewer_client)
+    hits = "() => window.threejsViewer.getModelCacheStats().hits"
+    assert viewer_page.evaluate(hits) >= 1
+    viewer_client.set_clip_progress("m1", 1.0)
+    settle(viewer_client)
+    _wait_for_scale(viewer_page, 0.857, obj_id="m1")
+    assert abs(_node_scale(viewer_page, "m2") - 1.0) < 1e-6
+
+
+@pytest.mark.browser
+def test_model_cache_skipped_for_python_sidecar(viewer_client, viewer_page):
+    """Python's add_model_binary uses a fresh blob URL per push and sends
+    cache: false, so nothing it loads is retained by the cache."""
+    viewer_client.add_model_binary("py1", _two_triangle_glb(), format="glb")
+    settle(viewer_client)
+    state = viewer_page.evaluate(
+        """() => ({
+            has: window.threejsViewer._objects.has('py1'),
+            entries: window.threejsViewer.getModelCacheStats().entries,
+        })"""
+    )
+    assert state == {"has": True, "entries": 0}
+
+
 # ========== Axis Control (rotary / linear range widgets) ==========
 
 _AXIS_CONTROL_SPHERE_PX = """(id) => {
@@ -9011,10 +9382,8 @@ def test_remove_axis_control(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_axis_control_drives_mounted_child_transform_scratch(
-    viewer_client, viewer_page
-):
-    """SCRATCH: mirrors examples/36_axis_control.py's mount+child pattern —
+def test_axis_control_drives_mounted_child_transform(viewer_client, viewer_page):
+    """Mirrors examples/36_axis_control.py's mount+child pattern:
     a control anchored on a static mount group (never moved), with
     batch_update writing the reported value onto a child box's local
     position on the control's axis, and no drift across repeated drags."""
@@ -9048,13 +9417,14 @@ def test_axis_control_drives_mounted_child_transform_scratch(
             "() => window.threejsViewer._axisControls.controls.get('elz').value"
         )
 
-    _drag_axis_control(viewer_page, "elz", 40, 0)
+    # Short drags so neither lands on the max=2.0 clamp.
+    _drag_axis_control(viewer_page, "elz", 4, 0)
     _wait_for(
         viewer_page,
         "() => window.threejsViewer._axisControls.controls.get('elz').value !== 0",
     )
     v1 = control_value()
-    assert v1 > 0.1, f"drag did not move value ({v1})"
+    assert 0.1 < v1 < 1.5, f"drag moved value to {v1}"
     _wait_for(
         viewer_page,
         f"() => Math.abs(window.threejsViewer._objects.get('child').position.x - {v1}) < 1e-3",
@@ -9065,10 +9435,276 @@ def test_axis_control_drives_mounted_child_transform_scratch(
     # control's value exactly on the child's local position again (not
     # doubled, which is what would happen if the control were attached
     # directly to the moving child instead of the static mount).
-    _drag_axis_control(viewer_page, "elz", 10, 0)
+    _drag_axis_control(viewer_page, "elz", 2, 0)
     _wait_for(
         viewer_page,
         f"() => window.threejsViewer._axisControls.controls.get('elz').value > {v1}",
     )
     v2 = control_value()
     assert child_x() == pytest.approx(v2, abs=1e-3)
+
+
+@pytest.mark.browser
+def test_axis_control_hidden_until_target_exists(viewer_client, viewer_page):
+    """A control whose target is not in the scene yet is hidden (not drawn at
+    the origin), and a bbox-derived radius resolves once its source arrives."""
+    viewer_client.add_axis_control(
+        "late",
+        target_id="mount",
+        axis="z",
+        kind="rotary_unlimited",
+        value=0.0,
+        bbox_source_id="mount",
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('late')"
+    )
+    frames(viewer_page)
+    hidden = viewer_page.evaluate(
+        "() => window.threejsViewer._axisControls.controls.get('late').group.visible"
+    )
+    assert hidden is False
+    viewer_client.add_box("mount", width=2, height=2, depth=1, position=[3, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(
+        "() => { const c = window.threejsViewer._axisControls.controls.get('late');"
+        " return { visible: c.group.visible, radius: c.radius,"
+        " pos: c.group.position.toArray() }; }"
+    )
+    assert state["visible"] is True
+    assert state["radius"] == pytest.approx(2**0.5, abs=1e-6)
+    assert state["pos"] == pytest.approx([3, 0, 0], abs=1e-6)
+
+
+@pytest.mark.browser
+def test_axis_control_outside_framing_and_clipping(viewer_client, viewer_page):
+    """Axis controls live in the overlay scene: a long linear range does not
+    inflate frameAll bounds."""
+    viewer_client.add_box("mount", position=[0, 0, 0])
+    viewer_client.add_axis_control(
+        "rail",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-100.0,
+        max=100.0,
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const c = v._axisControls.controls.get('rail');
+            const b = v._collectFrameableBounds();
+            return { overlay: c.group.parent === v._gizmoScene, sizeX: b.max.x - b.min.x };
+        }"""
+    )
+    assert r["overlay"] is True
+    assert r["sizeX"] < 2, r
+
+
+@pytest.mark.browser
+def test_axis_control_remove_mid_drag_restores_orbit(viewer_client, viewer_page):
+    """Removing (or clearing) a control while it is being dragged gives the
+    camera controls back instead of leaving orbit disabled."""
+    viewer_client.add_group("mount", position=[0, 0, 0])
+    viewer_client.add_axis_control(
+        "rail",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-2.0,
+        max=2.0,
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page)
+    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "rail")
+    viewer_page.mouse.move(p["x"], p["y"])
+    viewer_page.mouse.down()
+    viewer_page.mouse.move(p["x"] + 10, p["y"])
+    assert viewer_page.evaluate("() => window.threejsViewer._controls.enabled") is False
+    viewer_client.remove_axis_control("rail")
+    _wait_for(
+        viewer_page, "() => !window.threejsViewer._axisControls.controls.has('rail')"
+    )
+    assert viewer_page.evaluate("() => window.threejsViewer._controls.enabled") is True
+    viewer_page.mouse.up()
+
+
+@pytest.mark.browser
+def test_axis_control_press_is_not_an_object_click(viewer_client, viewer_page):
+    """A click on an axis-control handle belongs to the widget: no
+    object_clicked report for whatever is behind it, and no pivot jump."""
+    viewer_client.add_box("mount", position=[0, 0, 0])
+    viewer_client.add_axis_control(
+        "rail",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-2.0,
+        max=2.0,
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { window.__clicks = [];"
+        " window.threejsViewer.onObjectClick(m => window.__clicks.push(m.id)); }"
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page)
+    target_before = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "rail")
+    viewer_page.mouse.move(p["x"], p["y"])
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    frames(viewer_page)
+    assert viewer_page.evaluate("() => window.__clicks") == []
+    target_after = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    assert target_after == pytest.approx(target_before, abs=1e-9)
+
+
+@pytest.mark.browser
+def test_axis_control_rotary_guide_caps_at_one_turn(viewer_client, viewer_page):
+    """A rotary range of several turns draws a single circle (the arc steps by
+    2*pi/64), while the value keeps the whole range."""
+    viewer_client.add_group("m")
+    viewer_client.add_axis_control(
+        "j",
+        target_id="m",
+        axis="z",
+        kind="rotary",
+        value=7.0,
+        min=0.0,
+        max=math.radians(18000),
+        radius=1.0,
+    )
+    settle(viewer_client)
+    r = viewer_page.evaluate(
+        """() => {
+            const c = window.threejsViewer._axisControls.controls.get('j');
+            const a = c.line.geometry.attributes.instanceStart;
+            const ang = i => Math.atan2(a.getZ(i), a.getY(i));
+            let step = ang(1) - ang(0);
+            if (step < 0) step += 2 * Math.PI;
+            return { step, value: c.value };
+        }"""
+    )
+    assert r["step"] == pytest.approx(2 * math.pi / 64, abs=1e-6)
+    assert r["value"] == pytest.approx(7.0)
+
+
+@pytest.mark.browser
+def test_grid_center_lines_only_with_center_color(viewer_client, viewer_page):
+    viewer_client.add_grid("plain")
+    viewer_client.add_grid("axes", center_color=0xAA4444)
+    settle(viewer_client)
+    flags = viewer_page.evaluate(
+        "() => ['plain', 'axes'].map(id => window.threejsViewer._objects.get(id)"
+        ".material.uniforms.uCenterLines.value)"
+    )
+    assert flags == [0.0, 1.0]
+
+
+@pytest.mark.browser
+def test_enable_move_gizmo_scale_keeps_gizmo_state(viewer_client, viewer_page):
+    """A new scale on the interactive gizmo is a live multiplier: same gizmo,
+    same attached object and axis masks."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("box")
+    viewer_client.set_gizmo_axes(x=False, y=False)
+    _wait_for(
+        viewer_page,
+        "() => { const c = window.threejsViewer._transformGizmo.control;"
+        " return c.object && !c.showX && !c.showY && c.showZ; }",
+    )
+    viewer_page.evaluate(
+        "() => { window.__g = window.threejsViewer._transformGizmo._primary; }"
+    )
+    viewer_client.enable_move_gizmo("box", scale=2.0)
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo._primary.scale === 2"
+    )
+    r = viewer_page.evaluate(
+        """() => {
+            const t = window.threejsViewer._transformGizmo;
+            const c = t.control;
+            return { same: t._primary === window.__g, id: t.objectId,
+                     axes: [c.showX, c.showY, c.showZ] };
+        }"""
+    )
+    assert r == {"same": True, "id": "box", "axes": [False, False, True]}
+
+
+@pytest.mark.browser
+def test_gizmo_windows_modifier_keys(viewer_client, viewer_page):
+    """On Windows Shift is the rotate override and Ctrl the snap key
+    (window.__gizmoWindowsKeys forces the platform)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._transformGizmo.objectId === 'box'"
+    )
+    viewer_page.evaluate("() => { window.__gizmoWindowsKeys = true; }")
+    assert viewer_page.evaluate("() => window.threejsViewer.gizmoModifierKeys()") == {
+        "rotate": "Shift",
+        "snap": "Control",
+    }
+    key = """([key, down, mods]) => {
+        window.threejsViewer.container.dispatchEvent(new KeyboardEvent(
+            down ? 'keydown' : 'keyup', { key, bubbles: true, ...mods }));
+        const g = window.threejsViewer._transformGizmo;
+        return { mode: g.control.getMode(), snap: g.control.translationSnap };
+    }"""
+    r = viewer_page.evaluate(key, ["Shift", True, {"shiftKey": True}])
+    assert r["mode"] == "rotate" and r["snap"] is None
+    r = viewer_page.evaluate(key, ["Shift", False, {}])
+    assert r["mode"] == "translate"
+    r = viewer_page.evaluate(key, ["Control", True, {"ctrlKey": True}])
+    assert r["mode"] == "translate" and r["snap"] == 1.0
+    viewer_page.evaluate(key, ["Control", False, {}])
+    viewer_page.evaluate("() => { window.__gizmoWindowsKeys = false; }")
+    assert viewer_page.evaluate("() => window.threejsViewer.gizmoModifierKeys()") == {
+        "rotate": "Alt",
+        "snap": "Shift",
+    }
+
+
+@pytest.mark.browser
+def test_rail_panel_opens_upward_and_tabs_stay_on_top(viewer_client, viewer_page):
+    """A low tab's tall panel is lifted to use the rail space above it, stays
+    inside the rail, and never covers another menu's tab."""
+    viewer_client.add_menu("a", [{"type": "label", "label": "A"}], label="First")
+    viewer_client.add_menu("b", [{"type": "label", "label": "B"}], label="Second")
+    items = [{"type": "button", "id": f"i{i}", "label": f"Item {i}"} for i in range(8)]
+    viewer_client.add_menu("tall", items, label="Tall menu")
+    settle(viewer_client)
+    viewer_page.evaluate("() => window.threejsViewer.getMenu('tall').open()")
+    frames(viewer_page)
+    r = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const m = v.getMenu('tall');
+            const rail = v.el.querySelector('.tjsv-rail').getBoundingClientRect();
+            const body = m.el.querySelector('.tjsv-rail-body') || m.el.lastElementChild;
+            const tab = m.el.querySelector('button').getBoundingClientRect();
+            const b = body.getBoundingClientRect();
+            const other = v.getMenu('b').el.querySelector('button').getBoundingClientRect();
+            const hit = document.elementFromPoint(other.left + other.width / 2, other.top + other.height / 2);
+            return { bodyTop: b.top, bodyBottom: b.bottom, tabTop: tab.top,
+                     railBottom: rail.bottom,
+                     otherTabOnTop: !!hit && v.getMenu('b').el.contains(hit) };
+        }"""
+    )
+    assert r["bodyTop"] < r["tabTop"], r
+    assert r["bodyBottom"] <= r["railBottom"] + 0.5, r
+    assert r["otherTabOnTop"] is True, r

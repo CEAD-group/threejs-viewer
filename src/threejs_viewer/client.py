@@ -41,6 +41,15 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
+_ALLOWED_AXIS_CONTROL_AXES = frozenset({"x", "y", "z"})
+_ALLOWED_CLIP_CHANNELS = frozenset(
+    f"{prop}.{axis}"
+    for prop in ("translation", "rotation", "scale")
+    for axis in ("x", "y", "z")
+)
+_ALLOWED_AXIS_CONTROL_KINDS = frozenset(
+    {"rotary", "rotary_unlimited", "linear", "linear_unlimited"}
+)
 _ALLOWED_HIGHLIGHT_STYLES = frozenset({"silhouette", "edges"})
 _ALLOWED_MENU_ITEM_TYPES = frozenset(
     {"button", "toggle", "eye", "select", "segmented", "label", "divider"}
@@ -954,8 +963,8 @@ class ViewerClient:
             except Exception:
                 pass
 
-        # Re-declare clip bindings. Sent after the objects so both sides of each
-        # binding exist, though the viewer also resolves one declared early.
+        # Re-declare clip bindings. Objects are not replayed; the viewer resolves
+        # a binding once both ids exist, whenever they arrive.
         for spec in self._clip_bindings.values():
             try:
                 websocket.send(json.dumps(spec))
@@ -3424,7 +3433,6 @@ class ViewerClient:
         ],
         from_value: float,
         to_value: float,
-        clamp: bool = True,
     ) -> None:
         """Declare that ``id``'s embedded clip mixer time tracks another
         object's own live local transform, instead of being pushed here on
@@ -3454,28 +3462,48 @@ class ViewerClient:
         / :meth:`set_clip_progress` push path is still there for objects with
         no natural geometric parent to bind to. Either side of the binding
         may not exist yet when this is called — it just resolves once both
-        ``id``'s clip mixer and ``source_id`` are in the scene.
+        ``id``'s clip mixer and ``source_id`` are in the scene. The binding
+        survives a delete and re-add of either id; :meth:`clear` drops it.
+
+        Values outside ``from_value``..``to_value`` hold the clip's end pose.
+        The source is read from its local transform, including one written
+        by an animation channel or :meth:`set_follow_path`. A ``rotation.*``
+        channel reads an XYZ Euler angle, which wraps at ±π; bind a rotary
+        source only over a range that stays inside one half-turn either side
+        of zero.
+
+        Raises:
+            ValueError: For an unknown ``channel``, a non-finite value, or
+                ``from_value == to_value``.
         """
+        if channel not in _ALLOWED_CLIP_CHANNELS:
+            allowed = ", ".join(sorted(_ALLOWED_CLIP_CHANNELS))
+            raise ValueError(f"channel must be one of: {allowed} (got {channel!r})")
+        from_value = _validate_finite("from_value", from_value)
+        to_value = _validate_finite("to_value", to_value)
+        if from_value == to_value:
+            raise ValueError("from_value and to_value must differ")
         spec = {
             "type": "bind_clip",
             "id": id,
             "source": {
                 "id": source_id,
                 "channel": channel,
-                "from": float(from_value),
-                "to": float(to_value),
+                "from": from_value,
+                "to": to_value,
             },
-            "clamp": bool(clamp),
         }
         self._clip_bindings[id] = spec
-        self._send(spec)
+        if self._ws is not None:
+            self._send(spec)
 
     def unbind_clip(self, id: str) -> None:
         """Remove a :meth:`bind_clip` binding, restoring the plain
         :meth:`set_clip_time` / :meth:`set_clip_progress` push path. A no-op
         if ``id`` has no binding."""
         self._clip_bindings.pop(id, None)
-        self._send({"type": "unbind_clip", "id": id})
+        if self._ws is not None:
+            self._send({"type": "unbind_clip", "id": id})
 
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
@@ -4346,13 +4374,13 @@ class ViewerClient:
             hover_color: Override the colour a handle turns while
                 hovered/dragging. ``None`` (default) auto-derives a lightened
                 variant of its base colour.
-            scale: Size multiplier for the handles (axis length, plane size,
-                pick radii). The gizmo is world-sized, so ``1.0`` is a 1 m
-                axis. ``None`` keeps the current size.
+            scale: Multiplier on the gizmo's constant on-screen size (handles
+                and pick areas scale together). ``None`` keeps the current
+                size (``1.0`` initially).
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
-                snap values.
+                snap or scale values.
         """
         if mode not in _ALLOWED_GIZMO_MODES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
@@ -4367,6 +4395,13 @@ class ViewerClient:
             raise ValueError(
                 f"rotate_snap_deg must be a positive number (got {rotate_snap_deg!r})"
             )
+        if scale is None:
+            # Keep the size from an earlier enable, so a reconnect replays it.
+            scale = (self._move_gizmo or {}).get("scale")
+        else:
+            scale = _validate_finite("scale", scale)
+            if scale <= 0:
+                raise ValueError(f"scale must be > 0 (got {scale!r})")
         self._move_gizmo = {
             "type": "set_move_gizmo",
             "enabled": True,
@@ -4381,7 +4416,7 @@ class ViewerClient:
             "hoverColor": hover_color,
         }
         if scale is not None:
-            self._move_gizmo["scale"] = float(scale)
+            self._move_gizmo["scale"] = scale
         if self._ws is not None:
             self._send(self._move_gizmo)
 
@@ -4464,13 +4499,14 @@ class ViewerClient:
                 every axis/plane (see :meth:`enable_move_gizmo`).
             hover_color: Override the colour this gizmo's handles turn while
                 hovered/dragging (see :meth:`enable_move_gizmo`).
-            scale: Local size multiplier for this gizmo's handles (axis
-                length, plane size, pick radii all scale together). ``1.0``
-                (default) is the standard size.
+            scale: Multiplier on the gizmo's constant on-screen size (handles
+                and pick areas scale together). ``1.0`` (default) is the
+                standard size.
 
         Raises:
-            ValueError: For an unknown ``mode`` or ``space``, or a malformed
-                ``translate``/``rotate`` mask.
+            ValueError: For an unknown ``mode`` or ``space``, a malformed
+                ``translate``/``rotate`` mask, or a ``scale`` that is not a
+                finite number above zero.
         """
         if mode not in _ALLOWED_GIZMO_MODES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
@@ -4478,6 +4514,9 @@ class ViewerClient:
         if space not in _ALLOWED_GIZMO_SPACES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_SPACES))
             raise ValueError(f"space must be one of: {allowed} (got {space!r})")
+        scale = _validate_finite("scale", scale)
+        if scale <= 0:
+            raise ValueError(f"scale must be > 0 (got {scale!r})")
         spec = {
             "type": "add_gizmo",
             "id": id,
@@ -4485,7 +4524,7 @@ class ViewerClient:
             "mode": mode,
             "space": space,
             "snapDefault": bool(snap_default),
-            "scale": float(scale),
+            "scale": scale,
             "color": color,
             "hoverColor": hover_color,
         }
@@ -4628,7 +4667,7 @@ class ViewerClient:
         window: float = 1.0,
     ) -> None:
         """Show a rotary or linear range control: a line spanning the axis's
-        range of motion with a short, 3x-thicker section of the same line
+        range of motion with a short, 4x-thicker section of the same line
         marking the current value (a small arc for rotary, a short segment
         for linear). The handle and the guide line always share one colour
         pair; only the handle's invisible hitbox sphere is draggable/hoverable.
@@ -4668,24 +4707,50 @@ class ViewerClient:
         gizmo); call :meth:`update_axis_control` to correct it from Python if
         the caller's own model disagrees (e.g. a value outside a coupled
         joint's real range).
+
+        Raises:
+            ValueError: For an unknown ``axis`` or ``kind``, a non-finite
+                number, a bounded ``kind`` without ``min``/``max`` or with
+                ``min > max``, or a ``radius``/``window`` that is not above zero.
         """
+        if axis not in _ALLOWED_AXIS_CONTROL_AXES:
+            allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_AXES))
+            raise ValueError(f"axis must be one of: {allowed} (got {axis!r})")
+        if kind not in _ALLOWED_AXIS_CONTROL_KINDS:
+            allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_KINDS))
+            raise ValueError(f"kind must be one of: {allowed} (got {kind!r})")
+        value = _validate_finite("value", value)
+        min = _validate_finite("min", min)
+        max = _validate_finite("max", max)
+        if kind in ("rotary", "linear"):
+            if min is None or max is None:
+                raise ValueError(f"kind={kind!r} needs both min and max")
+            if min > max:
+                raise ValueError(f"min must be <= max (got {min} > {max})")
+        radius = _validate_finite("radius", radius)
+        if radius is not None and radius <= 0:
+            raise ValueError(f"radius must be > 0 (got {radius!r})")
+        window = _validate_finite("window", window)
+        if window <= 0:
+            raise ValueError(f"window must be > 0 (got {window!r})")
         spec = {
             "type": "add_axis_control",
             "id": id,
             "target_id": target_id,
             "axis": axis,
             "kind": kind,
-            "value": float(value),
-            "min": None if min is None else float(min),
-            "max": None if max is None else float(max),
+            "value": value,
+            "min": min,
+            "max": max,
             "color": color,
             "hover_color": hover_color,
             "radius": radius,
             "bbox_source_id": bbox_source_id,
-            "window": float(window),
+            "window": window,
         }
         self._axis_controls[id] = spec
-        self._send(spec)
+        if self._ws is not None:
+            self._send(spec)
 
     def update_axis_control(
         self,
@@ -4700,36 +4765,51 @@ class ViewerClient:
         """Update a control added with :meth:`add_axis_control` — its value,
         range, and/or colour. Only the given fields change; the rest keep
         their last value. Passing ``color`` without ``hover_color``
-        re-derives the hover tint from the new ``color``."""
+        re-derives the hover tint from the new ``color``.
+
+        Raises:
+            ValueError: If ``id`` was never added with :meth:`add_axis_control`.
+            ValueError: For a non-finite number, or a resulting ``min > max``.
+        """
         spec = self._axis_controls.get(id)
-        if spec is not None:
-            if value is not None:
-                spec["value"] = float(value)
-            if min is not None:
-                spec["min"] = float(min)
-            if max is not None:
-                spec["max"] = float(max)
-            if color is not None:
-                spec["color"] = color
-            if hover_color is not None:
-                spec["hover_color"] = hover_color
-        self._send(
-            {
-                "type": "update_axis_control",
-                "id": id,
-                "value": None if value is None else float(value),
-                "min": None if min is None else float(min),
-                "max": None if max is None else float(max),
-                "color": color,
-                "hover_color": hover_color,
-            }
-        )
+        if spec is None:
+            raise ValueError(f"no axis control {id!r}")
+        value = _validate_finite("value", value)
+        min = _validate_finite("min", min)
+        max = _validate_finite("max", max)
+        new_min = spec["min"] if min is None else min
+        new_max = spec["max"] if max is None else max
+        if new_min is not None and new_max is not None and new_min > new_max:
+            raise ValueError(f"min must be <= max (got {new_min} > {new_max})")
+        if value is not None:
+            spec["value"] = value
+        if min is not None:
+            spec["min"] = min
+        if max is not None:
+            spec["max"] = max
+        if color is not None:
+            spec["color"] = color
+        if hover_color is not None:
+            spec["hover_color"] = hover_color
+        if self._ws is not None:
+            self._send(
+                {
+                    "type": "update_axis_control",
+                    "id": id,
+                    "value": value,
+                    "min": min,
+                    "max": max,
+                    "color": color,
+                    "hover_color": hover_color,
+                }
+            )
 
     def remove_axis_control(self, id: str) -> None:
         """Remove a control added with :meth:`add_axis_control`. A no-op if
         ``id`` doesn't exist."""
         self._axis_controls.pop(id, None)
-        self._send({"type": "remove_axis_control", "id": id})
+        if self._ws is not None:
+            self._send({"type": "remove_axis_control", "id": id})
 
     def on_axis_control_change(self, callback) -> None:
         """Register a callback fired while the user drags an axis control's

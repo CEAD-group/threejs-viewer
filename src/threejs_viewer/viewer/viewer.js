@@ -474,11 +474,23 @@ function readLocalChannel(obj, channel) {
     const prop = channel.slice(0, dot);
     const axis = channel.slice(dot + 1);
     if (axis !== 'x' && axis !== 'y' && axis !== 'z') return null;
-    if (prop === 'translation') return obj.position[axis];
-    if (prop === 'rotation') return obj.rotation[axis];
-    if (prop === 'scale') return obj.scale[axis];
+    // Animation channels and follow paths write obj.matrix with
+    // matrixAutoUpdate off, leaving position/rotation/scale stale.
+    let pos = obj.position, rot = obj.rotation, scl = obj.scale;
+    if (obj.matrixAutoUpdate === false) {
+        obj.matrix.decompose(_readChannelPos, _readChannelQuat, _readChannelScale);
+        pos = _readChannelPos; scl = _readChannelScale;
+        rot = _readChannelEuler.setFromQuaternion(_readChannelQuat, obj.rotation.order);
+    }
+    if (prop === 'translation') return pos[axis];
+    if (prop === 'rotation') return rot[axis];
+    if (prop === 'scale') return scl[axis];
     return null;
 }
+const _readChannelPos = new THREE.Vector3();
+const _readChannelQuat = new THREE.Quaternion();
+const _readChannelScale = new THREE.Vector3();
+const _readChannelEuler = new THREE.Euler();
 
 // Channel apply functions — keyed by channel name. Signature is
 // (ch, refs, base, baseNext, t) where baseNext/t are optional; when baseNext
@@ -8365,28 +8377,33 @@ const GIZMO_HOVER_PALETTE = { x: 0xC74E52, y: 0x6DB587, z: 0x4D7ABD };
 // Gizmo modifier keys. On Windows a bare Alt press moves focus to the browser's
 // menu bar, so there Shift is the rotate override and Ctrl the snap toggle;
 // elsewhere Alt / Shift (Shift dodges macOS's Ctrl-click = right-click).
-const GIZMO_ON_WINDOWS = typeof navigator !== 'undefined'
-    && /win/i.test(/** @type {any} */ (navigator).userAgentData?.platform || navigator.platform || '');
-const GIZMO_KEYS = GIZMO_ON_WINDOWS
-    ? { rotate: 'Shift', snap: 'Control' }
-    : { rotate: 'Alt', snap: 'Shift' };
+// Anchored regex: an unanchored /win/ also matches "Darwin".
+// `window.__gizmoWindowsKeys` (true/false) overrides the detection, for tests.
+function gizmoOnWindows() {
+    if (typeof window !== 'undefined' && typeof /** @type {any} */ (window).__gizmoWindowsKeys === 'boolean') {
+        return /** @type {any} */ (window).__gizmoWindowsKeys;
+    }
+    return typeof navigator !== 'undefined'
+        && /^win/i.test(/** @type {any} */ (navigator).userAgentData?.platform || navigator.platform || '');
+}
+/** @returns {{rotate: string, snap: string}} */
+const gizmoKeys = () => (gizmoOnWindows() ? { rotate: 'Shift', snap: 'Control' } : { rotate: 'Alt', snap: 'Shift' });
 /** @param {KeyboardEvent|PointerEvent} e */
-const gizmoRotateHeld = (e) => (GIZMO_ON_WINDOWS ? e.shiftKey : e.altKey);
+const gizmoRotateHeld = (e) => (gizmoOnWindows() ? e.shiftKey : e.altKey);
 /** @param {KeyboardEvent|PointerEvent} e */
-const gizmoSnapHeld = (e) => (GIZMO_ON_WINDOWS ? e.ctrlKey : e.shiftKey);
-const GIZMO_SIZE = 0.5;            // TransformControls screen-size factor (1 = stock; half keeps handles out of the way)
+const gizmoSnapHeld = (e) => (gizmoOnWindows() ? e.ctrlKey : e.shiftKey);
+const GIZMO_SIZE = 0.7;            // TransformControls screen-size factor; the axis lines are ~0.12 of the viewport height at this size
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
 
 // Move-gizmo axis handles, redesigned to look like the axis-control widget
-// (AXIS_CONTROL_* above): a simple fat line per axis, same linewidth, instead
-// of the stock arrow, meeting at the gizmo centre (GIZMO_AXIS_LENGTH is the
-// length from centre to tip in world units — the move gizmo overrides
-// TransformControls' constant-screen-size scaling, see the Gizmo
-// constructor, so it keeps its 3D size when zooming; line widths stay in
-// screen pixels). Plane chips are offset GIZMO_PLANE_GAP_FACTOR * axis
-// length from the centre (a gap from the axis lines) and are
-// GIZMO_PLANE_SIZE_FACTOR * axis length on a side.
+// (AXIS_CONTROL_* below): a simple fat line per axis, same linewidth, instead
+// of the stock arrow, meeting at the gizmo centre. The handles are built in
+// unit-size local geometry (GIZMO_AXIS_LENGTH from centre to tip) and keep
+// TransformControls' constant screen size; a gizmo's `scale` multiplies that
+// per frame (see the Gizmo constructor). Plane chips are offset
+// GIZMO_PLANE_GAP_FACTOR * axis length from the centre (a gap from the axis
+// lines) and are GIZMO_PLANE_SIZE_FACTOR * axis length on a side.
 // GIZMO_AXIS_LINE_WIDTH_PX intentionally not aliased here: AXIS_CONTROL_LINE_WIDTH_PX
 // is declared later in this file, and reading it at top-level module-eval time
 // (rather than lazily inside a function) would hit the temporal dead zone.
@@ -8490,7 +8507,7 @@ function ghostGizmoMaterial(src) {
 //      rings get the same treatment: fat-line half arcs, same linewidth and
 //      palette, radius = GIZMO_AXIS_LENGTH, with a half-torus picker each.
 /** @param {any} control  a THREE TransformControls
- *  @param {{customTranslateHandles?: boolean, scale?: number}} [opts] */
+ *  @param {{customTranslateHandles?: boolean}} [opts] */
 function refineGizmoHandles(control, opts = {}) {
     const gm = control._gizmo;
     if (!gm) return;
@@ -8507,9 +8524,8 @@ function refineGizmoHandles(control, opts = {}) {
         }
     }
     if (opts.customTranslateHandles) {
-        const scale = opts.scale != null ? opts.scale : 1;
-        buildGizmoTranslateHandles(gm, scale);
-        buildGizmoRotateHandles(gm, scale);
+        buildGizmoTranslateHandles(gm, 1);
+        buildGizmoRotateHandles(gm, 1);
         return;
     }
     const arrows = gm.gizmo && gm.gizmo.translate;
@@ -8771,7 +8787,7 @@ function restyleGizmoHelper(helper, opts = {}) {
     const moveGizmo = !!opts.control;   // discriminates the move gizmo's styling from the clip gizmos'
     helper.traverse((/** @type {any} */ o) => {
         const m = o.material;
-        if (!m || o.userData.__gizmoOutline) return;
+        if (!m) return;
         if (m.resolution && opts.resW != null) m.resolution.set(opts.resW, opts.resH);
         const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
         // Pickers live in a permanently-hidden group (and the non-current
@@ -8842,9 +8858,7 @@ class Gizmo {
         this.snapDefault = false;                                 // snap is the resting state (Shift → free) instead of free (Shift → snap)
         this.color = /** @type {number|string|null} */ (null);       // override for every axis/plane; null = per-axis palette
         this.hoverColor = /** @type {number|string|null} */ (null);  // override for the highlighted state; null = auto-lightened
-        // Local-geometry size multiplier for the custom translate handles
-        // (axis length, plane size, pick radii) — fixed at construction,
-        // since the handles are built once, not re-scaled per frame.
+        // Multiplier on the constant screen size, applied per frame.
         this.scale = opts.scale != null ? opts.scale : 1;
         /** @type {THREE.Object3D|null} */
         this.ghost = null;                                        // translucent clone at the grab-time pose
@@ -8860,13 +8874,8 @@ class Gizmo {
         this.control = ctrl;
         this.helper = ctrl.getHelper();
         this.helper.visible = false;
-        // Framing must never union this subtree: the TransformControlsPlane
-        // drag plane is a ~±50k mesh (visible object, invisible *material*)
-        // and pickers carry huge axis lines — frameAll()/Home would fly the
-        // camera hundreds of km out (issue #144). Checked by
-        // _collectFrameableBounds; updateSceneBounds only walks _objects,
-        // which never contains gizmo helpers.
-        this.helper.userData.isGizmoHelper = true;
+        // The overlay scene also keeps framing (issue #144) and the clipping
+        // planes off the helper, since both only walk `_scene`.
         v._gizmoScene.add(this.helper);   // overlay pass, see _animate
 
         // Orbit off while dragging a handle; spawn/clear the ghost and flush the
@@ -8891,15 +8900,15 @@ class Gizmo {
             const stockUpdateMatrixWorld = gizmoObj.updateMatrixWorld.bind(gizmoObj);
             gizmoObj.updateMatrixWorld = (/** @type {boolean} */ force) => {
                 stockUpdateMatrixWorld(force);
-                // The stock pass scales every handle to a constant *screen*
-                // size; the move gizmo keeps a constant *world* size instead
-                // (its fat lines stay screen-space px via LineMaterial).
-                // Undo that scale and recompute the subtree's world matrices.
-                const mode = ctrl.mode;
-                for (const grp of [gizmoObj.gizmo[mode], gizmoObj.picker[mode], gizmoObj.helper[mode]]) {
-                    if (grp) for (const h of grp.children) h.scale.setScalar(1);
+                // The stock pass scales every handle to a constant screen
+                // size; apply this gizmo's `scale` on top of it.
+                if (this.scale !== 1) {
+                    const mode = ctrl.mode;
+                    for (const grp of [gizmoObj.gizmo[mode], gizmoObj.picker[mode]]) {
+                        if (grp) for (const h of grp.children) h.scale.multiplyScalar(this.scale);
+                    }
+                    THREE.Object3D.prototype.updateMatrixWorld.call(gizmoObj, true);
                 }
-                THREE.Object3D.prototype.updateMatrixWorld.call(gizmoObj, true);
                 owner._restyleGizmo(this);
             };
         }
@@ -8955,7 +8964,7 @@ class TransformGizmoController {
     _allGizmos() { return [this._primary, ...this._extra]; }
 
     /** The rotate key → rotate mode (never mid-drag); the snap key → toggle snap
-     * from the gizmo's resting state (live, read per move). See GIZMO_KEYS.
+     * from the gizmo's resting state (live, read per move). See gizmoKeys().
      * Applied across every attached gizmo so modifiers are global. */
     _syncModifiers(e) {
         if (!this.enabled) return;
@@ -9143,7 +9152,7 @@ class TransformGizmoController {
     // Thin wrappers over the shared free helpers (also used by the clip gizmos,
     // which don't pass `customTranslateHandles` and keep the stock arrow look).
     /** @param {Gizmo} g */
-    _refineHandles(g) { refineGizmoHandles(g.control, { customTranslateHandles: true, scale: g.scale }); }
+    _refineHandles(g) { refineGizmoHandles(g.control, { customTranslateHandles: true }); }
 
     // Refined look for one gizmo's handles. Runs every frame (cheap traverse).
     // Threads through this gizmo's colour override + live hover/drag axis (for
@@ -9321,10 +9330,8 @@ class TransformGizmoController {
 
     /** @param {any} [opts] */
     enable(opts = {}) {
-        // The handles are built at a fixed size, so a new size is a new gizmo.
-        if (typeof opts.scale === 'number' && opts.scale > 0 && opts.scale !== this._primary.scale) {
-            this._rebuildPrimary(opts.scale);
-        }
+        // Applied per frame on top of the constant screen size; no rebuild.
+        if (typeof opts.scale === 'number' && opts.scale > 0) this._primary.scale = opts.scale;
         if (opts.mode === 'rotate' || opts.mode === 'translate') this._primary.mode = opts.mode;
         if (typeof opts.translateSnap === 'number' && opts.translateSnap > 0) this.translateSnap = opts.translateSnap;
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
@@ -9339,24 +9346,6 @@ class TransformGizmoController {
             const obj = this.v._objects.get(opts.id);
             if (obj) this.attach(obj, opts.id);
         }
-    }
-
-    /** Replace the interactive gizmo with one built at `scale`, keeping its
-     * mode, axis masks, snap convention, colours and attached object.
-     * @param {number} scale */
-    _rebuildPrimary(scale) {
-        const old = this._primary;
-        const object = old.object, id = old.id;
-        if (object) this.detach();
-        const g = new Gizmo(this, { scale });
-        g.mode = old.mode;
-        g.axes = old.axes;
-        g.snapDefault = old.snapDefault;
-        g.color = old.color;
-        g.hoverColor = old.hoverColor;
-        old.dispose();
-        this._primary = g;
-        if (object) this.attach(object, id);
     }
 
     /** Register the window/dom listeners and mark enabled. Idempotent. */
@@ -9407,6 +9396,7 @@ class TransformGizmoController {
         // A handle drag was the gesture, not a select-click — consume it.
         if (this._interacted) { this._interacted = false; return; }
         if (this.control.dragging || this.control.axis != null) return;
+        if (this.v._axisControls.busy()) return;
         if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > CLICK_DRAG_MAX_PX) return;   // a drag = orbit
         const hit = this._pickObject(e.clientX, e.clientY);
         if (hit) this.attach(hit.object, hit.id);
@@ -9492,6 +9482,7 @@ const _acScratchA = new THREE.Vector3();
 const _acScratchB = new THREE.Vector3();
 const _acScratchC = new THREE.Vector3();
 const _acPlane = new THREE.Plane();
+const _acQuat = new THREE.Quaternion();
 
 /** One rotary/linear axis-control instance. Built once; `_rebuild()` re-derives
  * line geometry and sphere position from `value`/`min`/`max`. */
@@ -9506,9 +9497,13 @@ class AxisControl {
         this.min = opts.min;
         this.max = opts.max;
         this.radius = opts.radius;
+        // Set while the radius waits for `bboxSourceId` to be in the scene.
+        this.bboxSourceId = opts.radiusPending ? opts.bboxSourceId : null;
         this.window = opts.window != null ? opts.window : AXIS_CONTROL_DEFAULT_WINDOW;
         this._hovered = false;
         this._dragging = false;
+        this._framePivot = new THREE.Vector3();   // _liveFrame scratch, per control
+        this._frameDir = new THREE.Vector3();
 
         const hex = opts.color != null ? opts.color : 0xffffff;
         this._baseColor = new THREE.Color(hex);
@@ -9517,8 +9512,7 @@ class AxisControl {
             : this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
 
         this.group = new THREE.Group();
-        this.group.userData.isAxisControlHelper = true;
-        this.group.matrixAutoUpdate = true;
+        this.group.visible = false;   // until update() finds the target
 
         // Fat line (Line2/LineMaterial), same construction the polyline path
         // uses (viewer.js ~13139): a plain THREE.Line's width is 1px on most
@@ -9527,12 +9521,9 @@ class AxisControl {
         // pixel size and is kept current in AxisControlManager.update() —
         // devicePixelRatio-independent as long as it matches the renderer's
         // own drawing-buffer size, same as every other fat line here.
-        // `transparent` puts the lines in three's transparent list, drawn after
-        // the opaque one; there renderOrder 900 lands them over a transparent
-        // floor grid, which as an opaque line they sat underneath.
         this.lineMaterial = new LineMaterial({
             color: this._baseColor.clone(), linewidth: AXIS_CONTROL_LINE_WIDTH_PX,
-            depthTest: false, depthWrite: false, toneMapped: false, transparent: true,
+            depthTest: false, depthWrite: false, toneMapped: false,
             resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
         });
         this.line = new Line2(new LineGeometry(), this.lineMaterial);
@@ -9546,7 +9537,7 @@ class AxisControl {
         // `_setHovered`).
         this.handleLineMaterial = new LineMaterial({
             color: this._baseColor.clone(), linewidth: AXIS_CONTROL_HANDLE_WIDTH_PX,
-            depthTest: false, depthWrite: false, toneMapped: false, transparent: true,
+            depthTest: false, depthWrite: false, toneMapped: false,
             resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
         });
         this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
@@ -9687,10 +9678,43 @@ class AxisControlManager {
         const dom = viewer._renderer.domElement;
         this._onDown = (/** @type {PointerEvent} */ e) => this._pointerDown(e);
         this._onMove = (/** @type {PointerEvent} */ e) => this._pointerMove(e);
-        this._onUp = (/** @type {PointerEvent} */ e) => this._pointerUp(e);
-        dom.addEventListener('pointerdown', this._onDown);
+        this._onUp = () => this._pointerUp();
+        // Capture phase, so a handle press can stop ViewerControls' pivot
+        // pick and the click-select / object-click listeners on the canvas.
+        dom.addEventListener('pointerdown', this._onDown, true);
         window.addEventListener('pointermove', this._onMove);
         window.addEventListener('pointerup', this._onUp);
+        window.addEventListener('pointercancel', this._onUp);
+    }
+
+    /** True while a handle is hovered or dragged, so a press or release
+     * there is this widget's gesture rather than a click. @returns {boolean} */
+    busy() {
+        if (this._active) return true;
+        for (const c of this.controls.values()) if (c._hovered) return true;
+        return false;
+    }
+
+    /** Remove the listeners and every control (viewer destroy). */
+    dispose() {
+        const dom = this.v._renderer.domElement;
+        dom.removeEventListener('pointerdown', this._onDown, true);
+        window.removeEventListener('pointermove', this._onMove);
+        window.removeEventListener('pointerup', this._onUp);
+        window.removeEventListener('pointercancel', this._onUp);
+        this.clear();
+        this._reportHooks.length = 0;
+    }
+
+    /** Drop `c` from the scene; ends its drag first so orbit comes back.
+     * @param {AxisControl} c */
+    _discard(c) {
+        if (this._active === c) {
+            this._active = null;
+            this.v._controls.enabled = true;
+        }
+        this.v._gizmoScene.remove(c.group);
+        c.dispose();
     }
 
     /** @param {(m:any)=>void} cb @returns {() => void} unsubscribe */
@@ -9702,12 +9726,16 @@ class AxisControlManager {
     /** @param {string} id @param {any} opts */
     add(id, opts) {
         const existing = this.controls.get(id);
-        if (existing) { this.v._scene.remove(existing.group); existing.dispose(); }
-        const radius = opts.radius != null ? opts.radius
-            : (opts.bboxSourceId != null ? this._radiusFromBbox(opts.bboxSourceId, opts.axis) : 1.0);
-        const c = new AxisControl(id, { ...opts, radius, viewer: this.v });
+        if (existing) this._discard(existing);
+        let radius = opts.radius != null ? opts.radius : 1.0;
+        let radiusPending = false;
+        if (opts.radius == null && opts.bboxSourceId != null) {
+            const r = this._radiusFromBbox(opts.bboxSourceId, opts.axis);
+            if (r != null) radius = r; else radiusPending = true;
+        }
+        const c = new AxisControl(id, { ...opts, radius, radiusPending, viewer: this.v });
         this.controls.set(id, c);
-        this.v._scene.add(c.group);
+        this.v._gizmoScene.add(c.group);   // overlay pass: outside framing, clipping and the grid's sort
     }
 
     /** Update one control's value/min/max (update_axis_control) — distinct
@@ -9725,27 +9753,24 @@ class AxisControlManager {
     remove(id) {
         const c = this.controls.get(id);
         if (!c) return;
-        this.v._scene.remove(c.group);
-        c.dispose();
+        this._discard(c);
         this.controls.delete(id);
-        if (this._active === c) this._active = null;
     }
 
     /** Drop every control (scene clear) — their targets are all gone too. */
     clear() {
-        for (const c of this.controls.values()) { this.v._scene.remove(c.group); c.dispose(); }
+        for (const c of this.controls.values()) this._discard(c);
         this.controls.clear();
-        this._active = null;
     }
 
     /** Projected-diagonal-bounding-box radius (the component's world AABB
      * diagonal, projected onto the plane perpendicular to `axis`, halved) —
      * the default when a caller supplies `bboxSourceId` instead of an
-     * explicit `radius`.
-     * @param {string} sourceId @param {string} axis @returns {number} */
+     * explicit `radius`. Null while the source is not in the scene yet.
+     * @param {string} sourceId @param {string} axis @returns {number|null} */
     _radiusFromBbox(sourceId, axis) {
         const obj = this.v._objects.get(sourceId);
-        if (!obj) return 1.0;
+        if (!obj) return null;
         const box = new THREE.Box3().setFromObject(obj);
         if (box.isEmpty()) return 1.0;
         const size = box.getSize(_acScratchA);
@@ -9765,12 +9790,13 @@ class AxisControlManager {
     _liveFrame(c) {
         const target = this.v._objects.get(c.targetId);
         if (!target) return null;
-        target.updateMatrixWorld();
-        const pivot = _acScratchB.setFromMatrixPosition(target.matrixWorld);
-        const localAxis = c.axis === 'y' ? new THREE.Vector3(0, 1, 0)
-            : c.axis === 'z' ? new THREE.Vector3(0, 0, 1) : _acUnitX;
-        const dir = localAxis.clone().applyQuaternion(target.getWorldQuaternion(new THREE.Quaternion())).normalize();
-        return { pivot: pivot.clone(), dir };
+        target.updateWorldMatrix(true, false);
+        const pivot = c._framePivot.setFromMatrixPosition(target.matrixWorld);
+        target.matrixWorld.decompose(_acScratchA, _acQuat, _acScratchC);
+        const dir = c._frameDir.set(0, 0, 0);
+        dir[c.axis === 'y' || c.axis === 'z' ? c.axis : 'x'] = 1;
+        dir.applyQuaternion(_acQuat).normalize();
+        return { pivot, dir };
     }
 
     /** Per-frame: reposition/orient every control at its target's live pivot
@@ -9788,7 +9814,13 @@ class AxisControlManager {
             c.lineMaterial.resolution.set(w, h);
             c.handleLineMaterial.resolution.set(w, h);
             const frame = this._liveFrame(c);
+            // No target (not loaded yet, or deleted): hide rather than draw at the origin.
+            c.group.visible = !!frame;
             if (!frame) continue;
+            if (c.bboxSourceId != null) {
+                const r = this._radiusFromBbox(c.bboxSourceId, c.axis);
+                if (r != null) { c.bboxSourceId = null; c.radius = r; c._rebuild(); }
+            }
             c.group.position.copy(frame.pivot);
             c.group.quaternion.setFromUnitVectors(_acUnitX, frame.dir);
         }
@@ -9808,7 +9840,7 @@ class AxisControlManager {
             this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
         const spheres = [];
         const map = new Map();
-        for (const c of this.controls.values()) { spheres.push(c.sphere); map.set(c.sphere, c); }
+        for (const c of this.controls.values()) if (c.group.visible) { spheres.push(c.sphere); map.set(c.sphere, c); }
         const hits = this._raycaster.intersectObjects(spheres, false);
         return hits.length ? map.get(hits[0].object) : null;
     }
@@ -9823,6 +9855,7 @@ class AxisControlManager {
         this._active = hit;
         hit._dragging = true;
         this.v._controls.enabled = false;   // same synchronous suppression as the move gizmo
+        hit._setHovered(true);
         this._dragPivot.copy(frame.pivot);
         this._dragAxisDir.copy(frame.dir);
         // group.quaternion (the group sits directly under the scene root, so
@@ -9838,7 +9871,9 @@ class AxisControlManager {
             const grabRaw = this._linearRawValue(e.clientX, e.clientY);
             this._dragValueOffset = grabRaw == null ? 0 : hit.value - grabRaw;
         }
-        e.stopPropagation();
+        // Other canvas pointerdown listeners (pivot pick, click-select,
+        // object click) must not see a handle press.
+        e.stopImmediatePropagation();
         e.preventDefault();
     }
 
@@ -9860,10 +9895,16 @@ class AxisControlManager {
     _linearRawValue(clientX, clientY) {
         this._raycaster.setFromCamera(
             this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
-        const eye = _acScratchB.copy(/** @type {any} */ (this.v._camera).position).sub(this._dragPivot);
-        const planeNormal = this._dragAxisDir.clone()
-            .cross(eye.clone().cross(this._dragAxisDir)).normalize();
-        _acPlane.setFromNormalAndCoplanarPoint(planeNormal, this._dragPivot);
+        // Toward the camera: its back direction under ortho, where every view
+        // ray is parallel (TransformControls uses the same `eye`).
+        const cam = /** @type {any} */ (this.v._camera);
+        const eye = cam.isOrthographicCamera
+            ? _acScratchB.set(0, 0, 1).applyQuaternion(cam.quaternion)
+            : _acScratchB.copy(cam.position).sub(this._dragPivot);
+        const planeNormal = _acScratchC.copy(eye).cross(this._dragAxisDir).cross(this._dragAxisDir);
+        // Looking straight down the axis: no plane contains it and faces the camera.
+        if (planeNormal.lengthSq() < 1e-12) return null;
+        _acPlane.setFromNormalAndCoplanarPoint(planeNormal.normalize(), this._dragPivot);
         if (!this._raycaster.ray.intersectPlane(_acPlane, _acScratchA)) return null;
         return _acScratchA.sub(this._dragPivot).dot(this._dragAxisDir);
     }
@@ -9909,8 +9950,7 @@ class AxisControlManager {
         this._report(c, false);
     }
 
-    /** @param {PointerEvent} e */
-    _pointerUp(e) {
+    _pointerUp() {
         const c = this._active;
         if (!c) return;
         c._dragging = false;
@@ -10024,8 +10064,9 @@ export class ThreeJSViewer {
         // Ids already warned about a set_clip_progress with no mixer.
         /** @type {Set<string>} */
         this._clipProgressWarned = new Set();
-        // id -> {source: {id, channel, from, to}, clamp} — see bind_clip.
-        /** @type {Map<string, {source: {id:string, channel:string, from:number, to:number}, clamp: boolean}>} */
+        // id -> {source: {id, channel, from, to}} — see bind_clip. Kept across
+        // a delete/re-add of either id (same id = same logical object).
+        /** @type {Map<string, {source: {id:string, channel:string, from:number, to:number}}>} */
         this._clipBindings = new Map();
         this._objGeneration = 0;
         this._mixerGeneration = 0;
@@ -10668,7 +10709,7 @@ export class ThreeJSViewer {
         this._objectClickRaycaster.params.Line.threshold = 0.05;
         this._objectClickRaycaster.params.Points.threshold = 0.05;
         this._renderer.domElement.addEventListener('dblclick', (e) => {
-            if (!this._dblclickFrame) return;
+            if (!this._dblclickFrame || this._gizmoHandleHovered()) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
             if (hit) this.frameObject(hit.object); else this.resetView();
         });
@@ -11591,6 +11632,8 @@ export class ThreeJSViewer {
      */
     async _addObject(id, objData, parentId, deleteOpts) {
         let obj;
+        /** @type {THREE.AnimationMixer|null} */
+        let newMixer = null;
         const token = this._claimLoadToken(id);
 
         if (objData.primitive) {
@@ -11651,12 +11694,10 @@ export class ThreeJSViewer {
                 obj = this._instantiateModel(entry, format, objData.yUp === true);
                 if (entry.animations.length > 0) {
                     const mixerRoot = obj.userData.gltfScene || obj;
-                    const mixer = new THREE.AnimationMixer(mixerRoot);
+                    newMixer = new THREE.AnimationMixer(mixerRoot);
                     // Deferred bind: hold the authored bind pose until the
                     // first clip-drive message (issue #135).
-                    prepareModelMixer(mixer, entry.animations);
-                    this._mixers.set(id, mixer);
-                    this._mixerGeneration++;
+                    prepareModelMixer(newMixer, entry.animations);
                     console.log(`Model ${id}: ${entry.animations.length} animation clip(s) available`);
                 }
             } catch (e) {
@@ -11673,6 +11714,8 @@ export class ThreeJSViewer {
         this._applyTransform(obj, objData.transform);
         this._applyInitialVisibility(id, obj, objData.visible);
         this._deleteObject(id, deleteOpts);
+        // After the delete, which drops the previous object's mixer for this id.
+        if (newMixer) { this._mixers.set(id, newMixer); this._mixerGeneration++; }
         this._addToParentOrScene(obj, parentId);
         this._registerObject(id, obj);
         if (this._clipEnabled) this._applyClipToObject(obj);
@@ -11770,14 +11813,13 @@ export class ThreeJSViewer {
     }
 
     /** Declare (or clear) a declarative clip-time binding — see bind_clip.
-     * @param {string} id @param {{id:string, channel:string, from:number, to:number}|null|undefined} source
-     * @param {boolean} clamp */
-    _bindClip(id, source, clamp) {
+     * @param {string} id @param {{id:string, channel:string, from:number, to:number}|null|undefined} source */
+    _bindClip(id, source) {
         if (!source || source.id == null) {
             this._clipBindings.delete(id);
             return;
         }
-        this._clipBindings.set(id, { source, clamp: clamp !== false });
+        this._clipBindings.set(id, { source });
     }
 
     /** Resolve every declared clip binding from its source's current live
@@ -11797,13 +11839,8 @@ export class ThreeJSViewer {
             const { from, to } = binding.source;
             const span = to - from;
             if (span === 0) continue;
-            const t = (raw - from) / span;
-            // `driveMixerProgress` itself always clamps to [0,1] (a clip is
-            // LoopRepeat; an un-clamped seek would wrap past the authored
-            // range instead of holding the end pose) — `clamp` is honoured
-            // for wire-protocol completeness/future clip types, but there is
-            // no *visible* difference today between clamp:true and :false.
-            driveMixerProgress(mixer, binding.clamp ? Math.min(1, Math.max(0, t)) : t);
+            // driveMixerProgress clamps to [0, 1]: past either end holds the end pose.
+            driveMixerProgress(mixer, (raw - from) / span);
         }
     }
 
@@ -12503,7 +12540,6 @@ export class ThreeJSViewer {
                 this._billboardOrderDirty = true;
                 const childMixer = this._mixers.get(childId);
                 if (childMixer) { childMixer.stopAllAction(); this._mixers.delete(childId); this._mixerGeneration++; }
-                this._clipBindings.delete(childId);
             }
             if (obj.parent) obj.parent.remove(obj);
             this._objects.delete(id);
@@ -12511,7 +12547,6 @@ export class ThreeJSViewer {
             this._sceneBoundsDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
-            this._clipBindings.delete(id);
             obj.traverse(/** @param {any} child */ (child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 this._modelCache.release(child);
@@ -12567,6 +12602,7 @@ export class ThreeJSViewer {
         }
         this._followPaths.clear();
         this._pendingReparent.clear();
+        this._clipBindings.clear();
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
@@ -15374,10 +15410,10 @@ export class ThreeJSViewer {
                 // above — the target's mixer, and the source object, are each
                 // allowed to arrive after the binding (_resolveClipBindings
                 // no-ops until both exist).
-                this._bindClip(data.id, data.source, data.clamp);
+                this._bindClip(data.id, data.source);
                 break;
             case 'unbind_clip':
-                this._bindClip(data.id, null, true);
+                this._bindClip(data.id, null);
                 break;
             case 'set_follow_path': {
                 this._onFetchStart();
@@ -15861,28 +15897,6 @@ export class ThreeJSViewer {
             this._renderer.clearDepth();
             this._renderer.render(this._gizmoScene, this._camera);
         }
-        // Lift the ViewHelper above the animation toolbar when it's visible.
-        // ViewHelper hardcodes setViewport(x, 0, dim, dim); we shim that one
-        // call to add a Y offset matching the toolbar height.
-        const lift = (this._animLiftCss || 0) * window.devicePixelRatio;
-        if (lift > 0) {
-            // Cache the true original once so we don't re-wrap the wrapped
-            // setViewport each frame (which would deepen the call chain by
-            // one level per frame and eventually blow the stack).
-            if (!this._rendererSetViewportOriginal) {
-                this._rendererSetViewportOriginal = this._renderer.setViewport.bind(this._renderer);
-            }
-            const orig = this._rendererSetViewportOriginal;
-            const r = this._renderer;
-            r.setViewport = (x, y, w, h) => orig(x, (y === 0 && w === h) ? lift : y, w, h);
-            try {
-                this._viewHelper.render(this._renderer);
-            } finally {
-                r.setViewport = orig;
-            }
-        } else {
-            this._viewHelper.render(this._renderer);
-        }
         this._renderViewHelper();
 
         // LOD: dispatch to Web Worker after render (non-blocking)
@@ -16072,18 +16086,39 @@ export class ThreeJSViewer {
      * stretched along their own length by _gizmoArmScale. The arms share one
      * x-oriented cylinder that each mesh rotates into place, so a local
      * scale.x stretches every arm along itself. Baseline opacity is captured
-     * for the hover restore. _gizmoHitTest raycasts the live sprites through
-     * a mirror of the helper's ortho camera, so it follows these edits.
+     * for the hover restore. The arms and positive-axis bubbles are recoloured
+     * to GIZMO_PALETTE, so the gimbal and the move gizmo agree on X/Y/Z.
+     * _gizmoHitTest raycasts the live sprites through a mirror of the
+     * helper's ortho camera, so it follows these edits.
      * Called once per ViewHelper instance (re-created on every persp/ortho
      * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
+        // ViewHelper hardcodes its axis colours; map each stock one to ours.
+        const stockToPalette = { ff4466: GIZMO_PALETTE.x, '88ff44': GIZMO_PALETTE.y, '4488ff': GIZMO_PALETTE.z };
+        const bubbleHex = { posX: GIZMO_PALETTE.x, posY: GIZMO_PALETTE.y, posZ: GIZMO_PALETTE.z };
         for (const child of helper.children) {
             if (!child.userData || !child.userData.type) {
-                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                if (child.isMesh) {
+                    child.scale.x = this._gizmoArmScale;
+                    const hex = stockToPalette[child.material.color.getHexString()];
+                    if (hex != null) child.material.color.set(hex);
+                }
                 continue;
+            }
+            const hex = bubbleHex[child.userData.type];
+            const map = child.material.map;
+            if (hex != null && map && map.image && map.image.getContext) {
+                // Redraw the stock 64x64 disc (radius 14) in the palette colour.
+                const ctx = map.image.getContext('2d');
+                ctx.clearRect(0, 0, 64, 64);
+                ctx.beginPath();
+                ctx.arc(32, 32, 14, 0, 2 * Math.PI);
+                ctx.fillStyle = gizmoColor(hex).getStyle();
+                ctx.fill();
+                map.needsUpdate = true;
             }
             child.scale.setScalar(this._gizmoBaseScale);
             // Stock sprites sit on the unit axis; keep them at the arm tips.
@@ -16349,15 +16384,9 @@ export class ThreeJSViewer {
             // ignore them just like updateSceneBounds does — otherwise F/
             // Home framing over-zooms to fit a huge ground plane.
             if (child.userData && child.userData.excludeFromBounds) return;
-            // Move-gizmo TransformControls helpers (primary + pinned
-            // add_gizmo extras): their drag plane is a ~±50k mesh whose
-            // *material* is invisible but whose object is visible, so the
-            // geometry check below would union it and fly the camera ~250 km
-            // out (issue #144). The clip gizmos are caught by _isClipHelper;
-            // the transient drag ghost (__gizmoGhost) is deliberately NOT
-            // skipped — it sits at the dragged object's own grab-time pose,
-            // so it never inflates bounds beyond real content.
-            if (child.userData && child.userData.isGizmoHelper) return;
+            // Move-gizmo helpers and axis controls live in `_gizmoScene`, so
+            // only the clip gizmos need skipping here (_isClipHelper). The
+            // drag ghost stays in: it sits at the object's grab-time pose.
             if (child.geometry &&
                 child !== this._gridHelper &&
                 !this._isClipHelper(child) &&
@@ -16708,11 +16737,12 @@ export class ThreeJSViewer {
     setObjectClickEnabled(enabled) { this._objectClickEnabled = !!enabled; }
 
     /**
-     * True while any move/rotate gizmo handle is hovered or dragged, so a
+     * True while any move/rotate gizmo or axis-control handle is hovered or dragged, so a
      * press or release there is the gizmo's gesture rather than a click.
      * @returns {boolean}
      */
     _gizmoHandleHovered() {
+        if (this._axisControls && this._axisControls.busy()) return true;
         const tg = this._transformGizmo;
         if (!tg || !tg.enabled) return false;
         for (const g of tg._allGizmos()) {
@@ -17014,12 +17044,11 @@ export class ThreeJSViewer {
     /** Direct-call JS equivalent of the `bind_clip` WS message: drive `id`'s
      * clip from `source.id`'s live local `source.channel`, mapping
      * `source.from`..`source.to` onto clip progress 0..1, every render frame.
-     * @param {string} id @param {{id:string, channel:string, from:number, to:number}} source
-     * @param {{clamp?:boolean}} [opts] */
-    bindClip(id, source, opts = {}) { this._bindClip(id, source, opts.clamp !== false); }
+     * @param {string} id @param {{id:string, channel:string, from:number, to:number}} source */
+    bindClip(id, source) { this._bindClip(id, source); }
 
     /** @param {string} id */
-    unbindClip(id) { this._bindClip(id, null, true); }
+    unbindClip(id) { this._bindClip(id, null); }
 
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
@@ -17104,7 +17133,7 @@ export class ThreeJSViewer {
     /** The gizmo's modifier keys on this platform, as `KeyboardEvent.key` names:
      * `{rotate, snap}` — Shift / Control on Windows, Alt / Shift elsewhere.
      * @returns {{rotate: string, snap: string}} */
-    gizmoModifierKeys() { return { ...GIZMO_KEYS }; }
+    gizmoModifierKeys() { return gizmoKeys(); }
 
     /**
      * Register a hook fired on every gizmo `objectChange` — synchronously, on each
@@ -17190,6 +17219,7 @@ export class ThreeJSViewer {
         window.removeEventListener('pointercancel', this._onObjectClickCancel);
         this._objectClickDown = null;
         this._objectClickHooks.length = 0;
+        this._axisControls.dispose();
         this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();

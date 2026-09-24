@@ -22,8 +22,9 @@ you can see how far the block has travelled; it disappears on release. The plane
 chips are flat quads spaced a little out from the gizmo centre.
 
 These gizmos pin with ``snap_default=True``, so drags snap to the grid (``0.5`` /
-15°) by default — hold **Shift** to move freely (the inverse of the usual
-free / Shift-to-snap). Hold **Alt** to rotate instead of translate. Each release
+15°) by default — hold **Shift** (Ctrl on Windows) to move freely (the
+inverse of the usual free / hold-to-snap). Hold **Alt** (Shift on Windows) to
+rotate instead of translate. Each release
 is reported back here through ``on_object_move`` and logged.
 
 Run: uv run python examples/24_gizmo_dimensions.py
@@ -101,7 +102,7 @@ def on_move(m):
 # Pin the gizmos first, *then* register the callback. With pinned gizmos already
 # present, on_object_move only registers the callback (it doesn't also turn on the
 # click-select interactive gizmo, which would draw an extra gizmo).
-# snap_default=True → drags snap to the grid by default; hold Shift to move freely.
+# snap_default=True → drags snap to the grid by default; hold the snap key to move freely.
 # Back row — world-aligned (the default space).
 v.add_gizmo("rail", x=False, y=False, z=True, snap_default=True)  # 1-DOF: Z rail
 v.add_gizmo("tile", x=True, y=True, z=False, snap_default=True)  # 2-DOF: XY plane
@@ -119,7 +120,8 @@ print(__doc__)
 print("6 pinned gizmos · columns = 1D/2D/3D · back row = world, front = local.")
 print("Drag a block; a ghost stays at the start until you release.")
 print(
-    "  Snap on by default (0.5 / 15°) · Shift = free · Alt = rotate. Press F to frame."
+    "  Snap on by default (0.5 / 15°) · Shift = free · Alt = rotate. Press F to frame.\n"
+    "  (On Windows: Ctrl = free · Shift = rotate.)"
 )
 print("Ctrl+C here to quit.")
 

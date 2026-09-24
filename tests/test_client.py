@@ -478,7 +478,6 @@ def test_bind_clip_records_for_reconnect_and_clear_forgets():
             "from": 0.0,
             "to": 4.0,
         },
-        "clamp": True,
     }
     client.unbind_clip("bellows_mesh")
     assert set(client._clip_bindings) == {"chain_mesh"}
@@ -796,3 +795,154 @@ def test_update_menu_item_unknown_raises():
     client._send = lambda m: None
     with pytest.raises(ValueError, match="no menu"):
         client.update_menu_item("nope", "x", label="y")
+
+
+def test_add_gizmo_rejects_bad_scale():
+    client = ViewerClient()
+    for bad in (0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="scale"):
+            client.add_gizmo("box", scale=bad)
+    assert client._gizmos == []
+
+
+def test_add_axis_control_payload_and_records_for_reconnect():
+    """add_axis_control records its spec (replayed on reconnect) without a
+    connected viewer, and a scene clear forgets it."""
+
+    class _StubWS:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, data):
+            self.sent.append(json.loads(data))
+
+    client = ViewerClient()
+    client.add_axis_control(
+        "j1",
+        target_id="mount",
+        axis="z",
+        kind="rotary",
+        value=0.5,
+        min=0,
+        max=3.0,
+        radius=2,
+    )
+    assert client._axis_controls["j1"] == {
+        "type": "add_axis_control",
+        "id": "j1",
+        "target_id": "mount",
+        "axis": "z",
+        "kind": "rotary",
+        "value": 0.5,
+        "min": 0.0,
+        "max": 3.0,
+        "color": 0xFFFFFF,
+        "hover_color": None,
+        "radius": 2.0,
+        "bbox_source_id": None,
+        "window": 1.0,
+    }
+    client.update_axis_control("j1", value=1.0, max=4.0)
+    assert client._axis_controls["j1"]["value"] == 1.0
+    assert client._axis_controls["j1"]["max"] == 4.0
+
+    ws = _StubWS()
+    client._ws = ws
+    client.update_axis_control("j1", value=2.0)
+    assert ws.sent[-1]["type"] == "update_axis_control"
+    assert ws.sent[-1]["value"] == 2.0
+    client.clear()
+    assert client._axis_controls == {}
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"axis": "w"}, "axis"),
+        ({"kind": "rotatory"}, "kind"),
+        ({"kind": "linear", "min": None}, "min and max"),
+        ({"kind": "linear", "min": 2.0, "max": 1.0}, "min must be <= max"),
+        ({"value": float("nan")}, "value"),
+        ({"radius": 0.0}, "radius"),
+        ({"window": -1.0}, "window"),
+        ({"max": float("inf")}, "max"),
+    ],
+)
+def test_add_axis_control_validates(kwargs, match):
+    client = ViewerClient()
+    args = dict(
+        target_id="mount", axis="x", kind="linear", value=0.0, min=-1.0, max=1.0
+    )
+    args.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        client.add_axis_control("c", **args)
+    assert client._axis_controls == {}
+
+
+def test_update_axis_control_validates():
+    client = ViewerClient()
+    with pytest.raises(ValueError, match="no axis control"):
+        client.update_axis_control("missing", value=1.0)
+    client.add_axis_control(
+        "c", target_id="m", axis="x", kind="linear", value=0.0, min=-1.0, max=1.0
+    )
+    with pytest.raises(ValueError, match="min must be <= max"):
+        client.update_axis_control("c", min=5.0)
+    with pytest.raises(ValueError, match="value"):
+        client.update_axis_control("c", value=float("nan"))
+    assert client._axis_controls["c"]["min"] == -1.0
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"channel": "translation.w"}, "channel"),
+        ({"channel": "position.x"}, "channel"),
+        ({"from_value": float("nan")}, "from_value"),
+        ({"to_value": float("inf")}, "to_value"),
+        ({"from_value": 1.0, "to_value": 1.0}, "must differ"),
+    ],
+)
+def test_bind_clip_validates(kwargs, match):
+    client = ViewerClient()
+    args = dict(source_id="s", channel="translation.x", from_value=0.0, to_value=1.0)
+    args.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        client.bind_clip("c", **args)
+    assert client._clip_bindings == {}
+
+
+def test_enable_move_gizmo_scale_carries_forward_and_validates():
+    """scale=None keeps the size from an earlier enable (so a reconnect replays
+    it); a bad scale raises before any state changes."""
+    client = ViewerClient()
+    client.enable_move_gizmo(scale=2.0)
+    client.enable_move_gizmo("box")
+    assert client._move_gizmo["scale"] == 2.0
+    for bad in (0, -1.0, float("nan")):
+        with pytest.raises(ValueError, match="scale"):
+            client.enable_move_gizmo(scale=bad)
+    assert client._move_gizmo["scale"] == 2.0
+
+
+def test_reconnect_replays_bindings_and_axis_controls(bound_client):
+    """State recorded before any viewer connects is sent on connect."""
+    bound_client.bind_clip(
+        "bellows",
+        source_id="carriage",
+        channel="translation.y",
+        from_value=0.0,
+        to_value=4.0,
+    )
+    bound_client.add_axis_control(
+        "j1", target_id="m", axis="z", kind="rotary_unlimited", value=0.0, radius=1.0
+    )
+    bound_client.enable_move_gizmo(scale=1.5)
+    seen = {}
+    with ws_connect(f"ws://127.0.0.1:{bound_client.port}", open_timeout=5) as ws:
+        while not {"bind_clip", "add_axis_control", "set_move_gizmo"} <= set(seen):
+            msg = json.loads(ws.recv(timeout=5))
+            seen[msg["type"]] = msg
+    assert seen["bind_clip"] == bound_client._clip_bindings["bellows"]
+    assert seen["add_axis_control"]["id"] == "j1"
+    assert seen["set_move_gizmo"]["scale"] == 1.5
