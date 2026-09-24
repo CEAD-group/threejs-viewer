@@ -9843,16 +9843,32 @@ class PolylinePickController {
 // Lives in the scene like the pivot / pick markers; never enters _objects, so it
 // can't be picked or cleared and survives `clear`.
 
-// Axis colours match three's ViewHelper bubbles in the corner gimbal, so the
-// handles and the gimbal agree on what X / Y / Z look like (issue #191).
-const GIZMO_PALETTE = { x: 0xff4466, y: 0x88ff44, z: 0x4488ff, n: 0xcfd3da };
-const GIZMO_PLANE_SCALE = 1.7;     // enlarge the stock plane chips in place
-const GIZMO_PLANE_MARGIN = 0.15;   // push each plane chip outward from the gizmo centre so the three don't crowd the origin
-const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
-const GIZMO_CENTER_PICKER_SCALE = 0.6; // shrink of the stock centre (XYZ free-move) picker octahedron
-const GIZMO_SIZE = 0.5;            // TransformControls screen-size factor (1 = stock; half keeps handles out of the way)
+// Same base/hover colour pairs as examples/36_axis_control.py's RED/GREEN/BLUE,
+// so the move gizmo and the axis-control widget agree on what X/Y/Z look like.
+const GIZMO_PALETTE = { x: 0xAE4346, y: 0x5D9C74, z: 0x4369A2, n: 0xcfd3da };
+const GIZMO_HOVER_PALETTE = { x: 0xC74E52, y: 0x6DB587, z: 0x4D7ABD };
+const GIZMO_SIZE = 0.7;            // TransformControls screen-size factor; the axis lines are ~0.12 of the viewport height at this size
 const GIZMO_REPORT_HZ = 30;        // throttle continuous (mid-drag) move reports
 const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start pose until release
+
+// Move-gizmo axis handles, redesigned to look like the axis-control widget
+// (AXIS_CONTROL_* below): a simple fat line per axis, same linewidth, instead
+// of the stock arrow, meeting at the gizmo centre. The handles are built in
+// unit-size local geometry (GIZMO_AXIS_LENGTH from centre to tip) and keep
+// TransformControls' constant screen size; a gizmo's `scale` multiplies that
+// per frame (see the Gizmo constructor). Plane chips are offset
+// GIZMO_PLANE_GAP_FACTOR * axis length from the centre (a gap from the axis
+// lines) and are GIZMO_PLANE_SIZE_FACTOR * axis length on a side.
+// GIZMO_AXIS_LINE_WIDTH_PX intentionally not aliased here: AXIS_CONTROL_LINE_WIDTH_PX
+// is declared later in this file, and reading it at top-level module-eval time
+// (rather than lazily inside a function) would hit the temporal dead zone.
+const GIZMO_AXIS_LENGTH = 1.0;
+const GIZMO_PLANE_GAP_FACTOR = 0.15;
+const GIZMO_PLANE_SIZE_FACTOR = 0.75;
+const GIZMO_PLANE_OPACITY = 0.8;      // plane chips: mostly solid, a hint of what's behind
+const GIZMO_AXIS_PICK_RADIUS = 0.09;   // pill (capsule) hitbox radius around each axis line
+const GIZMO_CENTER_PICK_RADIUS = 0.16; // sphere hitbox radius around the (invisible) centre
+const GIZMO_PLANE_PICK_THICKNESS = 0.02;   // small box depth along the plane's normal, for a forgiving hitbox
 
 /** TransformControls handle name → palette hex, or null to leave it untouched. */
 function gizmoAxisColor(name) {
@@ -9863,14 +9879,49 @@ function gizmoAxisColor(name) {
     return null;
 }
 
+/** TransformControls handle name → default hover-tint hex, or null. */
+function gizmoAxisHoverColor(name) {
+    if (name === 'X' || name === 'YZ') return GIZMO_HOVER_PALETTE.x;
+    if (name === 'Y' || name === 'XZ') return GIZMO_HOVER_PALETTE.y;
+    if (name === 'Z' || name === 'XY') return GIZMO_HOVER_PALETTE.z;
+    return null;
+}
+
+// Which handle names light up together when `name` is hovered/dragging — the
+// centre (free move) highlights everything, a plane highlights itself plus
+// the two axes that span it, a single axis highlights only itself.
+const GIZMO_HIGHLIGHT_ALL = new Set(['X', 'Y', 'Z', 'XY', 'YZ', 'XZ']);
+const GIZMO_HIGHLIGHT_BY_NAME = {
+    XYZ: GIZMO_HIGHLIGHT_ALL,
+    XY: new Set(['XY', 'X', 'Y']),
+    YZ: new Set(['YZ', 'Y', 'Z']),
+    XZ: new Set(['XZ', 'X', 'Z']),
+    X: new Set(['X']), Y: new Set(['Y']), Z: new Set(['Z']),
+};
+/** @param {string|null} name  the live `TransformControls.axis` @returns {Set<string>|null} */
+function gizmoHighlightSet(name) {
+    return name ? (GIZMO_HIGHLIGHT_BY_NAME[name] || null) : null;
+}
+
 // Cached THREE.Color per palette hex — `_restyleGizmo()` runs every frame while a
 // gizmo is attached, so we reuse instances instead of allocating per handle.
 // Never mutate a returned colour (callers .copy()/.clone() it).
 const _gizmoColorCache = new Map();
-/** @param {number} hex @returns {THREE.Color} */
+/** @param {number|string} hex @returns {THREE.Color} */
 function gizmoColor(hex) {
     let c = _gizmoColorCache.get(hex);
     if (!c) { c = new THREE.Color(hex); _gizmoColorCache.set(hex, c); }
+    return c;
+}
+
+// Lazily-derived, cached "hovered" tint (lighten, same recipe as the axis
+// control widget's default hover colour) for a base hex with no explicit
+// hoverColor override.
+const _gizmoHoverColorCache = new Map();
+/** @param {number|string} hex @returns {THREE.Color} */
+function gizmoHoverColor(hex) {
+    let c = _gizmoHoverColorCache.get(hex);
+    if (!c) { c = gizmoColor(hex).clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN); _gizmoHoverColorCache.set(hex, c); }
     return c;
 }
 
@@ -9900,19 +9951,19 @@ function ghostGizmoMaterial(src) {
 //      environment sculpt the cone. The lib's per-frame re-theme + highlight
 //      only touch `.color`/`.opacity` (which Standard supports), so they keep
 //      working; `restyleGizmoHelper` re-applies our `_color` each frame regardless.
-//   3. Slim the translate pickers: hover resolves closest-intersection-wins
-//      across all pickers, and the stock arrow pickers are fat cone volumes
-//      hugging each axis (radius 0.2 at the tip, vs 0.04 for the visible
-//      cone) — from any 3/4 view they bulge in front of the flat plane chips
-//      and steal most of a chip's screen area, so the chip's own picker
-//      (deliberately larger than its visual) was unreachable over roughly
-//      half the visible parallelogram. Scale each arrow picker's two radial
-//      (non-axis) dims down and the centre free-move octahedron uniformly;
-//      the handle's axis passes through the radial origin of its baked
-//      geometry, so a plain geometry scale keeps it centred on the axis.
-//      Arrows keep ~2× their visible cone radius of invisible hit slop.
-/** @param {any} control  a THREE TransformControls */
-function refineGizmoHandles(control) {
+//   3. For the move gizmo only (`opts.customTranslateHandles`, the clip
+//      gizmos don't pass it): replace the stock X/Y/Z arrows with a simple
+//      fat line each (axis-control-widget styling) with a pill-shaped
+//      (capsule) picker around it, replace the centre free-move handle's
+//      picker with a sphere and hide its visible mesh entirely (it renders
+//      nothing — only the plane chips and axis lines stay visible), and
+//      leave the plane chips' own geometry untouched (`restyleGizmoHelper`
+//      already resizes/margins them into a clean box shape). The rotate
+//      rings get the same treatment: fat-line half arcs, same linewidth and
+//      palette, radius = GIZMO_AXIS_LENGTH, with a half-torus picker each.
+/** @param {any} control  a THREE TransformControls
+ *  @param {{customTranslateHandles?: boolean}} [opts] */
+function refineGizmoHandles(control, opts = {}) {
     const gm = control._gizmo;
     if (!gm) return;
     for (const grp of [gm.gizmo && gm.gizmo.rotate, gm.picker && gm.picker.rotate]) {
@@ -9926,6 +9977,11 @@ function refineGizmoHandles(control) {
         for (const child of helperRot.children.slice()) {
             if (child.name === 'AXIS') helperRot.remove(child);
         }
+    }
+    if (opts.customTranslateHandles) {
+        buildGizmoTranslateHandles(gm, 1);
+        buildGizmoRotateHandles(gm, 1);
+        return;
     }
     const arrows = gm.gizmo && gm.gizmo.translate;
     if (arrows) {
@@ -9971,52 +10027,224 @@ function refineGizmoHandles(control) {
     }
 }
 
-// Refined look for one gizmo helper's handles. Runs every frame (cheap traverse)
-// so our resting palette survives TransformControls' per-frame re-theme; the
-// plane resize + margin + outline are guarded (via `sizedPlanes`) so they only
-// happen once per handle. Shared by the move gizmo and the clipping gizmos.
-/** @param {any} helper  a TransformControls helper Object3D
- *  @param {WeakSet<object>} sizedPlanes  per-gizmo guard set for the one-time plane resize */
-function restyleGizmoHelper(helper, sizedPlanes) {
-    helper.traverse((/** @type {any} */ o) => {
-        const m = o.material;
-        if (!m || o.userData.__gizmoOutline) return;
-        const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
-        // Enlarge both the visible plane chip and its invisible picker so the
-        // clickable area matches the larger visual, then push the chip outward
-        // along its own offset direction so the three planes leave a margin
-        // around the gizmo centre instead of all meeting at the origin. Scale
-        // about the geometry's own centroid because the stock handle bakes its
-        // corner offset into the geometry.
-        if (planar && !sizedPlanes.has(o)) {
-            sizedPlanes.add(o);
-            const geo = o.geometry;
-            geo.computeBoundingBox();
-            const c = new THREE.Vector3();
-            geo.boundingBox.getCenter(c);
-            const size = new THREE.Vector3();
-            geo.boundingBox.getSize(size);
-            geo.translate(-c.x, -c.y, -c.z);
-            // The stock chip is a thin BOX (depth 0.01), which reads as a 3D
-            // slab — its sides catch light and its edge outline draws a back
-            // rectangle too. Scale the two broad axes up, but collapse the thin
-            // (normal) axis to zero so the chip is a flat quad. The thin axis is
-            // whichever bbox dimension is smallest (it varies per chip — the box
-            // is pre-rotated, baked into geometry — so detect it, don't hardcode).
-            const minDim = Math.min(size.x, size.y, size.z);
-            geo.scale(
-                size.x === minDim ? 0 : GIZMO_PLANE_SCALE,
-                size.y === minDim ? 0 : GIZMO_PLANE_SCALE,
-                size.z === minDim ? 0 : GIZMO_PLANE_SCALE,
-            );
-            const len = c.length();
-            if (len > 1e-6) {
-                const f = (len + GIZMO_PLANE_MARGIN) / len;   // push centroid out by the margin
-                geo.translate(c.x * f, c.y * f, c.z * f);
-            } else {
-                geo.translate(c.x, c.y, c.z);
+// Legacy stock-arrow picker tuning, kept only for the clip gizmos (which
+// don't opt into `customTranslateHandles`).
+const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
+const GIZMO_CENTER_PICKER_SCALE = 0.6; // shrink of the stock centre (XYZ free-move) picker octahedron
+
+/** @param {string} name  'X'|'Y'|'Z' @returns {[number, number, number]} */
+function gizmoAxisUnitVector(name) {
+    return name === 'X' ? [1, 0, 0] : name === 'Y' ? [0, 1, 0] : [0, 0, 1];
+}
+
+/** The two axes spanning a plane handle, in a fixed (u, v) order.
+ * @param {string} name  'XY'|'YZ'|'XZ' @returns {{u:[number,number,number], v:[number,number,number]}} */
+function gizmoPlaneAxes(name) {
+    if (name === 'XY') return { u: [1, 0, 0], v: [0, 1, 0] };
+    if (name === 'YZ') return { u: [0, 1, 0], v: [0, 0, 1] };
+    return { u: [1, 0, 0], v: [0, 0, 1] };   // 'XZ'
+}
+
+/** Simple fat line from the gizmo centre out to `GIZMO_AXIS_LENGTH * scale`
+ * along `name` (the three axes meet at the centre) — same linewidth
+ * convention as the axis-control widget's guide line.
+ * @param {string} name  'X'|'Y'|'Z' @param {number} scale @returns {any} a Line2 */
+function buildGizmoAxisLine(name, scale) {
+    const [ux, uy, uz] = gizmoAxisUnitVector(name);
+    const len = GIZMO_AXIS_LENGTH * scale;
+    const geo = new LineGeometry();
+    geo.setPositions([0, 0, 0, len * ux, len * uy, len * uz]);
+    const mat = new LineMaterial({
+        linewidth: AXIS_CONTROL_LINE_WIDTH_PX, toneMapped: false,   // depth-tested within the gizmo overlay pass
+    });
+    const line = new Line2(geo, mat);
+    line.name = name;
+    line.computeLineDistances();
+    return line;
+}
+
+/** Pill-shaped (capsule) hitbox around one axis line, centre to tip.
+ * @param {string} name  'X'|'Y'|'Z' @param {number} scale @returns {any} a Mesh */
+function buildGizmoAxisPicker(name, scale) {
+    const len = GIZMO_AXIS_LENGTH * scale;
+    const r = GIZMO_AXIS_PICK_RADIUS * scale;
+    const cylLen = Math.max(len - 2 * r, 0.01);
+    const geo = new THREE.CapsuleGeometry(r, cylLen, 4, 8);   // default long axis is local Y
+    geo.translate(0, len / 2, 0);
+    if (name === 'X') geo.rotateZ(-Math.PI / 2);
+    else if (name === 'Z') geo.rotateX(Math.PI / 2);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+    mesh.name = name;
+    // Raycast-only hitbox — three's raycaster ignores `.visible` (same trick
+    // as the axis-control widget's own invisible pick sphere).
+    mesh.visible = false;
+    return mesh;
+}
+
+/** A flat (or, for a picker, thin-boxed) square plane chip, offset
+ * `GIZMO_PLANE_GAP_FACTOR * axis length` from the gizmo centre along +u/+v
+ * (a gap from the axis lines) and `GIZMO_PLANE_SIZE_FACTOR * axis length`
+ * on a side.
+ * @param {string} name  'XY'|'YZ'|'XZ' @param {number} scale @param {number} thickness  0 for a flat quad
+ * @returns {any} a BufferGeometry */
+function buildGizmoPlaneGeometry(name, scale, thickness) {
+    const { u, v } = gizmoPlaneAxes(name);
+    const uVec = new THREE.Vector3(...u);
+    const vVec = new THREE.Vector3(...v);
+    const nVec = new THREE.Vector3().crossVectors(uVec, vVec).normalize();
+    const basis = new THREE.Matrix4().makeBasis(uVec, vVec, nVec);
+    const axisLen = GIZMO_AXIS_LENGTH * scale;
+    const gap = axisLen * GIZMO_PLANE_GAP_FACTOR;
+    const side = axisLen * GIZMO_PLANE_SIZE_FACTOR;
+    const geo = thickness > 0
+        ? new THREE.BoxGeometry(side, side, thickness * scale)
+        : new THREE.PlaneGeometry(side, side);
+    geo.translate(gap + side / 2, gap + side / 2, 0);   // near corner `gap` out from centre, extends toward +u, +v
+    geo.applyMatrix4(basis);
+    return geo;
+}
+
+/** @param {string} name  'XY'|'YZ'|'XZ' @param {number} scale @returns {any} a Mesh */
+function buildGizmoPlaneMesh(name, scale) {
+    const mesh = new THREE.Mesh(buildGizmoPlaneGeometry(name, scale, 0), new THREE.MeshBasicMaterial({
+        toneMapped: false, side: THREE.DoubleSide,   // opaque, depth-tested within the gizmo overlay pass
+    }));
+    mesh.name = name;
+    return mesh;
+}
+
+/** @param {string} name  'XY'|'YZ'|'XZ' @param {number} scale @returns {any} a Mesh */
+function buildGizmoPlanePicker(name, scale) {
+    const mesh = new THREE.Mesh(buildGizmoPlaneGeometry(name, scale, GIZMO_PLANE_PICK_THICKNESS), new THREE.MeshBasicMaterial());
+    mesh.name = name;
+    mesh.visible = false;   // raycast-only, see buildGizmoAxisPicker
+    return mesh;
+}
+
+/** Replace the stock X/Y/Z arrows, plane chips, and centre handle with
+ * axis-control-style lines/planes/pickers (issue: "look like the axis
+ * control widget"). @param {any} gm  control._gizmo @param {number} scale */
+function buildGizmoTranslateHandles(gm, scale) {
+    const visible = gm.gizmo && gm.gizmo.translate;
+    const picker = gm.picker && gm.picker.translate;
+    const AXES = ['X', 'Y', 'Z'];
+    const PLANES = ['XY', 'YZ', 'XZ'];
+    if (visible) {
+        for (const child of visible.children.slice()) {
+            if (AXES.includes(child.name) || PLANES.includes(child.name)) visible.remove(child);
+            else if (child.name === 'XYZ') child.visible = false;   // centre renders nothing
+        }
+        for (const name of AXES) visible.add(buildGizmoAxisLine(name, scale));
+        for (const name of PLANES) visible.add(buildGizmoPlaneMesh(name, scale));
+    }
+    if (picker) {
+        for (const child of picker.children.slice()) {
+            if (AXES.includes(child.name) || PLANES.includes(child.name)) picker.remove(child);
+            else if (child.name === 'XYZ' && child.geometry) {
+                child.geometry.dispose();
+                child.geometry = new THREE.SphereGeometry(GIZMO_CENTER_PICK_RADIUS * scale, 12, 8);
             }
         }
+        for (const name of AXES) picker.add(buildGizmoAxisPicker(name, scale));
+        for (const name of PLANES) picker.add(buildGizmoPlanePicker(name, scale));
+    }
+    // Stock TransformControls extends a long dashed "AXIS" guide line through
+    // whichever handle is being dragged — with the whole handle now just a
+    // simple line, that read as an infinite line snapping into view on
+    // selection. Only three axis lines + three plane chips should ever render.
+    const helperT = gm.helper && gm.helper.translate;
+    if (helperT) {
+        for (const child of helperT.children.slice()) helperT.remove(child);
+    }
+}
+
+// Stock rotate rings are half-circle tori (radius 0.5) whose orientation is
+// baked into the geometry by `setupGizmo` — X: none, Y: Euler(0, 0, -π/2),
+// Z: Euler(0, π/2, 0), on top of the lib's CircleGeometry rotateY(π/2) +
+// rotateX(π/2). TransformControls then spins each handle about its own axis
+// every frame so the half-ring faces the camera. We bake the same transforms
+// into our own arc so that per-frame spin still lines up.
+const GIZMO_ROTATE_BAKED_EULER = { X: [0, 0, 0], Y: [0, 0, -Math.PI / 2], Z: [0, Math.PI / 2, 0] };
+const GIZMO_ROTATE_ARC_SEGMENTS = 48;
+
+/** The stock CircleGeometry + setupGizmo orientation for rotate handle `name`.
+ * @param {string} name  'X'|'Y'|'Z' @returns {THREE.Matrix4} */
+function gizmoRotateBakeMatrix(name) {
+    const [ex, ey, ez] = GIZMO_ROTATE_BAKED_EULER[/** @type {'X'|'Y'|'Z'} */ (name)];
+    const baked = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(ex, ey, ez));
+    const circle = new THREE.Matrix4().makeRotationX(Math.PI / 2)
+        .multiply(new THREE.Matrix4().makeRotationY(Math.PI / 2));
+    return baked.multiply(circle);
+}
+
+/** Half-circle fat-line arc, radius = axis length, same linewidth as the
+ * axis lines. @param {string} name  'X'|'Y'|'Z' @param {number} scale @returns {any} a Line2 */
+function buildGizmoRotateArc(name, scale) {
+    const r = GIZMO_AXIS_LENGTH * scale;
+    const m = gizmoRotateBakeMatrix(name);
+    const p = new THREE.Vector3();
+    const pos = [];
+    for (let i = 0; i <= GIZMO_ROTATE_ARC_SEGMENTS; i++) {
+        const t = (i / GIZMO_ROTATE_ARC_SEGMENTS) * Math.PI;
+        p.set(r * Math.cos(t), r * Math.sin(t), 0).applyMatrix4(m);
+        pos.push(p.x, p.y, p.z);
+    }
+    const geo = new LineGeometry();
+    geo.setPositions(pos);
+    const mat = new LineMaterial({
+        linewidth: AXIS_CONTROL_LINE_WIDTH_PX, toneMapped: false,   // depth-tested within the gizmo overlay pass
+    });
+    const line = new Line2(geo, mat);
+    line.name = name;
+    line.computeLineDistances();
+    return line;
+}
+
+/** Half-torus hitbox hugging the visible arc (same bake, so the lib's
+ * per-frame spin keeps the two aligned). @param {string} name @param {number} scale @returns {any} a Mesh */
+function buildGizmoRotatePicker(name, scale) {
+    const geo = new THREE.TorusGeometry(GIZMO_AXIS_LENGTH * scale, GIZMO_AXIS_PICK_RADIUS * scale, 4, 24, Math.PI);
+    geo.applyMatrix4(gizmoRotateBakeMatrix(name));
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+    mesh.name = name;
+    mesh.visible = false;   // raycast-only, see buildGizmoAxisPicker
+    return mesh;
+}
+
+/** Replace the stock X/Y/Z rotate rings (and their pickers) with arcs styled
+ * like the translate axis lines. @param {any} gm  control._gizmo @param {number} scale */
+function buildGizmoRotateHandles(gm, scale) {
+    const AXES = ['X', 'Y', 'Z'];
+    const visible = gm.gizmo && gm.gizmo.rotate;
+    if (visible) {
+        for (const child of visible.children.slice()) if (AXES.includes(child.name)) visible.remove(child);
+        for (const name of AXES) visible.add(buildGizmoRotateArc(name, scale));
+    }
+    const picker = gm.picker && gm.picker.rotate;
+    if (picker) {
+        for (const child of picker.children.slice()) if (AXES.includes(child.name)) picker.remove(child);
+        for (const name of AXES) picker.add(buildGizmoRotatePicker(name, scale));
+    }
+}
+
+// Refined look for one gizmo helper's handles. Runs every frame (cheap traverse)
+// so our resting palette survives TransformControls' per-frame re-theme.
+// Shared by the move gizmo and the clipping gizmos (which never have planar
+// handles, so the planar-only branches below are inert for them).
+/** @param {any} helper  a TransformControls helper Object3D
+ *  @param {{control?: any, color?: number|string|null, hoverColor?: number|string|null, resW?: number, resH?: number}} [opts]
+ *    `control`/`color`/`hoverColor` only ever passed by the move gizmo (never
+ *    the clip gizmos): opts into live hover/drag highlighting, an optional
+ *    colour override (falls back to the per-axis palette), fully-opaque axis
+ *    lines (vs. the legacy 0.92 for stock arrows), and no plane outline. */
+function restyleGizmoHelper(helper, opts = {}) {
+    const highlightSet = opts.control ? gizmoHighlightSet(opts.control.axis) : null;
+    const moveGizmo = !!opts.control;   // discriminates the move gizmo's styling from the clip gizmos'
+    helper.traverse((/** @type {any} */ o) => {
+        const m = o.material;
+        if (!m) return;
+        if (m.resolution && opts.resW != null) m.resolution.set(opts.resW, opts.resH);
+        const planar = !!(o.name && o.name.length === 2 && gizmoAxisColor(o.name) != null);
         // Pickers live in a permanently-hidden group (and the non-current
         // mode's gizmo handles in a hidden one): resized above so the hit area
         // matches, but not recoloured / outlined. `matInvisible` is opacity-
@@ -10024,26 +10252,37 @@ function restyleGizmoHelper(helper, sizedPlanes) {
         // a picker would be raycast-hit before the chip and report an empty
         // axis, breaking plane-chip dragging.
         if (!o.parent || o.parent.visible === false) return;
+        if (moveGizmo && o.name === 'XYZ') {
+            // The centre should render nothing (only its sphere picker is
+            // real) — TransformControls re-asserts `.visible = true` on its
+            // own handles every frame, so force this back off here too
+            // rather than only once at construction.
+            o.visible = false; m.opacity = 0; m.transparent = true;
+            return;
+        }
         const hex = gizmoAxisColor(o.name);
         if (hex == null) return;
-        const col = gizmoColor(hex);              // cached; do not mutate
+        const hovered = !!(highlightSet && highlightSet.has(o.name));
+        const baseHex = opts.color != null ? opts.color : hex;
+        let col;
+        if (!hovered) {
+            col = gizmoColor(baseHex);             // cached; do not mutate
+        } else if (opts.hoverColor != null) {
+            col = gizmoColor(opts.hoverColor);
+        } else if (opts.color != null) {
+            col = gizmoHoverColor(baseHex);        // custom base colour: auto-lighten it
+        } else {
+            const hoverHex = gizmoAxisHoverColor(o.name);
+            col = hoverHex != null ? gizmoColor(hoverHex) : gizmoHoverColor(baseHex);
+        }
         m._color = (m._color || new THREE.Color()).copy(col);
         m.color.copy(col);
         if (planar) {
-            m._opacity = 0.22; m.opacity = 0.22; m.transparent = true;
-            if (!o.userData.__hasOutline) {
-                o.userData.__hasOutline = true;
-                const edge = new THREE.LineSegments(
-                    new THREE.EdgesGeometry(o.geometry),
-                    new THREE.LineBasicMaterial({
-                        color: col.clone().offsetHSL(0, 0, 0.18),
-                        transparent: true, opacity: 0.95, depthTest: false, depthWrite: false,
-                    })
-                );
-                edge.renderOrder = 1000;
-                edge.userData.__gizmoOutline = true;
-                o.add(edge);
-            }
+            // Slightly translucent flat chip, no outline.
+            m._opacity = GIZMO_PLANE_OPACITY; m.opacity = GIZMO_PLANE_OPACITY; m.transparent = true;
+        } else if (moveGizmo) {
+            // Move-gizmo axis lines are fully opaque.
+            m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
         } else {
             m._opacity = 0.92; m.opacity = 0.92; m.transparent = true;
         }
@@ -10061,8 +10300,8 @@ function restyleGizmoHelper(helper, sizedPlanes) {
 // base mode. All share the controller's modifier handling, snap settings, drag
 // ghost, and report/change hooks.
 class Gizmo {
-    /** @param {TransformGizmoController} owner */
-    constructor(owner) {
+    /** @param {TransformGizmoController} owner @param {{scale?: number}} [opts] */
+    constructor(owner, opts = {}) {
         this.owner = owner;
         /** @type {THREE.Object3D|null} */
         this.object = null;
@@ -10072,11 +10311,14 @@ class Gizmo {
         // arrows and rotate rings, so it is re-applied on every mode switch.
         this.axes = { translate: { x: true, y: true, z: true }, rotate: { x: true, y: true, z: true } };
         this.snapDefault = false;                                 // snap is the resting state (Shift → free) instead of free (Shift → snap)
+        this.color = /** @type {number|string|null} */ (null);       // override for every axis/plane; null = per-axis palette
+        this.hoverColor = /** @type {number|string|null} */ (null);  // override for the highlighted state; null = auto-lightened
+        // Multiplier on the constant screen size, applied per frame.
+        this.scale = opts.scale != null ? opts.scale : 1;
         /** @type {THREE.Object3D|null} */
         this.ghost = null;                                        // translucent clone at the grab-time pose
         this._snapOrigin = new THREE.Vector3();                   // object position at drag-start (relative snap + positionStart)
         this._snapQuat = new THREE.Quaternion();                  // object rotation at drag-start (quaternionStart)
-        this._sizedPlanes = new WeakSet();                        // plane chips already resized/margined
 
         const v = owner.v;
         const ctrl = /** @type {any} */ (new TransformControls(v._camera, v._renderer.domElement));
@@ -10087,22 +10329,44 @@ class Gizmo {
         this.control = ctrl;
         this.helper = ctrl.getHelper();
         this.helper.visible = false;
-        // Framing must never union this subtree: the TransformControlsPlane
-        // drag plane is a ~±50k mesh (visible object, invisible *material*)
-        // and pickers carry huge axis lines — frameAll()/Home would fly the
-        // camera hundreds of km out (issue #144). Checked by
-        // _collectFrameableBounds; updateSceneBounds only walks _objects,
-        // which never contains gizmo helpers.
-        this.helper.userData.isGizmoHelper = true;
-        v._scene.add(this.helper);
+        // The overlay scene also keeps framing (issue #144) and the clipping
+        // planes off the helper, since both only walk `_scene`.
+        v._gizmoScene.add(this.helper);   // overlay pass, see _animate
 
         // Orbit off while dragging a handle; spawn/clear the ghost and flush the
         // final transform on release (see _onDragChange / _onObjectChange).
         ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => owner._onDragChange(this, e.value));
         ctrl.addEventListener('objectChange', () => owner._onObjectChange(this));
 
-        owner._refineHandles(this);  // strip the bulky rotate handles + shade the cones (one-time)
-        owner._restyleGizmo(this);   // prime colour caches / build outlines up front
+        owner._refineHandles(this);  // strip the bulky rotate handles + build our own translate handles (one-time)
+        owner._restyleGizmo(this);   // prime colour caches up front
+
+        // TransformControlsGizmo re-themes its own handles (a hardcoded
+        // yellow on whichever one matches `control.axis`) inside its own
+        // `updateMatrixWorld`, which the renderer calls at the start of
+        // every `render()` — strictly *after* our `_restyleGizmo` call in
+        // `_animate`, so it would win the draw every time. Wrap it so our
+        // colours (base + the plane/centre-aware hover highlight) are
+        // re-applied immediately after the stock pass, same frame, before
+        // anything gets drawn.
+        const gizmoObj = /** @type {any} */ (ctrl._gizmo);
+        if (gizmoObj && !gizmoObj.__restyleWrapped) {
+            gizmoObj.__restyleWrapped = true;
+            const stockUpdateMatrixWorld = gizmoObj.updateMatrixWorld.bind(gizmoObj);
+            gizmoObj.updateMatrixWorld = (/** @type {boolean} */ force) => {
+                stockUpdateMatrixWorld(force);
+                // The stock pass scales every handle to a constant screen
+                // size; apply this gizmo's `scale` on top of it.
+                if (this.scale !== 1) {
+                    const mode = ctrl.mode;
+                    for (const grp of [gizmoObj.gizmo[mode], gizmoObj.picker[mode]]) {
+                        if (grp) for (const h of grp.children) h.scale.multiplyScalar(this.scale);
+                    }
+                    THREE.Object3D.prototype.updateMatrixWorld.call(gizmoObj, true);
+                }
+                owner._restyleGizmo(this);
+            };
+        }
     }
 
     dispose() {
@@ -10110,7 +10374,7 @@ class Gizmo {
         this.owner._clearGhost(this);
         this.control.detach();
         this.control.dispose();
-        v._scene.remove(this.helper);
+        v._gizmoScene.remove(this.helper);
     }
 }
 
@@ -10341,15 +10605,21 @@ class TransformGizmoController {
     //      environment sculpt the cone. The lib's per-frame re-theme + highlight
     //      only touch `.color`/`.opacity` (which Standard supports), so they keep
     //      working; `_restyleGizmo` re-applies our `_color` each frame regardless.
-    // Thin wrappers over the shared free helpers (also used by the clip gizmos).
+    // Thin wrappers over the shared free helpers (also used by the clip gizmos,
+    // which don't pass `customTranslateHandles` and keep the stock arrow look).
     /** @param {Gizmo} g */
-    _refineHandles(g) { refineGizmoHandles(g.control); }
+    _refineHandles(g) { refineGizmoHandles(g.control, { customTranslateHandles: true }); }
 
-    // Refined look for one gizmo's handles. Runs every frame (cheap traverse) so
-    // our resting palette survives TransformControls' per-frame re-theme; the
-    // plane resize + margin + outline are guarded so they only happen once per handle.
+    // Refined look for one gizmo's handles. Runs every frame (cheap traverse).
+    // Threads through this gizmo's colour override + live hover/drag axis (for
+    // highlighting) and the renderer size (fat-line resolution uniform).
     /** @param {Gizmo} g */
-    _restyleGizmo(g) { restyleGizmoHelper(g.helper, g._sizedPlanes); }
+    _restyleGizmo(g) {
+        const w = this.v.container.clientWidth, h = this.v.container.clientHeight;
+        restyleGizmoHelper(g.helper, {
+            control: g.control, color: g.color, hoverColor: g.hoverColor, resW: w, resH: h,
+        });
+    }
 
     // Drop a translucent clone of the dragged object at its grab-time world pose,
     // parented to the scene root so it stays put while the object moves. The clone
@@ -10478,17 +10748,19 @@ class TransformGizmoController {
      * Moves report through the same hooks. Activates the controller if it wasn't
      * already.
      * @param {THREE.Object3D} object
-     * @param {{id?:string|null, mode?:string, axes?:GizmoAxesMask|null, space?:string, snapDefault?:boolean}} [opts]
+     * @param {{id?:string|null, mode?:string, axes?:GizmoAxesMask|null, space?:string, snapDefault?:boolean, color?:number|string|null, hoverColor?:number|string|null, scale?:number}} [opts]
      * @returns {Gizmo|null}
      */
     addGizmo(object, opts = {}) {
         if (!object) return null;
         this._activate();
-        const g = new Gizmo(this);
+        const g = new Gizmo(this, { scale: opts.scale });
         g.object = object;
         g.id = (opts.id != null) ? opts.id : this._lookupId(object);
         if (opts.mode === 'rotate' || opts.mode === 'translate') g.mode = opts.mode;
         if (typeof opts.snapDefault === 'boolean') g.snapDefault = opts.snapDefault;
+        if (opts.color != null) g.color = opts.color;
+        if (opts.hoverColor != null) g.hoverColor = opts.hoverColor;
         if (opts.space === 'local' || opts.space === 'world') g.control.setSpace(opts.space);
         g.control.attach(object);
         g.control.enabled = true;
@@ -10519,6 +10791,8 @@ class TransformGizmoController {
         if (typeof opts.translateSnapRelative === 'boolean') this.translateSnapRelative = opts.translateSnapRelative;
         if (typeof opts.rotateSnap === 'number' && opts.rotateSnap > 0) this.rotateSnap = opts.rotateSnap;
         if (typeof opts.snapDefault === 'boolean') this._primary.snapDefault = opts.snapDefault;
+        if (opts.color != null) this._primary.color = opts.color;
+        if (opts.hoverColor != null) this._primary.hoverColor = opts.hoverColor;
         this.clickSelect = (typeof opts.clickSelect === 'boolean') ? opts.clickSelect : true;
         this._activate();
         this._setControlMode(this._primary, this._primary.mode);
@@ -10576,6 +10850,7 @@ class TransformGizmoController {
         // A handle drag was the gesture, not a select-click — consume it.
         if (this._interacted) { this._interacted = false; return; }
         if (this.control.dragging || this.control.axis != null) return;
+        if (this.v._axisControls.busy()) return;
         if (Math.hypot(e.clientX - this._downX, e.clientY - this._downY) > CLICK_DRAG_MAX_PX) return;   // a drag = orbit
         const hit = this._pickObject(e.clientX, e.clientY);
         if (hit) this.attach(hit.object, hit.id);
@@ -10611,6 +10886,542 @@ class TransformGizmoController {
             if (g.control.camera !== this.v._camera) g.control.camera = this.v._camera;
             if (g === this._primary && g.object && !g.object.parent) { this.detach(); continue; }
             if (g.object) this._restyleGizmo(g);
+        }
+    }
+}
+
+// ========== Axis Control (rotary / linear range indicators) ==========
+// A range-display control distinct from the move/rotate TransformControls
+// gizmo above: a line showing an axis's range of motion — an arc, a full
+// circle, a segment, or a window that follows the value — with a small
+// flat-shaded sphere marking the current value. Only the sphere is
+// draggable/hoverable; the line is a visual guide (its own raycast is a
+// no-op). Anchored every frame at a target object's world pivot, oriented so
+// the control's own local +X is that target's chosen local axis in world
+// space (`Quaternion.setFromUnitVectors`, same "derive the world direction
+// from a live object's transform" approach as bind_clip, rather than a
+// pushed/stale pose) — so all the geometry math below is written once, in
+// that canonical local frame, instead of per axis-name special-casing (the
+// mistake in an earlier pass of the move-gizmo shaft/picker work: baked
+// per-axis rotations mean "radial vs long" isn't the same tuple for every
+// axis, whereas building in one canonical frame sidesteps that entirely).
+//
+//   rotary            arc from `min` to `max` radians, radius `radius`
+//   rotary_unlimited  a full circle, radius `radius`
+//   linear            segment from `min` to `max` metres along the axis
+//   linear_unlimited  segment from `value - window` to `value + window`,
+//                     recomputed on every value change so it re-centres
+//                     ("moves with the sphere")
+//
+// Sphere local position: rotary* -> (0, R cos(value), R sin(value)); linear*
+// -> (value, 0, 0). Dragging projects the pointer onto a plane (perpendicular
+// to the axis for rotary; containing the axis and facing the camera for
+// linear, the same construction TransformControlsPlane uses for a
+// single-axis translate) and reports {id, value, phase} back, same shape as
+// the move gizmo's onObjectMove.
+
+const AXIS_CONTROL_SPHERE_RADIUS = 0.1;    // invisible pick-only hitbox, not rendered
+const AXIS_CONTROL_ARC_SEGMENTS = 64;
+const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
+const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
+const AXIS_CONTROL_REPORT_HZ = 30;
+const AXIS_CONTROL_LINE_WIDTH_PX = 3;      // fat line (Line2/LineMaterial), same convention as the polyline path
+const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 4;  // handle segment: 4x the guide line
+const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.05;   // radians either side of value, rotary handle arc
+const AXIS_CONTROL_HANDLE_ARC_SEGMENTS = 12;
+const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.05;  // world units either side of value, linear handle segment
+
+const _acUnitX = new THREE.Vector3(1, 0, 0);
+const _acScratchA = new THREE.Vector3();
+const _acScratchB = new THREE.Vector3();
+const _acScratchC = new THREE.Vector3();
+const _acPlane = new THREE.Plane();
+const _acQuat = new THREE.Quaternion();
+
+/** One rotary/linear axis-control instance. Built once; `_rebuild()` re-derives
+ * line geometry and sphere position from `value`/`min`/`max`. */
+class AxisControl {
+    /** @param {string} id @param {any} opts */
+    constructor(id, opts) {
+        this.id = id;
+        this.targetId = opts.targetId;
+        this.axis = opts.axis;                        // 'x' | 'y' | 'z'
+        this.kind = opts.kind;                         // rotary(_unlimited) | linear(_unlimited)
+        this.value = opts.value;
+        this.min = opts.min;
+        this.max = opts.max;
+        this.radius = opts.radius;
+        // Set while the radius waits for `bboxSourceId` to be in the scene.
+        this.bboxSourceId = opts.radiusPending ? opts.bboxSourceId : null;
+        this.window = opts.window != null ? opts.window : AXIS_CONTROL_DEFAULT_WINDOW;
+        this._hovered = false;
+        this._dragging = false;
+        this._framePivot = new THREE.Vector3();   // _liveFrame scratch, per control
+        this._frameDir = new THREE.Vector3();
+
+        const hex = opts.color != null ? opts.color : 0xffffff;
+        this._baseColor = new THREE.Color(hex);
+        this._hoverColor = opts.hoverColor != null
+            ? new THREE.Color(opts.hoverColor)
+            : this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
+
+        this.group = new THREE.Group();
+        this.group.visible = false;   // until update() finds the target
+
+        // Fat line (Line2/LineMaterial), same construction the polyline path
+        // uses (viewer.js ~13139): a plain THREE.Line's width is 1px on most
+        // GPUs regardless of `linewidth` (WebGL ignores it), too thin to read
+        // as a real range indicator. `resolution` needs the render target's
+        // pixel size and is kept current in AxisControlManager.update() —
+        // devicePixelRatio-independent as long as it matches the renderer's
+        // own drawing-buffer size, same as every other fat line here.
+        this.lineMaterial = new LineMaterial({
+            color: this._baseColor.clone(), linewidth: AXIS_CONTROL_LINE_WIDTH_PX,
+            depthTest: false, depthWrite: false, toneMapped: false,
+            resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
+        });
+        this.line = new Line2(new LineGeometry(), this.lineMaterial);
+        this.line.renderOrder = 900;
+        this.line.raycast = () => {};   // guide only — the sphere is the only pickable part
+
+        // The handle: a short, 3x-thick section of the same line, centred on
+        // `value` — a small arc for rotary, a short segment for linear. This
+        // is the visible "you are here" indicator; it shares its base/hover
+        // colour with the long guide line (both update together in
+        // `_setHovered`).
+        this.handleLineMaterial = new LineMaterial({
+            color: this._baseColor.clone(), linewidth: AXIS_CONTROL_HANDLE_WIDTH_PX,
+            depthTest: false, depthWrite: false, toneMapped: false,
+            resolution: new THREE.Vector2(opts.viewer.container.clientWidth, opts.viewer.container.clientHeight),
+        });
+        this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
+        this.handleLine.renderOrder = 901;
+        this.handleLine.raycast = () => {};   // guide only — the sphere is the only pickable part
+
+        // The sphere is kept as the pick target (three's raycaster ignores
+        // `.visible`, so it still hit-tests) but is never rendered — the
+        // handle line above is the visible indicator now.
+        this.sphereMaterial = new THREE.MeshStandardMaterial({
+            color: this._baseColor.clone(), flatShading: true, roughness: 0.5, metalness: 0.0,
+            depthTest: false, depthWrite: false, toneMapped: false,
+        });
+        this.sphere = new THREE.Mesh(new THREE.SphereGeometry(AXIS_CONTROL_SPHERE_RADIUS, 12, 8), this.sphereMaterial);
+        this.sphere.renderOrder = 901;
+        this.sphere.userData.axisControlId = id;
+        this.sphere.visible = false;
+
+        this.group.add(this.line, this.handleLine, this.sphere);
+        this._rebuild();
+    }
+
+    /** Re-derive the line geometry (kind-dependent), the handle segment, and
+     * the sphere's local position from the current value/min/max. Cheap
+     * (<= ARC_SEGMENTS+1 verts) — called on every value/min/max change, not
+     * per frame. */
+    _rebuild() {
+        const isRotary = this.kind === 'rotary' || this.kind === 'rotary_unlimited';
+        /** @type {number[]} */
+        const flat = [];
+        /** @type {number[]} */
+        const handleFlat = [];
+        if (isRotary) {
+            const R = this.radius;
+            const a0 = this.kind === 'rotary_unlimited' ? 0 : this.min;
+            const a1 = this.kind === 'rotary_unlimited' ? Math.PI * 2 : this.max;
+            for (let i = 0; i <= AXIS_CONTROL_ARC_SEGMENTS; i++) {
+                const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
+                flat.push(0, R * Math.cos(a), R * Math.sin(a));
+            }
+            this.sphere.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
+
+            let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_ANGLE;
+            let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_ANGLE;
+            if (this.kind === 'rotary') { h0 = Math.max(this.min, h0); h1 = Math.min(this.max, h1); }
+            for (let i = 0; i <= AXIS_CONTROL_HANDLE_ARC_SEGMENTS; i++) {
+                const a = h0 + (h1 - h0) * (i / AXIS_CONTROL_HANDLE_ARC_SEGMENTS);
+                handleFlat.push(0, R * Math.cos(a), R * Math.sin(a));
+            }
+        } else {
+            const lo = this.kind === 'linear_unlimited' ? this.value - this.window : this.min;
+            const hi = this.kind === 'linear_unlimited' ? this.value + this.window : this.max;
+            flat.push(lo, 0, 0, hi, 0, 0);
+            this.sphere.position.set(this.value, 0, 0);
+
+            let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_LENGTH;
+            let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_LENGTH;
+            if (this.kind === 'linear') { h0 = Math.max(this.min, h0); h1 = Math.min(this.max, h1); }
+            handleFlat.push(h0, 0, 0, h1, 0, 0);
+        }
+        this.line.geometry.dispose();
+        this.line.geometry = new LineGeometry();
+        this.line.geometry.setPositions(flat);
+        this.line.computeLineDistances();
+
+        this.handleLine.geometry.dispose();
+        this.handleLine.geometry = new LineGeometry();
+        this.handleLine.geometry.setPositions(handleFlat);
+        this.handleLine.computeLineDistances();
+    }
+
+    /** @param {number} value @param {{min?:number, max?:number}} [opts] */
+    setValue(value, opts) {
+        this.value = value;
+        if (opts && opts.min != null) this.min = opts.min;
+        if (opts && opts.max != null) this.max = opts.max;
+        this._rebuild();
+    }
+
+    _setHovered(hovered) {
+        if (hovered === this._hovered) return;
+        this._hovered = hovered;
+        const color = hovered ? this._hoverColor : this._baseColor;
+        this.lineMaterial.color.copy(color);
+        this.handleLineMaterial.color.copy(color);
+    }
+
+    /** Re-tint the guide line + handle. Omitting `hoverColor` re-derives it
+     * from `color` (or the current base color) the same way the constructor
+     * does — passing `color` alone still gives a sensible hover tint.
+     * @param {number|string|null} [color] @param {number|string|null} [hoverColor] */
+    setColor(color, hoverColor) {
+        if (color != null) this._baseColor.set(color);
+        this._hoverColor = hoverColor != null
+            ? new THREE.Color(hoverColor)
+            : this._baseColor.clone().offsetHSL(0, 0, AXIS_CONTROL_HOVER_LIGHTEN);
+        const current = this._hovered ? this._hoverColor : this._baseColor;
+        this.lineMaterial.color.copy(current);
+        this.handleLineMaterial.color.copy(current);
+    }
+
+    dispose() {
+        this.line.geometry.dispose();
+        this.lineMaterial.dispose();
+        this.handleLine.geometry.dispose();
+        this.handleLineMaterial.dispose();
+        this.sphere.geometry.dispose();
+        this.sphereMaterial.dispose();
+    }
+}
+
+class AxisControlManager {
+    /** @param {ThreeJSViewer} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** @type {Map<string, AxisControl>} */
+        this.controls = new Map();
+        this._reportHooks = /** @type {Array<(m:any)=>void>} */ ([]);
+        this._raycaster = new THREE.Raycaster();
+        this._ndc = new THREE.Vector2();
+        this._active = /** @type {AxisControl|null} */ (null);
+        // Drag-frame state, set at pointerdown: the world pivot/axis this
+        // drag is relative to (captured once so a moving target mid-drag
+        // doesn't retarget the constraint plane every frame), plus the raw
+        // (wrapped) angle for rotary's unwrap-across-±π accumulation.
+        this._dragPivot = new THREE.Vector3();
+        this._dragAxisDir = new THREE.Vector3();
+        this._dragU = new THREE.Vector3();
+        this._dragV = new THREE.Vector3();
+        this._dragRawAngle = 0;
+        this._dragAccumAngle = 0;
+        this._dragValueOffset = 0;   // linear*: grab-point offset, so the sphere doesn't jump to the cursor
+        this._lastReport = 0;
+
+        const dom = viewer._renderer.domElement;
+        this._onDown = (/** @type {PointerEvent} */ e) => this._pointerDown(e);
+        this._onMove = (/** @type {PointerEvent} */ e) => this._pointerMove(e);
+        this._onUp = () => this._pointerUp();
+        // Capture phase, so a handle press can stop ViewerControls' pivot
+        // pick and the click-select / object-click listeners on the canvas.
+        dom.addEventListener('pointerdown', this._onDown, true);
+        window.addEventListener('pointermove', this._onMove);
+        window.addEventListener('pointerup', this._onUp);
+        window.addEventListener('pointercancel', this._onUp);
+    }
+
+    /** True while a handle is hovered or dragged, so a press or release
+     * there is this widget's gesture rather than a click. @returns {boolean} */
+    busy() {
+        if (this._active) return true;
+        for (const c of this.controls.values()) if (c._hovered) return true;
+        return false;
+    }
+
+    /** Remove the listeners and every control (viewer destroy). */
+    dispose() {
+        const dom = this.v._renderer.domElement;
+        dom.removeEventListener('pointerdown', this._onDown, true);
+        window.removeEventListener('pointermove', this._onMove);
+        window.removeEventListener('pointerup', this._onUp);
+        window.removeEventListener('pointercancel', this._onUp);
+        this.clear();
+        this._reportHooks.length = 0;
+    }
+
+    /** Drop `c` from the scene; ends its drag first so orbit comes back.
+     * @param {AxisControl} c */
+    _discard(c) {
+        if (this._active === c) {
+            this._active = null;
+            this.v._controls.enabled = true;
+        }
+        this.v._gizmoScene.remove(c.group);
+        c.dispose();
+    }
+
+    /** @param {(m:any)=>void} cb @returns {() => void} unsubscribe */
+    onChange(cb) {
+        this._reportHooks.push(cb);
+        return () => { const i = this._reportHooks.indexOf(cb); if (i >= 0) this._reportHooks.splice(i, 1); };
+    }
+
+    /** @param {string} id @param {any} opts */
+    add(id, opts) {
+        const existing = this.controls.get(id);
+        if (existing) this._discard(existing);
+        let radius = opts.radius != null ? opts.radius : 1.0;
+        let radiusPending = false;
+        if (opts.radius == null && opts.bboxSourceId != null) {
+            const r = this._radiusFromBbox(opts.bboxSourceId, opts.axis);
+            if (r != null) radius = r; else radiusPending = true;
+        }
+        const c = new AxisControl(id, { ...opts, radius, radiusPending, viewer: this.v });
+        this.controls.set(id, c);
+        this.v._gizmoScene.add(c.group);   // overlay pass: outside framing, clipping and the grid's sort
+    }
+
+    /** Update one control's value/min/max (update_axis_control) — distinct
+     * from the no-arg `update()` below, which repositions every control at
+     * its target's live pivot once per render frame.
+     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+    setValue(id, opts) {
+        const c = this.controls.get(id);
+        if (!c) return;
+        c.setValue(opts.value != null ? opts.value : c.value, opts);
+        if (opts.color != null || opts.hoverColor != null) c.setColor(opts.color, opts.hoverColor);
+    }
+
+    /** @param {string} id */
+    remove(id) {
+        const c = this.controls.get(id);
+        if (!c) return;
+        this._discard(c);
+        this.controls.delete(id);
+    }
+
+    /** Drop every control (scene clear) — their targets are all gone too. */
+    clear() {
+        for (const c of this.controls.values()) this._discard(c);
+        this.controls.clear();
+    }
+
+    /** Projected-diagonal-bounding-box radius (the component's world AABB
+     * diagonal, projected onto the plane perpendicular to `axis`, halved) —
+     * the default when a caller supplies `bboxSourceId` instead of an
+     * explicit `radius`. Null while the source is not in the scene yet.
+     * @param {string} sourceId @param {string} axis @returns {number|null} */
+    _radiusFromBbox(sourceId, axis) {
+        const obj = this.v._objects.get(sourceId);
+        if (!obj) return null;
+        const box = new THREE.Box3().setFromObject(obj);
+        if (box.isEmpty()) return 1.0;
+        const size = box.getSize(_acScratchA);
+        const axisDir = _acUnitX.clone();
+        if (axis === 'y') axisDir.set(0, 1, 0); else if (axis === 'z') axisDir.set(0, 0, 1);
+        // Diagonal of the box, with the along-axis extent dropped (project
+        // onto the perpendicular plane): sqrt(diag² - alongAxis²).
+        const diagSq = size.x * size.x + size.y * size.y + size.z * size.z;
+        const along = size.dot(axisDir);
+        return Math.sqrt(Math.max(0, diagSq - along * along)) / 2;
+    }
+
+    /** Live world pivot + axis direction for a control, read off its target's
+     * current transform (never cached/pushed) — same "resolve from state the
+     * renderer already holds" approach as bind_clip.
+     * @param {AxisControl} c @returns {{pivot:THREE.Vector3, dir:THREE.Vector3}|null} */
+    _liveFrame(c) {
+        const target = this.v._objects.get(c.targetId);
+        if (!target) return null;
+        target.updateWorldMatrix(true, false);
+        const pivot = c._framePivot.setFromMatrixPosition(target.matrixWorld);
+        target.matrixWorld.decompose(_acScratchA, _acQuat, _acScratchC);
+        const dir = c._frameDir.set(0, 0, 0);
+        dir[c.axis === 'y' || c.axis === 'z' ? c.axis : 'x'] = 1;
+        dir.applyQuaternion(_acQuat).normalize();
+        return { pivot, dir };
+    }
+
+    /** Per-frame: reposition/orient every control at its target's live pivot
+     * + axis direction (a moving target — a jog, a drag — carries its
+     * controls with it for free), then keep the hovered/dragging sphere
+     * lit. Controls whose target has left the scene just hold their last
+     * pose (matches the move gizmo's own "detach on parent loss" being the
+     * caller's job, not silently vanishing mid-frame). */
+    update() {
+        if (!this.controls.size) return;
+        // Fat lines read their pixel width off this every frame; cheap (a
+        // .set() on an existing Vector2, no realloc) so no resize hook needed.
+        const w = this.v.container.clientWidth, h = this.v.container.clientHeight;
+        for (const c of this.controls.values()) {
+            c.lineMaterial.resolution.set(w, h);
+            c.handleLineMaterial.resolution.set(w, h);
+            const frame = this._liveFrame(c);
+            // No target (not loaded yet, or deleted): hide rather than draw at the origin.
+            c.group.visible = !!frame;
+            if (!frame) continue;
+            if (c.bboxSourceId != null) {
+                const r = this._radiusFromBbox(c.bboxSourceId, c.axis);
+                if (r != null) { c.bboxSourceId = null; c.radius = r; c._rebuild(); }
+            }
+            c.group.position.copy(frame.pivot);
+            c.group.quaternion.setFromUnitVectors(_acUnitX, frame.dir);
+        }
+    }
+
+    /** @param {number} clientX @param {number} clientY @returns {THREE.Vector2} */
+    _ndcFromClient(clientX, clientY) {
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        this._ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        this._ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        return this._ndc;
+    }
+
+    /** @param {number} clientX @param {number} clientY @returns {AxisControl|null} */
+    _pickSphere(clientX, clientY) {
+        this._raycaster.setFromCamera(
+            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
+        const spheres = [];
+        const map = new Map();
+        for (const c of this.controls.values()) if (c.group.visible) { spheres.push(c.sphere); map.set(c.sphere, c); }
+        const hits = this._raycaster.intersectObjects(spheres, false);
+        return hits.length ? map.get(hits[0].object) : null;
+    }
+
+    /** @param {PointerEvent} e */
+    _pointerDown(e) {
+        if (e.button !== 0) return;
+        const hit = this._pickSphere(e.clientX, e.clientY);
+        if (!hit) return;
+        const frame = this._liveFrame(hit);
+        if (!frame) return;
+        this._active = hit;
+        hit._dragging = true;
+        this.v._controls.enabled = false;   // same synchronous suppression as the move gizmo
+        hit._setHovered(true);
+        this._dragPivot.copy(frame.pivot);
+        this._dragAxisDir.copy(frame.dir);
+        // group.quaternion (the group sits directly under the scene root, so
+        // this IS its world quaternion) was just set by this frame's update(),
+        // so its own Y/Z are already the basis this control's geometry — and
+        // hence `value` — was built against.
+        this._dragU.set(0, 1, 0).applyQuaternion(hit.group.quaternion);
+        this._dragV.set(0, 0, 1).applyQuaternion(hit.group.quaternion);
+        this._dragRawAngle = this._angleOf(hit, this._dragPivot, this._dragAxisDir);
+        this._dragAccumAngle = hit.value;
+        const isRotary = hit.kind === 'rotary' || hit.kind === 'rotary_unlimited';
+        if (!isRotary) {
+            const grabRaw = this._linearRawValue(e.clientX, e.clientY);
+            this._dragValueOffset = grabRaw == null ? 0 : hit.value - grabRaw;
+        }
+        // Other canvas pointerdown listeners (pivot pick, click-select,
+        // object click) must not see a handle press.
+        e.stopImmediatePropagation();
+        e.preventDefault();
+    }
+
+    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT sphere position
+     * about its drag axis — the reference `_pointerMove` unwraps deltas
+     * against. @param {AxisControl} c @param {THREE.Vector3} pivot @param {THREE.Vector3} axisDir */
+    _angleOf(c, pivot, axisDir) {
+        const worldPos = c.sphere.getWorldPosition(_acScratchC);
+        const rel = worldPos.sub(pivot);
+        rel.addScaledVector(axisDir, -rel.dot(axisDir));
+        return Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
+    }
+
+    /** Raycast the pointer against the camera-facing plane containing the
+     * active drag's axis (same construction TransformControlsPlane uses for
+     * a single-axis translate) and return the raw along-axis value at the
+     * hit point — unadjusted for the drag's grab offset.
+     * @param {number} clientX @param {number} clientY @returns {number|null} */
+    _linearRawValue(clientX, clientY) {
+        this._raycaster.setFromCamera(
+            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
+        // Toward the camera: its back direction under ortho, where every view
+        // ray is parallel (TransformControls uses the same `eye`).
+        const cam = /** @type {any} */ (this.v._camera);
+        const eye = cam.isOrthographicCamera
+            ? _acScratchB.set(0, 0, 1).applyQuaternion(cam.quaternion)
+            : _acScratchB.copy(cam.position).sub(this._dragPivot);
+        const planeNormal = _acScratchC.copy(eye).cross(this._dragAxisDir).cross(this._dragAxisDir);
+        // Looking straight down the axis: no plane contains it and faces the camera.
+        if (planeNormal.lengthSq() < 1e-12) return null;
+        _acPlane.setFromNormalAndCoplanarPoint(planeNormal.normalize(), this._dragPivot);
+        if (!this._raycaster.ray.intersectPlane(_acPlane, _acScratchA)) return null;
+        return _acScratchA.sub(this._dragPivot).dot(this._dragAxisDir);
+    }
+
+    /** @param {PointerEvent} e */
+    _pointerMove(e) {
+        const c = this._active;
+        if (!c || !c._dragging) {
+            // Not dragging: plain hover check.
+            const hit = this._pickSphere(e.clientX, e.clientY);
+            for (const other of this.controls.values()) other._setHovered(other === hit);
+            return;
+        }
+        const isRotary = c.kind === 'rotary' || c.kind === 'rotary_unlimited';
+        let value;
+        if (isRotary) {
+            this._raycaster.setFromCamera(
+                this._ndcFromClient(e.clientX, e.clientY), /** @type {any} */ (this.v._camera));
+            _acPlane.setFromNormalAndCoplanarPoint(this._dragAxisDir, this._dragPivot);
+            if (!this._raycaster.ray.intersectPlane(_acPlane, _acScratchA)) return;
+            const rel = _acScratchA.sub(this._dragPivot);
+            rel.addScaledVector(this._dragAxisDir, -rel.dot(this._dragAxisDir));
+            const raw = Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
+            // Unwrap: the shortest angular step from the last raw reading,
+            // accumulated, so dragging past ±π keeps turning instead of
+            // snapping back — required for rotary_unlimited to ever exceed
+            // one turn, and keeps a limited rotary's clamp comparing against
+            // a continuous value instead of a wrapped one.
+            let delta = raw - this._dragRawAngle;
+            if (delta > Math.PI) delta -= Math.PI * 2;
+            else if (delta < -Math.PI) delta += Math.PI * 2;
+            this._dragAccumAngle += delta;
+            this._dragRawAngle = raw;
+            value = this._dragAccumAngle;
+            if (c.kind === 'rotary') value = Math.min(c.max, Math.max(c.min, value));
+        } else {
+            const raw = this._linearRawValue(e.clientX, e.clientY);
+            if (raw == null) return;
+            value = raw + this._dragValueOffset;
+            if (c.kind === 'linear') value = Math.min(c.max, Math.max(c.min, value));
+        }
+        c.setValue(value);
+        this._report(c, false);
+    }
+
+    _pointerUp() {
+        const c = this._active;
+        if (!c) return;
+        c._dragging = false;
+        this._active = null;
+        this.v._controls.enabled = true;
+        this._report(c, true);
+    }
+
+    /** @param {AxisControl} c @param {boolean} flush */
+    _report(c, flush) {
+        const now = performance.now();
+        if (!flush && now - this._lastReport < 1000 / AXIS_CONTROL_REPORT_HZ) return;
+        this._lastReport = now;
+        const payload = { id: c.id, value: c.value, phase: flush ? 'end' : 'move' };
+        const ws = this.v._ws;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'axis_control_change', ...payload }));
+        }
+        for (const cb of this._reportHooks.slice()) {
+            try { cb(payload); } catch (err) { console.error('axis control change hook error', err); }
         }
     }
 }
@@ -11345,7 +12156,7 @@ class ThreeJSViewer {
         this._objectClickRaycaster.params.Line.threshold = 0.05;
         this._objectClickRaycaster.params.Points.threshold = 0.05;
         this._renderer.domElement.addEventListener('dblclick', (e) => {
-            if (!this._dblclickFrame) return;
+            if (!this._dblclickFrame || this._gizmoHandleHovered()) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
             if (hit) this.frameObject(hit.object); else this.resetView();
         });
@@ -11412,8 +12223,12 @@ class ThreeJSViewer {
         this._polylinePick.attach();
 
         // Move/rotate gizmo (opt-in; enabled from Python via enable_move_gizmo or
-        // from JS via enableMoveGizmo). Inert until enabled.
+        // from JS via enableMoveGizmo). Inert until enabled. Its helpers live in
+        // their own overlay scene, drawn after the main render over a cleared
+        // depth buffer: depth-tested among themselves, on top of everything else.
+        this._gizmoScene = new THREE.Scene();
         this._transformGizmo = new TransformGizmoController(this);
+        this._axisControls = new AxisControlManager(this);
 
         // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
@@ -11564,12 +12379,7 @@ class ThreeJSViewer {
         // shaded translate cone): a ROTATE gizmo to tilt the plane normal, and a
         // Z-only TRANSLATE gizmo (local space, so its arrow follows the current
         // normal) to slide the plane along that normal. Both report through the
-        // same _syncClipFromGizmo handler. Per-gizmo Sets guard the one-time
-        // plane-chip resize inside restyleGizmoHelper (no chips show here, but
-        // the helper expects a Set).
-        this._clipRotSizedPlanes = new WeakSet();
-        this._clipMoveSizedPlanes = new WeakSet();
-
+        // same _syncClipFromGizmo handler.
         this._clipGizmo = new TransformControls(this._camera, this._renderer.domElement);
         this._clipGizmo.attach(this._clipAnchor);
         this._clipGizmo.setMode('rotate');
@@ -13211,6 +14021,8 @@ class ThreeJSViewer {
         // Pinned gizmos target now-deleted objects; drop them (and their helpers)
         // rather than waiting for the per-frame prune.
         if (this._transformGizmo) this._transformGizmo.clearGizmos();
+        // Axis controls likewise target now-deleted objects.
+        if (this._axisControls) this._axisControls.clear();
     }
 
     /** @param {Record<string, any>} transforms */
@@ -15987,6 +16799,23 @@ class ThreeJSViewer {
             case 'set_clip_progress':
                 this._withObject(data.id, 'set_clip_progress', () => this._setClipProgress(data.id, data.t));
                 break;
+            case 'add_axis_control':
+                this._axisControls.add(data.id, {
+                    targetId: data.target_id, axis: data.axis, kind: data.kind,
+                    value: data.value, min: data.min, max: data.max, color: data.color,
+                    hoverColor: data.hover_color,
+                    radius: data.radius, bboxSourceId: data.bbox_source_id, window: data.window,
+                });
+                break;
+            case 'update_axis_control':
+                this._axisControls.setValue(data.id, {
+                    value: data.value, min: data.min, max: data.max,
+                    color: data.color, hoverColor: data.hover_color,
+                });
+                break;
+            case 'remove_axis_control':
+                this._axisControls.remove(data.id);
+                break;
             case 'set_follow_path': {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
@@ -16184,6 +17013,8 @@ class ThreeJSViewer {
                         rotateSnap: data.rotateSnap,   // radians
                         clickSelect: data.clickSelect,
                         snapDefault: data.snapDefault,
+                        color: data.color,
+                        hoverColor: data.hoverColor,
                     });
                 } else {
                     this._transformGizmo.disable();
@@ -16200,6 +17031,9 @@ class ThreeJSViewer {
                     axes: { x: data.x, y: data.y, z: data.z, translate: data.translate, rotate: data.rotate },
                     space: data.space,
                     snapDefault: data.snapDefault,
+                    color: data.color,
+                    hoverColor: data.hoverColor,
+                    scale: data.scale,
                 });
                 break;
             }
@@ -16424,12 +17258,13 @@ class ThreeJSViewer {
 
         // Move/rotate gizmo: keep the refined palette alive, prune stale selection.
         if (this._transformGizmo) this._transformGizmo.update();
+        this._axisControls.update();
 
         // Clipping gizmos wear the same refined look — TransformControls re-themes
         // its handles every frame, so re-apply our palette while the clip tool is open.
         if (this._clipGizmo.enabled) {
-            restyleGizmoHelper(this._clipGizmoHelper, this._clipRotSizedPlanes);
-            restyleGizmoHelper(this._clipMoveGizmoHelper, this._clipMoveSizedPlanes);
+            restyleGizmoHelper(this._clipGizmoHelper);
+            restyleGizmoHelper(this._clipMoveGizmoHelper);
         }
 
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
@@ -16451,6 +17286,12 @@ class ThreeJSViewer {
             this._renderer.render(this._scene, this._camera);
         }
         this._renderer.autoClear = false;
+        // Move gizmos: own pass over a cleared depth buffer, so handles occlude
+        // each other correctly but always draw over the scene.
+        if (this._gizmoScene.children.some((h) => h.visible)) {
+            this._renderer.clearDepth();
+            this._renderer.render(this._gizmoScene, this._camera);
+        }
         this._renderViewHelper();
 
         // LOD: dispatch to Web Worker after render (non-blocking)
@@ -16640,18 +17481,39 @@ class ThreeJSViewer {
      * stretched along their own length by _gizmoArmScale. The arms share one
      * x-oriented cylinder that each mesh rotates into place, so a local
      * scale.x stretches every arm along itself. Baseline opacity is captured
-     * for the hover restore. _gizmoHitTest raycasts the live sprites through
-     * a mirror of the helper's ortho camera, so it follows these edits.
+     * for the hover restore. The arms and positive-axis bubbles are recoloured
+     * to GIZMO_PALETTE, so the gimbal and the move gizmo agree on X/Y/Z.
+     * _gizmoHitTest raycasts the live sprites through a mirror of the
+     * helper's ortho camera, so it follows these edits.
      * Called once per ViewHelper instance (re-created on every persp/ortho
      * swap).
      * @param {any} helper
      */
     _configureViewHelper(helper) {
         const sprites = [];
+        // ViewHelper hardcodes its axis colours; map each stock one to ours.
+        const stockToPalette = { ff4466: GIZMO_PALETTE.x, '88ff44': GIZMO_PALETTE.y, '4488ff': GIZMO_PALETTE.z };
+        const bubbleHex = { posX: GIZMO_PALETTE.x, posY: GIZMO_PALETTE.y, posZ: GIZMO_PALETTE.z };
         for (const child of helper.children) {
             if (!child.userData || !child.userData.type) {
-                if (child.isMesh) child.scale.x = this._gizmoArmScale;
+                if (child.isMesh) {
+                    child.scale.x = this._gizmoArmScale;
+                    const hex = stockToPalette[child.material.color.getHexString()];
+                    if (hex != null) child.material.color.set(hex);
+                }
                 continue;
+            }
+            const hex = bubbleHex[child.userData.type];
+            const map = child.material.map;
+            if (hex != null && map && map.image && map.image.getContext) {
+                // Redraw the stock 64x64 disc (radius 14) in the palette colour.
+                const ctx = map.image.getContext('2d');
+                ctx.clearRect(0, 0, 64, 64);
+                ctx.beginPath();
+                ctx.arc(32, 32, 14, 0, 2 * Math.PI);
+                ctx.fillStyle = gizmoColor(hex).getStyle();
+                ctx.fill();
+                map.needsUpdate = true;
             }
             child.scale.setScalar(this._gizmoBaseScale);
             // Stock sprites sit on the unit axis; keep them at the arm tips.
@@ -16917,15 +17779,9 @@ class ThreeJSViewer {
             // ignore them just like updateSceneBounds does — otherwise F/
             // Home framing over-zooms to fit a huge ground plane.
             if (child.userData && child.userData.excludeFromBounds) return;
-            // Move-gizmo TransformControls helpers (primary + pinned
-            // add_gizmo extras): their drag plane is a ~±50k mesh whose
-            // *material* is invisible but whose object is visible, so the
-            // geometry check below would union it and fly the camera ~250 km
-            // out (issue #144). The clip gizmos are caught by _isClipHelper;
-            // the transient drag ghost (__gizmoGhost) is deliberately NOT
-            // skipped — it sits at the dragged object's own grab-time pose,
-            // so it never inflates bounds beyond real content.
-            if (child.userData && child.userData.isGizmoHelper) return;
+            // Move-gizmo helpers and axis controls live in `_gizmoScene`, so
+            // only the clip gizmos need skipping here (_isClipHelper). The
+            // drag ghost stays in: it sits at the object's grab-time pose.
             if (child.geometry &&
                 child !== this._gridHelper &&
                 !this._isClipHelper(child) &&
@@ -17276,11 +18132,12 @@ class ThreeJSViewer {
     setObjectClickEnabled(enabled) { this._objectClickEnabled = !!enabled; }
 
     /**
-     * True while any move/rotate gizmo handle is hovered or dragged, so a
+     * True while any move/rotate gizmo or axis-control handle is hovered or dragged, so a
      * press or release there is the gizmo's gesture rather than a click.
      * @returns {boolean}
      */
     _gizmoHandleHovered() {
+        if (this._axisControls && this._axisControls.busy()) return true;
         const tg = this._transformGizmo;
         if (!tg || !tg.enabled) return false;
         for (const g of tg._allGizmos()) {
@@ -17562,6 +18419,23 @@ class ThreeJSViewer {
      */
     attachMoveGizmo(object3D, id = null) { this._transformGizmo.attach(object3D, id); }
 
+    /** Direct-call JS equivalent of the `add_axis_control` WS message — same
+     * effect, for an embedder holding a live `viewer` reference in the same
+     * page (no WS round trip needed). `opts`: `{targetId, axis, kind, value,
+     * min, max, color, hoverColor, radius, bboxSourceId, window}` — see the
+     * WS message for the full shape. `hoverColor` is optional; omitting it
+     * auto-derives a lightened variant of `color`. Values are plain
+     * THREE.js scene units: metres for linear(_unlimited), radians for
+     * rotary(_unlimited) — no CSD-unit conversion happens here.
+     * @param {string} id @param {any} opts */
+    addAxisControl(id, opts) { this._axisControls.add(id, opts); }
+
+    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+    updateAxisControl(id, opts) { this._axisControls.setValue(id, opts); }
+
+    /** @param {string} id */
+    removeAxisControl(id) { this._axisControls.remove(id); }
+
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
      * its own axis constraint and base mode. Independent of the interactive gizmo
@@ -17573,7 +18447,7 @@ class ThreeJSViewer {
      * snap the resting state (hold Shift to move freely). Enables the gizmo
      * subsystem if it wasn't already.
      * @param {string|THREE.Object3D} objectOrId
-     * @param {{mode?:string, axes?:GizmoAxesMask|null, id?:string|null, space?:string, snapDefault?:boolean}} [opts]
+     * @param {{mode?:string, axes?:GizmoAxesMask|null, id?:string|null, space?:string, snapDefault?:boolean, color?:number|string|null, hoverColor?:number|string|null, scale?:number}} [opts]
      * @returns {any} the created gizmo, or null if the object can't be resolved.
      */
     addGizmo(objectOrId, opts = {}) {
@@ -17581,7 +18455,10 @@ class ThreeJSViewer {
         let id = opts.id;
         if (typeof objectOrId === 'string') { id = objectOrId; obj = this._objects.get(objectOrId); }
         if (!obj) return null;
-        return this._transformGizmo.addGizmo(obj, { mode: opts.mode, axes: opts.axes, id, space: opts.space, snapDefault: opts.snapDefault });
+        return this._transformGizmo.addGizmo(obj, {
+            mode: opts.mode, axes: opts.axes, id, space: opts.space, snapDefault: opts.snapDefault,
+            color: opts.color, hoverColor: opts.hoverColor, scale: opts.scale,
+        });
     }
 
     /** Remove every pinned gizmo added with `addGizmo` (the interactive gizmo is untouched). */
@@ -17620,6 +18497,9 @@ class ThreeJSViewer {
      * @param {(m:any)=>void} cb @returns {() => void} unsubscribe
      */
     onObjectMove(cb) { return this._transformGizmo.onMove(cb); }
+
+    /** @param {(m:{id:string, value:number, phase:'move'|'end'})=>void} cb @returns {() => void} unsubscribe */
+    onAxisControlChange(cb) { return this._axisControls.onChange(cb); }
 
     /**
      * Set the move gizmo's translation snap step and mode at runtime — e.g. to
@@ -17720,6 +18600,7 @@ class ThreeJSViewer {
         window.removeEventListener('pointercancel', this._onObjectClickCancel);
         this._objectClickDown = null;
         this._objectClickHooks.length = 0;
+        this._axisControls.dispose();
         this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
         this._renderer.dispose();

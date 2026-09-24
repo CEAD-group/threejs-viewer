@@ -41,6 +41,10 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
+_ALLOWED_AXIS_CONTROL_AXES = frozenset({"x", "y", "z"})
+_ALLOWED_AXIS_CONTROL_KINDS = frozenset(
+    {"rotary", "rotary_unlimited", "linear", "linear_unlimited"}
+)
 _ALLOWED_HIGHLIGHT_STYLES = frozenset({"silhouette", "edges"})
 _ALLOWED_MENU_ITEM_TYPES = frozenset(
     {"button", "toggle", "eye", "select", "segmented", "label", "divider"}
@@ -725,6 +729,11 @@ class ViewerClient:
         # freshly-enabled gizmo. Cleared when the gizmo is disabled (the viewer
         # resets axes to all-true on detach).
         self._gizmo_axes: Optional[dict] = None
+        # Rotary/linear axis-control widgets added with add_axis_control — id ->
+        # its latest add_axis_control spec, so a reconnect re-adds each one (the
+        # viewer holds none of this state across a fresh WS connection).
+        self._axis_controls: Dict[str, dict] = {}
+        self._axis_control_callbacks: List = []
         # Pinned (persistent) gizmos added with add_gizmo — a list of
         # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
         # interactive gizmo above; any number can be active at once, each with its
@@ -937,6 +946,14 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-add any axis-control widgets (the viewer's own state is gone on a
+        # fresh WS connection, same as pinned gizmos above).
+        for spec in self._axis_controls.values():
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
         try:
             for message in websocket:
                 try:
@@ -954,6 +971,8 @@ class ViewerClient:
                         self._dispatch_menu_action(data)
                     elif msg_type == "transform_gizmo":
                         self._dispatch_object_move(data)
+                    elif msg_type == "axis_control_change":
+                        self._dispatch_axis_control_change(data)
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -4189,6 +4208,8 @@ class ViewerClient:
         rotate_snap_deg: float = 15.0,
         click_select: bool = True,
         snap_default: bool = False,
+        color: Optional[int] = None,
+        hover_color: Optional[int] = None,
     ) -> None:
         """Show an interactive move/rotate gizmo for transforming objects.
 
@@ -4235,6 +4256,12 @@ class ViewerClient:
                 the gizmo to it.
             snap_default: When ``True``, snap is the resting state and holding
                 Shift moves freely (the inverse of the default free / Shift-to-snap).
+            color: Override the gizmo's per-axis palette with one colour for
+                every axis/plane. ``None`` (default) keeps the distinct X/Y/Z
+                palette (matching the corner view gimbal).
+            hover_color: Override the colour a handle turns while
+                hovered/dragging. ``None`` (default) auto-derives a lightened
+                variant of its base colour.
 
         Raises:
             ValueError: For an unknown ``mode`` or non-positive / non-finite
@@ -4263,6 +4290,8 @@ class ViewerClient:
             "rotateSnap": math.radians(rs),
             "clickSelect": bool(click_select),
             "snapDefault": bool(snap_default),
+            "color": color,
+            "hoverColor": hover_color,
         }
         if self._ws is not None:
             self._send(self._move_gizmo)
@@ -4293,6 +4322,9 @@ class ViewerClient:
         mode: str = "translate",
         space: str = "world",
         snap_default: bool = False,
+        color: Optional[int] = None,
+        hover_color: Optional[int] = None,
+        scale: float = 1.0,
     ) -> None:
         """Pin a persistent move/rotate gizmo to object ``id``.
 
@@ -4339,10 +4371,18 @@ class ViewerClient:
                 own rotation, so the arrows follow a tilted object).
             snap_default: When ``True``, snap is the resting state (and Shift moves
                 freely) instead of the default free-with-Shift-to-snap.
+            color: Override this gizmo's per-axis palette with one colour for
+                every axis/plane (see :meth:`enable_move_gizmo`).
+            hover_color: Override the colour this gizmo's handles turn while
+                hovered/dragging (see :meth:`enable_move_gizmo`).
+            scale: Multiplier on the gizmo's constant on-screen size (handles
+                and pick areas scale together). ``1.0`` (default) is the
+                standard size.
 
         Raises:
-            ValueError: For an unknown ``mode`` or ``space``, or a malformed
-                ``translate``/``rotate`` mask.
+            ValueError: For an unknown ``mode`` or ``space``, a malformed
+                ``translate``/``rotate`` mask, or a ``scale`` that is not a
+                finite number above zero.
         """
         if mode not in _ALLOWED_GIZMO_MODES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_MODES))
@@ -4350,6 +4390,9 @@ class ViewerClient:
         if space not in _ALLOWED_GIZMO_SPACES:
             allowed = ", ".join(sorted(_ALLOWED_GIZMO_SPACES))
             raise ValueError(f"space must be one of: {allowed} (got {space!r})")
+        scale = _validate_finite("scale", scale)
+        if scale <= 0:
+            raise ValueError(f"scale must be > 0 (got {scale!r})")
         spec = {
             "type": "add_gizmo",
             "id": id,
@@ -4357,6 +4400,9 @@ class ViewerClient:
             "mode": mode,
             "space": space,
             "snapDefault": bool(snap_default),
+            "scale": scale,
+            "color": color,
+            "hoverColor": hover_color,
         }
         self._gizmos.append(spec)
         if self._ws is not None:
@@ -4480,12 +4526,209 @@ class ViewerClient:
             except Exception:
                 logging.getLogger(__name__).exception("Error in object move callback")
 
+    def add_axis_control(
+        self,
+        id: str,
+        *,
+        target_id: str,
+        axis: Literal["x", "y", "z"],
+        kind: Literal["rotary", "rotary_unlimited", "linear", "linear_unlimited"],
+        value: float,
+        min: Optional[float] = None,
+        max: Optional[float] = None,
+        color: int = 0xFFFFFF,
+        hover_color: Optional[int] = None,
+        radius: Optional[float] = None,
+        bbox_source_id: Optional[str] = None,
+        window: float = 1.0,
+    ) -> None:
+        """Show a rotary or linear range control: a line spanning the axis's
+        range of motion with a short, 4x-thicker section of the same line
+        marking the current value (a small arc for rotary, a short segment
+        for linear). The handle and the guide line always share one colour
+        pair; only the handle's invisible hitbox sphere is draggable/hoverable.
+
+        Anchored every render frame at ``target_id``'s live world pivot,
+        oriented along its local ``axis`` — a moving target (a jog, a drag)
+        carries the control with it for free, the same "read the live
+        transform, don't push a pose" approach as :meth:`bind_clip`.
+
+        ``kind``:
+
+        - ``"rotary"`` — an arc from ``min`` to ``max`` radians, at ``radius``.
+        - ``"rotary_unlimited"`` — a full circle at ``radius``; ``min``/``max``
+          are ignored, and dragging can turn past ±180° (the value keeps
+          accumulating rather than wrapping).
+        - ``"linear"`` — a segment from ``min`` to ``max`` metres along the axis.
+        - ``"linear_unlimited"`` — a segment spanning ``value - window`` to
+          ``value + window``, which re-centres on every value change so the
+          visible window always follows the sphere; ``min``/``max`` are ignored.
+
+        ``radius`` (rotary only) is required unless ``bbox_source_id`` is
+        given, in which case it defaults to half the world-space diagonal of
+        that object's bounding box, projected onto the plane perpendicular to
+        ``axis`` (dropping the along-axis extent) — a size that scales with
+        whatever component the control is drawn around.
+
+        ``hover_color`` overrides the tint used while hovering/dragging;
+        omit it to auto-derive a lightened variant of ``color``.
+
+        Dragging the sphere reports ``{id, value, phase}`` to every callback
+        registered with :meth:`on_axis_control_change`, throttled during the
+        drag (``"move"``) with a final unthrottled report on release
+        (``"end"``) — same shape as :meth:`on_object_move`. The new value is
+        applied locally by the viewer immediately (optimistic, like the move
+        gizmo); call :meth:`update_axis_control` to correct it from Python if
+        the caller's own model disagrees (e.g. a value outside a coupled
+        joint's real range).
+
+        Raises:
+            ValueError: For an unknown ``axis`` or ``kind``, a non-finite
+                number, a bounded ``kind`` without ``min``/``max`` or with
+                ``min > max``, or a ``radius``/``window`` that is not above zero.
+        """
+        if axis not in _ALLOWED_AXIS_CONTROL_AXES:
+            allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_AXES))
+            raise ValueError(f"axis must be one of: {allowed} (got {axis!r})")
+        if kind not in _ALLOWED_AXIS_CONTROL_KINDS:
+            allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_KINDS))
+            raise ValueError(f"kind must be one of: {allowed} (got {kind!r})")
+        value = _validate_finite("value", value)
+        min = _validate_finite("min", min)
+        max = _validate_finite("max", max)
+        if kind in ("rotary", "linear"):
+            if min is None or max is None:
+                raise ValueError(f"kind={kind!r} needs both min and max")
+            if min > max:
+                raise ValueError(f"min must be <= max (got {min} > {max})")
+        radius = _validate_finite("radius", radius)
+        if radius is not None and radius <= 0:
+            raise ValueError(f"radius must be > 0 (got {radius!r})")
+        window = _validate_finite("window", window)
+        if window <= 0:
+            raise ValueError(f"window must be > 0 (got {window!r})")
+        spec = {
+            "type": "add_axis_control",
+            "id": id,
+            "target_id": target_id,
+            "axis": axis,
+            "kind": kind,
+            "value": value,
+            "min": min,
+            "max": max,
+            "color": color,
+            "hover_color": hover_color,
+            "radius": radius,
+            "bbox_source_id": bbox_source_id,
+            "window": window,
+        }
+        self._axis_controls[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def update_axis_control(
+        self,
+        id: str,
+        *,
+        value: Optional[float] = None,
+        min: Optional[float] = None,
+        max: Optional[float] = None,
+        color: Optional[int] = None,
+        hover_color: Optional[int] = None,
+    ) -> None:
+        """Update a control added with :meth:`add_axis_control` — its value,
+        range, and/or colour. Only the given fields change; the rest keep
+        their last value. Passing ``color`` without ``hover_color``
+        re-derives the hover tint from the new ``color``.
+
+        Raises:
+            ValueError: If ``id`` was never added with :meth:`add_axis_control`.
+            ValueError: For a non-finite number, or a resulting ``min > max``.
+        """
+        spec = self._axis_controls.get(id)
+        if spec is None:
+            raise ValueError(f"no axis control {id!r}")
+        value = _validate_finite("value", value)
+        min = _validate_finite("min", min)
+        max = _validate_finite("max", max)
+        new_min = spec["min"] if min is None else min
+        new_max = spec["max"] if max is None else max
+        if new_min is not None and new_max is not None and new_min > new_max:
+            raise ValueError(f"min must be <= max (got {new_min} > {new_max})")
+        if value is not None:
+            spec["value"] = value
+        if min is not None:
+            spec["min"] = min
+        if max is not None:
+            spec["max"] = max
+        if color is not None:
+            spec["color"] = color
+        if hover_color is not None:
+            spec["hover_color"] = hover_color
+        if self._ws is not None:
+            self._send(
+                {
+                    "type": "update_axis_control",
+                    "id": id,
+                    "value": value,
+                    "min": min,
+                    "max": max,
+                    "color": color,
+                    "hover_color": hover_color,
+                }
+            )
+
+    def remove_axis_control(self, id: str) -> None:
+        """Remove a control added with :meth:`add_axis_control`. A no-op if
+        ``id`` doesn't exist."""
+        self._axis_controls.pop(id, None)
+        if self._ws is not None:
+            self._send({"type": "remove_axis_control", "id": id})
+
+    def on_axis_control_change(self, callback) -> None:
+        """Register a callback fired while the user drags an axis control's
+        sphere.
+
+        The callback receives one dict argument with keys ``id``, ``value``
+        and ``phase`` (``"move"`` mid-drag, ``"end"`` on release) — see
+        :meth:`add_axis_control`. It runs on the client's WebSocket receive
+        thread, so keep it short.
+
+        Args:
+            callback: A callable ``callback(change: dict) -> None``.
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._axis_control_callbacks.append(callback)
+
+    def _dispatch_axis_control_change(self, data: dict) -> None:
+        """Deliver an incoming ``axis_control_change`` message to registered
+        callbacks, and keep the stored spec's value in sync so a reconnect
+        re-adds the control at wherever the user last dragged it to."""
+        spec = self._axis_controls.get(data.get("id"))
+        if spec is not None and data.get("value") is not None:
+            spec["value"] = data["value"]
+        change = {
+            "id": data.get("id"),
+            "value": data.get("value"),
+            "phase": data.get("phase"),
+        }
+        for cb in list(self._axis_control_callbacks):
+            try:
+                cb(change)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Error in axis control change callback"
+                )
+
     def clear(self) -> None:
         """Clear all objects from the scene."""
         # Pinned gizmos target now-removed objects; the viewer drops them on a
         # scene clear, so forget them here too (else a reconnect would re-pin them
         # to ids that no longer exist).
         self._gizmos = []
+        # Axis controls likewise target now-removed objects.
+        self._axis_controls = {}
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a
