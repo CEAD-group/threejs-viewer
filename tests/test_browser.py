@@ -9885,3 +9885,58 @@ def test_sun_casts_shadow_and_set_sun_toggles(viewer_client, viewer_page):
         "() => [window.threejsViewer._sun.visible,"
         " document.querySelector('.tjsv-lighting-sun').checked]"
     ) == [False, False]
+
+
+def test_display_quality_low_clays_opaque_meshes_and_simplifies_lighting(
+    viewer_client, viewer_page
+):
+    """Low: opaque lit meshes share one clay material, translucent ones keep
+    theirs, the sun + IBL give way to the hemisphere/headlight rig. set_color
+    while low edits the mesh's own material, and high restores it."""
+    viewer_client.add_box("a", 1, 1, 1, color=0x3366CC, position=[0, 0, 0.5])
+    viewer_client.add_box("b", 1, 1, 1, color=0xCC3333, position=[2, 0, 0.5])
+    viewer_client.add_box(
+        "glass", 1, 1, 1, color=0xFFFFFF, opacity=0.3, position=[4, 0, 0.5]
+    )
+    viewer_client.set_display_quality("low")
+    viewer_client.add_box("late", 1, 1, 1, color=0x33CC33, position=[6, 0, 0.5])
+    viewer_client.set_color("a", 0xFF8800)
+    settle(viewer_client)
+    frames(viewer_page)
+
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; const m = (id) => v._objects.get(id).material;"
+        " const clay = v._shading._clayMat;"
+        " return { quality: v.getDisplayQuality(),"
+        "  shared: [m('a'), m('b'), m('late')].every(x => x === clay),"
+        "  clayLambert: !!clay && clay.isMeshLambertMaterial,"
+        "  clayHex: clay.color.getHex(),"
+        "  glassOwn: m('glass') !== clay,"
+        "  aOwnHex: v._objects.get('a').userData.originalMaterial.color.getHex(),"
+        "  sun: v._sun.visible, env: v._scene.environment,"
+        "  hemi: v._lowHemi.visible, head: v._headlight.visible }; }"
+    )
+    assert state["quality"] == "low"
+    assert state["shared"] and state["clayLambert"] and state["glassOwn"]
+    assert state["clayHex"] == 0xA8A6A2
+    assert state["aOwnHex"] == 0xFF8800
+    assert state["sun"] is False and state["env"] is None
+    assert state["hemi"] is True and state["head"] is True
+
+    viewer_client.set_display_quality("high")
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; const m = (id) => v._objects.get(id).material;"
+        " return { std: ['a', 'b', 'late'].every(id => m(id).isMeshStandardMaterial"
+        "            && v._objects.get(id).userData.originalMaterial === undefined),"
+        "  aHex: m('a').color.getHex(), sun: v._sun.visible,"
+        "  env: v._scene.environment !== null, hemi: v._lowHemi.visible }; }"
+    )
+    assert state == {
+        "std": True,
+        "aHex": 0xFF8800,
+        "sun": True,
+        "env": True,
+        "hemi": False,
+    }

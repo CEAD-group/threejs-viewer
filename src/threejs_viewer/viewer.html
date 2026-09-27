@@ -1717,6 +1717,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [sunElevation]                      Sun elevation in degrees above the XY plane (default 50; URL `sun_elevation` wins)
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
+ * @property {string} [displayQuality]                    "high" (default) or "low": one clay material and a hemisphere + headlight rig, no IBL, sun or shadows (URL `display_quality` wins)
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  * @property {number | null} [viewHelperSize]            View gimbal square in CSS px (clamped to 32–512). Omitted/null = auto: 128, or 80 when the canvas' shorter side is under 500 px (issue #233). Overridable per page via the `view_helper_size` URL query param; `setViewHelperSize()` changes it at runtime.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
@@ -2149,8 +2150,7 @@ function makeChannelApply(viewer) {
                 }
                 obj.traverse(/** @param {any} child */ (child) => {
                     if (!child.material) return;
-                    const mats = Array.isArray(child.material) ? child.material : [child.material];
-                    for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
+                    for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(color); }
                 });
             }
         },
@@ -2654,6 +2654,30 @@ const DEFAULT_SUN_AZIMUTH = -80;
 const DEFAULT_SUN_ELEVATION = 50;
 const SUN_SHADOW_MAP_SIZE = 2048;
 const SUN_SHADOW_RADIUS = 4;
+
+// Low display quality (setDisplayQuality): opaque lit meshes share one matte
+// clay material, and a hemisphere light plus a camera headlight (no shadows)
+// replace the IBL and the sun.
+const DISPLAY_QUALITIES = /** @type {const} */ (['high', 'low']);
+const CLAY_COLOR = 0xa8a6a2;
+const LOW_HEMI_SKY = 0xffffff;
+const LOW_HEMI_GROUND = 0x303030;
+const LOW_HEMI_INTENSITY = 0.5;
+const LOW_HEADLIGHT_INTENSITY = 1.4;
+// Headlight offset from the eye, in multiples of the orbit distance along the
+// camera's right/up axes: raking light from the upper left reads the form.
+const LOW_HEADLIGHT_RIGHT = -0.4;
+const LOW_HEADLIGHT_UP = 0.6;
+
+const _headlightRight = new THREE.Vector3();
+const _headlightUp = new THREE.Vector3();
+
+/** @param {any} raw @returns {string|null} "high"/"low", or null when unset or unknown */
+function parseDisplayQuality(raw) {
+    if (raw === null || raw === undefined || raw === '') return null;
+    const s = String(raw).toLowerCase();
+    return /** @type {readonly string[]} */ (DISPLAY_QUALITIES).includes(s) ? s : null;
+}
 const LS_KEY_SUN = 'tjsv.sun';
 const LS_KEY_SUN_INTENSITY = 'tjsv.sunIntensity';
 const LS_KEY_SUN_AZIMUTH = 'tjsv.sunAzimuth';
@@ -2988,6 +3012,18 @@ function depthMaterialFields(params, defaultDepthWrite) {
 }
 
 /**
+ * A mesh's own materials, past a display swap (debug shading, low-quality
+ * clay) that parks them in `userData.originalMaterial`. set_color/set_opacity
+ * edit these, so a shared swap material is never recoloured.
+ * @param {any} obj
+ * @returns {any[]}
+ */
+function ownMaterials(obj) {
+    const m = obj.userData.originalMaterial !== undefined ? obj.userData.originalMaterial : obj.material;
+    return Array.isArray(m) ? m : [m];
+}
+
+/**
  * @param {THREE.Object3D} obj
  * @param {number} opacity
  */
@@ -3001,8 +3037,7 @@ function applyOpacity(obj, opacity) {
         // Same for a primitive's `outline`: an accent that follows the fill's
         // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        for (const mat of mats) {
+        for (const mat of ownMaterials(child)) {
             const wasTransparent = mat.transparent;
             mat.transparent = opacity < 1;
             mat.opacity = opacity;
@@ -7832,6 +7867,9 @@ class ShadingDebugController {
         this.v = viewer;
         this.wireframeMode = 0;
         this.shadingMode = 0;
+        // Low display quality: eligible meshes wear _clayMat (debug modes win).
+        this.clay = false;
+        this._clayMat = null;
         this._normalMat = null;
         this._uvMat = null;
         this._uvTex = null;
@@ -7960,19 +7998,43 @@ class ShadingDebugController {
         return null;
     }
 
+    _getClayMaterial() {
+        if (!this._clayMat) {
+            this._clayMat = new THREE.MeshLambertMaterial({ color: CLAY_COLOR });
+            this._syncClip(this._clayMat);
+        }
+        return this._clayMat;
+    }
+
+    /**
+     * Clay replaces opaque lit surfaces only. Translucent, vertex-coloured and
+     * polygon-offset overlays carry data (reach maps, heat colours), and
+     * unlit/shader materials are markers or furniture, so they keep theirs.
+     * @param {any} obj
+     */
+    _clayEligible(obj) {
+        return ownMaterials(obj).every((/** @type {any} */ m) => m
+            && (m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshLambertMaterial)
+            && !m.transparent && m.opacity >= 1 && !m.vertexColors && !m.polygonOffset);
+    }
+
     /** @param {any} obj @param {number} mode */
     _applyDebugMaterial(obj, mode) {
         const debugMat = this._getDebugMaterial(mode);
-        if (!debugMat) return;
+        if (debugMat) this._swapMaterial(obj, debugMat);
+    }
+
+    /** @param {any} obj @param {any} mat */
+    _swapMaterial(obj, mat) {
         if (obj.userData.originalMaterial === undefined) {
             obj.userData.originalMaterial = obj.material;
         }
-        // A tube split into geometry groups for the per-draw index cap
-        // (#113) only renders every group when its material is an array;
-        // wrap the debug material to match so a >cap tube doesn't truncate
-        // in normals/UV debug view.
-        const grouped = obj.geometry && obj.geometry.groups && obj.geometry.groups.length > 1;
-        obj.material = grouped ? [debugMat] : debugMat;
+        const orig = obj.userData.originalMaterial;
+        // Mirror the original's shape: a tube chunked for the per-draw index
+        // cap (#113) is already an array, while a single material over a
+        // grouped geometry (BoxGeometry's six faces) draws in one call, and a
+        // one-entry array would draw only group 0.
+        obj.material = Array.isArray(orig) ? orig.map(() => mat) : mat;
     }
 
     /** @param {any} obj */
@@ -7980,27 +8042,52 @@ class ShadingDebugController {
         if (obj.userData.originalMaterial === undefined) return;
         obj.material = obj.userData.originalMaterial;
         delete obj.userData.originalMaterial;
-        // Clipping state may have changed while the debug material was active.
-        // Re-sync clippingPlanes + side + clipShadows to match what
-        // _updateClipMaterials would set right now, so toggling N-key off
-        // while clipping is enabled doesn't leave the restored material with
-        // stale sidedness/clip flags.
-        const planes = this.v._activeClippingPlanes();
-        const clipEnabled = this.v._clipEnabled;
+        // Clipping state may have changed while a swap material was active.
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of mats) {
-            if (!m) continue;
-            m.clippingPlanes = planes;
-            m.clipShadows = true;
-            if (clipEnabled) {
-                if (m.userData.originalSide === undefined) m.userData.originalSide = m.side;
-                m.side = THREE.DoubleSide;
-            } else if (m.userData.originalSide !== undefined) {
-                m.side = m.userData.originalSide;
-                delete m.userData.originalSide;
-            }
-            m.needsUpdate = true;
+        for (const m of mats) if (m) this._syncClip(m);
+    }
+
+    /**
+     * Match clippingPlanes + side + clipShadows to what _updateClipMaterials
+     * would set right now, so a material swapped in or back while clipping is
+     * enabled doesn't keep stale sidedness/clip flags.
+     * @param {any} m
+     */
+    _syncClip(m) {
+        m.clippingPlanes = this.v._activeClippingPlanes();
+        m.clipShadows = true;
+        if (this.v._clipEnabled) {
+            if (m.userData.originalSide === undefined) m.userData.originalSide = m.side;
+            m.side = THREE.DoubleSide;
+        } else if (m.userData.originalSide !== undefined) {
+            m.side = m.userData.originalSide;
+            delete m.userData.originalSide;
         }
+        m.needsUpdate = true;
+    }
+
+    /**
+     * Pick the material a user mesh should wear now: debug view, clay, or its own.
+     * @param {any} obj
+     */
+    _applyMaterialMode(obj) {
+        const mode = this.shadingMode;
+        if (mode === 1 || mode === 2) this._applyDebugMaterial(obj, mode);
+        else if (this.clay && this._clayEligible(obj)) this._swapMaterial(obj, this._getClayMaterial());
+        else this._restoreOriginalMaterial(obj);
+    }
+
+    /**
+     * Re-evaluate the display material under one object (a new add, or a
+     * set_color/set_opacity that may change clay eligibility).
+     * @param {any} root
+     */
+    refreshObject(root) {
+        // Outside these modes nothing is swapped, so there is nothing to do.
+        if (!this.clay && this.shadingMode !== 1 && this.shadingMode !== 2) return;
+        root.traverse((/** @type {any} */ obj) => {
+            if (this._isUserMesh(obj)) this._applyMaterialMode(obj);
+        });
     }
 
     /** @param {(obj: any) => void} cb */
@@ -8010,27 +8097,25 @@ class ShadingDebugController {
         // marker, clip anchor) whose materials often lack the fields our
         // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
         for (const root of this.v._objects.values()) {
-            root.traverse((/** @type {any} */ obj) => {
-                if (!obj.isMesh) return;
-                if (obj.userData.isWireOverlay) return;
-                if (obj.userData.isDebugHelper) return;
-                if (obj.userData.isGrid) return;
-                // Selection-silhouette hulls are Meshes (issue #165): a debug
-                // material swap would turn the outline into a solid shell.
-                if (obj.userData.__highlightOutline) return;
-                cb(obj);
-            });
+            root.traverse((/** @type {any} */ obj) => { if (this._isUserMesh(obj)) cb(obj); });
         }
+    }
+
+    /** @param {any} obj */
+    _isUserMesh(obj) {
+        if (!obj.isMesh) return false;
+        const ud = obj.userData;
+        // Selection-silhouette hulls are Meshes (issue #165): a material swap
+        // would turn the outline into a solid shell. Same for primitive outlines.
+        return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
+            || ud.__highlightOutline || ud.__primitiveOutline);
     }
 
     applyShading() {
         const mode = this.shadingMode;
+        if (this._clayMat) this._syncClip(this._clayMat);
         this._forEachUserMesh((obj) => {
-            if (mode === 1 || mode === 2) {
-                this._applyDebugMaterial(obj, mode);
-            } else {
-                this._restoreOriginalMaterial(obj);
-            }
+            this._applyMaterialMode(obj);
 
             let helper = obj.userData.vertexNormalsHelper;
             if (mode === 3) {
@@ -11707,6 +11792,9 @@ class ThreeJSViewer {
         // localStorage but don't override a URL-provided value on reload.
         this._lightingDefaults = resolveLightingDefaults(options, urlParams);
         this._sunDefaults = resolveSunDefaults(options, urlParams);
+        // Display quality, applied once the lights exist. URL `display_quality` > option > high.
+        this._displayQuality = parseDisplayQuality(urlParams.get('display_quality'))
+            ?? parseDisplayQuality(options.displayQuality) ?? 'high';
         // IBL environment map on/off (uglier-but-faster toggle). The PMREM map
         // is retained on `_envMap` so the toggle can restore it without a rebuild.
         this._envEnabled = this._lightingDefaults.envEnabled;
@@ -12496,6 +12584,16 @@ class ThreeJSViewer {
         this._sunShadowGen = -1;
         this.setSun(this._sunState);
 
+        // Low display quality rig (hidden on high): sky/ground fill plus a
+        // headlight that follows the camera, neither casting shadows.
+        this._lowHemi = new THREE.HemisphereLight(LOW_HEMI_SKY, LOW_HEMI_GROUND, LOW_HEMI_INTENSITY);
+        this._lowHemi.position.set(0, 0, 1);
+        this._lowHemi.visible = false;
+        this._headlight = new THREE.DirectionalLight(0xffffff, LOW_HEADLIGHT_INTENSITY);
+        this._headlight.visible = false;
+        this._scene.add(this._lowHemi, this._headlight, this._headlight.target);
+        this.setDisplayQuality(this._displayQuality);
+
         // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
         this._gridHelper.rotation.x = Math.PI / 2;
@@ -12619,7 +12717,7 @@ class ThreeJSViewer {
             this._envCube = cubeTexture;
             this._envMap = envMap;
             this._cubemapName = name;
-            this._scene.environment = this._envEnabled ? envMap : null;
+            this._syncEnvironment();
             this._applyBackground();
         } catch (err) {
             console.error('Failed to load environment cubemap:', err);
@@ -13107,8 +13205,13 @@ class ThreeJSViewer {
      */
     _applyEnvironmentEnabled(enabled) {
         this._envEnabled = enabled;
-        this._scene.environment = enabled ? (this._envMap || null) : null;
+        this._syncEnvironment();
         if (this._lightingEnvSlider) this._lightingEnvSlider.disabled = !enabled;
+    }
+
+    _syncEnvironment() {
+        const on = this._envEnabled && this._displayQuality !== 'low';
+        this._scene.environment = on ? (this._envMap || null) : null;
     }
 
     _applyAmbientIntensity(value) {
@@ -13336,7 +13439,13 @@ class ThreeJSViewer {
     _setOpacity(id, opacity) {
         const obj = this._objects.get(id);
         if (!obj) return;
+        this._setObjectOpacity(obj, opacity);
+    }
+
+    /** Opacity decides clay eligibility, so re-pick the display material after. @param {any} obj @param {number} opacity */
+    _setObjectOpacity(obj, opacity) {
         applyOpacity(obj, opacity);
+        this._shading.refreshObject(obj);
     }
 
     /** @param {THREE.Object3D} obj @param {string | null | undefined} parentId */
@@ -13385,6 +13494,7 @@ class ThreeJSViewer {
         this._objects.set(id, obj);
         this._objGeneration++;
         this._menus?.applyEyes();
+        this._shading.refreshObject(obj);
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -14405,6 +14515,7 @@ class ThreeJSViewer {
                     delete child.userData.vertexNormalsHelper;
                 }
                 if (child.userData.originalMaterial !== undefined) {
+                    child.material = child.userData.originalMaterial;
                     delete child.userData.originalMaterial;
                 }
                 if (child.geometry && !this._modelCache.ownsGeometry(child.geometry)) child.geometry.dispose();
@@ -14725,8 +14836,7 @@ class ThreeJSViewer {
                 }
                 obj.traverse(/** @param {any} child */ (child) => {
                     if (!child.material) return;
-                    const mats = Array.isArray(child.material) ? child.material : [child.material];
-                    for (const mat of mats) { if (mat.color) mat.color.setHex(hex); }
+                    for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(hex); }
                 });
             }
         }
@@ -15609,15 +15719,15 @@ class ThreeJSViewer {
                         // Composes with set_highlight: the outline child keeps
                         // its own selection colour.
                         if (!child.material || child.userData.__highlightOutline) return;
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
+                        for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(data.color); }
                     });
                     if (data.opacity != null) applyOpacity(colorObj, data.opacity);
+                    this._shading.refreshObject(colorObj);
                 });
                 break;
             }
             case 'set_opacity':
-                this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
+                this._withObject(data.id, 'set_opacity', (obj) => this._setObjectOpacity(obj, data.opacity));
                 break;
             case 'set_highlight':
                 // Toggle a persistent selection outline (issue #147). Transient
@@ -17405,6 +17515,9 @@ class ThreeJSViewer {
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
                 break;
+            case 'set_display_quality':
+                this.setDisplayQuality(data.quality);
+                break;
             case 'set_sun':
                 // Programmatic twin of the Lighting panel's Sun section.
                 this.setSun({
@@ -17690,6 +17803,7 @@ class ThreeJSViewer {
         this._depthCue.update();
         this._updateNearFar();
         this._updateSun();
+        this._updateHeadlight();
 
         // Billboards: re-face the camera after controls have moved it.
         this._updateBillboards();
@@ -18473,7 +18587,7 @@ class ThreeJSViewer {
         }
         st.intensity = Math.max(0, st.intensity);
         st.elevation = Math.min(90, Math.max(-90, st.elevation));
-        this._sun.visible = st.enabled;
+        this._sun.visible = st.enabled && this._displayQuality !== 'low';
         this._sun.intensity = st.intensity;
         this._sunFitKey = '';  // force a re-aim on the next frame
         this._syncSunPanel();
@@ -18482,6 +18596,49 @@ class ThreeJSViewer {
     /** @returns {SunState} a copy of the sun's current state */
     getSun() {
         return { ...this._sunState };
+    }
+
+    /**
+     * Switch render quality. "low" puts one shared matte clay material on
+     * every opaque lit mesh and swaps the IBL + sun + shadows for a hemisphere
+     * light and a camera headlight; "high" restores materials and lighting.
+     * The sun and environment settings are kept, only suppressed. Transient.
+     * @param {string} quality "high" or "low"
+     */
+    setDisplayQuality(quality) {
+        const q = parseDisplayQuality(quality);
+        if (!q) {
+            console.warn(`setDisplayQuality: unknown quality '${quality}'`);
+            return;
+        }
+        this._displayQuality = q;
+        const low = q === 'low';
+        this._lowHemi.visible = low;
+        this._headlight.visible = low;
+        this.setSun({});
+        this._syncEnvironment();
+        this._shading.clay = low;
+        this._shading.applyShading();
+    }
+
+    /** @returns {string} the current display quality, "high" or "low" */
+    getDisplayQuality() {
+        return this._displayQuality;
+    }
+
+    /** Aim the low-quality headlight at the orbit target from just above-left of the eye. */
+    _updateHeadlight() {
+        if (!this._headlight.visible) return;
+        const cam = this._camera;
+        const target = this._controls.target;
+        const d = cam.position.distanceTo(target);
+        const right = _headlightRight.setFromMatrixColumn(cam.matrixWorld, 0);
+        const up = _headlightUp.setFromMatrixColumn(cam.matrixWorld, 1);
+        this._headlight.position.copy(cam.position)
+            .addScaledVector(right, LOW_HEADLIGHT_RIGHT * d)
+            .addScaledVector(up, LOW_HEADLIGHT_UP * d);
+        this._headlight.target.position.copy(target);
+        this._headlight.target.updateMatrixWorld();
     }
 
     /**

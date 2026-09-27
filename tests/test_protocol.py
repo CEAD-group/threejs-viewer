@@ -1890,6 +1890,17 @@ def test_set_grid_color(client):
     ]
 
 
+# === set_display_quality ===
+
+
+def test_set_display_quality_sends_and_records(client):
+    client.set_display_quality("LOW")
+    assert client._messages == [{"type": "set_display_quality", "quality": "low"}]
+    assert client._display_quality_state == "low"
+    with pytest.raises(ValueError):
+        client.set_display_quality("medium")
+
+
 # === set_sun ===
 
 

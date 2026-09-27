@@ -39,6 +39,8 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
     {"none", "linear", "reinhard", "cineon", "aces", "agx", "neutral"}
 )
 
+_ALLOWED_DISPLAY_QUALITIES = frozenset({"high", "low"})
+
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
 _ALLOWED_AXIS_CONTROL_AXES = frozenset({"x", "y", "z"})
@@ -163,6 +165,16 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number (got {value!r})")
     return f
+
+
+def _validate_display_quality(quality: Optional[str]) -> Optional[str]:
+    """Normalize a display quality to lowercase (``None`` passes through)."""
+    if quality is None:
+        return None
+    normalized = str(quality).lower()
+    if normalized not in _ALLOWED_DISPLAY_QUALITIES:
+        raise ValueError(f"display_quality must be 'high' or 'low' (got {quality!r})")
+    return normalized
 
 
 def _validate_sun(
@@ -588,6 +600,7 @@ class ViewerClient:
         sun_intensity: Optional[float] = None,
         sun_azimuth: Optional[float] = None,
         sun_elevation: Optional[float] = None,
+        display_quality: Optional[str] = None,
         fov: Optional[float] = None,
         toolbar: Optional[bool] = None,
         view_helper_size: Optional[float] = None,
@@ -624,6 +637,11 @@ class ViewerClient:
                 Like the other lighting kwargs these ride the viewer URL and
                 win over the Lighting panel's localStorage; change them at
                 runtime with :meth:`set_sun`.
+            display_quality: ``"high"`` (default) or ``"low"``. Low puts one
+                matte clay material on every opaque lit mesh and swaps the IBL,
+                sun and shadows for a hemisphere light plus a camera headlight.
+                Rides the URL; change it at runtime with
+                :meth:`set_display_quality`.
             tone_mapping: Tone-mapping mode, one of ``"none"``, ``"linear"``,
                 ``"reinhard"``, ``"cineon"``, ``"aces"`` (default), ``"agx"``,
                 ``"neutral"``. Case-insensitive; stored lowercase. Invalid
@@ -705,6 +723,7 @@ class ViewerClient:
             self.tone_mapping = normalized
         else:
             self.tone_mapping = None
+        self.display_quality = _validate_display_quality(display_quality)
         # Perspective camera FOV (degrees). `None` means "use the viewer default".
         self.fov = _validate_fov(fov)
         if toolbar is not None and not isinstance(toolbar, bool):
@@ -720,6 +739,8 @@ class ViewerClient:
         self._toolbar_visible: Optional[dict] = None
         # Accumulated set_sun fields, re-sent on reconnect.
         self._sun_state: Dict[str, Any] = {}
+        # Runtime set_display_quality value, re-sent on reconnect.
+        self._display_quality_state: Optional[str] = None
         # Client-defined menus (add_menu): id -> the add_menu message, kept
         # current through update_menu_item so a reconnect replays the latest
         # state; plus the callbacks fed by the viewer's menu_action messages.
@@ -855,7 +876,7 @@ class ViewerClient:
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
         `env_background`,
         `ambient_intensity`, `sun`, `sun_intensity`, `sun_azimuth`,
-        `sun_elevation`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
+        `sun_elevation`, `display_quality`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
@@ -883,6 +904,8 @@ class ViewerClient:
             value = getattr(self, name)
             if value is not None:
                 params.append((name, str(value)))
+        if self.display_quality is not None:
+            params.append(("display_quality", self.display_quality))
         if self.fov is not None:
             params.append(("fov", str(self.fov)))
         if self.toolbar is not None:
@@ -969,6 +992,20 @@ class ViewerClient:
         if self._sun_state:
             try:
                 websocket.send(json.dumps({"type": "set_sun", **self._sun_state}))
+            except Exception:
+                pass
+
+        # Re-apply a runtime display quality (set_display_quality).
+        if self._display_quality_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {
+                            "type": "set_display_quality",
+                            "quality": self._display_quality_state,
+                        }
+                    )
+                )
             except Exception:
                 pass
 
@@ -4142,6 +4179,23 @@ class ViewerClient:
             msg["elevation"] = elevation
         self._sun_state.update(msg)
         self._send({"type": "set_sun", **msg})
+
+    def set_display_quality(self, quality: str) -> None:
+        """Switch render quality at runtime.
+
+        ``"low"`` puts one shared matte clay material on every opaque lit mesh
+        (translucent, vertex-coloured and polygon-offset overlays keep theirs)
+        and replaces the IBL, sun and shadows with a hemisphere light plus a
+        camera headlight. ``"high"`` restores materials and lighting; the sun
+        and environment settings are kept throughout, only suppressed.
+
+        Re-sent on reconnect, so a browser refresh keeps the requested quality.
+        """
+        normalized = _validate_display_quality(quality)
+        if normalized is None:
+            raise ValueError("display_quality must be 'high' or 'low' (got None)")
+        self._display_quality_state = normalized
+        self._send({"type": "set_display_quality", "quality": normalized})
 
     def set_depth_cue(
         self,

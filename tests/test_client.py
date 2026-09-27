@@ -970,6 +970,16 @@ def test_viewer_url_sun_params():
     assert not {"sun", "sun_intensity", "sun_azimuth", "sun_elevation"} & set(default)
 
 
+def test_viewer_url_display_quality():
+    """display_quality rides the URL lowercased; the default omits it."""
+    assert _params(ViewerClient(display_quality="Low").viewer_url)[
+        "display_quality"
+    ] == ["low"]
+    assert "display_quality" not in _params(ViewerClient().viewer_url)
+    with pytest.raises(ValueError):
+        ViewerClient(display_quality="ultra")
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
