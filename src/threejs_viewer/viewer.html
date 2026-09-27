@@ -963,6 +963,25 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
             <span class="lighting-value tjsv-lighting-ambient-value">1.50</span>
         </div>
     </div>
+    <div class="lighting-section">
+        <label>Sun</label>
+        <div class="lighting-check-row">
+            <input type="checkbox" class="tjsv-lighting-sun" id="tjsv-lighting-sun" checked>
+            <label for="tjsv-lighting-sun" class="lighting-check-label">Sun light + shadows</label>
+        </div>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-sun-intensity" min="0" max="6" step="0.05" value="2" title="Sun intensity">
+            <span class="lighting-value tjsv-lighting-sun-intensity-value">2.00</span>
+        </div>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-sun-azimuth" min="-180" max="180" step="1" value="-80" title="Sun azimuth (degrees)">
+            <span class="lighting-value tjsv-lighting-sun-azimuth-value">-80°</span>
+        </div>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-sun-elevation" min="0" max="90" step="1" value="50" title="Sun elevation (degrees)">
+            <span class="lighting-value tjsv-lighting-sun-elevation-value">50°</span>
+        </div>
+    </div>
     <div class="lighting-actions">
         <button class="tjsv-lighting-reset" title="Reset to initial values">Reset</button>
     </div>
@@ -1692,6 +1711,10 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
+ * @property {boolean} [sun]                              Shadow-casting sun (DirectionalLight) on/off (default true; URL `sun` wins)
+ * @property {number} [sunIntensity]                      Sun intensity (default 2.0; URL `sun_intensity` wins)
+ * @property {number} [sunAzimuth]                        Sun azimuth in degrees, XY plane from +X toward +Y (default -80; URL `sun_azimuth` wins)
+ * @property {number} [sunElevation]                      Sun elevation in degrees above the XY plane (default 50; URL `sun_elevation` wins)
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
@@ -2620,6 +2643,69 @@ const LS_KEY_AMBIENT_INTENSITY = 'tjsv.ambientIntensity';
 const LS_KEY_TONE_MAPPING = 'tjsv.toneMapping';
 const LS_KEY_ENVIRONMENT_MAP = 'tjsv.environmentMap';
 const LS_KEY_CUBEMAP = 'tjsv.cubemap';
+
+// Sun (shadow-casting DirectionalLight). Azimuth is degrees in the XY plane
+// from +X toward +Y (Z-up), elevation degrees above the XY plane. The default
+// sits over the left shoulder of the default iso camera (which looks from
+// azimuth -45°), so shadows fall away from the viewer.
+const DEFAULT_SUN_ENABLED = true;
+const DEFAULT_SUN_INTENSITY = 2.0;
+const DEFAULT_SUN_AZIMUTH = -80;
+const DEFAULT_SUN_ELEVATION = 50;
+const SUN_SHADOW_MAP_SIZE = 2048;
+const SUN_SHADOW_RADIUS = 4;
+const LS_KEY_SUN = 'tjsv.sun';
+const LS_KEY_SUN_INTENSITY = 'tjsv.sunIntensity';
+const LS_KEY_SUN_AZIMUTH = 'tjsv.sunAzimuth';
+const LS_KEY_SUN_ELEVATION = 'tjsv.sunElevation';
+
+/**
+ * @typedef {{enabled: boolean, intensity: number, azimuth: number, elevation: number}} SunState
+ */
+
+/**
+ * Resolve the sun's initial state with the lighting panel's precedence:
+ * URL param (`sun`, `sun_intensity`, `sun_azimuth`, `sun_elevation`) >
+ * `ThreeJSViewer` option (`sun`, `sunIntensity`, `sunAzimuth`, `sunElevation`)
+ * > localStorage > hard default. `reset` is the same without localStorage.
+ * Invalid values fall through to the next level.
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {SunState & {reset: SunState}}
+ */
+function resolveSunDefaults(options, urlParams) {
+    /** @type {(raw: any) => (number|null)} */
+    const num = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const n = typeof raw === 'number' ? raw : parseFloat(raw);
+        return Number.isFinite(n) ? n : null;
+    };
+    /** @type {(key: string) => (string|null)} */
+    const ls = (key) => {
+        try { return localStorage.getItem(key); } catch (e) { return null; }
+    };
+    /** @type {(vals: any[], parse: (raw: any) => any, fallback: any) => any} */
+    const pick = (vals, parse, fallback) => {
+        for (const v of vals) {
+            const p = parse(v);
+            if (p != null) return p;
+        }
+        return fallback;
+    };
+    const o = /** @type {any} */ (options);
+    const fields = /** @type {const} */ ([
+        ['enabled', 'sun', 'sun', LS_KEY_SUN, parseBoolOption, DEFAULT_SUN_ENABLED],
+        ['intensity', 'sun_intensity', 'sunIntensity', LS_KEY_SUN_INTENSITY, num, DEFAULT_SUN_INTENSITY],
+        ['azimuth', 'sun_azimuth', 'sunAzimuth', LS_KEY_SUN_AZIMUTH, num, DEFAULT_SUN_AZIMUTH],
+        ['elevation', 'sun_elevation', 'sunElevation', LS_KEY_SUN_ELEVATION, num, DEFAULT_SUN_ELEVATION],
+    ]);
+    const out = /** @type {any} */ ({ reset: {} });
+    for (const [name, urlKey, optKey, lsKey, parse, fallback] of fields) {
+        out[name] = pick([urlParams.get(urlKey), o[optKey], ls(lsKey)], parse, fallback);
+        out.reset[name] = pick([urlParams.get(urlKey), o[optKey]], parse, fallback);
+    }
+    return out;
+}
 
 // Tone-mapping mode name -> THREE.* constant. Resolved lazily so THREE only
 // needs to be loaded when the viewer actually instantiates.
@@ -11620,6 +11706,7 @@ class ThreeJSViewer {
         // URL param is always authoritative (developer's explicit choice) — panel edits go to
         // localStorage but don't override a URL-provided value on reload.
         this._lightingDefaults = resolveLightingDefaults(options, urlParams);
+        this._sunDefaults = resolveSunDefaults(options, urlParams);
         // IBL environment map on/off (uglier-but-faster toggle). The PMREM map
         // is retained on `_envMap` so the toggle can restore it without a rebuild.
         this._envEnabled = this._lightingDefaults.envEnabled;
@@ -11946,6 +12033,13 @@ class ThreeJSViewer {
         this._lightingAmbientValue = q('.tjsv-lighting-ambient-value');
         this._lightingToneMappingSelect = q('.tjsv-lighting-tone-mapping');
         this._lightingCubemapSelect = q('.tjsv-lighting-cubemap');
+        this._lightingSunCheck = q('.tjsv-lighting-sun');
+        this._lightingSunIntensitySlider = q('.tjsv-lighting-sun-intensity');
+        this._lightingSunIntensityValue = q('.tjsv-lighting-sun-intensity-value');
+        this._lightingSunAzimuthSlider = q('.tjsv-lighting-sun-azimuth');
+        this._lightingSunAzimuthValue = q('.tjsv-lighting-sun-azimuth-value');
+        this._lightingSunElevationSlider = q('.tjsv-lighting-sun-elevation');
+        this._lightingSunElevationValue = q('.tjsv-lighting-sun-elevation-value');
         this._lightingResetBtn = q('.tjsv-lighting-reset');
         this._lightingCloseBtn = q('.tjsv-lighting-close');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
@@ -12378,6 +12472,29 @@ class ThreeJSViewer {
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
         this._scene.add(this._ambientLight);
 
+        // Sun: one shadow-casting DirectionalLight, re-aimed and its shadow
+        // camera re-fitted to the content sphere by _updateSun each frame.
+        // The shadow map is refreshed once per frame (autoUpdate off +
+        // needsUpdate), not once per renderer.render() call — the EDL line
+        // pre-pass, gizmo overlay and view helper are extra render calls.
+        this._renderer.shadowMap.enabled = true;
+        this._renderer.shadowMap.type = THREE.PCFShadowMap;
+        this._renderer.shadowMap.autoUpdate = false;
+        this._sun = new THREE.DirectionalLight(0xffffff, 0);
+        this._sun.castShadow = true;
+        this._sun.shadow.mapSize.set(SUN_SHADOW_MAP_SIZE, SUN_SHADOW_MAP_SIZE);
+        this._sun.shadow.radius = SUN_SHADOW_RADIUS;
+        this._scene.add(this._sun, this._sun.target);
+        /** @type {SunState} */
+        this._sunState = {
+            enabled: this._sunDefaults.enabled,
+            intensity: this._sunDefaults.intensity,
+            azimuth: this._sunDefaults.azimuth,
+            elevation: this._sunDefaults.elevation,
+        };
+        this._sunFitKey = '';
+        this._sunShadowGen = -1;
+        this.setSun(this._sunState);
 
         // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
@@ -13042,6 +13159,10 @@ class ThreeJSViewer {
         try { localStorage.removeItem(LS_KEY_ENVIRONMENT_MAP); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_AMBIENT_INTENSITY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING); } catch (e) { /* ignore */ }
+        for (const k of [LS_KEY_SUN, LS_KEY_SUN_INTENSITY, LS_KEY_SUN_AZIMUTH, LS_KEY_SUN_ELEVATION]) {
+            try { localStorage.removeItem(k); } catch (e) { /* ignore */ }
+        }
+        this.setSun(this._sunDefaults.reset);
         this._applyToneMapping(d.toneMapping);
         this._applyToneMappingExposure(d.exposure);
         this._applyEnvironmentIntensity(d.envIntensity);
@@ -13116,6 +13237,24 @@ class ThreeJSViewer {
             this._lightingAmbientValue.textContent = v.toFixed(2);
             this._writeLightingLocalStorage(LS_KEY_AMBIENT_INTENSITY, v);
         });
+        this._syncSunPanel();
+        this._lightingSunCheck.addEventListener('change', () => {
+            const enabled = this._lightingSunCheck.checked;
+            this.setSun({ enabled });
+            this._writeLightingLocalStorage(LS_KEY_SUN, enabled);
+        });
+        for (const [slider, field, lsKey] of /** @type {const} */ ([
+            [this._lightingSunIntensitySlider, 'intensity', LS_KEY_SUN_INTENSITY],
+            [this._lightingSunAzimuthSlider, 'azimuth', LS_KEY_SUN_AZIMUTH],
+            [this._lightingSunElevationSlider, 'elevation', LS_KEY_SUN_ELEVATION],
+        ])) {
+            slider.addEventListener('input', () => {
+                const v = parseFloat(slider.value);
+                if (!Number.isFinite(v)) return;
+                this.setSun({ [field]: v });
+                this._writeLightingLocalStorage(lsKey, v);
+            });
+        }
         this._lightingResetBtn.addEventListener('click', () => this._resetLightingPanel());
     }
 
@@ -17266,6 +17405,14 @@ class ThreeJSViewer {
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
                 break;
+            case 'set_sun':
+                // Programmatic twin of the Lighting panel's Sun section.
+                this.setSun({
+                    enabled: data.enabled, intensity: data.intensity,
+                    azimuth: data.azimuth, elevation: data.elevation,
+                });
+                break;
+
             case 'set_depth_cue': {
                 // Programmatic equivalent of the D / Shift+D keys.
                 if (data.fog != null) this._depthCue.setFog(data.fog);
@@ -17542,6 +17689,7 @@ class ThreeJSViewer {
         this._controls.update();
         this._depthCue.update();
         this._updateNearFar();
+        this._updateSun();
 
         // Billboards: re-face the camera after controls have moved it.
         this._updateBillboards();
@@ -18306,6 +18454,111 @@ class ThreeJSViewer {
         this._backgroundColor = new THREE.Color(color ?? VIEWER_BACKGROUND_COLOR);
         this._renderer.domElement.style.backgroundColor = `#${this._backgroundColor.getHexString()}`;
         this._applyBackground();
+    }
+
+    /**
+     * Set the sun (shadow-casting directional light). Fields left out are
+     * unchanged. Transient: the Lighting panel persists its own edits, this
+     * does not.
+     * @param {Partial<SunState>} opts
+     *   enabled — on/off; intensity — light intensity; azimuth — degrees in the
+     *   XY plane from +X toward +Y; elevation — degrees above the XY plane.
+     */
+    setSun(opts = {}) {
+        const st = this._sunState;
+        if (opts.enabled != null) st.enabled = !!opts.enabled;
+        for (const k of /** @type {const} */ (['intensity', 'azimuth', 'elevation'])) {
+            const v = opts[k];
+            if (v != null && Number.isFinite(Number(v))) st[k] = Number(v);
+        }
+        st.intensity = Math.max(0, st.intensity);
+        st.elevation = Math.min(90, Math.max(-90, st.elevation));
+        this._sun.visible = st.enabled;
+        this._sun.intensity = st.intensity;
+        this._sunFitKey = '';  // force a re-aim on the next frame
+        this._syncSunPanel();
+    }
+
+    /** @returns {SunState} a copy of the sun's current state */
+    getSun() {
+        return { ...this._sunState };
+    }
+
+    /**
+     * Per-frame sun upkeep: (1) re-flag shadow casters/receivers when the
+     * object set changed, (2) re-aim the light and re-fit its orthographic
+     * shadow camera around the content sphere when either moved, (3) ask for
+     * one shadow-map refresh this frame (objects may be animating).
+     */
+    _updateSun() {
+        if (!this._sun.visible) return;
+        if (this._sunShadowGen !== this._objGeneration) {
+            this._sunShadowGen = this._objGeneration;
+            for (const root of this._objects.values()) {
+                root.traverse((/** @type {any} */ o) => {
+                    if (!o.isMesh) return;
+                    const ud = o.userData;
+                    // Fat lines are instanced Meshes whose depth pass is
+                    // meaningless; grids/outlines/wire overlays are furniture.
+                    if (o.isLine2 || o.isLineSegments2 || ud.isGrid || root.userData.isGrid
+                        || ud.__highlightOutline || ud.__primitiveOutline
+                        || (o.parent && o.parent.userData.wireframeOverlay === o)) {
+                        o.castShadow = o.receiveShadow = false;
+                        return;
+                    }
+                    const mats = Array.isArray(o.material) ? o.material : [o.material];
+                    // A translucent volume casting a full-black shadow reads
+                    // wrong (ribweaver's workzone fill); it still receives.
+                    o.castShadow = !mats.some((/** @type {any} */ m) => m && (m.transparent || m.opacity < 1));
+                    o.receiveShadow = true;
+                });
+            }
+        }
+        if (this._sceneBoundsDirty) this._camController.updateSceneBounds();
+        const sph = this._sceneSphere;
+        const st = this._sunState;
+        const key = `${sph.center.x},${sph.center.y},${sph.center.z},${sph.radius},${st.azimuth},${st.elevation}`;
+        if (key !== this._sunFitKey) {
+            this._sunFitKey = key;
+            const r = Math.max(sph.radius, 1e-3);
+            const az = THREE.MathUtils.degToRad(st.azimuth);
+            const el = THREE.MathUtils.degToRad(st.elevation);
+            const dir = new THREE.Vector3(
+                Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el));
+            this._sun.target.position.copy(sph.center);
+            this._sun.position.copy(sph.center).addScaledVector(dir, 2 * r);
+            this._sun.target.updateMatrixWorld();
+            this._sun.updateMatrixWorld();
+            const cam = this._sun.shadow.camera;
+            cam.left = cam.bottom = -r;
+            cam.right = cam.top = r;
+            cam.near = 0.5 * r;
+            cam.far = 3.5 * r;
+            cam.updateProjectionMatrix();
+            // Bias in world units scales with the scene: ~1.5 shadow texels
+            // along the normal kills acne on curved/thin geometry without
+            // visibly detaching contact shadows.
+            this._sun.shadow.normalBias = 1.5 * (2 * r / SUN_SHADOW_MAP_SIZE);
+            this._sun.shadow.bias = -0.0002;
+        }
+        this._renderer.shadowMap.needsUpdate = true;
+    }
+
+    /** Mirror _sunState into the Lighting panel widgets (no-op before they exist). */
+    _syncSunPanel() {
+        if (!this._lightingSunCheck) return;
+        const st = this._sunState;
+        this._lightingSunCheck.checked = st.enabled;
+        this._lightingSunIntensitySlider.value = String(st.intensity);
+        this._lightingSunIntensityValue.textContent = st.intensity.toFixed(2);
+        this._lightingSunAzimuthSlider.value = String(st.azimuth);
+        this._lightingSunAzimuthValue.textContent = `${Math.round(st.azimuth)}°`;
+        this._lightingSunElevationSlider.value = String(st.elevation);
+        this._lightingSunElevationValue.textContent = `${Math.round(st.elevation)}°`;
+        for (const el of [this._lightingSunIntensitySlider, this._lightingSunAzimuthSlider,
+            this._lightingSunElevationSlider]) {
+            el.disabled = !st.enabled;
+        }
     }
 
     /**

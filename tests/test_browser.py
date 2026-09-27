@@ -9828,3 +9828,60 @@ def test_rail_panel_opens_upward_and_tabs_stay_on_top(viewer_client, viewer_page
     assert r["bodyTop"] < r["tabTop"], r
     assert r["bodyBottom"] <= r["railBottom"] + 0.5, r
     assert r["otherTabOnTop"] is True, r
+
+
+@pytest.mark.browser
+def test_sun_casts_shadow_and_set_sun_toggles(viewer_client, viewer_page):
+    """The default sun (azimuth -80°, elevation 50°) throws a box's shadow
+    toward +Y onto a floor: that floor spot reads darker than open floor.
+    set_sun(enabled=False) removes it and syncs the Lighting panel."""
+    viewer_client.add_box("floor", 10, 10, 0.2, color=0x777777, position=[0, 0, -0.1])
+    viewer_client.add_box("tower", 1, 1, 2, color=0x3366CC, position=[0, 0, 1])
+    viewer_client.add_box(
+        "glass", 1, 1, 1, color=0xFFFFFF, opacity=0.3, position=[3, -3, 0.5]
+    )
+    viewer_client.set_camera(position=[0, 0, 14], target=[0, 0, 0], up=[0, 1, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+
+    flags = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const m = (id) => v._objects.get(id);"
+        " return [m('tower').castShadow, m('floor').receiveShadow,"
+        "         m('glass').castShadow, m('glass').receiveShadow, v._sun.visible]; }"
+    )
+    assert flags == [True, True, False, True, True]
+
+    def floor_luma():
+        # Render (with a fresh shadow map) and read two floor pixels in one JS
+        # turn — no preserveDrawingBuffer. Shadow spot: +Y of the tower, off
+        # its top-view footprint; open spot: -Y, toward the sun.
+        return viewer_page.evaluate(
+            "() => { const v = window.threejsViewer;"
+            " v._renderer.shadowMap.needsUpdate = true;"
+            " v._renderer.render(v._scene, v._camera);"
+            " const gl = v._renderer.getContext();"
+            " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
+            " const px = new Uint8Array(4);"
+            " return [[-0.2, 1.4, 0], [0, -2.5, 0]].map(([x, y, z]) => {"
+            "  const p = v._camera.position.clone().set(x, y, z).project(v._camera);"
+            "  gl.readPixels(Math.round((p.x + 1) / 2 * w), Math.round((p.y + 1) / 2 * h),"
+            "                1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);"
+            "  return px[0] + px[1] + px[2]; }); }"
+        )
+
+    shadow, lit = floor_luma()
+    gap_on = lit - shadow
+
+    viewer_client.set_sun(enabled=False)
+    settle(viewer_client)
+    frames(viewer_page)
+    shadow, lit = floor_luma()
+    gap_off = lit - shadow
+    # The IBL lights the floor unevenly on its own (gap_off is not 0), so
+    # compare the gaps: the shadow darkens its spot by ~50-70 summed RGB.
+    assert gap_on - gap_off > 40, (gap_on, gap_off)
+    assert viewer_page.evaluate(
+        "() => [window.threejsViewer._sun.visible,"
+        " document.querySelector('.tjsv-lighting-sun').checked]"
+    ) == [False, False]

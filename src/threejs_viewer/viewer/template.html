@@ -98,6 +98,25 @@
             <span class="lighting-value tjsv-lighting-ambient-value">1.50</span>
         </div>
     </div>
+    <div class="lighting-section">
+        <label>Sun</label>
+        <div class="lighting-check-row">
+            <input type="checkbox" class="tjsv-lighting-sun" id="tjsv-lighting-sun" checked>
+            <label for="tjsv-lighting-sun" class="lighting-check-label">Sun light + shadows</label>
+        </div>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-sun-intensity" min="0" max="6" step="0.05" value="2" title="Sun intensity">
+            <span class="lighting-value tjsv-lighting-sun-intensity-value">2.00</span>
+        </div>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-sun-azimuth" min="-180" max="180" step="1" value="-80" title="Sun azimuth (degrees)">
+            <span class="lighting-value tjsv-lighting-sun-azimuth-value">-80°</span>
+        </div>
+        <div class="lighting-slider-row">
+            <input type="range" class="tjsv-lighting-sun-elevation" min="0" max="90" step="1" value="50" title="Sun elevation (degrees)">
+            <span class="lighting-value tjsv-lighting-sun-elevation-value">50°</span>
+        </div>
+    </div>
     <div class="lighting-actions">
         <button class="tjsv-lighting-reset" title="Reset to initial values">Reset</button>
     </div>

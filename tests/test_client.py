@@ -953,3 +953,33 @@ def test_reconnect_replays_bindings_and_axis_controls(bound_client):
     assert seen["bind_clip"] == bound_client._clip_bindings["bellows"]
     assert seen["add_axis_control"]["id"] == "j1"
     assert seen["set_move_gizmo"]["scale"] == 1.5
+
+
+def test_viewer_url_sun_params():
+    """Sun kwargs ride the URL; the default omits every sun param."""
+    params = _params(
+        ViewerClient(
+            sun=False, sun_intensity=3.5, sun_azimuth=120, sun_elevation=30
+        ).viewer_url
+    )
+    assert params["sun"] == ["false"]
+    assert params["sun_intensity"] == ["3.5"]
+    assert params["sun_azimuth"] == ["120.0"]
+    assert params["sun_elevation"] == ["30.0"]
+    default = _params(ViewerClient().viewer_url)
+    assert not {"sun", "sun_intensity", "sun_azimuth", "sun_elevation"} & set(default)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sun": 1},
+        {"sun_intensity": -1},
+        {"sun_intensity": float("nan")},
+        {"sun_elevation": 91},
+        {"sun_azimuth": float("inf")},
+    ],
+)
+def test_viewer_sun_kwargs_validated(kwargs):
+    with pytest.raises(ValueError):
+        ViewerClient(**kwargs)

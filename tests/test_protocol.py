@@ -1888,3 +1888,32 @@ def test_set_grid_color(client):
         {"type": "set_grid_color", "color": 0x3B434E},
         {"type": "set_grid_color", "color": "#3b434e", "center_color": "#5e81ac"},
     ]
+
+
+# === set_sun ===
+
+
+def test_set_sun_sends_only_given_fields(client):
+    client.set_sun(enabled=True, azimuth=45)
+    client.set_sun(intensity=3, elevation=20)
+    assert client._messages == [
+        {"type": "set_sun", "enabled": True, "azimuth": 45.0},
+        {"type": "set_sun", "intensity": 3.0, "elevation": 20.0},
+    ]
+    # Accumulated for the reconnect replay.
+    assert client._sun_state == {
+        "enabled": True,
+        "azimuth": 45.0,
+        "intensity": 3.0,
+        "elevation": 20.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"intensity": -0.1}, {"elevation": -91}, {"azimuth": float("nan")}],
+)
+def test_set_sun_validates(client, kwargs):
+    with pytest.raises(ValueError):
+        client.set_sun(**kwargs)
+    assert client._messages == []

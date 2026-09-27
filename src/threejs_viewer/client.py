@@ -19,7 +19,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
@@ -163,6 +163,22 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number (got {value!r})")
     return f
+
+
+def _validate_sun(
+    intensity: Optional[float],
+    azimuth: Optional[float],
+    elevation: Optional[float],
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Validate the sun's numeric fields (``None`` passes through)."""
+    intensity = _validate_finite("sun intensity", intensity)
+    azimuth = _validate_finite("sun azimuth", azimuth)
+    elevation = _validate_finite("sun elevation", elevation)
+    if intensity is not None and intensity < 0:
+        raise ValueError(f"sun intensity must be >= 0 (got {intensity!r})")
+    if elevation is not None and not -90 <= elevation <= 90:
+        raise ValueError(f"sun elevation must be in [-90, 90] (got {elevation!r})")
+    return intensity, azimuth, elevation
 
 
 GizmoAxisMask = Union[Dict[str, bool], Tuple[bool, bool, bool], List[bool]]
@@ -568,6 +584,10 @@ class ViewerClient:
         environment_background: bool = False,
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
+        sun: Optional[bool] = None,
+        sun_intensity: Optional[float] = None,
+        sun_azimuth: Optional[float] = None,
+        sun_elevation: Optional[float] = None,
         fov: Optional[float] = None,
         toolbar: Optional[bool] = None,
         view_helper_size: Optional[float] = None,
@@ -596,6 +616,14 @@ class ViewerClient:
                 ``False``; a debug view of the IBL).
             ambient_intensity: Override the ambient light's ``intensity``
                 (default ``1.5``). Must be finite.
+            sun: Shadow-casting sun (directional light) on/off (default
+                ``True``). ``sun_intensity`` (default ``2.0``), ``sun_azimuth``
+                (degrees in the XY plane from +X toward +Y, default ``-80``)
+                and ``sun_elevation`` (degrees above the XY plane, default
+                ``50``, range ``[-90, 90]``) set its strength and direction.
+                Like the other lighting kwargs these ride the viewer URL and
+                win over the Lighting panel's localStorage; change them at
+                runtime with :meth:`set_sun`.
             tone_mapping: Tone-mapping mode, one of ``"none"``, ``"linear"``,
                 ``"reinhard"``, ``"cineon"``, ``"aces"`` (default), ``"agx"``,
                 ``"neutral"``. Case-insensitive; stored lowercase. Invalid
@@ -659,6 +687,12 @@ class ViewerClient:
         self.ambient_intensity = _validate_finite(
             "ambient_intensity", ambient_intensity
         )
+        if sun is not None and not isinstance(sun, bool):
+            raise ValueError(f"sun must be a bool or None, got {sun!r}")
+        self.sun = sun
+        self.sun_intensity, self.sun_azimuth, self.sun_elevation = _validate_sun(
+            sun_intensity, sun_azimuth, sun_elevation
+        )
         # Validate tone_mapping (case-insensitive, stored lowercase).  Matches
         # the seven Three.js modes exposed in the viewer's lighting panel.
         if tone_mapping is not None:
@@ -684,6 +718,8 @@ class ViewerClient:
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
+        # Accumulated set_sun fields, re-sent on reconnect.
+        self._sun_state: Dict[str, Any] = {}
         # Client-defined menus (add_menu): id -> the add_menu message, kept
         # current through update_menu_item so a reconnect replays the latest
         # state; plus the callbacks fed by the viewer's menu_action messages.
@@ -818,7 +854,8 @@ class ViewerClient:
         ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
         `env_background`,
-        `ambient_intensity`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
+        `ambient_intensity`, `sun`, `sun_intensity`, `sun_azimuth`,
+        `sun_elevation`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
@@ -840,6 +877,12 @@ class ViewerClient:
             params.append(("env_background", "true"))
         if self.ambient_intensity is not None:
             params.append(("ambient_intensity", str(self.ambient_intensity)))
+        if self.sun is not None:
+            params.append(("sun", "true" if self.sun else "false"))
+        for name in ("sun_intensity", "sun_azimuth", "sun_elevation"):
+            value = getattr(self, name)
+            if value is not None:
+                params.append((name, str(value)))
         if self.fov is not None:
             params.append(("fov", str(self.fov)))
         if self.toolbar is not None:
@@ -919,6 +962,13 @@ class ViewerClient:
         if self._toolbar_visible is not None:
             try:
                 websocket.send(json.dumps(self._toolbar_visible))
+            except Exception:
+                pass
+
+        # Re-apply runtime sun changes (set_sun).
+        if self._sun_state:
+            try:
+                websocket.send(json.dumps({"type": "set_sun", **self._sun_state}))
             except Exception:
                 pass
 
@@ -4053,6 +4103,45 @@ class ViewerClient:
         if center_color is not None:
             msg["center_color"] = center_color
         self._send(msg)
+
+    def set_sun(
+        self,
+        enabled: Optional[bool] = None,
+        intensity: Optional[float] = None,
+        azimuth: Optional[float] = None,
+        elevation: Optional[float] = None,
+    ) -> None:
+        """Change the sun (shadow-casting directional light) at runtime.
+
+        The programmatic twin of the Lighting panel's Sun section (``E``).
+        The sun aims at the centre of the scene content and its shadow map
+        is fitted to the content bounds, so it works at any scene scale.
+        Opaque meshes cast and receive shadows; translucent ones only
+        receive; lines, point clouds and floor grids do neither.
+
+        Args:
+            enabled: On/off. ``None`` leaves it unchanged.
+            intensity: Light intensity (default ``2.0``), ``>= 0``.
+            azimuth: Degrees in the XY plane from +X toward +Y (default
+                ``-80``).
+            elevation: Degrees above the XY plane (default ``50``), in
+                ``[-90, 90]``.
+
+        Fields left ``None`` are unchanged. Re-sent on reconnect, so a
+        browser refresh keeps the requested sun.
+        """
+        intensity, azimuth, elevation = _validate_sun(intensity, azimuth, elevation)
+        msg: Dict[str, Any] = {}
+        if enabled is not None:
+            msg["enabled"] = bool(enabled)
+        if intensity is not None:
+            msg["intensity"] = intensity
+        if azimuth is not None:
+            msg["azimuth"] = azimuth
+        if elevation is not None:
+            msg["elevation"] = elevation
+        self._sun_state.update(msg)
+        self._send({"type": "set_sun", **msg})
 
     def set_depth_cue(
         self,
