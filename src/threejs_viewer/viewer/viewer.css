@@ -12,6 +12,9 @@
    container. */
 .threejs-viewer {
     --tjsv-float-bg: rgba(30, 30, 30, 0.95);
+    /* Rail tab + slide-out body: the viewer's background colour, kept in
+       step by setBackground() so a themed viewer's menus match it. */
+    --tjsv-menu-bg: #222222;
     --tjsv-panel-2: #2a2a2a;
     --tjsv-panel-3: #333;
     --tjsv-border: #3a3a3a;
@@ -62,11 +65,10 @@
     font: inherit;
     font-size: 11px;
     color: var(--tjsv-text);
-    background: rgba(34, 34, 34, 0.9);
+    background: var(--tjsv-menu-bg);
     border: 1px solid var(--tjsv-border);
     border-right: none;
     border-radius: 4px 0 0 4px;
-    backdrop-filter: blur(2px);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -96,13 +98,12 @@
     width: var(--tjsv-body-w, 190px);
     box-sizing: border-box;
     overflow-y: auto;
-    background: rgba(30, 30, 30, 0.94);
+    background: var(--tjsv-menu-bg);
     border: 1px solid var(--tjsv-border);
     border-right: none;
     /* Resting shape: square top-left, flush against its tab. When open,
        MenuController._placeBody sets max-height, the upward lift and the corners. */
     border-radius: 0 0 0 4px;
-    backdrop-filter: blur(3px);
     /* Extra right padding: a stacked tab below can overlap an open body's
        right edge, so rows keep clear of it. */
     padding: 6px 26px 8px 8px;

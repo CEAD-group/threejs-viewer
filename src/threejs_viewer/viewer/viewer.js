@@ -16983,13 +16983,16 @@ export class ThreeJSViewer {
     /**
      * Set the scene background colour, for embedders that theme the viewer.
      * Drives both render paths: `scene.background` (direct) and the canvas CSS
-     * colour the EDL composer path shows through (see renderComposer).
+     * colour the EDL composer path shows through (see renderComposer), and the
+     * slide-out menus' `--tjsv-menu-bg` so they stay the viewer's colour.
      * @param {number|string|null} color hex int or a CSS colour string three.js
      *     parses; null restores the default
      */
     setBackground(color) {
         this._backgroundColor = new THREE.Color(color ?? VIEWER_BACKGROUND_COLOR);
-        this._renderer.domElement.style.backgroundColor = `#${this._backgroundColor.getHexString()}`;
+        const css = `#${this._backgroundColor.getHexString()}`;
+        this._renderer.domElement.style.backgroundColor = css;
+        this.el.style.setProperty('--tjsv-menu-bg', css);
         this._applyBackground();
     }
 
