@@ -1865,3 +1865,26 @@ def test_add_mesh_render_flags_omitted_by_default(client):
     client.add_mesh("m", pos, idx)
     header, _ = client._binary_messages[-1]
     assert "transparent" not in header and "renderOrder" not in header
+
+
+# === set_background / set_grid_color ===
+
+
+def test_set_background(client):
+    client.set_background(0x1C2128)
+    client.set_background("#1c2128")
+    client.set_background(None)
+    assert client._messages == [
+        {"type": "set_background", "color": 0x1C2128},
+        {"type": "set_background", "color": "#1c2128"},
+        {"type": "set_background", "color": None},
+    ]
+
+
+def test_set_grid_color(client):
+    client.set_grid_color(0x3B434E)
+    client.set_grid_color("#3b434e", center_color="#5e81ac")
+    assert client._messages == [
+        {"type": "set_grid_color", "color": 0x3B434E},
+        {"type": "set_grid_color", "color": "#3b434e", "center_color": "#5e81ac"},
+    ]

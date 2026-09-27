@@ -565,6 +565,7 @@ class ViewerClient:
         tone_mapping_exposure: Optional[float] = None,
         environment_intensity: Optional[float] = None,
         environment_map: Optional[bool] = None,
+        environment_background: bool = False,
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
         fov: Optional[float] = None,
@@ -590,6 +591,9 @@ class ViewerClient:
                 (default ``True``). Pass ``False`` for a flatter, uglier, but
                 faster render (drops the per-pixel PBR reflection lookups).
                 Toggleable at runtime from the browser Lighting panel.
+            environment_background: Show the environment cubemap as the
+                scene background instead of the flat colour (default
+                ``False``; a debug view of the IBL).
             ambient_intensity: Override the ambient light's ``intensity``
                 (default ``1.5``). Must be finite.
             tone_mapping: Tone-mapping mode, one of ``"none"``, ``"linear"``,
@@ -647,6 +651,11 @@ class ViewerClient:
                 f"environment_map must be a bool or None, got {environment_map!r}"
             )
         self.environment_map = environment_map
+        if not isinstance(environment_background, bool):
+            raise ValueError(
+                f"environment_background must be a bool, got {environment_background!r}"
+            )
+        self.environment_background = environment_background
         self.ambient_intensity = _validate_finite(
             "ambient_intensity", ambient_intensity
         )
@@ -808,6 +817,7 @@ class ViewerClient:
         Always includes `ws_port`; adds `ws_host` when ``host`` is not
         ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
+        `env_background`,
         `ambient_intensity`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
@@ -826,6 +836,8 @@ class ViewerClient:
             params.append(
                 ("environment_map", "true" if self.environment_map else "false")
             )
+        if self.environment_background:
+            params.append(("env_background", "true"))
         if self.ambient_intensity is not None:
             params.append(("ambient_intensity", str(self.ambient_intensity)))
         if self.fov is not None:
@@ -4009,6 +4021,37 @@ class ViewerClient:
         if size is not None and divisions is not None:
             msg["size"] = size
             msg["divisions"] = divisions
+        self._send(msg)
+
+    def set_background(self, color: int | str | None) -> None:
+        """Set the scene background colour.
+
+        Transient viewer state like :meth:`set_color` (not replayed on
+        reconnect).
+
+        Args:
+            color: Hex int (``0x1C2128``) or a CSS colour string
+                (``"#1c2128"``). ``None`` restores the viewer default.
+        """
+        self._send({"type": "set_background", "color": color})
+
+    def set_grid_color(
+        self, color: int | str | None, center_color: int | str | None = None
+    ) -> None:
+        """Override the line colour of every shader floor grid (:meth:`add_grid`).
+
+        The override also applies to grids added later, so it survives a grid
+        being re-pushed with its own ``color``. Transient viewer state like
+        :meth:`set_color` (not replayed on reconnect).
+
+        Args:
+            color: Hex int or CSS colour string. ``None`` drops the override for
+                grids added from now on; existing grids keep their colour.
+            center_color: Axis-line colour. ``None`` keeps each grid's own.
+        """
+        msg: dict = {"type": "set_grid_color", "color": color}
+        if center_color is not None:
+            msg["center_color"] = center_color
         self._send(msg)
 
     def set_depth_cue(

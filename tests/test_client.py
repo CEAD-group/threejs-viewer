@@ -95,6 +95,13 @@ def test_viewer_url_environment_map_true():
     assert params["environment_map"] == ["true"]
 
 
+def test_viewer_url_environment_background():
+    """environment_background=True emits env_background=true; default omits it."""
+    params = _params(ViewerClient(environment_background=True).viewer_url)
+    assert params["env_background"] == ["true"]
+    assert "env_background" not in _params(ViewerClient().viewer_url)
+
+
 def test_viewer_url_default_omits_environment_map():
     """No environment_map kwarg → no param (viewer/localStorage default)."""
     client = ViewerClient()

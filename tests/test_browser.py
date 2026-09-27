@@ -63,6 +63,36 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
 
 
 @pytest.mark.browser
+def test_set_background_and_grid_color(viewer_client, viewer_page):
+    """set_background recolours both render paths; set_grid_color outlives a re-add."""
+    viewer_client.add_grid("floor", color=0x555555)
+    viewer_client.set_background("#1c2128")
+    viewer_client.set_grid_color(0x3B434E)
+    settle(viewer_client)
+    read = (
+        "() => { const v = window.threejsViewer;"
+        " return { bg: v._scene.background.getHex(),"
+        "          css: v._renderer.domElement.style.backgroundColor,"
+        "          grid: v._objects.get('floor').material.uniforms.uColor.value.getHex() }; }"
+    )
+    state = viewer_page.evaluate(read)
+    assert state["bg"] == 0x1C2128
+    assert state["css"] == "rgb(28, 33, 40)"
+    assert state["grid"] == 0x3B434E
+    # A producer re-pushing its grid with its own colour keeps the override.
+    viewer_client.add_grid("floor", color=0x555555)
+    settle(viewer_client)
+    assert viewer_page.evaluate(read)["grid"] == 0x3B434E
+    viewer_client.set_background(None)
+    viewer_client.set_grid_color(None)
+    viewer_client.add_grid("floor", color=0x555555)
+    settle(viewer_client)
+    state = viewer_page.evaluate(read)
+    assert state["bg"] == 0x222222
+    assert state["grid"] == 0x555555
+
+
+@pytest.mark.browser
 def test_grouping(viewer_client, viewer_page):
     """Parent-child hierarchy works end-to-end."""
     viewer_client.add_group("arm")
@@ -3400,6 +3430,96 @@ def test_environment_map_url_param_starts_disabled(page):
         assert page.evaluate("() => window.threejsViewer._scene.environment == null")
         assert page.evaluate(
             "() => window.threejsViewer._lightingEnvMapCheck.checked === false"
+        )
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.browser
+def test_environment_map_falls_back_to_module_static_dir(page, tmp_path):
+    """An embedder serving the viewer/ source dir (ribweaver) that passes
+    cubemapData in a non-HDR shape (base64 of the retired static/*.jpg, now a
+    404 body) still gets the env map: the viewer loads the default
+    static/cubemaps/ set next to viewer.js instead, and offers every set listed
+    in static/cubemaps/index.json."""
+    import functools
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+
+    viewer_dir = Path(__file__).parent.parent / "src" / "threejs_viewer" / "viewer"
+    (tmp_path / "index.html").write_text(
+        """<!doctype html><html><head>
+<script type="importmap">{"imports": {
+  "three": "https://unpkg.com/three@0.183.2/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.183.2/examples/jsm/"}}</script>
+</head><body style="margin:0"><div id="c" style="width:400px;height:300px"></div>
+<script type="module">
+const { ThreeJSViewer } = await import('/viewer/viewer.js');
+const htmlTemplate = await (await fetch('/viewer/template.html')).text();
+const junk = btoa('Not Found');
+const cubemapData = Object.fromEntries(
+  ['px','nx','py','ny','pz','nz'].map(f => [f, junk]));
+window.v = new ThreeJSViewer(document.getElementById('c'),
+  { htmlTemplate, cubemapData, autoConnect: false });
+</script></body></html>"""
+    )
+
+    class Handler(SimpleHTTPRequestHandler):
+        def translate_path(self, path):
+            if path.startswith("/viewer/"):
+                return str(viewer_dir / path[len("/viewer/") :].split("?")[0])
+            return str(tmp_path / path.lstrip("/").split("?")[0])
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{server.server_address[1]}/index.html")
+        page.wait_for_function(
+            "() => window.v?._envMap != null && window.v._envCube?.isCubeTexture",
+            timeout=20_000,
+        )
+        assert page.evaluate("() => window.v._scene.environment != null")
+        # The named sets come from static/cubemaps/index.json (written by
+        # build.py) and switching fetches that set's faces as static files.
+        names = page.evaluate("() => window.v.getCubemapNames()")
+        assert names[0] == "paul-lobe-haus"
+        options = page.evaluate(
+            "() => [...document.querySelectorAll('.tjsv-lighting-cubemap option')]"
+            ".map(o => o.value)"
+        )
+        assert options == names
+        for name in names[1:]:
+            page.evaluate(f"() => window.v.setCubemap('{name}')")
+            page.wait_for_function(
+                f"() => window.v._cubemapName === '{name}'", timeout=20_000
+            )
+        assert page.evaluate("() => window.v._scene.environment === window.v._envMap")
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.browser
+def test_environment_background_toggle(page):
+    """env_background=true shows the HDR cubemap as the background once it
+    loads; setEnvironmentBackground(false) restores the flat colour."""
+    client = _start_client()
+    try:
+        page.goto(
+            f"{client.viewer_path.resolve().as_uri()}"
+            f"?ws_port={client.port}&env_background=true"
+        )
+        _wait_for_viewer(page)
+        page.wait_for_function(
+            "() => window.threejsViewer._scene.background?.isCubeTexture === true",
+            timeout=10_000,
+        )
+        page.evaluate("() => window.threejsViewer.setEnvironmentBackground(false)")
+        assert page.evaluate(
+            "() => window.threejsViewer._scene.background.getHex() === 0x222222"
         )
     finally:
         client.disconnect()

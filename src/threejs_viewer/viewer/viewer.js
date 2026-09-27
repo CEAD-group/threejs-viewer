@@ -9,6 +9,7 @@ import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { TDSLoader } from 'three/addons/loaders/TDSLoader.js';
+import { HDRCubeTextureLoader } from 'three/addons/loaders/HDRCubeTextureLoader.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
@@ -127,7 +128,9 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://${host}:${port}` where host comes from the `ws_host` query param (default `localhost`) and port from the `ws_port` query param, `wsPort`, or 5666
  * @property {number} [wsPort]                            WebSocket port used when `wsUrl` is not provided (default 5666)
  * @property {boolean} [autoConnect]                      Auto-connect on construction (default true)
- * @property {Object<string, string>} [cubemapData]       Map of face name -> base64 JPEG
+ * @property {Object<string, string>} [cubemapData]       Map of face name (px/nx/py/ny/pz/nz) -> gzip+base64 Radiance HDR (omit to load static/cubemaps/paul-lobe-haus/*.hdr next to the module)
+ * @property {Object<string, {format: string, faces: Object<string, string>}>} [cubemaps]  Named cubemap sets (format hdr/png/jpg, faces gzip+base64) offered in the Lighting panel's picker; URL `cubemap` / localStorage pick one
+ * @property {boolean} [environmentBackground]           Show the environment cubemap as the scene background (default false; URL `env_background` wins)
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
@@ -1058,6 +1061,7 @@ const LS_KEY_ENVIRONMENT_INTENSITY = 'tjsv.environmentIntensity';
 const LS_KEY_AMBIENT_INTENSITY = 'tjsv.ambientIntensity';
 const LS_KEY_TONE_MAPPING = 'tjsv.toneMapping';
 const LS_KEY_ENVIRONMENT_MAP = 'tjsv.environmentMap';
+const LS_KEY_CUBEMAP = 'tjsv.cubemap';
 
 // Tone-mapping mode name -> THREE.* constant. Resolved lazily so THREE only
 // needs to be loaded when the viewer actually instantiates.
@@ -1760,6 +1764,19 @@ function buildFloorGridMesh(data) {
     mesh.userData.excludeFromBounds = true;
     mesh.raycast = () => {};
     return mesh;
+}
+
+/**
+ * Recolour a shader floor grid's lines in place. `centerColor` null keeps the
+ * grid's own axis-line setting.
+ * @param {THREE.Mesh} grid
+ * @param {{color: number, centerColor: number|null}} style
+ */
+function applyGridColor(grid, style) {
+    const u = /** @type {THREE.ShaderMaterial} */ (grid.material).uniforms;
+    u.uColor.value.set(style.color);
+    if (style.centerColor != null) u.uCenterColor.value.set(style.centerColor);
+    else if (!u.uCenterLines.value) u.uCenterColor.value.set(style.color);
 }
 
 // ========== Billboards ==========
@@ -7623,7 +7640,9 @@ class DepthCueController {
         // PERSISTS, so a pre-pass with the background still set would leave
         // RenderPass clearing to an opaque #222222 (then tone-mapped) regardless.
         const prevBg = v._scene.background;
-        v._scene.background = null;
+        // A cubemap background (setEnvironmentBackground) is scene content, not
+        // a clear colour: leave it in so the composer draws it.
+        if (!(prevBg instanceof THREE.Texture)) v._scene.background = null;
 
         // Line-only depth pre-pass: render JUST the polyline layer into
         // _lineDepthTarget so the EDL pass (which reads tDepth) shades and
@@ -10047,6 +10066,14 @@ export class ThreeJSViewer {
         // is retained on `_envMap` so the toggle can restore it without a rebuild.
         this._envEnabled = this._lightingDefaults.envEnabled;
         this._envMap = null;
+        /** @type {THREE.CubeTexture|null} raw HDR cube, the visible-background source */
+        this._envCube = null;
+        /** @type {Object<string, {format: string, faces?: Object<string, string>}>} named cubemap sets (_initCubemaps) */
+        this._cubemapSets = {};
+        // Show the environment cubemap as the background. URL `env_background` > option > off.
+        this._envBackground = parseBoolOption(urlParams.get('env_background'))
+            ?? parseBoolOption(options.environmentBackground) ?? false;
+        this._backgroundColor = new THREE.Color(VIEWER_BACKGROUND_COLOR);
 
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
@@ -10060,6 +10087,9 @@ export class ThreeJSViewer {
 
         // State
         this._objects = new Map();
+        // Embedder grid-colour override (setGridColor); null = each grid's own colour.
+        /** @type {{color: number, centerColor: number|null}|null} */
+        this._gridColorOverride = null;
         this._mixers = new Map();
         // Ids already warned about a set_clip_progress with no mixer.
         /** @type {Set<string>} */
@@ -10357,6 +10387,7 @@ export class ThreeJSViewer {
         this._lightingAmbientSlider = q('.tjsv-lighting-ambient');
         this._lightingAmbientValue = q('.tjsv-lighting-ambient-value');
         this._lightingToneMappingSelect = q('.tjsv-lighting-tone-mapping');
+        this._lightingCubemapSelect = q('.tjsv-lighting-cubemap');
         this._lightingResetBtn = q('.tjsv-lighting-reset');
         this._lightingCloseBtn = q('.tjsv-lighting-close');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
@@ -10410,7 +10441,7 @@ export class ThreeJSViewer {
 
         // Scene
         this._scene = new THREE.Scene();
-        this._scene.background = new THREE.Color(VIEWER_BACKGROUND_COLOR);
+        this._applyBackground();
 
         // Cameras
         this._perspCamera = new THREE.PerspectiveCamera(this._fov, w / h, 0.1, 1000);
@@ -10444,8 +10475,10 @@ export class ThreeJSViewer {
         this._renderer.localClippingEnabled = true;
         this.el.appendChild(this._renderer.domElement);
 
-        // Environment cubemap
-        this._loadCubemap();
+        // Environment cubemap. Intensity is set up front (not when the async
+        // load lands) so it is right immediately and survives cubemap switches.
+        this._scene.environmentIntensity = this._lightingDefaults.envIntensity;
+        this._initCubemaps();
 
         // Controls: bespoke ViewerControls (one implementation, two modes).
         // - turntable: yaw around world-Z, pitch around camera-right (clamped near pole)
@@ -10787,6 +10820,7 @@ export class ThreeJSViewer {
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
         this._scene.add(this._ambientLight);
 
+
         // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
         this._gridHelper.rotation.x = Math.PI / 2;
@@ -10847,44 +10881,145 @@ export class ThreeJSViewer {
         this._resizeObserver.observe(this.container);
     }
 
-    _loadCubemap() {
-        const cubemapData = this._options.cubemapData;
-        if (!cubemapData) {
-            console.warn('ThreeJSViewer: no cubemapData provided, skipping environment map');
-            return;
-        }
-        const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+    /**
+     * Load the environment cubemap. Face source, in precedence order:
+     *   1. named set `name` — from `options.cubemaps` (`{format, faces}`, faces
+     *      gzip+base64, inlined by build.py), or from `static/cubemaps/index.json`
+     *      when the `viewer/` source dir is served (ribweaver), in which case
+     *      the faces are fetched from `static/cubemaps/<name>/<face>.<format>`.
+     *      Picked in the Lighting panel.
+     *   2. `options.cubemapData` — gzip+base64 Radiance HDR per face, inlined by
+     *      build.py; the standalone viewer.html path, works under `file://`.
+     *   3. `static/cubemaps/paul-lobe-haus/<face>.hdr` next to this module —
+     *      works when an embedder serves the `viewer/` source directory as
+     *      static files (ribweaver).
+     * cubemapData in any other shape (the pre-HDR base64 JPEGs, or base64 of a
+     * 404 body from an embedder still fetching `static/*.jpg`) falls to 3.
+     * A later call replaces (and disposes) the previous cube; a call superseded
+     * by a newer one before it finishes is discarded.
+     * @param {string|null} [name] key into `options.cubemaps`
+     */
+    async _loadCubemap(name = null) {
         const faces = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
-        const cubeTexture = new THREE.CubeTexture();
-        cubeTexture.colorSpace = THREE.SRGBColorSpace;
-        let loaded = 0;
-        let failed = false;
-        const scene = this._scene;
-        faces.forEach((face, i) => {
-            const img = new Image();
-            img.onload = () => {
-                if (failed) return;
-                cubeTexture.images[i] = img;
-                loaded++;
-                if (loaded === 6) {
-                    cubeTexture.needsUpdate = true;
-                    const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
-                    this._envMap = envMap;
-                    scene.environment = this._envEnabled ? envMap : null;
-                    scene.environmentIntensity = this._lightingDefaults.envIntensity;
-                    cubeTexture.dispose();
-                    pmremGenerator.dispose();
-                }
-            };
-            img.onerror = () => {
-                if (failed) return;
-                failed = true;
-                console.error(`Failed to load cubemap face: ${face}`);
+        const set = name ? this._cubemapSets[name] : null;
+        const cubemapData = set ? set.faces : this._options.cubemapData;
+        const format = set ? set.format : 'hdr';
+        // Every gzip stream starts 1f 8b 08, which base64-encodes as "H4sI".
+        const inline = cubemapData && faces.every(f => String(cubemapData[f] ?? '').startsWith('H4sI'));
+        if (cubemapData && !inline && !set) {
+            console.warn('ThreeJSViewer: cubemapData is not gzip+base64 HDR; '
+                + 'loading static/cubemaps/paul-lobe-haus/*.hdr next to the viewer module instead');
+        }
+        const token = (this._cubemapToken = (this._cubemapToken || 0) + 1);
+        /** @type {string[]} */
+        let blobUrls = [];
+        try {
+            let urls;
+            if (inline) {
+                const buffers = await Promise.all(faces.map(f => inflateGzipBase64(cubemapData[f])));
+                const mime = format === 'hdr' ? undefined : `image/${format === 'jpg' ? 'jpeg' : format}`;
+                urls = blobUrls = buffers.map(b => URL.createObjectURL(new Blob([b], mime ? { type: mime } : {})));
+            } else {
+                const dir = set ? `static/cubemaps/${name}` : 'static/cubemaps/paul-lobe-haus';
+                urls = faces.map(f => new URL(`${dir}/${f}.${format}`, import.meta.url).href);
+            }
+            /** @type {THREE.CubeTexture} */
+            let cubeTexture;
+            if (format === 'hdr') {
+                cubeTexture = await new HDRCubeTextureLoader().loadAsync(urls);
+            } else {
+                cubeTexture = await new THREE.CubeTextureLoader().loadAsync(urls);
+                cubeTexture.colorSpace = THREE.SRGBColorSpace;
+            }
+            if (token !== this._cubemapToken) {
                 cubeTexture.dispose();
-                pmremGenerator.dispose();
-            };
-            img.src = 'data:image/jpeg;base64,' + cubemapData[face];
-        });
+                return;
+            }
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
+            pmremGenerator.dispose();
+            this._envCube?.dispose();
+            this._envMap?.dispose();
+            // The raw cube is kept (not disposed) for the optional visible background.
+            this._envCube = cubeTexture;
+            this._envMap = envMap;
+            this._cubemapName = name;
+            this._scene.environment = this._envEnabled ? envMap : null;
+            this._applyBackground();
+        } catch (err) {
+            console.error('Failed to load environment cubemap:', err);
+        } finally {
+            blobUrls.forEach(u => URL.revokeObjectURL(u));
+        }
+    }
+
+    /** @returns {string[]} names of the available cubemap sets (build.py order, default first) */
+    getCubemapNames() {
+        return Object.keys(this._cubemapSets || {});
+    }
+
+    /**
+     * Resolve the available cubemap sets, fill the Lighting panel picker and
+     * load the initial one. Sets come from `options.cubemaps` (viewer.html) or,
+     * failing that, `static/cubemaps/index.json` next to this module (an
+     * embedder serving the `viewer/` source dir); with neither, the single
+     * default HDR loads as before.
+     */
+    async _initCubemaps() {
+        /** @type {Object<string, {format: string, faces?: Object<string, string>}>} */
+        let sets = this._options.cubemaps || {};
+        if (!Object.keys(sets).length) {
+            try {
+                const resp = await fetch(new URL('static/cubemaps/index.json', import.meta.url).href);
+                if (resp.ok) {
+                    sets = {};
+                    for (const e of await resp.json()) sets[e.name] = { format: e.format };
+                }
+            } catch (e) { /* no manifest: single default cubemap */ }
+        }
+        this._cubemapSets = sets;
+        const names = this.getCubemapNames();
+        const initial = this._resolveInitialCubemap();
+        const select = this._lightingCubemapSelect;
+        if (select) {
+            select.replaceChildren(...names.map(n => {
+                const opt = document.createElement('option');
+                opt.value = opt.textContent = n;
+                return opt;
+            }));
+            if (initial) select.value = initial;
+            const section = select.closest('.lighting-section');
+            if (section) /** @type {HTMLElement} */ (section).style.display = names.length > 1 ? '' : 'none';
+        }
+        await this._loadCubemap(initial);
+    }
+
+    /**
+     * Switch the environment cubemap to a named set from `options.cubemaps`.
+     * Temporary picker for comparing environments; persists in localStorage.
+     * @param {string} name
+     * @returns {Promise<void>}
+     */
+    setCubemap(name) {
+        if (!this._cubemapSets?.[name]) {
+            console.warn(`ThreeJSViewer: unknown cubemap '${name}'`);
+            return Promise.resolve();
+        }
+        if (this._lightingCubemapSelect) this._lightingCubemapSelect.value = name;
+        this._writeLightingLocalStorage(LS_KEY_CUBEMAP, name);
+        return this._loadCubemap(name);
+    }
+
+    /** Initial cubemap set: URL `cubemap` > localStorage > first (default) set. */
+    _resolveInitialCubemap() {
+        const names = this.getCubemapNames();
+        if (!names.length) return null;
+        const url = new URLSearchParams(window.location.search).get('cubemap');
+        if (url && names.includes(url)) return url;
+        let stored = null;
+        try { stored = localStorage.getItem(LS_KEY_CUBEMAP); } catch (e) { /* ignore */ }
+        if (stored && names.includes(stored)) return stored;
+        return names[0];
     }
 
     _initClipping() {
@@ -11378,6 +11513,18 @@ export class ThreeJSViewer {
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
+
+        // Cubemap picker: options are filled by _initCubemaps once the sets are
+        // known; hidden until then (and when there is only one set).
+        const cubemapSection = this._lightingCubemapSelect?.closest('.lighting-section');
+        if (cubemapSection && !this.getCubemapNames().length) {
+            /** @type {HTMLElement} */ (cubemapSection).style.display = 'none';
+        }
+        if (this._lightingCubemapSelect) {
+            this._lightingCubemapSelect.addEventListener('change', () => {
+                this.setCubemap(this._lightingCubemapSelect.value);
+            });
+        }
 
         this._lightingToneMappingSelect.addEventListener('change', () => {
             const mode = this._lightingToneMappingSelect.value;
@@ -15642,6 +15789,7 @@ export class ThreeJSViewer {
                 break;
             case 'add_grid': {
                 const grid = buildFloorGridMesh(data);
+                if (this._gridColorOverride) applyGridColor(grid, this._gridColorOverride);
                 grid.name = data.id;
                 grid.userData.id = data.id;
                 if (data.transform) this._applyTransform(grid, data.transform);
@@ -15678,6 +15826,12 @@ export class ThreeJSViewer {
                 this._enableBillboard(data.id, billboard, data);
                 break;
             }
+            case 'set_background':
+                this.setBackground(data.color);
+                break;
+            case 'set_grid_color':
+                this.setGridColor(data.color ?? null, data.center_color ?? null);
+                break;
             case 'show_grid':
                 this._gridHelper.visible = !!data.visible;
                 if (data.size != null && data.divisions != null) {
@@ -16582,6 +16736,55 @@ export class ThreeJSViewer {
      * @param {boolean} enabled
      */
     setControlsEnabled(enabled) { this._controls.enabled = !!enabled; }
+
+    /**
+     * Set the scene background colour, for embedders that theme the viewer.
+     * Drives both render paths: `scene.background` (direct) and the canvas CSS
+     * colour the EDL composer path shows through (see renderComposer).
+     * @param {number|string|null} color hex int or a CSS colour string three.js
+     *     parses; null restores the default
+     */
+    setBackground(color) {
+        this._backgroundColor = new THREE.Color(color ?? VIEWER_BACKGROUND_COLOR);
+        this._renderer.domElement.style.backgroundColor = `#${this._backgroundColor.getHexString()}`;
+        this._applyBackground();
+    }
+
+    /**
+     * Show the environment cubemap as the scene background instead of the flat
+     * colour (a debug view of the IBL; off by default). Takes effect once the
+     * cubemap has loaded if called earlier.
+     * @param {boolean} enabled
+     */
+    setEnvironmentBackground(enabled) {
+        this._envBackground = !!enabled;
+        this._applyBackground();
+    }
+
+    _applyBackground() {
+        this._scene.background = this._envBackground && this._envCube
+            ? this._envCube : this._backgroundColor;
+    }
+
+    /**
+     * Override the line colour of every shader floor grid (`add_grid`), including
+     * grids added later, so an embedder theme survives a producer re-pushing its
+     * grid. `null` drops the override for future grids; existing ones keep the
+     * last colour until re-added.
+     * @param {number|string|null} color
+     * @param {number|string|null} [centerColor] axis-line colour; null keeps each grid's own
+     */
+    setGridColor(color, centerColor = null) {
+        if (color == null) { this._gridColorOverride = null; return; }
+        const style = {
+            color: new THREE.Color(color).getHex(),
+            centerColor: centerColor == null ? null : new THREE.Color(centerColor).getHex(),
+        };
+        this._gridColorOverride = style;
+        for (const obj of this._objects.values()) {
+            if (obj.userData.isGrid) applyGridColor(/** @type {THREE.Mesh} */ (obj), style);
+        }
+    }
 
     // ========== Embedder animation transport / object / overlay / status API
     // (issues #74, #75, #76, #78) ==========
