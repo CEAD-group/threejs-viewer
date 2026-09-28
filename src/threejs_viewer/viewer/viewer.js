@@ -1446,6 +1446,26 @@ function ownMaterials(obj) {
 }
 
 /**
+ * The materials a mesh wears right now: a shared clay/debug swap, or its own.
+ * @param {any} obj
+ * @returns {any[]}
+ */
+function currentMaterials(obj) {
+    return Array.isArray(obj.material) ? obj.material : [obj.material];
+}
+
+/**
+ * Worn and own materials of a mesh, each once: what a display-state pass
+ * (fog scope, M wireframe) must reach so neither a swap nor the parked
+ * original comes back stale.
+ * @param {any} obj
+ * @returns {any[]}
+ */
+function wornAndOwnMaterials(obj) {
+    return [...new Set([...currentMaterials(obj), ...ownMaterials(obj)])].filter(Boolean);
+}
+
+/**
  * Whether a mesh under a tracked object casts / receives the sun's shadow.
  * Fat lines are instanced Meshes whose depth pass is meaningless; grids,
  * highlight/primitive outlines and wire overlays are furniture. A translucent
@@ -6330,36 +6350,59 @@ class ShadingDebugController {
     }
 
     applyWireframe() {
-        const mode = this.wireframeMode;
-        const wantOverlay = mode === 2;
-        const wantWire = mode === 1;
-        this.v._scene.traverse(/** @param {any} obj */ (obj) => {
-            if (!obj.isMesh) return;
-            if (obj.userData.isWireOverlay) return;
-            if (obj.userData.isGrid) return;
-            // Selection-silhouette hulls are Meshes (issue #165) — wireframing
-            // one would draw the whole extruded shell as a wire cage.
-            if (obj.userData.__highlightOutline) return;
-            if (!obj.material) return;
-            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-            for (const m of mats) {
-                if ('wireframe' in m) m.wireframe = wantWire;
+        this.v._scene.traverse(/** @param {any} obj */ (obj) => this._applyWireframeTo(obj));
+        // The shared swap materials follow the mode even while nobody wears
+        // them, so a later swap does not bring back a stale flag.
+        for (const m of [this._clayMat, this._normalMat, this._uvMat]) {
+            if (m) this._applyWireframeToMaterial(m);
+        }
+    }
+
+    /** @param {any} m */
+    _applyWireframeToMaterial(m) {
+        if (!('wireframe' in m)) return;
+        if (this.wireframeMode === 1) {
+            if (m.userData.__wireframeSaved === undefined) m.userData.__wireframeSaved = m.wireframe;
+            m.wireframe = true;
+        } else if (m.userData.__wireframeSaved !== undefined) {
+            m.wireframe = m.userData.__wireframeSaved;
+            delete m.userData.__wireframeSaved;
+        }
+    }
+
+    /**
+     * Apply the current M mode to one mesh. Mode 1 overrides `wireframe` on
+     * the worn *and* the own materials (a clay/debug swap must not drop the
+     * wire view, and the parked original must not come back with a stale
+     * flag), saving each material's own value so a cage added with
+     * `wireframe=True` survives the cycle back to 0; mode 2 shows a wire
+     * overlay child. Idempotent, and also run per mesh from applyShading and
+     * refreshObject so material swaps and late adds compose with M.
+     * @param {any} obj
+     */
+    _applyWireframeTo(obj) {
+        if (!obj.isMesh) return;
+        if (obj.userData.isWireOverlay) return;
+        if (obj.userData.isGrid) return;
+        // Selection-silhouette hulls are Meshes (issue #165) — wireframing
+        // one would draw the whole extruded shell as a wire cage.
+        if (obj.userData.__highlightOutline) return;
+        if (!obj.material) return;
+        for (const m of wornAndOwnMaterials(obj)) this._applyWireframeToMaterial(m);
+        let overlay = obj.userData.wireframeOverlay;
+        if (this.wireframeMode === 2) {
+            if (!overlay) {
+                overlay = this._createWireOverlay(obj);
+                obj.userData.wireframeOverlay = overlay;
+                obj.add(overlay);
+            } else {
+                overlay.material.clippingPlanes = this.v._activeClippingPlanes();
+                overlay.material.needsUpdate = true;
             }
-            let overlay = obj.userData.wireframeOverlay;
-            if (wantOverlay) {
-                if (!overlay) {
-                    overlay = this._createWireOverlay(obj);
-                    obj.userData.wireframeOverlay = overlay;
-                    obj.add(overlay);
-                } else {
-                    overlay.material.clippingPlanes = this.v._activeClippingPlanes();
-                    overlay.material.needsUpdate = true;
-                }
-                overlay.visible = true;
-            } else if (overlay) {
-                overlay.visible = false;
-            }
-        });
+            overlay.visible = true;
+        } else if (overlay) {
+            overlay.visible = false;
+        }
     }
 
     /** @param {any} parentMesh */
@@ -6532,10 +6575,13 @@ class ShadingDebugController {
      * @param {any} root
      */
     refreshObject(root) {
-        // Outside these modes nothing is swapped, so there is nothing to do.
-        if (!this.clay && this.shadingMode !== 1 && this.shadingMode !== 2) return;
+        const swap = this.clay || this.shadingMode === 1 || this.shadingMode === 2;
+        // Outside these modes nothing is swapped and nothing is wireframed.
+        if (!swap && this.wireframeMode === 0) return;
         root.traverse((/** @type {any} */ obj) => {
-            if (this._isUserMesh(obj)) this._applyMaterialMode(obj);
+            if (!this._isUserMesh(obj)) return;
+            if (swap) this._applyMaterialMode(obj);
+            this._applyWireframeTo(obj);
         });
     }
 
@@ -6566,6 +6612,8 @@ class ShadingDebugController {
         if (this._clayMat) this._syncClip(this._clayMat);
         this._forEachUserMesh((obj) => {
             this._applyMaterialMode(obj);
+            // The swapped-in (or restored) material must carry the M state.
+            this._applyWireframeTo(obj);
 
             let helper = obj.userData.vertexNormalsHelper;
             if (mode === 3) {
@@ -7599,6 +7647,9 @@ class DepthCueController {
         // scope (no real mode is negative).
         this._lastFogScopeWireframeMode = -1;
         this._lastFogScopeShadingMode = -1;
+        // Low display quality swaps in a shared clay the same way; null forces
+        // the first scope.
+        this._lastFogScopeClay = null;
         this._toastEl = null;
         this._toastTimer = 0;
     }
@@ -7713,23 +7764,27 @@ class DepthCueController {
         // (acceptable: a fading grid is itself a depth cue, not a regression).
         for (const obj of this.v._objects.values()) {
             if (this._isPolyline(obj)) continue;
-            obj.traverse((node) => {
-                const mat = node.material;
-                if (!mat) return;
-                if (Array.isArray(mat)) {
-                    for (const m of mat) this._scopeMeshMaterialFog(m, on);
-                } else {
-                    this._scopeMeshMaterialFog(mat, on);
-                }
+            obj.traverse((/** @type {any} */ node) => {
+                if (!node.material) return;
+                // Worn and own: a parked original restored by a later
+                // clay/debug switch must not come back fogged, and a swap
+                // worn now must not fog either.
+                for (const m of wornAndOwnMaterials(node)) this._scopeMeshMaterialFog(m, on);
             });
         }
         this._lastFogScopeGen = this.v._objGeneration;
         // Remember the shading-debug modes this pass scoped against, so update()
-        // re-scopes after the next `M`/`N` material swap (see constructor note).
+        // re-scopes after the next `M`/`N`/clay material swap (see constructor note).
         const sd = this.v._shading;
         if (sd) {
+            // The shared swap materials are scoped even while nobody wears
+            // them, so a later swap does not bring back a stale flag.
+            for (const m of [sd._clayMat, sd._normalMat, sd._uvMat]) {
+                if (m) this._scopeMeshMaterialFog(m, on);
+            }
             this._lastFogScopeWireframeMode = sd.wireframeMode;
             this._lastFogScopeShadingMode = sd.shadingMode;
+            this._lastFogScopeClay = sd.clay;
         }
     }
 
@@ -7972,7 +8027,8 @@ class DepthCueController {
             const sd = this.v._shading;
             if (this.v._objGeneration !== this._lastFogScopeGen
                 || (sd && sd.wireframeMode !== this._lastFogScopeWireframeMode)
-                || (sd && sd.shadingMode !== this._lastFogScopeShadingMode)) {
+                || (sd && sd.shadingMode !== this._lastFogScopeShadingMode)
+                || (sd && sd.clay !== this._lastFogScopeClay)) {
                 this._applyFogScope(true);
             }
             this._updateFogRange();

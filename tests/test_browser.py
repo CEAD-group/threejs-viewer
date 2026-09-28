@@ -4347,6 +4347,122 @@ def test_depth_cue_fog_rescopes_on_shading_toggle(viewer_client, viewer_page):
     )
 
 
+_FOG_STATE_JS = (
+    "() => { const v = window.threejsViewer; const box = v._objects.get('fogqbox');"
+    " const worn = Array.isArray(box.material) ? box.material[0] : box.material;"
+    " const own = box.userData.originalMaterial ?? box.material;"
+    " const line = v._objects.get('fogqline');"
+    " const lm = Array.isArray(line.material) ? line.material[0] : line.material;"
+    " return { worn: worn.fog, own: own.fog, clay: v._shading._clayMat?.fog ?? null,"
+    "   line: lm.fog, isClay: worn === v._shading._clayMat }; }"
+)
+
+
+def _wait_fog_state(page, want):
+    """Poll the fog flags until every key in ``want`` matches (the scope pass
+    runs from the render loop, one frame after the switch)."""
+    state = None
+    for _ in range(40):
+        state = page.evaluate(_FOG_STATE_JS)
+        if all(state[k] == v for k, v in want.items()):
+            return state
+        time.sleep(0.05)
+    pytest.fail(f"fog scope never reached {want!r}, last {state!r}")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("fog_first", [True, False])
+def test_depth_cue_fog_rescopes_on_display_quality(
+    viewer_client, viewer_page, fog_first
+):
+    """Low quality swaps in a shared MeshLambertMaterial clay (fog:true by
+    default) without bumping _objGeneration, and high restores the parked
+    originals. Fog must stay off both the worn and the own material in either
+    order (fog then low, or low then fog), and come back on both when fog is
+    switched off."""
+    viewer_client.add_box("fogqbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("fogqline", pts, color=0x44AAFF, line_width=4)
+    settle(viewer_client)
+    if fog_first:
+        viewer_client.set_depth_cue(fog=True)
+        _wait_fog_state(viewer_page, {"worn": False, "line": True})
+        viewer_client.set_display_quality("low")
+    else:
+        viewer_client.set_display_quality("low")
+        settle(viewer_client)
+        frames(viewer_page)
+        assert viewer_page.evaluate(_FOG_STATE_JS)["isClay"] is True
+        viewer_client.set_depth_cue(fog=True)
+    state = _wait_fog_state(viewer_page, {"worn": False, "own": False, "line": True})
+    assert state["isClay"] is True and state["clay"] is False
+    viewer_client.set_display_quality("high")
+    state = _wait_fog_state(viewer_page, {"worn": False, "own": False, "line": True})
+    assert state["isClay"] is False
+    viewer_client.set_depth_cue(fog=False)
+    state = _wait_fog_state(viewer_page, {"worn": True, "own": True})
+    assert state["clay"] is True
+
+
+_WIRE_STATE_JS = (
+    "() => { const v = window.threejsViewer;"
+    " const mat = (id) => { const o = v._objects.get(id);"
+    "   return Array.isArray(o.material) ? o.material[0] : o.material; };"
+    " const own = (id) => v._objects.get(id).userData.originalMaterial ?? mat(id);"
+    " return { worn: mat('wqbox').wireframe, own: own('wqbox').wireframe,"
+    "   cage: mat('wqcage').wireframe, cageOwn: own('wqcage').wireframe,"
+    "   clay: v._shading._clayMat?.wireframe ?? null,"
+    "   isClay: mat('wqbox') === v._shading._clayMat, mode: v._shading.wireframeMode }; }"
+)
+
+
+@pytest.mark.browser
+def test_wireframe_composes_with_display_quality(viewer_client, viewer_page):
+    """M mode 1 survives a low/high switch (the swapped-in clay and the
+    restored original both carry it), cycling M back to 0 clears it from both,
+    and a cage added with wireframe=True keeps its own flag throughout."""
+    viewer_client.add_box("wqbox", color=0x3366CC)
+    viewer_client.add_box("wqcage", color=0xCC3333, wireframe=True, position=[2, 0, 0])
+    settle(viewer_client)
+    _press_key(viewer_page, "KeyM")
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert (state["mode"], state["worn"], state["cage"]) == (1, True, True)
+
+    viewer_client.set_display_quality("low")
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert state["isClay"] is True
+    assert (state["worn"], state["clay"], state["own"], state["cage"]) == (True,) * 4
+
+    viewer_client.set_display_quality("high")
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert state["isClay"] is False
+    assert (state["worn"], state["cage"]) == (True, True)
+
+    _press_key(viewer_page, "KeyM")  # 2: overlay
+    _press_key(viewer_page, "KeyM")  # 0
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert (state["mode"], state["worn"], state["clay"]) == (0, False, False)
+    # The cage's own wireframe=True is restored, not clobbered.
+    assert state["cage"] is True
+
+    # And an object added while M is on comes in wireframed too.
+    viewer_client.set_display_quality("low")
+    _press_key(viewer_page, "KeyM")
+    viewer_client.add_box("wqlate", color=0x33CC33, position=[4, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate(
+        "() => { const o = window.threejsViewer._objects.get('wqlate');"
+        " return [o.material.wireframe, o.userData.originalMaterial.wireframe]; }"
+    ) == [True, True]
+
+
 # Move/rotate gizmo: top-down camera so a horizontal drag maps to world +X.
 _GIZMO_TOPDOWN = """() => {
   const v = window.threejsViewer;
