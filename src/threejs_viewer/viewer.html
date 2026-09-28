@@ -9602,8 +9602,11 @@ function dimensionGeometry(p1, p2, d, direction) {
         : new THREE.Vector3(direction[0] === 'X' ? 1 : 0, direction[0] === 'Y' ? 1 : 0, direction[0] === 'Z' ? 1 : 0);
     const a = d.clone().addScaledVector(u, new THREE.Vector3().subVectors(p1, d).dot(u));
     const b = d.clone().addScaledVector(u, new THREE.Vector3().subVectors(p2, d).dot(u));
-    const n = new THREE.Vector3().crossVectors(delta, new THREE.Vector3().subVectors(d, p1));
-    if (n.lengthSq() <= 1e-18 * scale ** 4) n.crossVectors(u, new THREE.Vector3().subVectors(d, p1));
+    // The plane holds the measured direction and the draw origin. For a
+    // dimension measuring every differing axis `u` is along p2 - p1, so this is
+    // the plane through the three points.
+    const n = new THREE.Vector3().crossVectors(u, new THREE.Vector3().subVectors(d, p1));
+    if (n.lengthSq() <= 1e-18 * scale ** 2) n.crossVectors(delta, new THREE.Vector3().subVectors(d, p1));
     if (n.lengthSq() <= 1e-18 * scale ** 4) {
         // Collinear points: any plane holding `u` will do.
         const helper = Math.abs(u.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
@@ -9613,8 +9616,8 @@ function dimensionGeometry(p1, p2, d, direction) {
     return { value, u, a, b, n, scale };
 }
 
-/** @param {string} text @param {THREE.Color} color */
-function makeDimensionLabel(text, color) {
+/** @param {string} text @param {THREE.Color} color @param {THREE.Color} background */
+function makeDimensionLabel(text, color, background) {
     const fontPx = 64, padX = 16, padY = 12;
     const font = `600 ${fontPx}px system-ui, -apple-system, "Segoe UI", sans-serif`;
     const canvas = document.createElement('canvas');
@@ -9622,13 +9625,13 @@ function makeDimensionLabel(text, color) {
     ctx.font = font;
     canvas.width = Math.ceil(ctx.measureText(text).width) + 2 * padX;
     canvas.height = fontPx + 2 * padY;
+    ctx.fillStyle = `#${background.getHexString()}`;
+    ctx.beginPath();
+    ctx.roundRect(0, 0, canvas.width, canvas.height, 10);
+    ctx.fill();
     ctx.font = font;   // resizing a canvas resets its context state
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = 12;
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-    ctx.strokeText(text, canvas.width / 2, canvas.height / 2 + 3);
     ctx.fillStyle = `#${color.getHexString()}`;
     ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 3);
     const tex = new THREE.CanvasTexture(canvas);
@@ -9717,7 +9720,11 @@ class DimensionController {
         if (opts.unit != null) this.fmt.unit = String(opts.unit);
         if (opts.format !== undefined) this.fmt.format = typeof opts.format === 'function' ? opts.format : null;
         if (opts.inViewToleranceDeg != null && +opts.inViewToleranceDeg > 0) this.inViewToleranceDeg = +opts.inViewToleranceDeg;
-        // Labels bake their text into a texture: rebuild every one.
+        this.relabel();
+    }
+
+    /** Labels bake text and background into a texture: rebuild every one. */
+    relabel() {
         for (const r of [...this.dims.values()]) {
             this._remove(r.id);
             this.dims.set(r.id, this._build(r.id, r.p1, r.p2, r.d, r.direction, r.color, r.label, r.preview));
@@ -9770,7 +9777,7 @@ class DimensionController {
         lines.renderOrder = 2000;
         group.add(lines);
         const rec = { id, p1: p1.clone(), p2: p2.clone(), d: d.clone(), direction, color: color.clone(), label, preview, geom, group, lines, text: /** @type {any} */ (null), aspect: 1 };
-        const { tex, aspect } = makeDimensionLabel(label ?? this._formatValue(geom.value, rec), color);
+        const { tex, aspect } = makeDimensionLabel(label ?? this._formatValue(geom.value, rec), color, this.v._backgroundColor);
         const text = new THREE.Mesh(
             new THREE.PlaneGeometry(1, 1),
             new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide }),
@@ -9893,7 +9900,7 @@ class DimensionController {
         if (_dimV1.crossVectors(x, y).dot(toCam) < 0) y.negate();
         const z = new THREE.Vector3().crossVectors(x, y);
         const hgt = DIM_LABEL_PX * wpp;
-        const center = r.d.clone().addScaledVector(y, hgt * 0.5 + 2 * wpp);
+        const center = r.d.clone();
         r.text.matrix.makeBasis(x.multiplyScalar(hgt * r.aspect), y.multiplyScalar(hgt), z).setPosition(center);
         r.text.matrixWorldNeedsUpdate = true;
     }
@@ -19261,6 +19268,7 @@ class ThreeJSViewer {
         this._renderer.domElement.style.backgroundColor = css;
         this.el.style.setProperty('--tjsv-menu-bg', css);
         this._applyBackground();
+        this._dimensions?.relabel();   // label plates wear the background colour
     }
 
     /**
