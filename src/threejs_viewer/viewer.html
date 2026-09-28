@@ -1720,6 +1720,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [displayQuality]                    "high" (default) or "low": one clay material and a hemisphere + headlight rig, no IBL, sun or shadows (URL `display_quality` wins)
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  * @property {number | null} [viewHelperSize]            View gimbal square in CSS px (clamped to 32–512). Omitted/null = auto: 128, or 80 when the canvas' shorter side is under 500 px (issue #233). Overridable per page via the `view_helper_size` URL query param; `setViewHelperSize()` changes it at runtime.
+ * @property {number} [maxPixelRatio]                     Cap on the renderer pixel ratio, applied as min(devicePixelRatio, maxPixelRatio) (default Infinity = no cap, clamped to >= 0.5; issue #237). Overridable per page via the `max_pixel_ratio` URL query param, which wins over this option.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  * @property {false | {maxEntries?: number, maxBytes?: number}} [modelCache] Session cache of parsed models keyed by URL (issue #221). Default 64 entries / 256 MB; `false` disables it. `clearModelCache()` empties it.
  * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
@@ -2753,6 +2754,9 @@ const DEFAULT_FOV = 40;
 const FOV_MIN = 1;
 const FOV_MAX = 179;
 
+// Floor for the maxPixelRatio cap; below this the canvas is too blurry to use.
+const MAX_PIXEL_RATIO_MIN = 0.5;
+
 /**
  * Parse a boolean-ish option/URL/localStorage value. `null` means "not set"
  * so the caller can fall through to the next precedence level.
@@ -2808,6 +2812,25 @@ function resolveFov(options, urlParams) {
     const urlFov = parse(urlParams.get('fov'));
     const optFov = parse(options.fov);
     return urlFov != null ? urlFov : optFov != null ? optFov : DEFAULT_FOV;
+}
+
+/**
+ * Resolve the renderer pixel-ratio cap (issue #237): URL `max_pixel_ratio`
+ * param > `maxPixelRatio` option > Infinity (no cap). Values clamp to
+ * >= MAX_PIXEL_RATIO_MIN; NaN/empty/unparseable fall through a level.
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {number}
+ */
+function resolveMaxPixelRatio(options, urlParams) {
+    /** @type {(raw: (string|null|number|undefined)) => (number|null)} */
+    const parse = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const n = typeof raw === 'number' ? raw : parseFloat(raw);
+        if (Number.isNaN(n)) return null;
+        return Math.max(MAX_PIXEL_RATIO_MIN, n);
+    };
+    return parse(urlParams.get('max_pixel_ratio')) ?? parse(options.maxPixelRatio) ?? Infinity;
 }
 
 /**
@@ -9202,6 +9225,8 @@ class DepthCueController {
         this._edlRadius = EDL_SHADER.uniforms.edlRadius.value;
         // EDL pipeline — created lazily on first use.
         this._composer = null;
+        /** @type {number | null} pixel ratio the composer was sized for */
+        this._composerPixelRatio = null;
         this._edlPass = null;
         this._renderPass = null;
         this._smaaPass = null;
@@ -9456,6 +9481,8 @@ class DepthCueController {
         this._depthTexture = depthTexture;
 
         const composer = new EffectComposer(renderer);
+        // EffectComposer snapshots the pixel ratio here; onResize re-syncs it.
+        this._composerPixelRatio = renderer.getPixelRatio();
         // Route FULL-SCENE depth into a sampleable texture for the EDL pass'
         // occlusion guard. RenderPass always renders into the composer's
         // readBuffer (= renderTarget2 — renderComposer() normalises the buffer
@@ -9621,7 +9648,16 @@ class DepthCueController {
     onResize(width, height) {
         // setSize resizes renderTarget2 and its attached depthTexture in place,
         // so the shared full-scene EDL depth texture follows automatically.
-        if (this._composer) this._composer.setSize(width, height);
+        if (this._composer) {
+            // The composer caches the pixel ratio it was built with; follow a
+            // maxPixelRatio / monitor change so its targets match the canvas.
+            const pr = this.v._renderer.getPixelRatio();
+            if (this._composerPixelRatio !== pr) {
+                this._composerPixelRatio = pr;
+                this._composer.setPixelRatio(pr);
+            }
+            this._composer.setSize(width, height);
+        }
         // The line-only depth target is a standalone WebGLRenderTarget — resize
         // it to the same drawing-buffer (device px) resolution so its samples
         // align with the composer's read buffer in the EDL pass.
@@ -12010,6 +12046,9 @@ class ThreeJSViewer {
         // Precedence: URL `view_helper_size` param > option > auto.
         this._viewHelperSizeOpt = resolveViewHelperSize(options, urlParams);
 
+        // Renderer pixel-ratio cap (issue #237). URL `max_pixel_ratio` > option > Infinity.
+        this._maxPixelRatio = resolveMaxPixelRatio(options, urlParams);
+
         // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
         this._toolbarVisible = resolveToolbarVisible(options, urlParams);
 
@@ -12244,6 +12283,8 @@ class ThreeJSViewer {
         // Start render loop
         this._lastFrameTime = performance.now();
         this._lastUIUpdate = 0;
+        // Explicit pause (pause()/resume()); the rAF is cancelled while set.
+        this._paused = false;
         this._animate = this._animate.bind(this);
         this._animationFrameId = requestAnimationFrame(this._animate);
 
@@ -12400,9 +12441,9 @@ class ThreeJSViewer {
         // OutputPass never tone-maps it) and the canvas CSS background-color
         // below shows through, matching the direct path's untone-mapped clear.
         this._renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        this._renderer.setPixelRatio(this._effectivePixelRatio());
         this._renderer.setSize(w, h);
         this._renderer.domElement.style.backgroundColor = VIEWER_BACKGROUND_CSS;
-        this._renderer.setPixelRatio(window.devicePixelRatio);
         this._renderer.toneMapping = /** @type {THREE.ToneMapping} */ (
             toneMappingModes()[this._lightingDefaults.toneMapping]
         );
@@ -12840,8 +12881,14 @@ class ThreeJSViewer {
         // updated in resize(), which also runs once on construction.
         this._highlightResolution = { value: new THREE.Vector2(
             this.container.clientWidth || 1, this.container.clientHeight || 1) };
+        // True while the container is 0x0 (display:none); _animate skips the
+        // frame so no GPU work queues up behind a hidden canvas (issue #237).
+        this._containerHidden = false;
         this._resizeObserver = new ResizeObserver(entries => {
             const { width, height } = entries[0].contentRect;
+            const hidden = width === 0 || height === 0;
+            if (this._containerHidden && !hidden) this._resetFrameClocks();
+            this._containerHidden = hidden;
             this._pendingResize = { width, height };
             if (this._pendingResizeRaf) return;
             this._pendingResizeRaf = requestAnimationFrame(() => {
@@ -18001,6 +18048,11 @@ class ThreeJSViewer {
 
     _animate() {
         this._animationFrameId = requestAnimationFrame(this._animate);
+        // Hidden container: keep the loop alive but do no work (issue #237).
+        if (this._containerHidden) return;
+        // Pixel ratio changes when the window moves to another monitor
+        // without any size change, so the ResizeObserver never sees it.
+        if (this._renderer.getPixelRatio() !== this._effectivePixelRatio()) this.resize();
         const frameNow = performance.now();
         const frameDelta = (frameNow - this._lastFrameTime) / 1000;
         this._lastFrameTime = frameNow;
@@ -18188,11 +18240,15 @@ class ThreeJSViewer {
         width = width ?? this.container.clientWidth;
         height = height ?? this.container.clientHeight;
         if (width === 0 || height === 0) return;
+        const pixelRatio = this._effectivePixelRatio();
         // No-op guard (issue #128): embedders call viewer.resize() directly on
         // every mousemove — skip the GL realloc when the size didn't change.
-        if (width === this._lastResizeWidth && height === this._lastResizeHeight) return;
+        if (width === this._lastResizeWidth && height === this._lastResizeHeight
+            && pixelRatio === this._renderer.getPixelRatio()) return;
         this._lastResizeWidth = width;
         this._lastResizeHeight = height;
+        // setPixelRatio reallocates on its own, so only call it on a change.
+        if (pixelRatio !== this._renderer.getPixelRatio()) this._renderer.setPixelRatio(pixelRatio);
         const aspect = width / height;
         this._perspCamera.aspect = aspect;
         this._perspCamera.updateProjectionMatrix();
@@ -18209,6 +18265,45 @@ class ThreeJSViewer {
         this._highlightResolution.value.set(width, height);
         this._depthCue.onResize(width, height);
         this._syncViewHelperSize(width, height);
+    }
+
+    /** Renderer pixel ratio: devicePixelRatio capped by maxPixelRatio (issue #237). */
+    _effectivePixelRatio() {
+        return Math.min(window.devicePixelRatio || 1, this._maxPixelRatio);
+    }
+
+    /** Restart the frame and playback clocks at now, so leaving a hidden or
+     *  paused state does not count the gap as elapsed playback. */
+    _resetFrameClocks() {
+        const now = performance.now();
+        this._lastFrameTime = now;
+        this._lastAnimationUpdate = now;
+    }
+
+    /**
+     * Stop the render loop (issue #237): no rendering, playback clock, LOD or
+     * per-frame updates until resume(). WebSocket messages are still handled.
+     * Not the same as setAnimationPlaying(false): the play state is kept and
+     * getAnimationState().playing still reports it.
+     */
+    pause() {
+        if (this._paused || this._destroyed) return;
+        this._paused = true;
+        cancelAnimationFrame(this._animationFrameId);
+        this._animationFrameId = 0;
+    }
+
+    /** Restart a loop stopped by pause(); playback continues where it froze. */
+    resume() {
+        if (!this._paused || this._destroyed) return;
+        this._paused = false;
+        this._resetFrameClocks();
+        this._animationFrameId = requestAnimationFrame(this._animate);
+    }
+
+    /** @returns {boolean} whether pause() has stopped the render loop */
+    isPaused() {
+        return this._paused;
     }
 
     /** @param {THREE.Object3D} object */

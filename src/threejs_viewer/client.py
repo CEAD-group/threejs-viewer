@@ -604,6 +604,7 @@ class ViewerClient:
         fov: Optional[float] = None,
         toolbar: Optional[bool] = None,
         view_helper_size: Optional[float] = None,
+        max_pixel_ratio: Optional[float] = None,
     ):
         """Create a viewer client.
 
@@ -662,8 +663,14 @@ class ViewerClient:
                 ``None`` (default) lets the viewer pick: 128, or 80 when the
                 canvas' shorter side is under 500 px (phones). Must be finite
                 and positive; the viewer clamps it to 32-512.
+            max_pixel_ratio: Upper bound on the renderer's pixel ratio, applied
+                as ``min(devicePixelRatio, max_pixel_ratio)``. ``None``
+                (default) renders at the full device pixel ratio. Lower it
+                (e.g. ``1.5``) to cut GPU load on high-density phone screens.
+                Must be finite and positive; the viewer clamps it to >= 0.5.
 
-        The lighting kwargs, ``fov``, ``toolbar`` and ``view_helper_size`` are forwarded to the viewer as
+        The lighting kwargs, ``fov``, ``toolbar``, ``view_helper_size`` and
+        ``max_pixel_ratio`` are forwarded to the viewer as
         snake-case query parameters on ``viewer_url``. They act as authoritative
         initial values — the lighting ones win over any value the user
         previously persisted via the in-browser Lighting panel. Leave them as
@@ -733,6 +740,11 @@ class ViewerClient:
         if self.view_helper_size is not None and self.view_helper_size <= 0:
             raise ValueError(
                 f"view_helper_size must be positive (got {view_helper_size!r})"
+            )
+        self.max_pixel_ratio = _validate_finite("max_pixel_ratio", max_pixel_ratio)
+        if self.max_pixel_ratio is not None and self.max_pixel_ratio <= 0:
+            raise ValueError(
+                f"max_pixel_ratio must be positive (got {max_pixel_ratio!r})"
             )
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
@@ -881,7 +893,8 @@ class ViewerClient:
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
         `env_background`,
         `ambient_intensity`, `sun`, `sun_intensity`, `sun_azimuth`,
-        `sun_elevation`, `display_quality`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
+        `sun_elevation`, `display_quality`, `fov`, `toolbar`, `view_helper_size`,
+        and/or `max_pixel_ratio` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
@@ -917,6 +930,8 @@ class ViewerClient:
             params.append(("toolbar", "true" if self.toolbar else "false"))
         if self.view_helper_size is not None:
             params.append(("view_helper_size", str(self.view_helper_size)))
+        if self.max_pixel_ratio is not None:
+            params.append(("max_pixel_ratio", str(self.max_pixel_ratio)))
         return f"{self.viewer_path.resolve().as_uri()}?{urllib.parse.urlencode(params)}"
 
     def _start_servers(self, http_port: Optional[int] = None) -> None:
