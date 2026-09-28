@@ -40,6 +40,8 @@ _ALLOWED_TONE_MAPPING_MODES = frozenset(
 )
 
 _ALLOWED_DISPLAY_QUALITIES = frozenset({"high", "low"})
+_ALLOWED_DIMENSION_DIRECTIONS = frozenset({"X", "Y", "Z", "XY", "XZ", "YZ", "XYZ"})
+_ALLOWED_DIMENSION_DISPLAYS = frozenset({"all", "in_view", "none"})
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
@@ -165,6 +167,29 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number (got {value!r})")
     return f
+
+
+def _validate_point3(name: str, value) -> List[float]:
+    """A finite ``[x, y, z]`` as floats."""
+    try:
+        pt = [float(c) for c in value]
+    except TypeError:
+        raise ValueError(
+            f"{name} must be a sequence of 3 numbers (got {value!r})"
+        ) from None
+    if len(pt) != 3 or not all(math.isfinite(c) for c in pt):
+        raise ValueError(f"{name} must be 3 finite numbers (got {value!r})")
+    return pt
+
+
+def _normalize_dimension_direction(direction: str) -> str:
+    """Canonical axis order (``"yx"`` -> ``"XY"``); raises on anything else."""
+    raw = str(direction).upper()
+    normalized = "".join(a for a in "XYZ" if a in raw)
+    if set(raw) - set("XYZ") or normalized not in _ALLOWED_DIMENSION_DIRECTIONS:
+        allowed = ", ".join(sorted(_ALLOWED_DIMENSION_DIRECTIONS))
+        raise ValueError(f"direction must be one of: {allowed} (got {direction!r})")
+    return normalized
 
 
 def _validate_display_quality(quality: Optional[str]) -> Optional[str]:
@@ -822,6 +847,13 @@ class ViewerClient:
         # viewer holds none of this state across a fresh WS connection).
         self._axis_controls: Dict[str, dict] = {}
         self._axis_control_callbacks: List = []
+        # Dimension annotations (id -> its add_dimension message), plus the
+        # display mode and label format, all replayed on reconnect. Not scene
+        # objects, so clear() leaves them; clear_dimensions() drops them.
+        self._dimensions: Dict[str, dict] = {}
+        self._dimension_display: Optional[str] = None
+        self._dimension_format: Optional[dict] = None
+        self._dimension_callbacks: List = []
         # Clip bindings declared with bind_clip — id -> its bind_clip message, so
         # a reconnect re-declares each one (the viewer resolves them per frame
         # but holds none of them across a fresh WS connection).
@@ -1111,6 +1143,20 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-add dimension annotations with their display mode and format.
+        dimension_msgs = list(self._dimensions.values())
+        if self._dimension_format is not None:
+            dimension_msgs.insert(0, self._dimension_format)
+        if self._dimension_display is not None:
+            dimension_msgs.append(
+                {"type": "set_dimension_display", "mode": self._dimension_display}
+            )
+        for spec in dimension_msgs:
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
         try:
             for message in websocket:
                 try:
@@ -1130,6 +1176,8 @@ class ViewerClient:
                         self._dispatch_object_move(data)
                     elif msg_type == "axis_control_change":
                         self._dispatch_axis_control_change(data)
+                    elif msg_type in ("dimension_created", "dimension_tool_cancelled"):
+                        self._dispatch_dimension_event(data)
                     else:
                         request_id = data.get("requestId")
                         if request_id and request_id in self._pending_responses:
@@ -5079,6 +5127,164 @@ class ViewerClient:
         self._axis_controls.pop(id, None)
         if self._ws is not None:
             self._send({"type": "remove_axis_control", "id": id})
+
+    # === Dimension annotations ===
+
+    def add_dimension(
+        self,
+        id: str,
+        *,
+        p1: List[float],
+        p2: List[float],
+        draw_origin: List[float],
+        direction: str = "XYZ",
+        color: Optional[int] = None,
+        label: Optional[str] = None,
+    ) -> None:
+        """Add (or replace) a linear dimension between ``p1`` and ``p2``.
+
+        ``direction`` names the measured axes: ``"X"``, ``"Y"``, ``"Z"``,
+        ``"XY"``, ``"XZ"``, ``"YZ"`` or ``"XYZ"``. The value is the length of
+        ``p2 - p1`` with the other components zeroed, so ``"X"`` is ``|dx|``
+        and ``"XYZ"`` the true distance. The dimension line runs along that
+        direction through ``draw_origin``, where the label sits, and the
+        extension lines, arrowheads and label all lie on the plane through the
+        three points. Lines, arrows and label keep a constant screen size and
+        draw over the scene. ``label`` replaces the formatted value.
+
+        Dimensions are annotations, not scene objects: :meth:`clear` leaves
+        them, :meth:`clear_dimensions` removes them, and a reconnect re-adds
+        them.
+
+        Raises:
+            ValueError: For a point that is not 3 finite numbers or an unknown
+                ``direction``.
+        """
+        spec = {
+            "type": "add_dimension",
+            "id": id,
+            "p1": _validate_point3("p1", p1),
+            "p2": _validate_point3("p2", p2),
+            "draw_origin": _validate_point3("draw_origin", draw_origin),
+            "direction": _normalize_dimension_direction(direction),
+            "color": color,
+            "label": label,
+        }
+        self._dimensions[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def remove_dimension(self, id: str) -> None:
+        """Remove a dimension added with :meth:`add_dimension`. A no-op if
+        ``id`` doesn't exist."""
+        self._dimensions.pop(id, None)
+        if self._ws is not None:
+            self._send({"type": "remove_dimension", "id": id})
+
+    def clear_dimensions(self) -> None:
+        """Remove every dimension annotation."""
+        self._dimensions = {}
+        if self._ws is not None:
+            self._send({"type": "clear_dimensions"})
+
+    def set_dimension_display(self, mode: str) -> None:
+        """Which dimensions draw: ``"all"``, ``"in_view"`` (only those whose
+        plane faces the camera, within the in-view tolerance) or ``"none"``.
+        Re-sent on reconnect."""
+        normalized = str(mode).lower().replace("-", "_")
+        if normalized not in _ALLOWED_DIMENSION_DISPLAYS:
+            allowed = ", ".join(sorted(_ALLOWED_DIMENSION_DISPLAYS))
+            raise ValueError(f"mode must be one of: {allowed} (got {mode!r})")
+        self._dimension_display = normalized
+        if self._ws is not None:
+            self._send({"type": "set_dimension_display", "mode": normalized})
+
+    def set_dimension_format(
+        self,
+        *,
+        unit_scale: Optional[float] = None,
+        decimals: Optional[int] = None,
+        unit: Optional[str] = None,
+        in_view_tolerance_deg: Optional[float] = None,
+    ) -> None:
+        """Label format for every dimension: the scene-unit value times
+        ``unit_scale`` (``1000`` shows metres as mm), with ``decimals`` places
+        and a ``unit`` suffix. ``in_view_tolerance_deg`` is the angle between
+        the view direction and a dimension's plane normal that ``"in_view"``
+        still draws (default 10). Omitted fields keep their current value.
+        Re-sent on reconnect."""
+        unit_scale = _validate_finite("unit_scale", unit_scale)
+        tol = _validate_finite("in_view_tolerance_deg", in_view_tolerance_deg)
+        if tol is not None and tol <= 0:
+            raise ValueError(f"in_view_tolerance_deg must be > 0 (got {tol!r})")
+        if decimals is not None and (
+            int(decimals) != decimals or not 0 <= decimals <= 6
+        ):
+            raise ValueError(f"decimals must be an integer in 0..6 (got {decimals!r})")
+        msg = dict(self._dimension_format or {"type": "set_dimension_format"})
+        for key, value in (
+            ("unit_scale", unit_scale),
+            ("decimals", decimals),
+            ("unit", unit),
+            ("in_view_tolerance_deg", tol),
+        ):
+            if value is not None:
+                msg[key] = value
+        self._dimension_format = msg
+        if self._ws is not None:
+            self._send(msg)
+
+    def start_dimension_tool(
+        self, *, plane_origin: Optional[List[float]] = None, color: Optional[int] = None
+    ) -> None:
+        """Start the interactive dimension tool in the browser: click the first
+        point, click the second, then move to place the label and click. Points
+        land on the camera-facing plane through ``plane_origin`` (default the
+        world origin); the second point snaps onto an axis line through the
+        first. Esc cancels.
+
+        The result goes to every :meth:`on_dimension_create` callback; the tool
+        does not add it, so call :meth:`add_dimension` to keep it."""
+        msg: dict = {"type": "start_dimension_tool", "color": color}
+        if plane_origin is not None:
+            msg["plane_origin"] = _validate_point3("plane_origin", plane_origin)
+        self._send(msg)
+
+    def cancel_dimension_tool(self) -> None:
+        """End an active dimension tool without creating anything."""
+        self._send({"type": "cancel_dimension_tool"})
+
+    def on_dimension_create(self, callback) -> None:
+        """Register a callback for the dimension tool.
+
+        It receives one dict: ``{"event": "created", "p1", "p2",
+        "draw_origin", "direction", "value"}`` when the operator places a
+        dimension, or ``{"event": "cancelled"}`` when the tool ends without
+        one. Runs on the client's WebSocket receive thread.
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._dimension_callbacks.append(callback)
+
+    def _dispatch_dimension_event(self, data: dict) -> None:
+        if data.get("type") == "dimension_created":
+            event = {
+                "event": "created",
+                "p1": data.get("p1"),
+                "p2": data.get("p2"),
+                "draw_origin": data.get("draw_origin"),
+                "direction": data.get("direction"),
+                "value": data.get("value"),
+            }
+        else:
+            event = {"event": "cancelled"}
+        for cb in list(self._dimension_callbacks):
+            try:
+                cb(event)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Error in dimension tool callback"
+                )
 
     def on_axis_control_change(self, callback) -> None:
         """Register a callback fired while the user drags an axis control's

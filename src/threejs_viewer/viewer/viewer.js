@@ -8205,6 +8205,640 @@ class DepthCueController {
     }
 }
 
+// ========== Dimension annotations ==========
+// Linear dimensions between two world points, drawn CAD-style: two extension
+// lines, a dimension line with arrowheads, and a label. `direction` picks the
+// measured axes ('X', 'Y', 'Z', 'XY', 'XZ', 'YZ', 'XYZ'): the value is the
+// length of (p2 - p1) with the other components zeroed, so 'X' is |dx| and
+// 'XYZ' the true distance. The dimension line runs along that measured
+// direction through `drawOrigin`, where the label sits, and everything lies on
+// the plane through p1, p2 and drawOrigin.
+//
+// Line width, arrowheads and label keep a constant on-screen size; the label
+// lies flat on the dimension plane and flips so it never reads mirrored or
+// upside down. Display modes: 'all' draws every dimension, 'in_view' only the
+// ones whose plane faces the camera (within DIM_IN_VIEW_TOL_DEG), 'none' hides
+// them. Dimensions render in their own pass over the scene, so geometry never
+// hides them, and they are not scene objects: no picking, no framing bounds, no
+// eye menus, and clear_scene leaves them alone.
+//
+// The creation tool (startTool) picks points on the plane through
+// `planeOrigin` (default world origin) facing the camera: click p1, click p2,
+// then move to place the label and click (or press on p2 and drag, then
+// release). p2 snaps onto an axis line through p1 within DIM_SNAP_PX. While
+// placing, the direction follows the cursor: points differing in one axis lock
+// to it; otherwise a cursor near the p1-p2 diagonal measures the aligned
+// distance over every differing axis, and a cursor away from it picks the
+// single axis the way a CAD linear dimension does (above/below the points
+// measures the horizontal, beside them the vertical).
+const DIM_AXES = /** @type {const} */ (['X', 'Y', 'Z']);
+const DIM_DIRECTIONS = new Set(['X', 'Y', 'Z', 'XY', 'XZ', 'YZ', 'XYZ']);
+const DIM_DISPLAY_MODES = new Set(['all', 'in_view', 'none']);
+const DIM_DEFAULT_COLOR = 0xf2c14e;
+const DIM_LINE_WIDTH_PX = 2;
+const DIM_ARROW_PX = 12;
+const DIM_EXT_GAP_PX = 4;          // extension lines stop short of the measured point
+const DIM_EXT_OVERSHOOT_PX = 6;    // and run past the dimension line
+const DIM_LABEL_PX = 24;           // label quad height on screen, padding included
+const DIM_IN_VIEW_TOL_DEG = 10;
+const DIM_SNAP_PX = 10;
+const DIM_DIAGONAL_PX = 24;
+const DIM_PREVIEW_ID = '__dimension_preview__';
+
+/** Canonical direction string ('yx' -> 'XY'), or null. @param {any} d */
+function normalizeDimensionDirection(d) {
+    const s = String(d == null ? '' : d).toUpperCase();
+    if (/[^XYZ]/.test(s)) return null;
+    const out = DIM_AXES.filter((a) => s.includes(a)).join('');
+    return DIM_DIRECTIONS.has(out) ? out : null;
+}
+
+/** @param {any} p @returns {THREE.Vector3|null} */
+function toDimVec(p) {
+    if (p == null) return null;
+    const v = Array.isArray(p) ? new THREE.Vector3(+p[0], +p[1], +p[2]) : new THREE.Vector3(+p.x, +p.y, +p.z);
+    return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z) ? v : null;
+}
+
+/** Axes along which p1 and p2 differ, as a direction string ('' when coincident).
+ * @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 */
+function dimensionDiffAxes(p1, p2) {
+    const d = [p2.x - p1.x, p2.y - p1.y, p2.z - p1.z];
+    const eps = 1e-9 * Math.max(1e-9, Math.hypot(d[0], d[1], d[2]));
+    return DIM_AXES.filter((_, i) => Math.abs(d[i]) > eps).join('');
+}
+
+/**
+ * The direction the creation tool proposes for cursor `c` (see the banner).
+ * `nearDiagonal` says whether the cursor is close to the p1-p2 line on screen.
+ * @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {THREE.Vector3} c @param {boolean} nearDiagonal
+ * @returns {string}
+ */
+function autoDimensionDirection(p1, p2, c, nearDiagonal) {
+    const diff = dimensionDiffAxes(p1, p2);
+    if (diff.length <= 1) return diff || 'X';
+    if (nearDiagonal) return diff;
+    const delta = { X: p2.x - p1.x, Y: p2.y - p1.y, Z: p2.z - p1.z };
+    const off = { X: c.x - (p1.x + p2.x) / 2, Y: c.y - (p1.y + p2.y) / 2, Z: c.z - (p1.z + p2.z) / 2 };
+    // The axis the cursor sits furthest outside the points' box along carries the
+    // extension lines; the dimension measures the largest remaining axis.
+    const axes = diff.split('');
+    let ext = axes[0];
+    for (const a of axes) {
+        if (Math.abs(off[a]) - Math.abs(delta[a]) / 2 > Math.abs(off[ext]) - Math.abs(delta[ext]) / 2) ext = a;
+    }
+    let pick = null;
+    for (const a of axes) {
+        if (a !== ext && (pick === null || Math.abs(delta[a]) > Math.abs(delta[pick]))) pick = a;
+    }
+    return pick || ext;
+}
+
+/**
+ * World-space construction of one dimension: the measured value, the measured
+ * unit direction `u`, the dimension-line feet `a`/`b` (where the extension lines
+ * from p1/p2 meet the line through drawOrigin) and the plane normal `n`.
+ * @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {THREE.Vector3} d @param {string} direction
+ */
+function dimensionGeometry(p1, p2, d, direction) {
+    const delta = new THREE.Vector3().subVectors(p2, p1);
+    const m = new THREE.Vector3(
+        direction.includes('X') ? delta.x : 0,
+        direction.includes('Y') ? delta.y : 0,
+        direction.includes('Z') ? delta.z : 0,
+    );
+    const value = m.length();
+    const scale = Math.max(1e-9, delta.length(), p1.distanceTo(d), p2.distanceTo(d));
+    const u = value > 1e-12 * scale
+        ? m.clone().divideScalar(value)
+        : new THREE.Vector3(direction[0] === 'X' ? 1 : 0, direction[0] === 'Y' ? 1 : 0, direction[0] === 'Z' ? 1 : 0);
+    const a = d.clone().addScaledVector(u, new THREE.Vector3().subVectors(p1, d).dot(u));
+    const b = d.clone().addScaledVector(u, new THREE.Vector3().subVectors(p2, d).dot(u));
+    const n = new THREE.Vector3().crossVectors(delta, new THREE.Vector3().subVectors(d, p1));
+    if (n.lengthSq() <= 1e-18 * scale ** 4) n.crossVectors(u, new THREE.Vector3().subVectors(d, p1));
+    if (n.lengthSq() <= 1e-18 * scale ** 4) {
+        // Collinear points: any plane holding `u` will do.
+        const helper = Math.abs(u.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+        n.crossVectors(u, helper);
+    }
+    n.normalize();
+    return { value, u, a, b, n, scale };
+}
+
+/** @param {string} text @param {THREE.Color} color */
+function makeDimensionLabel(text, color) {
+    const fontPx = 64, padX = 16, padY = 12;
+    const font = `600 ${fontPx}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+    const canvas = document.createElement('canvas');
+    const ctx = /** @type {CanvasRenderingContext2D} */ (canvas.getContext('2d'));
+    ctx.font = font;
+    canvas.width = Math.ceil(ctx.measureText(text).width) + 2 * padX;
+    canvas.height = fontPx + 2 * padY;
+    ctx.font = font;   // resizing a canvas resets its context state
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 12;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.strokeText(text, canvas.width / 2, canvas.height / 2 + 3);
+    ctx.fillStyle = `#${color.getHexString()}`;
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 3);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    return { tex, aspect: canvas.width / canvas.height };
+}
+
+const _dimV1 = new THREE.Vector3();
+const _dimV2 = new THREE.Vector3();
+const _dimV3 = new THREE.Vector3();
+
+class DimensionController {
+    /** @param {ThreeJSViewer} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** Own scene: drawn in a pass over a cleared depth buffer. */
+        this.scene = new THREE.Scene();
+        /** @type {Map<string, any>} */
+        this.dims = new Map();
+        /** @type {'all'|'in_view'|'none'} */
+        this.mode = 'all';
+        this.inViewToleranceDeg = DIM_IN_VIEW_TOL_DEG;
+        this.fmt = { unitScale: 1, decimals: 2, unit: '', /** @type {((value:number, dim:any) => string)|null} */ format: null };
+        this._camSig = '';
+        this._dirty = true;
+        /** @type {any} */
+        this._tool = null;
+        this._raycaster = new THREE.Raycaster();
+        this._ndc = new THREE.Vector2();
+        this._camRight = new THREE.Vector3();
+        this._camUp = new THREE.Vector3();
+        this._camFwd = new THREE.Vector3();
+    }
+
+    // ---- public state -------------------------------------------------------
+
+    /** @param {string} id @param {any} spec */
+    add(id, spec) {
+        if (!id) throw new Error('addDimension: id is required');
+        const p1 = toDimVec(spec && spec.p1), p2 = toDimVec(spec && spec.p2);
+        const d = toDimVec(spec && (spec.drawOrigin ?? spec.draw_origin));
+        const direction = normalizeDimensionDirection(spec && spec.direction);
+        if (!p1 || !p2 || !d) throw new Error(`addDimension '${id}': p1, p2 and drawOrigin must be finite 3-vectors`);
+        if (!direction) throw new Error(`addDimension '${id}': direction must be one of ${[...DIM_DIRECTIONS].join(', ')}`);
+        const color = new THREE.Color(spec.color ?? DIM_DEFAULT_COLOR);
+        const label = spec.label == null ? null : String(spec.label);
+        const prev = this.dims.get(id);
+        if (prev && prev.p1.equals(p1) && prev.p2.equals(p2) && prev.d.equals(d)
+            && prev.direction === direction && prev.color.equals(color) && prev.label === label) return;
+        this._remove(id);
+        const rec = this._build(id, p1, p2, d, direction, color, label);
+        this.dims.set(id, rec);
+        this._dirty = true;
+    }
+
+    /** @param {string} id @returns {boolean} */
+    remove(id) {
+        const had = this._remove(id);
+        if (had) this._dirty = true;
+        return had;
+    }
+
+    clear() {
+        for (const id of [...this.dims.keys()]) if (id !== DIM_PREVIEW_ID) this._remove(id);
+        this._dirty = true;
+    }
+
+    /** @returns {Array<any>} plain specs, preview excluded */
+    list() {
+        return [...this.dims.values()].filter((r) => r.id !== DIM_PREVIEW_ID).map((r) => this._spec(r));
+    }
+
+    /** @param {string} mode */
+    setMode(mode) {
+        const m = String(mode || '').toLowerCase().replace('-', '_');
+        if (!DIM_DISPLAY_MODES.has(m)) throw new Error(`setDimensionDisplay: mode must be one of ${[...DIM_DISPLAY_MODES].join(', ')}`);
+        this.mode = /** @type {any} */ (m);
+        this._dirty = true;
+    }
+
+    /** @param {{unitScale?:number, decimals?:number, unit?:string, format?:any, inViewToleranceDeg?:number}} opts */
+    setFormat(opts = {}) {
+        if (opts.unitScale != null && Number.isFinite(+opts.unitScale)) this.fmt.unitScale = +opts.unitScale;
+        if (opts.decimals != null && Number.isFinite(+opts.decimals)) this.fmt.decimals = Math.max(0, Math.min(6, Math.round(+opts.decimals)));
+        if (opts.unit != null) this.fmt.unit = String(opts.unit);
+        if (opts.format !== undefined) this.fmt.format = typeof opts.format === 'function' ? opts.format : null;
+        if (opts.inViewToleranceDeg != null && +opts.inViewToleranceDeg > 0) this.inViewToleranceDeg = +opts.inViewToleranceDeg;
+        // Labels bake their text into a texture: rebuild every one.
+        for (const r of [...this.dims.values()]) {
+            this._remove(r.id);
+            this.dims.set(r.id, this._build(r.id, r.p1, r.p2, r.d, r.direction, r.color, r.label, r.preview));
+        }
+        this._dirty = true;
+    }
+
+    /** True when at least one dimension (or the tool preview) will draw. */
+    hasVisible() { return this.scene.children.some((g) => g.visible); }
+
+    dispose() {
+        this.cancelTool();
+        for (const id of [...this.dims.keys()]) this._remove(id);
+    }
+
+    // ---- building -----------------------------------------------------------
+
+    /** @param {number} value @param {any} rec */
+    _formatValue(value, rec) {
+        if (this.fmt.format) {
+            try { return String(this.fmt.format(value, this._spec(rec))); } catch (err) { console.error('dimension format error', err); }
+        }
+        const n = value * this.fmt.unitScale;
+        return `${n.toFixed(this.fmt.decimals)}${this.fmt.unit ? ' ' + this.fmt.unit : ''}`;
+    }
+
+    /** @param {any} r */
+    _spec(r) {
+        return {
+            id: r.id, p1: r.p1.toArray(), p2: r.p2.toArray(), drawOrigin: r.d.toArray(),
+            direction: r.direction, value: r.geom.value, color: r.color.getHex(), label: r.label,
+        };
+    }
+
+    /**
+     * @param {string} id @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {THREE.Vector3} d
+     * @param {string} direction @param {THREE.Color} color @param {string|null} label @param {boolean} [preview]
+     */
+    _build(id, p1, p2, d, direction, color, label, preview = false) {
+        const geom = dimensionGeometry(p1, p2, d, direction);
+        const group = new THREE.Group();
+        group.name = `dimension:${id}`;
+        group.renderOrder = 2000;
+        const mat = new LineMaterial({
+            color: color.getHex(), linewidth: DIM_LINE_WIDTH_PX, worldUnits: false,
+            depthTest: false, depthWrite: false, transparent: true, opacity: preview ? 0.85 : 1,
+        });
+        const lines = new LineSegments2(new LineSegmentsGeometry(), mat);
+        lines.frustumCulled = false;
+        lines.renderOrder = 2000;
+        group.add(lines);
+        const rec = { id, p1: p1.clone(), p2: p2.clone(), d: d.clone(), direction, color: color.clone(), label, preview, geom, group, lines, text: /** @type {any} */ (null), aspect: 1 };
+        const { tex, aspect } = makeDimensionLabel(label ?? this._formatValue(geom.value, rec), color);
+        const text = new THREE.Mesh(
+            new THREE.PlaneGeometry(1, 1),
+            new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide }),
+        );
+        text.matrixAutoUpdate = false;
+        text.frustumCulled = false;
+        text.renderOrder = 2001;
+        group.add(text);
+        rec.text = text;
+        rec.aspect = aspect;
+        if (preview) {
+            const pts = new THREE.Points(
+                new THREE.BufferGeometry().setFromPoints([p1, p2]),
+                new THREE.PointsMaterial({ color: color.getHex(), size: 8, sizeAttenuation: false, depthTest: false, depthWrite: false, transparent: true }),
+            );
+            pts.frustumCulled = false;
+            pts.renderOrder = 2002;
+            group.add(pts);
+        }
+        this.scene.add(group);
+        return rec;
+    }
+
+    /** @param {string} id */
+    _remove(id) {
+        const r = this.dims.get(id);
+        if (!r) return false;
+        this.scene.remove(r.group);
+        r.group.traverse((/** @type {any} */ o) => {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) {
+                if (o.material.map) o.material.map.dispose();
+                o.material.dispose();
+            }
+        });
+        this.dims.delete(id);
+        return true;
+    }
+
+    // ---- per frame ----------------------------------------------------------
+
+    /** World units per screen pixel at `point`. @param {THREE.Vector3} point */
+    _worldPerPixel(point) {
+        const cam = /** @type {any} */ (this.v._camera);
+        const h = Math.max(1, this.v._renderer.domElement.clientHeight);
+        if (cam.isPerspectiveCamera) {
+            return (2 * cam.position.distanceTo(point) * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
+        }
+        return (cam.top - cam.bottom) / cam.zoom / h;
+    }
+
+    update() {
+        if (!this.dims.size) return;
+        const cam = /** @type {any} */ (this.v._camera);
+        const w = this.v.container.clientWidth, h = this.v.container.clientHeight;
+        const e = cam.matrixWorld.elements;
+        const sig = `${e.join(',')}|${cam.zoom}|${cam.fov}|${w}x${h}`;
+        if (!this._dirty && sig === this._camSig) return;
+        this._camSig = sig;
+        this._dirty = false;
+        cam.updateMatrixWorld();
+        this._camRight.setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+        this._camUp.setFromMatrixColumn(cam.matrixWorld, 1).normalize();
+        this._camFwd.setFromMatrixColumn(cam.matrixWorld, 2).normalize().negate();
+        const cosTol = Math.cos(THREE.MathUtils.degToRad(this.inViewToleranceDeg));
+        for (const r of this.dims.values()) {
+            r.lines.material.resolution.set(w, h);
+            let show = r.preview || this.mode === 'all';
+            if (!r.preview && this.mode === 'in_view') show = Math.abs(r.geom.n.dot(this._camFwd)) >= cosTol;
+            r.group.visible = show;
+            if (show) this._layout(r);
+        }
+    }
+
+    /** Screen-sized construction of one dimension for the current camera. @param {any} r */
+    _layout(r) {
+        const { u, a, b, n } = r.geom;
+        const wpp = this._worldPerPixel(r.d);
+        const L = DIM_ARROW_PX * wpp;
+        const eps = 1e-9 * r.geom.scale;
+        /** @type {number[]} */
+        const pos = [];
+        const seg = (/** @type {THREE.Vector3} */ s, /** @type {THREE.Vector3} */ t) => pos.push(s.x, s.y, s.z, t.x, t.y, t.z);
+
+        for (const [p, foot] of [[r.p1, a], [r.p2, b]]) {
+            const ext = _dimV1.subVectors(foot, p);
+            const len = ext.length();
+            if (len <= eps) continue;
+            ext.divideScalar(len);
+            seg(_dimV2.copy(p).addScaledVector(ext, Math.min(DIM_EXT_GAP_PX * wpp, len)),
+                _dimV3.copy(foot).addScaledVector(ext, DIM_EXT_OVERSHOOT_PX * wpp));
+        }
+
+        const span = b.distanceTo(a);
+        const t = span > eps ? new THREE.Vector3().subVectors(b, a).divideScalar(span) : u.clone();
+        const wv = new THREE.Vector3().crossVectors(n, t);
+        if (wv.lengthSq() < 1e-12) wv.copy(this._camUp);
+        wv.normalize();
+        // Too short for two arrows between the extension lines: arrows go outside.
+        const inside = span >= 2.5 * L;
+        const sd = _dimV1.subVectors(r.d, a).dot(t);
+        const lo = Math.min(0, sd, inside ? 0 : -1.6 * L);
+        const hi = Math.max(span, sd, inside ? span : span + 1.6 * L);
+        seg(a.clone().addScaledVector(t, lo), a.clone().addScaledVector(t, hi));
+        const dir = inside ? 1 : -1;
+        for (const [tip, sgn] of [[a, 1], [b, -1]]) {
+            const back = tip.clone().addScaledVector(t, sgn * dir * L);
+            seg(tip, back.clone().addScaledVector(wv, 0.3 * L));
+            seg(tip, back.clone().addScaledVector(wv, -0.3 * L));
+        }
+        r.lines.geometry.setPositions(pos);
+
+        // Label: flat on the plane, reading left-to-right (bottom-to-top for a
+        // line vertical on screen) and never mirrored.
+        const x = t.clone();
+        const onRight = x.dot(this._camRight);
+        if (onRight < -1e-3 || (Math.abs(onRight) <= 1e-3 && x.dot(this._camUp) < 0)) x.negate();
+        const toCam = this._camFwd.clone().negate();
+        const y = wv.clone();
+        if (_dimV1.crossVectors(x, y).dot(toCam) < 0) y.negate();
+        const z = new THREE.Vector3().crossVectors(x, y);
+        const hgt = DIM_LABEL_PX * wpp;
+        const center = r.d.clone().addScaledVector(y, hgt * 0.5 + 2 * wpp);
+        r.text.matrix.makeBasis(x.multiplyScalar(hgt * r.aspect), y.multiplyScalar(hgt), z).setPosition(center);
+        r.text.matrixWorldNeedsUpdate = true;
+    }
+
+    // ---- creation tool ------------------------------------------------------
+
+    isToolActive() { return !!this._tool; }
+
+    /**
+     * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any,
+     *   color?: any, reply?: boolean}} [opts]
+     */
+    startTool(opts = {}) {
+        this.cancelTool();
+        const dom = this.v._renderer.domElement;
+        const tool = {
+            state: 'p1', opts,
+            planeOrigin: toDimVec(opts.planeOrigin) || new THREE.Vector3(),
+            color: new THREE.Color(opts.color ?? DIM_DEFAULT_COLOR),
+            p1: /** @type {THREE.Vector3|null} */ (null), p2: /** @type {THREE.Vector3|null} */ (null),
+            cursor: /** @type {THREE.Vector3|null} */ (null), direction: 'X',
+            press: /** @type {{x:number, y:number, id:number, setP2:boolean}|null} */ (null), dragged: false,
+            hint: document.createElement('div'),
+            lastX: 0, lastY: 0,
+        };
+        tool.hint.className = 'tjsv-dim-hint';
+        this.v.el.appendChild(tool.hint);
+        const down = (/** @type {PointerEvent} */ e) => this._toolDown(e);
+        const move = (/** @type {PointerEvent} */ e) => this._toolMove(e);
+        const up = (/** @type {PointerEvent} */ e) => this._toolUp(e);
+        const key = (/** @type {KeyboardEvent} */ e) => {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.cancelTool(); }
+        };
+        // Capture phase so the tool owns the left button ahead of orbit, pivot
+        // picking and object clicks; right-drag pan and wheel zoom stay live.
+        dom.addEventListener('pointerdown', down, true);
+        dom.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('keydown', key, true);
+        tool.detach = () => {
+            dom.removeEventListener('pointerdown', down, true);
+            dom.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('keydown', key, true);
+            tool.hint.remove();
+            dom.style.cursor = '';
+        };
+        dom.style.cursor = 'crosshair';
+        this._tool = tool;
+        this._showHint('Click the first point · Esc to cancel');
+    }
+
+    cancelTool() {
+        const tool = this._tool;
+        if (!tool) return;
+        this._endTool();
+        if (tool.opts.onCancel) {
+            try { tool.opts.onCancel(); } catch (err) { console.error('dimension tool onCancel error', err); }
+        }
+        if (tool.opts.reply) this.v._reply({ type: 'dimension_tool_cancelled' });
+    }
+
+    _endTool() {
+        const tool = this._tool;
+        if (!tool) return;
+        tool.detach();
+        this._tool = null;
+        this.remove(DIM_PREVIEW_ID);
+    }
+
+    /** @param {string} text */
+    _showHint(text) {
+        const t = this._tool;
+        if (!t) return;
+        t.hint.textContent = text;
+        t.hint.style.left = `${t.lastX + 16}px`;
+        t.hint.style.top = `${t.lastY + 16}px`;
+    }
+
+    /** Pointer ray from client coords. @param {number} cx @param {number} cy */
+    _ray(cx, cy) {
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        this._ndc.set(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1);
+        this._raycaster.setFromCamera(this._ndc, this.v._camera);
+        return this._raycaster.ray;
+    }
+
+    /** Cursor on the camera-facing plane through planeOrigin. @param {number} cx @param {number} cy */
+    _pickPlane(cx, cy) {
+        const ray = this._ray(cx, cy);
+        const normal = new THREE.Vector3();
+        this.v._camera.getWorldDirection(normal);
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, this._tool.planeOrigin);
+        return ray.intersectPlane(plane, new THREE.Vector3());
+    }
+
+    /** World point -> client pixels. @param {THREE.Vector3} p */
+    _toScreen(p) {
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        const q = p.clone().project(this.v._camera);
+        return { x: rect.left + (q.x + 1) / 2 * rect.width, y: rect.top + (1 - q.y) / 2 * rect.height };
+    }
+
+    /** The cursor snapped onto the nearest axis line through p1 on screen, or null.
+     * @param {THREE.Vector3} p1 @param {number} cx @param {number} cy */
+    _snapToAxis(p1, cx, cy) {
+        const s0 = this._toScreen(p1);
+        const k = 100 * this._worldPerPixel(p1);
+        let best = null, bestPx = DIM_SNAP_PX;
+        for (const axis of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
+            const s1 = this._toScreen(p1.clone().addScaledVector(axis, k));
+            const dx = s1.x - s0.x, dy = s1.y - s0.y, len = Math.hypot(dx, dy);
+            if (len < 20) continue;   // axis runs (nearly) along the view direction
+            const px = Math.abs((cx - s0.x) * dy - (cy - s0.y) * dx) / len;
+            if (px < bestPx) { bestPx = px; best = axis; }
+        }
+        if (!best) return null;
+        // Closest point on the axis line to the pointer ray.
+        const ray = this._ray(cx, cy);
+        const w0 = new THREE.Vector3().subVectors(p1, ray.origin);
+        const bdot = best.dot(ray.direction);
+        const denom = 1 - bdot * bdot;
+        if (denom < 1e-9) return null;
+        const s = (bdot * ray.direction.dot(w0) - best.dot(w0)) / denom;
+        return p1.clone().addScaledVector(best, s);
+    }
+
+    /** Pixel distance from the cursor to the p1-p2 segment on screen.
+     * @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {number} cx @param {number} cy */
+    _diagonalPx(p1, p2, cx, cy) {
+        const a = this._toScreen(p1), b = this._toScreen(p2);
+        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((cx - a.x) * dx + (cy - a.y) * dy) / l2)) : 0;
+        return { px: Math.hypot(cx - (a.x + t * dx), cy - (a.y + t * dy)), len: Math.sqrt(l2) };
+    }
+
+    /** @param {number} cx @param {number} cy */
+    _toolUpdate(cx, cy) {
+        const t = this._tool;
+        if (!t) return;
+        const rect = this.v.el.getBoundingClientRect();
+        t.lastX = cx - rect.left;
+        t.lastY = cy - rect.top;
+        if (t.state === 'p1') { this._showHint('Click the first point · Esc to cancel'); return; }
+        if (t.state === 'p2') {
+            const c = this._snapToAxis(t.p1, cx, cy) || this._pickPlane(cx, cy);
+            if (!c) return;
+            t.cursor = c;
+            const diff = dimensionDiffAxes(t.p1, c);
+            if (!diff) { this.remove(DIM_PREVIEW_ID); this._showHint('Click the second point'); return; }
+            const mid = new THREE.Vector3().addVectors(t.p1, c).multiplyScalar(0.5);
+            this._preview(t.p1, c, mid, diff);
+            this._showHint(`Click the second point · ${diff}`);
+            return;
+        }
+        // state 'place': the cursor is the draw origin.
+        const c = this._pickPlane(cx, cy);
+        if (!c) return;
+        t.cursor = c;
+        const { px, len } = this._diagonalPx(t.p1, t.p2, cx, cy);
+        t.direction = autoDimensionDirection(t.p1, t.p2, c, px <= Math.max(DIM_DIAGONAL_PX, 0.1 * len));
+        const rec = this._preview(t.p1, t.p2, c, t.direction);
+        this._showHint(`${this._formatValue(rec.geom.value, rec)} · ${t.direction} · click to place`);
+    }
+
+    /** @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {THREE.Vector3} d @param {string} direction */
+    _preview(p1, p2, d, direction) {
+        this._remove(DIM_PREVIEW_ID);
+        const rec = this._build(DIM_PREVIEW_ID, p1, p2, d, direction, this._tool.color, null, true);
+        this.dims.set(DIM_PREVIEW_ID, rec);
+        this._dirty = true;
+        return rec;
+    }
+
+    /** @param {PointerEvent} e */
+    _toolDown(e) {
+        const t = this._tool;
+        if (!t || e.button !== 0) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        t.press = { x: e.clientX, y: e.clientY, id: e.pointerId, setP2: t.state === 'p2' };
+        t.dragged = false;
+        if (t.state === 'p1') {
+            const p = this._pickPlane(e.clientX, e.clientY);
+            if (!p) return;
+            t.p1 = p;
+            t.state = 'p2';
+            t.press = null;   // the release of this press is not a placement
+            this._toolUpdate(e.clientX, e.clientY);
+        } else if (t.state === 'p2') {
+            this._toolUpdate(e.clientX, e.clientY);
+            if (!t.cursor || !dimensionDiffAxes(t.p1, t.cursor)) { t.press = null; return; }
+            t.p2 = t.cursor.clone();
+            t.state = 'place';
+            this._toolUpdate(e.clientX, e.clientY);
+        }
+    }
+
+    /** @param {PointerEvent} e */
+    _toolMove(e) {
+        const t = this._tool;
+        if (!t) return;
+        if (t.press && Math.hypot(e.clientX - t.press.x, e.clientY - t.press.y) > CLICK_DRAG_MAX_PX) t.dragged = true;
+        this._toolUpdate(e.clientX, e.clientY);
+    }
+
+    /** @param {PointerEvent} e */
+    _toolUp(e) {
+        const t = this._tool;
+        if (!t || e.button !== 0 || !t.press || e.pointerId !== t.press.id) return;
+        const press = t.press;
+        t.press = null;
+        if (t.state !== 'place') return;
+        // The release that set p2 without moving keeps placing on hover; a drag
+        // from p2, or a later click, commits.
+        if (press.setP2 && !t.dragged) return;
+        this._toolUpdate(e.clientX, e.clientY);
+        if (!t.cursor) return;
+        const spec = {
+            p1: t.p1.toArray(), p2: t.p2.toArray(), drawOrigin: t.cursor.toArray(),
+            direction: t.direction, value: dimensionGeometry(t.p1, t.p2, t.cursor, t.direction).value,
+        };
+        this._endTool();
+        if (t.opts.onCreate) {
+            try { t.opts.onCreate(spec); } catch (err) { console.error('dimension tool onCreate error', err); }
+        }
+        if (t.opts.reply) {
+            this.v._reply({ type: 'dimension_created', p1: spec.p1, p2: spec.p2, draw_origin: spec.drawOrigin,
+                direction: spec.direction, value: spec.value });
+        }
+    }
+}
+
 // ========== Polyline / tube picking ==========
 // Opt-in interactive picking of points ALONG a polyline OR a parametric tube
 // (the "bead"). Enabled from Python via set_polyline_picking (see
@@ -11303,6 +11937,7 @@ export class ThreeJSViewer {
         this._gizmoScene = new THREE.Scene();
         this._transformGizmo = new TransformGizmoController(this);
         this._axisControls = new AxisControlManager(this);
+        this._dimensions = new DimensionController(this);
 
         // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
@@ -16146,6 +16781,33 @@ export class ThreeJSViewer {
             case 'remove_axis_control':
                 this._axisControls.remove(data.id);
                 break;
+            case 'add_dimension':
+                this._dimensions.add(data.id, {
+                    p1: data.p1, p2: data.p2, drawOrigin: data.draw_origin,
+                    direction: data.direction, color: data.color, label: data.label,
+                });
+                break;
+            case 'remove_dimension':
+                this._dimensions.remove(data.id);
+                break;
+            case 'clear_dimensions':
+                this._dimensions.clear();
+                break;
+            case 'set_dimension_display':
+                this._dimensions.setMode(data.mode);
+                break;
+            case 'set_dimension_format':
+                this._dimensions.setFormat({
+                    unitScale: data.unit_scale, decimals: data.decimals, unit: data.unit,
+                    inViewToleranceDeg: data.in_view_tolerance_deg,
+                });
+                break;
+            case 'start_dimension_tool':
+                this._dimensions.startTool({ planeOrigin: data.plane_origin, color: data.color, reply: true });
+                break;
+            case 'cancel_dimension_tool':
+                this._dimensions.cancelTool();
+                break;
             case 'bind_clip':
                 // Declared once (cell load / cell switch), not per-tick, so this
                 // is NOT gated behind _withObject like the imperative clip calls
@@ -16669,6 +17331,12 @@ export class ThreeJSViewer {
         this._renderer.autoClear = false;
         // Move gizmos: own pass over a cleared depth buffer, so handles occlude
         // each other correctly but always draw over the scene.
+        // Dimension annotations: their own pass, so geometry never hides them.
+        this._dimensions.update();
+        if (this._dimensions.hasVisible()) {
+            this._renderer.clearDepth();
+            this._renderer.render(this._dimensions.scene, this._camera);
+        }
         if (this._gizmoScene.children.some((h) => h.visible)) {
             this._renderer.clearDepth();
             this._renderer.render(this._gizmoScene, this._camera);
@@ -18114,6 +18782,59 @@ export class ThreeJSViewer {
     /** @param {string} id */
     removeAxisControl(id) { this._axisControls.remove(id); }
 
+    /**
+     * Add (or replace) a linear dimension annotation. `spec`: `{p1, p2,
+     * drawOrigin, direction, color?, label?}`; points are `[x, y, z]` or
+     * `{x, y, z}` in scene units, `direction` one of 'X', 'Y', 'Z', 'XY', 'XZ',
+     * 'YZ', 'XYZ' (the measured axes), `label` overrides the formatted value.
+     * See the DimensionController banner. Throws on a malformed spec.
+     * @param {string} id @param {any} spec
+     */
+    addDimension(id, spec) { this._dimensions.add(id, spec); }
+
+    /** @param {string} id @returns {boolean} */
+    removeDimension(id) { return this._dimensions.remove(id); }
+
+    clearDimensions() { this._dimensions.clear(); }
+
+    /** @returns {Array<{id:string, p1:number[], p2:number[], drawOrigin:number[], direction:string, value:number, color:number, label:string|null}>} */
+    getDimensions() { return this._dimensions.list(); }
+
+    /**
+     * 'all' draws every dimension, 'in_view' only those whose plane faces the
+     * camera (within the in-view tolerance, default 10°), 'none' hides them.
+     * @param {'all'|'in_view'|'none'} mode
+     */
+    setDimensionDisplay(mode) { this._dimensions.setMode(mode); }
+
+    /** @returns {'all'|'in_view'|'none'} */
+    getDimensionDisplay() { return this._dimensions.mode; }
+
+    /**
+     * Label formatting: `unitScale` multiplies the scene-unit value (1000 turns
+     * metres into mm), `decimals`, `unit` suffix, or a `format(value, spec)`
+     * function that replaces all three. `inViewToleranceDeg` sets the angle
+     * the 'in_view' mode accepts.
+     * @param {{unitScale?:number, decimals?:number, unit?:string, format?:((value:number, spec:any) => string)|null, inViewToleranceDeg?:number}} opts
+     */
+    setDimensionFormat(opts) { this._dimensions.setFormat(opts || {}); }
+
+    /**
+     * Start the interactive dimension tool: click p1, click p2, then move the
+     * cursor to place the label and click (or drag from p2 and release). Points
+     * land on the camera-facing plane through `planeOrigin` (default world
+     * origin). The tool owns the left button until it ends; Esc cancels. The
+     * created spec (`{p1, p2, drawOrigin, direction, value}`) goes to `onCreate`;
+     * the tool does not add it, so the embedder decides where it is stored.
+     * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any, color?: any}} [opts]
+     */
+    startDimensionTool(opts) { this._dimensions.startTool(opts || {}); }
+
+    cancelDimensionTool() { this._dimensions.cancelTool(); }
+
+    /** @returns {boolean} */
+    isDimensionToolActive() { return this._dimensions.isToolActive(); }
+
     /** Direct-call JS equivalent of the `bind_clip` WS message: drive `id`'s
      * clip from `source.id`'s live local `source.channel`, mapping
      * `source.from`..`source.to` onto clip progress 0..1, every render frame.
@@ -18293,6 +19014,7 @@ export class ThreeJSViewer {
         this._objectClickDown = null;
         this._objectClickHooks.length = 0;
         this._axisControls.dispose();
+        this._dimensions.dispose();
         this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
         // An in-flight _loadCubemap sees the bumped token and discards its result.

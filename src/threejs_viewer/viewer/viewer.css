@@ -831,3 +831,18 @@
     color: white;
     opacity: 1;
 }
+
+/* Cursor-following prompt while the dimension tool is active */
+.threejs-viewer .tjsv-dim-hint {
+    position: absolute;
+    background: rgba(30, 30, 30, 0.85);
+    color: #eee;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    z-index: 10;
+}
