@@ -32,12 +32,46 @@ THREE_VERSION = "0.183.2"
 CUBEMAP_FACES = ["px", "nx", "py", "ny", "pz", "nz"]
 
 
-def _gzip_b64(raw: bytes) -> str:
-    """Deterministically gzip + base64 a blob (mtime=0 so rebuilds are stable)."""
+def _gzip_b64(raw: bytes, previous: str | None = None) -> str:
+    """gzip + base64 a blob (mtime=0 so rebuilds are stable).
+
+    ``previous`` is the encoding already committed in viewer.html for this
+    slot; it is returned unchanged when it inflates to ``raw``. The compressed
+    bytes differ between zlib implementations (madler zlib vs the zlib-ng some
+    python-build-standalone builds ship), so recompressing an unchanged blob
+    would rewrite 1.4 MB of base64 per PR and fail CI's byte-exact freshness
+    check on the other implementation. A changed blob always recompresses.
+    """
+    if previous:
+        try:
+            if gzip.decompress(base64.b64decode(previous, validate=True)) == raw:
+                return previous
+        except (ValueError, OSError, EOFError):
+            pass
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gz:
         gz.write(raw)
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _previous_blobs() -> dict:
+    """The gzip+base64 blobs inlined in the committed viewer.html, keyed by
+    slot: ``draco.wasm``, ``draco.wrapper`` and ``cubemap.<name>.<face>``."""
+    try:
+        html = OUTPUT_HTML.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    blobs = {}
+    for slot, field in (("draco.wasm", "wasmGzB64"), ("draco.wrapper", "wrapperGzB64")):
+        m = re.search(rf"{field}: '([^']*)'", html)
+        if m:
+            blobs[slot] = m.group(1)
+    for m in re.finditer(
+        r"^    '([^']+)': \{ format: '\w+', faces: \{ ([^}]*) \} \}", html, re.M
+    ):
+        for face in re.finditer(r"(\w+): '([^']*)'", m.group(2)):
+            blobs[f"cubemap.{m.group(1)}.{face.group(1)}"] = face.group(2)
+    return blobs
 
 
 CUBEMAPS_DIR = STATIC_DIR / "cubemaps"
@@ -45,9 +79,9 @@ DEFAULT_CUBEMAP = "paul-lobe-haus"
 CUBEMAP_FORMATS = ("hdr", "png", "jpg")
 
 
-def _read_cubemaps_b64() -> dict:
+def _read_cubemaps_b64(previous: dict) -> dict:
     """Read every face set under static/cubemaps/<name>/ and gzip+base64 each
-    face (inflated in the browser; gzip halves the RLE'd HDR bytes, and keeps
+    face (inflated in the browser; gzip roughly halves the HDR bytes, and keeps
     one decode path for the LDR sets). Returns {name: {format, faces}} with
     DEFAULT_CUBEMAP first."""
     sets = {}
@@ -58,7 +92,10 @@ def _read_cubemaps_b64() -> dict:
         sets[d.name] = {
             "format": fmt,
             "faces": {
-                face: _gzip_b64((d / f"{face}.{fmt}").read_bytes())
+                face: _gzip_b64(
+                    (d / f"{face}.{fmt}").read_bytes(),
+                    previous.get(f"cubemap.{d.name}.{face}"),
+                )
                 for face in CUBEMAP_FACES
             },
         }
@@ -69,7 +106,7 @@ def _read_cubemaps_b64() -> dict:
     return {DEFAULT_CUBEMAP: sets.pop(DEFAULT_CUBEMAP), **sets}
 
 
-def _read_draco_b64() -> dict:
+def _read_draco_b64(previous: dict) -> dict:
     """Read the vendored Draco glTF decoder and return gzip+base64 payloads.
 
     Raw is ~251 KB (wasm 188 KB + wrapper 57 KB); gzip+base64 is ~100 KB, so
@@ -77,8 +114,13 @@ def _read_draco_b64() -> dict:
     both with DecompressionStream('gzip') before handing them to DRACOLoader.
     """
     return {
-        "wasm": _gzip_b64((DRACO_DIR / "draco_decoder.wasm").read_bytes()),
-        "wrapper": _gzip_b64((DRACO_DIR / "draco_wasm_wrapper.js").read_bytes()),
+        "wasm": _gzip_b64(
+            (DRACO_DIR / "draco_decoder.wasm").read_bytes(), previous.get("draco.wasm")
+        ),
+        "wrapper": _gzip_b64(
+            (DRACO_DIR / "draco_wasm_wrapper.js").read_bytes(),
+            previous.get("draco.wrapper"),
+        ),
     }
 
 
@@ -87,8 +129,9 @@ def build():
     controls_content = (VIEWER_DIR / "controls.js").read_text(encoding="utf-8")
     css_content = (VIEWER_DIR / "viewer.css").read_text(encoding="utf-8")
     html_template = (VIEWER_DIR / "template.html").read_text(encoding="utf-8")
-    cubemaps = _read_cubemaps_b64()
-    draco_data = _read_draco_b64()
+    previous = _previous_blobs()
+    cubemaps = _read_cubemaps_b64(previous)
+    draco_data = _read_draco_b64(previous)
 
     # Strip the local controls.js import from viewer.js (we inline it instead).
     js_content = re.sub(
