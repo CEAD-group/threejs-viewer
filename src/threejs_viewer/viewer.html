@@ -10237,8 +10237,13 @@ class DimensionController {
         };
         // Capture phase so the tool owns the left button ahead of orbit, pivot
         // picking and object clicks; right-drag pan and wheel zoom stay live.
+        // Two quick picks are a dblclick, which would frame or reset the view.
+        // The swallow outlives the tool briefly: the click that places the
+        // label can complete one too.
+        const swallowDbl = (/** @type {MouseEvent} */ e) => e.stopImmediatePropagation();
         dom.addEventListener('pointerdown', down, true);
         dom.addEventListener('pointermove', move);
+        dom.addEventListener('dblclick', swallowDbl, true);
         window.addEventListener('pointerup', up, true);
         window.addEventListener('keydown', key, true);
         tool.detach = () => {
@@ -10246,6 +10251,7 @@ class DimensionController {
             dom.removeEventListener('pointermove', move);
             window.removeEventListener('pointerup', up, true);
             window.removeEventListener('keydown', key, true);
+            setTimeout(() => dom.removeEventListener('dblclick', swallowDbl, true), 600);
             tool.hint.remove();
             dom.style.cursor = '';
         };

@@ -10816,3 +10816,25 @@ def test_dimension_tool_snaps_to_axis_and_escape_cancels(viewer_client, viewer_p
         "() => window.threejsViewer.isDimensionToolActive()"
     )
     assert _dim_state(viewer_page) == {}
+
+
+@pytest.mark.browser
+def test_dimension_tool_quick_picks_do_not_reframe(viewer_client, viewer_page):
+    """Two quick picks form a dblclick; the tool swallows it, so the camera
+    does not reset or frame an object."""
+    viewer_client.add_box("b", position=[3, 3, 0])
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    before = viewer_page.evaluate(
+        "() => window.threejsViewer._camera.position.toArray()"
+    )
+    viewer_page.evaluate("() => window.threejsViewer.startDimensionTool()")
+    p = viewer_page.evaluate(_DIM_PROJECT, [3, 3, 0])
+    viewer_page.mouse.click(p["x"], p["y"])
+    viewer_page.mouse.click(p["x"] + 40, p["y"], click_count=2)
+    frames(viewer_page, 10)
+    after = viewer_page.evaluate(
+        "() => window.threejsViewer._camera.position.toArray()"
+    )
+    assert after == pytest.approx(before)
+    assert viewer_page.evaluate("() => window.threejsViewer.isDimensionToolActive()")
