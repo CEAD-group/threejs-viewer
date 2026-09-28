@@ -9,7 +9,6 @@ import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { TDSLoader } from 'three/addons/loaders/TDSLoader.js';
-import { HDRCubeTextureLoader } from 'three/addons/loaders/HDRCubeTextureLoader.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
@@ -6670,6 +6669,112 @@ function inflateGzipBase64(b64) {
 }
 
 /**
+ * Decode a Radiance RGBE (.hdr) image to half-float RGBA, the way three's
+ * HDRLoader does (value = byte * 2^(e-128) / 255, clamped to the float16
+ * max). In-file so the viewer imports neither HDRLoader nor
+ * HDRCubeTextureLoader from three/addons: an embedder serving its own copy of
+ * the addons only has to ship what the model loaders already need.
+ * Header: `#?RADIANCE`, then lines until a blank one, then `-Y <h> +X <w>`
+ * (rows top-down). Pixels are new-style RLE scanlines when the width is in
+ * [8, 32767] and the stream starts 02 02, else flat RGBE quads.
+ * @param {ArrayBuffer} buffer
+ * @returns {{width: number, height: number, data: Uint16Array}}
+ */
+function decodeRadianceHDR(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let pos = 0;
+    const readLine = () => {
+        const end = bytes.indexOf(0x0a, pos);
+        if (end < 0) throw new Error('decodeRadianceHDR: truncated header');
+        const line = String.fromCharCode.apply(null, /** @type {any} */ (bytes.subarray(pos, end)));
+        pos = end + 1;
+        return line;
+    };
+    if (!readLine().startsWith('#?')) throw new Error('decodeRadianceHDR: not a Radiance file');
+    for (let line = readLine(); line !== ''; line = readLine()) {
+        if (line.startsWith('FORMAT=') && line !== 'FORMAT=32-bit_rle_rgbe') {
+            throw new Error(`decodeRadianceHDR: unsupported ${line}`);
+        }
+    }
+    const dims = /^-Y (\d+) \+X (\d+)$/.exec(readLine());
+    if (!dims) throw new Error('decodeRadianceHDR: unsupported orientation (need -Y h +X w)');
+    const height = parseInt(dims[1], 10), width = parseInt(dims[2], 10);
+    const rgbe = new Uint8Array(width * height * 4);
+    const rle = width >= 8 && width <= 0x7fff
+        && bytes[pos] === 2 && bytes[pos + 1] === 2 && !(bytes[pos + 2] & 0x80);
+    if (rle) {
+        const scan = new Uint8Array(width * 4);
+        for (let y = 0; y < height; y++) {
+            if (bytes[pos] !== 2 || bytes[pos + 1] !== 2
+                || ((bytes[pos + 2] << 8) | bytes[pos + 3]) !== width) {
+                throw new Error('decodeRadianceHDR: bad scanline header');
+            }
+            pos += 4;
+            // Four planes (r, g, b, e), each a stream of runs: count > 128 is
+            // count-128 copies of one byte, else count literal bytes.
+            for (let ptr = 0; ptr < scan.length;) {
+                let count = bytes[pos++];
+                const run = count > 128;
+                if (run) count -= 128;
+                if (!(count > 0) || ptr + count > scan.length || pos >= bytes.length) {
+                    throw new Error('decodeRadianceHDR: bad scanline data');
+                }
+                if (run) scan.fill(bytes[pos++], ptr, ptr + count);
+                else { scan.set(bytes.subarray(pos, pos + count), ptr); pos += count; }
+                ptr += count;
+            }
+            const row = y * width * 4;
+            for (let x = 0; x < width; x++) {
+                rgbe[row + x * 4] = scan[x];
+                rgbe[row + x * 4 + 1] = scan[width + x];
+                rgbe[row + x * 4 + 2] = scan[2 * width + x];
+                rgbe[row + x * 4 + 3] = scan[3 * width + x];
+            }
+        }
+    } else {
+        if (bytes.length - pos < rgbe.length) throw new Error('decodeRadianceHDR: truncated pixel data');
+        rgbe.set(bytes.subarray(pos, pos + rgbe.length));
+    }
+    const data = new Uint16Array(width * height * 4);
+    const one = THREE.DataUtils.toHalfFloat(1);
+    for (let i = 0; i < data.length; i += 4) {
+        const scale = Math.pow(2, rgbe[i + 3] - 128) / 255;
+        data[i] = THREE.DataUtils.toHalfFloat(Math.min(rgbe[i] * scale, 65504));
+        data[i + 1] = THREE.DataUtils.toHalfFloat(Math.min(rgbe[i + 1] * scale, 65504));
+        data[i + 2] = THREE.DataUtils.toHalfFloat(Math.min(rgbe[i + 2] * scale, 65504));
+        data[i + 3] = one;
+    }
+    return { width, height, data };
+}
+
+/**
+ * Six Radiance .hdr faces (px, nx, py, ny, pz, nz) as a CubeTexture with the
+ * settings HDRCubeTextureLoader uses for HalfFloatType: linear-sRGB, linear
+ * filters, no mipmaps, rows top-down (DataTexture's flipY is false).
+ * @param {ArrayBuffer[]} buffers
+ * @returns {THREE.CubeTexture}
+ */
+function buildHDRCubeTexture(buffers) {
+    const cube = new THREE.CubeTexture();
+    cube.type = THREE.HalfFloatType;
+    cube.colorSpace = THREE.LinearSRGBColorSpace;
+    cube.minFilter = cube.magFilter = THREE.LinearFilter;
+    cube.generateMipmaps = false;
+    cube.images = buffers.map((buf) => {
+        const { width, height, data } = decodeRadianceHDR(buf);
+        const face = new THREE.DataTexture(data, width, height);
+        face.type = cube.type;
+        face.colorSpace = cube.colorSpace;
+        face.format = cube.format;
+        face.minFilter = face.magFilter = THREE.LinearFilter;
+        face.generateMipmaps = false;
+        return face;
+    });
+    cube.needsUpdate = true;
+    return cube;
+}
+
+/**
  * Build the DRACOLoader that GLTFLoader delegates KHR_draco_mesh_compression
  * primitives to. Decoder source, in precedence order:
  *   1. `options.dracoDecoder` — `{wasmGzB64, wrapperGzB64}` inlined by
@@ -10222,8 +10327,12 @@ export class ThreeJSViewer {
         // is retained on `_envMap` so the toggle can restore it without a rebuild.
         this._envEnabled = this._lightingDefaults.envEnabled;
         this._envMap = null;
+        /** @type {THREE.WebGLRenderTarget|null} PMREM target that owns `_envMap` (disposed with it) */
+        this._envTarget = null;
         /** @type {THREE.CubeTexture|null} raw HDR cube, the visible-background source */
         this._envCube = null;
+        /** @type {Promise<void>} resolves once the initial cubemap has loaded (or failed) */
+        this._cubemapsReady = Promise.resolve();
         /** @type {Object<string, {format: string, faces?: Object<string, string>}>} named cubemap sets (_initCubemaps) */
         this._cubemapSets = {};
         // Show the environment cubemap as the background. URL `env_background` > option > off.
@@ -10641,7 +10750,7 @@ export class ThreeJSViewer {
         // Environment cubemap. Intensity is set up front (not when the async
         // load lands) so it is right immediately and survives cubemap switches.
         this._scene.environmentIntensity = this._lightingDefaults.envIntensity;
-        this._initCubemaps();
+        this._cubemapsReady = this._initCubemaps();
 
         // Controls: bespoke ViewerControls (one implementation, two modes).
         // - turntable: yaw around world-Z, pitch around camera-right (clamped near pole)
@@ -11091,8 +11200,10 @@ export class ThreeJSViewer {
      *      static files (ribweaver).
      * cubemapData in any other shape (the pre-HDR base64 JPEGs, or base64 of a
      * 404 body from an embedder still fetching `static/*.jpg`) falls to 3.
-     * A later call replaces (and disposes) the previous cube; a call superseded
-     * by a newer one before it finishes is discarded.
+     * HDR faces are decoded in-file (`decodeRadianceHDR`); LDR sets go through
+     * `CubeTextureLoader`. A later call replaces (and disposes) the previous
+     * cube and PMREM target; a call superseded by a newer one, or by
+     * `destroy()`, before it finishes is discarded.
      * @param {string|null} [name] key into `options.cubemaps`
      */
     async _loadCubemap(name = null) {
@@ -11107,43 +11218,50 @@ export class ThreeJSViewer {
                 + 'loading static/cubemaps/paul-lobe-haus/*.hdr next to the viewer module instead');
         }
         const token = (this._cubemapToken = (this._cubemapToken || 0) + 1);
+        const stale = () => token !== this._cubemapToken || this._destroyed;
+        const dir = set ? `static/cubemaps/${name}` : 'static/cubemaps/paul-lobe-haus';
+        const staticUrls = () => faces.map(f => new URL(`${dir}/${f}.${format}`, import.meta.url).href);
         /** @type {string[]} */
         let blobUrls = [];
         try {
-            let urls;
-            if (inline) {
-                const buffers = await Promise.all(faces.map(f => inflateGzipBase64(cubemapData[f])));
-                const mime = format === 'hdr' ? undefined : `image/${format === 'jpg' ? 'jpeg' : format}`;
-                urls = blobUrls = buffers.map(b => URL.createObjectURL(new Blob([b], mime ? { type: mime } : {})));
-            } else {
-                const dir = set ? `static/cubemaps/${name}` : 'static/cubemaps/paul-lobe-haus';
-                urls = faces.map(f => new URL(`${dir}/${f}.${format}`, import.meta.url).href);
-            }
             /** @type {THREE.CubeTexture} */
             let cubeTexture;
             if (format === 'hdr') {
-                cubeTexture = await new HDRCubeTextureLoader().loadAsync(urls);
+                const buffers = await Promise.all(inline
+                    ? faces.map(f => inflateGzipBase64(cubemapData[f]))
+                    : staticUrls().map(u => fetchArrayBuffer(u, `cubemap '${name ?? 'default'}'`)));
+                if (stale()) return;
+                cubeTexture = buildHDRCubeTexture(buffers);
             } else {
+                let urls = staticUrls();
+                if (inline) {
+                    const buffers = await Promise.all(faces.map(f => inflateGzipBase64(cubemapData[f])));
+                    const mime = `image/${format === 'jpg' ? 'jpeg' : format}`;
+                    urls = blobUrls = buffers.map(b => URL.createObjectURL(new Blob([b], { type: mime })));
+                }
                 cubeTexture = await new THREE.CubeTextureLoader().loadAsync(urls);
                 cubeTexture.colorSpace = THREE.SRGBColorSpace;
             }
-            if (token !== this._cubemapToken) {
+            if (stale()) {
                 cubeTexture.dispose();
                 return;
             }
             const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
-            const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
+            const target = pmremGenerator.fromCubemap(cubeTexture);
             pmremGenerator.dispose();
+            // The render target owns the PMREM texture and its framebuffer;
+            // disposing the texture alone would leak the framebuffer.
+            this._envTarget?.dispose();
             this._envCube?.dispose();
-            this._envMap?.dispose();
             // The raw cube is kept (not disposed) for the optional visible background.
             this._envCube = cubeTexture;
-            this._envMap = envMap;
+            this._envTarget = target;
+            this._envMap = target.texture;
             this._cubemapName = name;
             this._syncEnvironment();
             this._applyBackground();
         } catch (err) {
-            console.error('Failed to load environment cubemap:', err);
+            if (!this._destroyed) console.error('Failed to load environment cubemap:', err);
         } finally {
             blobUrls.forEach(u => URL.revokeObjectURL(u));
         }
@@ -17819,6 +17937,13 @@ export class ThreeJSViewer {
         this._axisControls.dispose();
         this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
+        // An in-flight _loadCubemap sees the bumped token and discards its result.
+        this._cubemapToken = (this._cubemapToken || 0) + 1;
+        this._scene.environment = null;
+        if (this._scene.background === this._envCube) this._scene.background = null;
+        this._envTarget?.dispose();
+        this._envCube?.dispose();
+        this._envTarget = this._envCube = this._envMap = null;
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();

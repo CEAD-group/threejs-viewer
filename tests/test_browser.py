@@ -3536,6 +3536,172 @@ def test_environment_background_toggle(page):
         client.disconnect()
 
 
+_CUBE_FACES = ("px", "nx", "py", "ny", "pz", "nz")
+
+
+def _hdr_face(w, h, pixels, rle):
+    """A Radiance .hdr byte string of ``(r, g, b, e)`` quads, top-down rows.
+
+    ``rle`` writes new-style RLE scanlines, one run per plane: a repeat run
+    when the plane is constant, else a literal run (``w`` must be <= 128).
+    """
+    out = bytearray(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n")
+    out += f"-Y {h} +X {w}\n".encode()
+    if not rle:
+        for px in pixels:
+            out += bytes(px)
+        return bytes(out)
+    for y in range(h):
+        row = pixels[y * w : (y + 1) * w]
+        out += bytes((2, 2, w >> 8, w & 255))
+        for c in range(4):
+            plane = [px[c] for px in row]
+            if len(set(plane)) == 1:
+                out += bytes((128 + w, plane[0]))
+            else:
+                out += bytes([w] + plane)
+    return bytes(out)
+
+
+_HALF_TO_FLOAT_JS = (
+    "const h2f = (h) => { const s = h >> 15 & 1, e = h >> 10 & 0x1f, m = h & 0x3ff;"
+    " const v = e === 0 ? m * 2 ** -24 : e === 31 ? (m ? NaN : Infinity)"
+    "   : (1 + m / 1024) * 2 ** (e - 15);"
+    " return s ? -v : v; };"
+)
+
+
+@pytest.mark.browser
+def test_hdr_decoder_pins_pixels_and_texture_settings(viewer_client, viewer_page):
+    """The in-file Radiance decoder stands in for three's HDRCubeTextureLoader
+    (dropped so an embedder's vendored addons need not ship HDRLoader): RLE
+    and flat faces decode to the same known half-float values, top-down, with
+    that loader's texture settings. The committed 128x128 set loads first."""
+    import gzip
+
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envCube?.isCubeTexture === true", timeout=10_000
+    )
+    assert viewer_page.evaluate(
+        "() => { const im = window.threejsViewer._envCube.images[0].image;"
+        " return [im.width, im.height, im.data.length]; }"
+    ) == [128, 128, 128 * 128 * 4]
+
+    w, h = 8, 2
+    pixels = [
+        (x * 32 % 256, 255 - x * 16, y * 100, 128 + (x % 3) - 1 if y else 128)
+        for y in range(h)
+        for x in range(w)
+    ]
+    expected = [c * 2.0 ** (e - 128) / 255 for r, g, b, e in pixels for c in (r, g, b)]
+
+    def gz(b):
+        return base64.b64encode(gzip.compress(b, mtime=0)).decode()
+
+    sets = {}
+    for name, rle in (("tiny_rle", True), ("tiny_flat", False)):
+        face = _hdr_face(w, h, pixels, rle)
+        assert (b"\n\n-Y 2 +X 8\n\x02\x02" in face) == rle
+        sets[name] = {"format": "hdr", "faces": {f: gz(face) for f in _CUBE_FACES}}
+    viewer_page.evaluate(
+        "(sets) => Object.assign(window.threejsViewer._cubemapSets, sets)", sets
+    )
+    read = (
+        "() => { const v = window.threejsViewer; const cube = v._envCube;"
+        " const face = cube.images[0], im = face.image;"
+        + _HALF_TO_FLOAT_JS
+        + " const rgb = [];"
+        " for (let i = 0; i < im.data.length; i += 4)"
+        "   rgb.push(h2f(im.data[i]), h2f(im.data[i + 1]), h2f(im.data[i + 2]));"
+        " const alpha = Array.from(im.data).filter((_, i) => i % 4 === 3)"
+        "   .every(a => h2f(a) === 1);"
+        " return { name: v._cubemapName, width: im.width, height: im.height,"
+        "   rgb, alpha, faces: cube.images.length, types: [cube.type, face.type],"
+        "   spaces: [cube.colorSpace, face.colorSpace], flipY: face.flipY,"
+        "   mipmaps: cube.generateMipmaps || face.generateMipmaps,"
+        "   filters: [cube.minFilter, cube.magFilter, face.minFilter, face.magFilter],"
+        "   env: !!v._envMap && v._scene.environment === v._envMap }; }"
+    )
+    try:
+        for name in ("tiny_rle", "tiny_flat"):
+            viewer_page.evaluate(f"() => window.threejsViewer.setCubemap('{name}')")
+            state = viewer_page.evaluate(read)
+            assert state["name"] == name
+            assert (state["width"], state["height"], state["faces"]) == (w, h, 6)
+            assert len(state["rgb"]) == len(expected)
+            for got, want in zip(state["rgb"], expected):
+                # Half floats carry ~11 bits of mantissa.
+                assert abs(got - want) <= 1.5e-3 * max(1.0, abs(want)), (
+                    name,
+                    got,
+                    want,
+                )
+            assert state["alpha"] is True
+            # HalfFloatType, LinearSRGBColorSpace, LinearFilter.
+            assert state["types"] == [1016, 1016]
+            assert state["spaces"] == ["srgb-linear", "srgb-linear"]
+            assert state["flipY"] is False and state["mipmaps"] is False
+            assert state["filters"] == [1006] * 4
+            assert state["env"] is True
+    finally:
+        viewer_page.evaluate("() => localStorage.removeItem('tjsv.cubemap')")
+
+
+@pytest.mark.browser
+def test_cubemap_reload_disposes_previous_env(viewer_client, viewer_page):
+    """Replacing the cubemap disposes the previous PMREM render target (which
+    owns the environment texture and its framebuffer) and the raw cube."""
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envTarget != null", timeout=10_000
+    )
+    result = viewer_page.evaluate(
+        "async () => { const v = window.threejsViewer;"
+        " const target = v._envTarget, cube = v._envCube, map = v._envMap;"
+        " const calls = { target: 0, cube: 0 };"
+        " const t0 = target.dispose.bind(target);"
+        " target.dispose = () => { calls.target++; t0(); };"
+        " const c0 = cube.dispose.bind(cube);"
+        " cube.dispose = () => { calls.cube++; c0(); };"
+        " await v._loadCubemap(v._cubemapName);"
+        " return { ...calls,"
+        "   replaced: v._envTarget !== target && v._envCube !== cube && v._envMap !== map,"
+        "   env: v._scene.environment === v._envMap }; }"
+    )
+    assert result == {"target": 1, "cube": 1, "replaced": True, "env": True}
+
+
+@pytest.mark.browser
+def test_destroy_disposes_env_and_discards_inflight_cubemap(viewer_client, viewer_page):
+    """destroy() frees the PMREM target and raw cube, and a cubemap load still
+    in flight at destroy() lands nowhere (no environment on a dead scene)."""
+    errors = []
+    viewer_page.on(
+        "console", lambda m: errors.append(m.text) if m.type == "error" else None
+    )
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envTarget != null", timeout=10_000
+    )
+    result = viewer_page.evaluate(
+        "async () => { const first = window.threejsViewer;"
+        " const make = () => { const el = document.createElement('div');"
+        "   el.style.cssText = 'width:200px;height:150px';"
+        "   document.body.appendChild(el);"
+        "   return new first.constructor(el, { ...first._options, autoConnect: false }); };"
+        " const a = make(); await a._cubemapsReady;"
+        " const calls = { target: 0, cube: 0 };"
+        " const t = a._envTarget, c = a._envCube;"
+        " const t0 = t.dispose.bind(t); t.dispose = () => { calls.target++; t0(); };"
+        " const c0 = c.dispose.bind(c); c.dispose = () => { calls.cube++; c0(); };"
+        " a.destroy();"
+        " const b = make(); b.destroy(); await b._cubemapsReady;"
+        " const freed = (v) => v._envTarget === null && v._envCube === null"
+        "   && v._envMap === null && v._scene.environment === null;"
+        " return { ...calls, a: freed(a), b: freed(b) }; }"
+    )
+    assert result == {"target": 1, "cube": 1, "a": True, "b": True}
+    assert not [e for e in errors if "cubemap" in e.lower()], errors
+
+
 @pytest.mark.browser
 def test_polyline_pick_roundtrip(viewer_client, viewer_page):
     """Hovering + clicking a polyline in the browser sends a pick back to

@@ -56,6 +56,28 @@ def test_previous_blobs_finds_every_inlined_slot(build_mod):
         gzip.decompress(base64.b64decode(value, validate=True))
 
 
+def test_cubemap_faces_are_flat_rgbe(build_mod):
+    """Committed .hdr faces are flat RGBE, not RLE: run-length coding gzips
+    worse on HDR noise (+15% in viewer.html for the same pixels), so a
+    re-export that turns RLE back on is caught here."""
+    checked = 0
+    for d in build_mod.CUBEMAPS_DIR.iterdir():
+        for face in build_mod.CUBEMAP_FACES:
+            p = d / f"{face}.hdr"
+            if not p.is_file():
+                continue
+            raw = p.read_bytes()
+            i = raw.index(b"\n\n") + 2
+            j = raw.index(b"\n", i) + 1
+            dims = raw[i : j - 1].decode().split()
+            assert dims[0] == "-Y" and dims[2] == "+X", (p, dims)
+            h, w = int(dims[1]), int(dims[3])
+            assert raw[j : j + 2] != b"\x02\x02", f"{p} is RLE-encoded"
+            assert len(raw) - j == w * h * 4, p
+            checked += 1
+    assert checked >= 6
+
+
 def test_build_is_idempotent(build_mod, tmp_path, monkeypatch):
     """Two builds over the same sources produce byte-identical outputs, and a
     build over a committed viewer.html keeps its blob encodings."""
