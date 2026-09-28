@@ -136,7 +136,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {boolean} [sun]                              Shadow-casting sun (DirectionalLight) on/off (default true; URL `sun` wins)
  * @property {number} [sunIntensity]                      Sun intensity (default 2.0; URL `sun_intensity` wins)
  * @property {number} [sunAzimuth]                        Sun azimuth in degrees, XY plane from +X toward +Y (default -80; URL `sun_azimuth` wins)
- * @property {number} [sunElevation]                      Sun elevation in degrees above the XY plane (default 50; URL `sun_elevation` wins)
+ * @property {number} [sunElevation]                      Sun elevation in degrees above the XY plane, 0 to 90 (default 50; URL `sun_elevation` wins)
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
  * @property {string} [displayQuality]                    "high" (default) or "low": one clay material and a hemisphere + headlight rig, no IBL, sun or shadows (URL `display_quality` wins)
@@ -17169,8 +17169,9 @@ export class ThreeJSViewer {
      * unchanged. Transient: the Lighting panel persists its own edits, this
      * does not.
      * @param {Partial<SunState>} opts
-     *   enabled — on/off; intensity — light intensity; azimuth — degrees in the
-     *   XY plane from +X toward +Y; elevation — degrees above the XY plane.
+     *   enabled — on/off; intensity — light intensity (>= 0); azimuth — degrees
+     *   in the XY plane from +X toward +Y; elevation — degrees above the XY
+     *   plane, clamped to [0, 90].
      */
     setSun(opts = {}) {
         const st = this._sunState;
@@ -17180,7 +17181,8 @@ export class ThreeJSViewer {
             if (v != null && Number.isFinite(Number(v))) st[k] = Number(v);
         }
         st.intensity = Math.max(0, st.intensity);
-        st.elevation = Math.min(90, Math.max(-90, st.elevation));
+        // Above the horizon only: a sun below it lights from underneath.
+        st.elevation = Math.min(90, Math.max(0, st.elevation));
         this._sun.visible = st.enabled && this._displayQuality !== 'low';
         this._sun.intensity = st.intensity;
         this._sunFitKey = '';  // force a re-aim on the next frame

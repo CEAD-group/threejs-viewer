@@ -1922,7 +1922,12 @@ def test_set_sun_sends_only_given_fields(client):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"intensity": -0.1}, {"elevation": -91}, {"azimuth": float("nan")}],
+    [
+        {"intensity": -0.1},
+        {"elevation": -1},
+        {"elevation": 90.5},
+        {"azimuth": float("nan")},
+    ],
 )
 def test_set_sun_validates(client, kwargs):
     with pytest.raises(ValueError):

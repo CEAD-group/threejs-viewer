@@ -188,8 +188,8 @@ def _validate_sun(
     elevation = _validate_finite("sun elevation", elevation)
     if intensity is not None and intensity < 0:
         raise ValueError(f"sun intensity must be >= 0 (got {intensity!r})")
-    if elevation is not None and not -90 <= elevation <= 90:
-        raise ValueError(f"sun elevation must be in [-90, 90] (got {elevation!r})")
+    if elevation is not None and not 0 <= elevation <= 90:
+        raise ValueError(f"sun elevation must be in [0, 90] (got {elevation!r})")
     return intensity, azimuth, elevation
 
 
@@ -633,7 +633,7 @@ class ViewerClient:
                 ``True``). ``sun_intensity`` (default ``2.0``), ``sun_azimuth``
                 (degrees in the XY plane from +X toward +Y, default ``-80``)
                 and ``sun_elevation`` (degrees above the XY plane, default
-                ``50``, range ``[-90, 90]``) set its strength and direction.
+                ``50``, range ``[0, 90]``) set its strength and direction.
                 Like the other lighting kwargs these ride the viewer URL and
                 win over the Lighting panel's localStorage; change them at
                 runtime with :meth:`set_sun`.
@@ -4162,7 +4162,7 @@ class ViewerClient:
             azimuth: Degrees in the XY plane from +X toward +Y (default
                 ``-80``).
             elevation: Degrees above the XY plane (default ``50``), in
-                ``[-90, 90]``.
+                ``[0, 90]``; the sun never lights from below the horizon.
 
         Fields left ``None`` are unchanged. Re-sent on reconnect, so a
         browser refresh keeps the requested sun.

@@ -987,6 +987,7 @@ def test_viewer_url_display_quality():
         {"sun_intensity": -1},
         {"sun_intensity": float("nan")},
         {"sun_elevation": 91},
+        {"sun_elevation": -1},
         {"sun_azimuth": float("inf")},
     ],
 )
