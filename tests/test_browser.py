@@ -6985,6 +6985,24 @@ def test_add_menu_rail_stacks_and_panel_mode(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_menu_rail_is_solid_viewer_background(viewer_client, viewer_page):
+    """Rail tabs and slide-out bodies are opaque in the viewer's background
+    colour, and an embedder can re-theme them through --tjsv-menu-bg."""
+    menu_bg = (
+        "() => { const r = document.querySelector('.tjsv-rail-panel');"
+        " return [r.querySelector(':scope > .tjsv-menu-btn'),"
+        "         r.querySelector(':scope > .tjsv-menu')]"
+        "   .map(e => [getComputedStyle(e).backgroundColor,"
+        "              getComputedStyle(e).backdropFilter]); }"
+    )
+    assert viewer_page.evaluate(menu_bg) == [["rgb(34, 34, 34)", "none"]] * 2
+    viewer_page.evaluate(
+        "() => window.threejsViewer.el.style.setProperty('--tjsv-menu-bg', '#1c2128')"
+    )
+    assert viewer_page.evaluate(menu_bg) == [["rgb(28, 33, 40)", "none"]] * 2
+
+
+@pytest.mark.browser
 def test_add_menu_reserved_shortcut_is_not_bound(viewer_client, viewer_page):
     """A client item may display a viewer key but never binds it."""
     page = viewer_page
