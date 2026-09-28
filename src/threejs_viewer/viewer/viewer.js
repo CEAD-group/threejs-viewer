@@ -16162,6 +16162,12 @@ export class ThreeJSViewer {
             case 'set_display_quality':
                 this.setDisplayQuality(data.quality);
                 break;
+            case 'set_environment_background':
+                this.setEnvironmentBackground(!!data.enabled);
+                break;
+            case 'set_cubemap':
+                this.setCubemap(String(data.name));
+                break;
             case 'set_sun':
                 // Programmatic twin of the Lighting panel's Sun section.
                 this.setSun({

@@ -24,6 +24,14 @@ def client():
     return c
 
 
+@pytest.fixture
+def connected_client(client):
+    """The mocked client with a viewer "connected": methods that record state
+    for the reconnect replay only send while ``_ws`` is set."""
+    client._ws = object()
+    return client
+
+
 # === add_group ===
 
 
@@ -1893,7 +1901,8 @@ def test_set_grid_color(client):
 # === set_display_quality ===
 
 
-def test_set_display_quality_sends_and_records(client):
+def test_set_display_quality_sends_and_records(connected_client):
+    client = connected_client
     client.set_display_quality("LOW")
     assert client._messages == [{"type": "set_display_quality", "quality": "low"}]
     assert client._display_quality_state == "low"
@@ -1904,7 +1913,8 @@ def test_set_display_quality_sends_and_records(client):
 # === set_sun ===
 
 
-def test_set_sun_sends_only_given_fields(client):
+def test_set_sun_sends_only_given_fields(connected_client):
+    client = connected_client
     client.set_sun(enabled=True, azimuth=45)
     client.set_sun(intensity=3, elevation=20)
     assert client._messages == [
@@ -1933,3 +1943,30 @@ def test_set_sun_validates(client, kwargs):
     with pytest.raises(ValueError):
         client.set_sun(**kwargs)
     assert client._messages == []
+
+
+# === set_environment_background / set_cubemap ===
+
+
+def test_set_environment_background_sends_and_records(connected_client):
+    client = connected_client
+    client.set_environment_background()
+    client.set_environment_background(False)
+    assert client._messages == [
+        {"type": "set_environment_background", "enabled": True},
+        {"type": "set_environment_background", "enabled": False},
+    ]
+    assert client._environment_background_state is False
+    with pytest.raises(ValueError):
+        client.set_environment_background("yes")
+
+
+def test_set_cubemap_sends_and_records(connected_client):
+    client = connected_client
+    client.set_cubemap("paul-lobe-haus")
+    assert client._messages == [{"type": "set_cubemap", "name": "paul-lobe-haus"}]
+    assert client._cubemap_state == "paul-lobe-haus"
+    for bad in ("", None, 3):
+        with pytest.raises(ValueError):
+            client.set_cubemap(bad)
+    assert len(client._messages) == 1

@@ -3536,6 +3536,42 @@ def test_environment_background_toggle(page):
         client.disconnect()
 
 
+@pytest.mark.browser
+def test_set_environment_background_and_cubemap_messages(viewer_client, viewer_page):
+    """The Python runtime setters reach the JS setters: the cube becomes the
+    background and back, a known set name reloads, an unknown one warns and
+    keeps the current set."""
+    warnings = []
+    viewer_page.on(
+        "console", lambda m: warnings.append(m.text) if m.type == "warning" else None
+    )
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envCube?.isCubeTexture === true", timeout=10_000
+    )
+    viewer_client.set_environment_background(True)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._scene.background?.isCubeTexture === true"
+    )
+    viewer_client.set_environment_background(False)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._scene.background.getHex() === 0x222222"
+    )
+    viewer_client.set_cubemap("paul-lobe-haus")
+    settle(viewer_client)
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._cubemapName === 'paul-lobe-haus'", timeout=10_000
+    )
+    viewer_client.set_cubemap("no-such-set")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.threejsViewer._cubemapName") == (
+        "paul-lobe-haus"
+    )
+    assert any("no-such-set" in w for w in warnings), warnings
+    viewer_page.evaluate("() => localStorage.removeItem('tjsv.cubemap')")
+
+
 _CUBE_FACES = ("px", "nx", "py", "ny", "pz", "nz")
 
 

@@ -741,6 +741,11 @@ class ViewerClient:
         self._sun_state: Dict[str, Any] = {}
         # Runtime set_display_quality value, re-sent on reconnect.
         self._display_quality_state: Optional[str] = None
+        # Runtime set_environment_background / set_cubemap values, re-sent on
+        # reconnect (the browser remembers the cubemap in localStorage, but a
+        # different profile or a cleared one would not).
+        self._environment_background_state: Optional[bool] = None
+        self._cubemap_state: Optional[str] = None
         # Client-defined menus (add_menu): id -> the add_menu message, kept
         # current through update_menu_item so a reconnect replays the latest
         # state; plus the callbacks fed by the viewer's menu_action messages.
@@ -1005,6 +1010,27 @@ class ViewerClient:
                             "quality": self._display_quality_state,
                         }
                     )
+                )
+            except Exception:
+                pass
+
+        # Re-apply the runtime environment background and cubemap choice.
+        if self._environment_background_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {
+                            "type": "set_environment_background",
+                            "enabled": self._environment_background_state,
+                        }
+                    )
+                )
+            except Exception:
+                pass
+        if self._cubemap_state is not None:
+            try:
+                websocket.send(
+                    json.dumps({"type": "set_cubemap", "name": self._cubemap_state})
                 )
             except Exception:
                 pass
@@ -4164,8 +4190,9 @@ class ViewerClient:
             elevation: Degrees above the XY plane (default ``50``), in
                 ``[0, 90]``; the sun never lights from below the horizon.
 
-        Fields left ``None`` are unchanged. Re-sent on reconnect, so a
-        browser refresh keeps the requested sun.
+        Fields left ``None`` are unchanged. Recorded and re-sent on
+        reconnect, so a browser refresh keeps the requested sun; may be called
+        before a viewer connects.
         """
         intensity, azimuth, elevation = _validate_sun(intensity, azimuth, elevation)
         msg: Dict[str, Any] = {}
@@ -4178,7 +4205,8 @@ class ViewerClient:
         if elevation is not None:
             msg["elevation"] = elevation
         self._sun_state.update(msg)
-        self._send({"type": "set_sun", **msg})
+        if self._ws is not None:
+            self._send({"type": "set_sun", **msg})
 
     def set_display_quality(self, quality: str) -> None:
         """Switch render quality at runtime.
@@ -4189,13 +4217,53 @@ class ViewerClient:
         camera headlight. ``"high"`` restores materials and lighting; the sun
         and environment settings are kept throughout, only suppressed.
 
-        Re-sent on reconnect, so a browser refresh keeps the requested quality.
+        Recorded and re-sent on reconnect, so a browser refresh keeps the
+        requested quality; may be called before a viewer connects.
         """
         normalized = _validate_display_quality(quality)
         if normalized is None:
             raise ValueError("display_quality must be 'high' or 'low' (got None)")
         self._display_quality_state = normalized
-        self._send({"type": "set_display_quality", "quality": normalized})
+        if self._ws is not None:
+            self._send({"type": "set_display_quality", "quality": normalized})
+
+    def set_environment_background(self, enabled: bool = True) -> None:
+        """Show the environment cubemap as the scene background at runtime.
+
+        The runtime twin of ``ViewerClient(environment_background=True)``:
+        ``True`` replaces the flat background colour with the raw HDR cube (a
+        debug view of the image-based lighting), ``False`` restores the flat
+        colour (:meth:`set_background`). Takes effect once the cubemap has
+        loaded if sent earlier.
+
+        Recorded and re-sent on reconnect, so a browser refresh keeps the
+        requested background; may be called before a viewer connects.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError(f"enabled must be a bool, got {enabled!r}")
+        self._environment_background_state = enabled
+        if self._ws is not None:
+            self._send({"type": "set_environment_background", "enabled": enabled})
+
+    def set_cubemap(self, name: str) -> None:
+        """Switch the environment cubemap to a named set at runtime.
+
+        ``name`` is a folder under the viewer's ``static/cubemaps/`` (the
+        Lighting panel's Cubemap picker lists the same names; only
+        ``"paul-lobe-haus"`` ships today). The viewer keeps its current set
+        and logs a console warning for a name it does not have: Python
+        cannot see the browser's list, so no validation beyond a non-empty
+        string happens here. The browser also persists the choice in
+        localStorage like a panel pick.
+
+        Recorded and re-sent on reconnect, so a browser refresh keeps the
+        requested set; may be called before a viewer connects.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"cubemap name must be a non-empty string, got {name!r}")
+        self._cubemap_state = name
+        if self._ws is not None:
+            self._send({"type": "set_cubemap", "name": name})
 
     def set_depth_cue(
         self,

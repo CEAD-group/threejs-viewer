@@ -994,3 +994,27 @@ def test_viewer_url_display_quality():
 def test_viewer_sun_kwargs_validated(kwargs):
     with pytest.raises(ValueError):
         ViewerClient(**kwargs)
+
+
+def test_reconnect_replays_runtime_lighting_state(bound_client):
+    """set_sun, set_display_quality, set_environment_background and
+    set_cubemap are recorded before any viewer connects and sent on connect."""
+    bound_client.set_sun(enabled=True, azimuth=30)
+    bound_client.set_display_quality("low")
+    bound_client.set_environment_background(True)
+    bound_client.set_cubemap("paul-lobe-haus")
+    want = {
+        "set_sun",
+        "set_display_quality",
+        "set_environment_background",
+        "set_cubemap",
+    }
+    seen = {}
+    with ws_connect(f"ws://127.0.0.1:{bound_client.port}", open_timeout=5) as ws:
+        while not want <= set(seen):
+            msg = json.loads(ws.recv(timeout=5))
+            seen[msg["type"]] = msg
+    assert seen["set_sun"] == {"type": "set_sun", "enabled": True, "azimuth": 30.0}
+    assert seen["set_display_quality"]["quality"] == "low"
+    assert seen["set_environment_background"]["enabled"] is True
+    assert seen["set_cubemap"]["name"] == "paul-lobe-haus"
