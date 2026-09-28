@@ -127,12 +127,19 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://${host}:${port}` where host comes from the `ws_host` query param (default `localhost`) and port from the `ws_port` query param, `wsPort`, or 5666
  * @property {number} [wsPort]                            WebSocket port used when `wsUrl` is not provided (default 5666)
  * @property {boolean} [autoConnect]                      Auto-connect on construction (default true)
- * @property {Object<string, string>} [cubemapData]       Map of face name -> base64 JPEG
+ * @property {Object<string, string>} [cubemapData]       Map of face name (px/nx/py/ny/pz/nz) -> gzip+base64 Radiance HDR (omit to load static/cubemaps/paul-lobe-haus/*.hdr next to the module)
+ * @property {Object<string, {format: string, faces: Object<string, string>}>} [cubemaps]  Named cubemap sets (format hdr/png/jpg, faces gzip+base64) offered in the Lighting panel's picker; URL `cubemap` / localStorage pick one
+ * @property {boolean} [environmentBackground]           Show the environment cubemap as the scene background (default false; URL `env_background` wins)
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
+ * @property {boolean} [sun]                              Shadow-casting sun (DirectionalLight) on/off (default true; URL `sun` wins)
+ * @property {number} [sunIntensity]                      Sun intensity (default 2.0; URL `sun_intensity` wins)
+ * @property {number} [sunAzimuth]                        Sun azimuth in degrees, XY plane from +X toward +Y (default -80; URL `sun_azimuth` wins)
+ * @property {number} [sunElevation]                      Sun elevation in degrees above the XY plane, 0 to 90 (default 50; URL `sun_elevation` wins)
  * @property {number} [ambientIntensity]                  Ambient-light intensity (default 1.5)
  * @property {string} [toneMapping]                       Tone-mapping mode: one of none/linear/reinhard/cineon/aces/agx/neutral (default "aces")
+ * @property {string} [displayQuality]                    "high" (default) or "low": one clay material and a hemisphere + headlight rig, no IBL, sun or shadows (URL `display_quality` wins)
  * @property {number} [fov]                               Perspective camera vertical field-of-view in degrees (default 40, clamped to 1–179). Overridable per page via the `fov` URL query param, which wins over this option.
  * @property {number | null} [viewHelperSize]            View gimbal square in CSS px (clamped to 32–512). Omitted/null = auto: 128, or 80 when the canvas' shorter side is under 500 px (issue #233). Overridable per page via the `view_helper_size` URL query param; `setViewHelperSize()` changes it at runtime.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
@@ -565,8 +572,7 @@ function makeChannelApply(viewer) {
                 }
                 obj.traverse(/** @param {any} child */ (child) => {
                     if (!child.material) return;
-                    const mats = Array.isArray(child.material) ? child.material : [child.material];
-                    for (const mat of mats) { if (mat.color) mat.color.setHex(color); }
+                    for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(color); }
                 });
             }
         },
@@ -1058,6 +1064,94 @@ const LS_KEY_ENVIRONMENT_INTENSITY = 'tjsv.environmentIntensity';
 const LS_KEY_AMBIENT_INTENSITY = 'tjsv.ambientIntensity';
 const LS_KEY_TONE_MAPPING = 'tjsv.toneMapping';
 const LS_KEY_ENVIRONMENT_MAP = 'tjsv.environmentMap';
+const LS_KEY_CUBEMAP = 'tjsv.cubemap';
+
+// Sun (shadow-casting DirectionalLight). Azimuth is degrees in the XY plane
+// from +X toward +Y (Z-up), elevation degrees above the XY plane. The default
+// sits over the left shoulder of the default iso camera (which looks from
+// azimuth -45°), so shadows fall away from the viewer.
+const DEFAULT_SUN_ENABLED = true;
+const DEFAULT_SUN_INTENSITY = 2.0;
+const DEFAULT_SUN_AZIMUTH = -80;
+const DEFAULT_SUN_ELEVATION = 50;
+const SUN_SHADOW_MAP_SIZE = 2048;
+const SUN_SHADOW_RADIUS = 4;
+
+// Low display quality (setDisplayQuality): opaque lit meshes share one matte
+// clay material, and a hemisphere light plus a camera headlight (no shadows)
+// replace the IBL and the sun.
+const DISPLAY_QUALITIES = /** @type {const} */ (['high', 'low']);
+const CLAY_COLOR = 0xa8a6a2;
+const LOW_HEMI_SKY = 0xffffff;
+const LOW_HEMI_GROUND = 0x303030;
+const LOW_HEMI_INTENSITY = 0.5;
+const LOW_HEADLIGHT_INTENSITY = 1.4;
+// Headlight offset from the eye, in multiples of the orbit distance along the
+// camera's right/up axes: raking light from the upper left reads the form.
+const LOW_HEADLIGHT_RIGHT = -0.4;
+const LOW_HEADLIGHT_UP = 0.6;
+
+const _headlightRight = new THREE.Vector3();
+const _headlightUp = new THREE.Vector3();
+
+/** @param {any} raw @returns {string|null} "high"/"low", or null when unset or unknown */
+function parseDisplayQuality(raw) {
+    if (raw === null || raw === undefined || raw === '') return null;
+    const s = String(raw).toLowerCase();
+    return /** @type {readonly string[]} */ (DISPLAY_QUALITIES).includes(s) ? s : null;
+}
+const LS_KEY_SUN = 'tjsv.sun';
+const LS_KEY_SUN_INTENSITY = 'tjsv.sunIntensity';
+const LS_KEY_SUN_AZIMUTH = 'tjsv.sunAzimuth';
+const LS_KEY_SUN_ELEVATION = 'tjsv.sunElevation';
+
+/**
+ * @typedef {{enabled: boolean, intensity: number, azimuth: number, elevation: number}} SunState
+ */
+
+/**
+ * Resolve the sun's initial state with the lighting panel's precedence:
+ * URL param (`sun`, `sun_intensity`, `sun_azimuth`, `sun_elevation`) >
+ * `ThreeJSViewer` option (`sun`, `sunIntensity`, `sunAzimuth`, `sunElevation`)
+ * > localStorage > hard default. `reset` is the same without localStorage.
+ * Invalid values fall through to the next level.
+ * @param {ThreeJSViewerOptions} options
+ * @param {URLSearchParams} urlParams
+ * @returns {SunState & {reset: SunState}}
+ */
+function resolveSunDefaults(options, urlParams) {
+    /** @type {(raw: any) => (number|null)} */
+    const num = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return null;
+        const n = typeof raw === 'number' ? raw : parseFloat(raw);
+        return Number.isFinite(n) ? n : null;
+    };
+    /** @type {(key: string) => (string|null)} */
+    const ls = (key) => {
+        try { return localStorage.getItem(key); } catch (e) { return null; }
+    };
+    /** @type {(vals: any[], parse: (raw: any) => any, fallback: any) => any} */
+    const pick = (vals, parse, fallback) => {
+        for (const v of vals) {
+            const p = parse(v);
+            if (p != null) return p;
+        }
+        return fallback;
+    };
+    const o = /** @type {any} */ (options);
+    const fields = /** @type {const} */ ([
+        ['enabled', 'sun', 'sun', LS_KEY_SUN, parseBoolOption, DEFAULT_SUN_ENABLED],
+        ['intensity', 'sun_intensity', 'sunIntensity', LS_KEY_SUN_INTENSITY, num, DEFAULT_SUN_INTENSITY],
+        ['azimuth', 'sun_azimuth', 'sunAzimuth', LS_KEY_SUN_AZIMUTH, num, DEFAULT_SUN_AZIMUTH],
+        ['elevation', 'sun_elevation', 'sunElevation', LS_KEY_SUN_ELEVATION, num, DEFAULT_SUN_ELEVATION],
+    ]);
+    const out = /** @type {any} */ ({ reset: {} });
+    for (const [name, urlKey, optKey, lsKey, parse, fallback] of fields) {
+        out[name] = pick([urlParams.get(urlKey), o[optKey], ls(lsKey)], parse, fallback);
+        out.reset[name] = pick([urlParams.get(urlKey), o[optKey]], parse, fallback);
+    }
+    return out;
+}
 
 // Tone-mapping mode name -> THREE.* constant. Resolved lazily so THREE only
 // needs to be loaded when the viewer actually instantiates.
@@ -1340,6 +1434,59 @@ function depthMaterialFields(params, defaultDepthWrite) {
 }
 
 /**
+ * A mesh's own materials, past a display swap (debug shading, low-quality
+ * clay) that parks them in `userData.originalMaterial`. set_color/set_opacity
+ * edit these, so a shared swap material is never recoloured.
+ * @param {any} obj
+ * @returns {any[]}
+ */
+function ownMaterials(obj) {
+    const m = obj.userData.originalMaterial !== undefined ? obj.userData.originalMaterial : obj.material;
+    return Array.isArray(m) ? m : [m];
+}
+
+/**
+ * The materials a mesh wears right now: a shared clay/debug swap, or its own.
+ * @param {any} obj
+ * @returns {any[]}
+ */
+function currentMaterials(obj) {
+    return Array.isArray(obj.material) ? obj.material : [obj.material];
+}
+
+/**
+ * Worn and own materials of a mesh, each once: what a display-state pass
+ * (fog scope, M wireframe) must reach so neither a swap nor the parked
+ * original comes back stale.
+ * @param {any} obj
+ * @returns {any[]}
+ */
+function wornAndOwnMaterials(obj) {
+    return [...new Set([...currentMaterials(obj), ...ownMaterials(obj)])].filter(Boolean);
+}
+
+/**
+ * Whether a mesh under a tracked object casts / receives the sun's shadow.
+ * Fat lines are instanced Meshes whose depth pass is meaningless; grids,
+ * highlight/primitive outlines and wire overlays are furniture. A translucent
+ * volume casting a full-black shadow reads wrong (ribweaver's workzone fill),
+ * so it only receives; judged on the mesh's own materials, past a clay/debug
+ * swap. Read by _updateSun's re-flag walk and by applyOpacity, the one place
+ * transparent/opacity change afterwards.
+ * @param {any} o
+ * @returns {{cast: boolean, receive: boolean}}
+ */
+function shadowRoleFor(o) {
+    const ud = o.userData;
+    if (o.isLine2 || o.isLineSegments2 || ud.isGrid || ud.__highlightOutline || ud.__primitiveOutline
+        || (o.parent && o.parent.userData.wireframeOverlay === o)) {
+        return { cast: false, receive: false };
+    }
+    const translucent = ownMaterials(o).some((/** @type {any} */ m) => m && (m.transparent || m.opacity < 1));
+    return { cast: !translucent, receive: true };
+}
+
+/**
  * @param {THREE.Object3D} obj
  * @param {number} opacity
  */
@@ -1353,8 +1500,7 @@ function applyOpacity(obj, opacity) {
         // Same for a primitive's `outline`: an accent that follows the fill's
         // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        for (const mat of mats) {
+        for (const mat of ownMaterials(child)) {
             const wasTransparent = mat.transparent;
             mat.transparent = opacity < 1;
             mat.opacity = opacity;
@@ -1362,6 +1508,11 @@ function applyOpacity(obj, opacity) {
             if (!mat.userData || !mat.userData.__depthWriteExplicit) mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
         }
+        // A mesh made translucent stops casting the sun's shadow (and an
+        // opaque one starts); castShadow is otherwise only re-flagged when
+        // the object set changes. A billboard root is re-flagged from
+        // _updateSun's walk, which never casts, so keep that decision.
+        if (child.isMesh && !child.userData.__noCast) child.castShadow = shadowRoleFor(child).cast;
         // transparent/depthWrite just changed, and a silhouette highlight is
         // only legible on a depth-priming mesh (see resolveHighlightStyle) — so a highlight
         // riding on this mesh may need to swap style. Collected and re-applied
@@ -1760,6 +1911,19 @@ function buildFloorGridMesh(data) {
     mesh.userData.excludeFromBounds = true;
     mesh.raycast = () => {};
     return mesh;
+}
+
+/**
+ * Recolour a shader floor grid's lines in place. `centerColor` null keeps the
+ * grid's own axis-line setting.
+ * @param {THREE.Mesh} grid
+ * @param {{color: number, centerColor: number|null}} style
+ */
+function applyGridColor(grid, style) {
+    const u = /** @type {THREE.ShaderMaterial} */ (grid.material).uniforms;
+    u.uColor.value.set(style.color);
+    if (style.centerColor != null) u.uCenterColor.value.set(style.centerColor);
+    else if (!u.uCenterLines.value) u.uCenterColor.value.set(style.color);
 }
 
 // ========== Billboards ==========
@@ -6078,6 +6242,7 @@ class MenuController {
 
     /** @param {MenuItemSpec} it @param {boolean} on */
     _applyEye(it, on) {
+        this._viewer._shadowDirty = true;
         if (typeof it.apply === 'function') return it.apply(on, it) !== false;
         for (const [objId, obj] of this._viewer._objects) {
             if (obj && this._eyeOwns(it, objId)) obj.visible = on;
@@ -6171,6 +6336,9 @@ class ShadingDebugController {
         this.v = viewer;
         this.wireframeMode = 0;
         this.shadingMode = 0;
+        // Low display quality: eligible meshes wear _clayMat (debug modes win).
+        this.clay = false;
+        this._clayMat = null;
         this._normalMat = null;
         this._uvMat = null;
         this._uvTex = null;
@@ -6182,36 +6350,59 @@ class ShadingDebugController {
     }
 
     applyWireframe() {
-        const mode = this.wireframeMode;
-        const wantOverlay = mode === 2;
-        const wantWire = mode === 1;
-        this.v._scene.traverse(/** @param {any} obj */ (obj) => {
-            if (!obj.isMesh) return;
-            if (obj.userData.isWireOverlay) return;
-            if (obj.userData.isGrid) return;
-            // Selection-silhouette hulls are Meshes (issue #165) — wireframing
-            // one would draw the whole extruded shell as a wire cage.
-            if (obj.userData.__highlightOutline) return;
-            if (!obj.material) return;
-            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-            for (const m of mats) {
-                if ('wireframe' in m) m.wireframe = wantWire;
+        this.v._scene.traverse(/** @param {any} obj */ (obj) => this._applyWireframeTo(obj));
+        // The shared swap materials follow the mode even while nobody wears
+        // them, so a later swap does not bring back a stale flag.
+        for (const m of [this._clayMat, this._normalMat, this._uvMat]) {
+            if (m) this._applyWireframeToMaterial(m);
+        }
+    }
+
+    /** @param {any} m */
+    _applyWireframeToMaterial(m) {
+        if (!('wireframe' in m)) return;
+        if (this.wireframeMode === 1) {
+            if (m.userData.__wireframeSaved === undefined) m.userData.__wireframeSaved = m.wireframe;
+            m.wireframe = true;
+        } else if (m.userData.__wireframeSaved !== undefined) {
+            m.wireframe = m.userData.__wireframeSaved;
+            delete m.userData.__wireframeSaved;
+        }
+    }
+
+    /**
+     * Apply the current M mode to one mesh. Mode 1 overrides `wireframe` on
+     * the worn *and* the own materials (a clay/debug swap must not drop the
+     * wire view, and the parked original must not come back with a stale
+     * flag), saving each material's own value so a cage added with
+     * `wireframe=True` survives the cycle back to 0; mode 2 shows a wire
+     * overlay child. Idempotent, and also run per mesh from applyShading and
+     * refreshObject so material swaps and late adds compose with M.
+     * @param {any} obj
+     */
+    _applyWireframeTo(obj) {
+        if (!obj.isMesh) return;
+        if (obj.userData.isWireOverlay) return;
+        if (obj.userData.isGrid) return;
+        // Selection-silhouette hulls are Meshes (issue #165) — wireframing
+        // one would draw the whole extruded shell as a wire cage.
+        if (obj.userData.__highlightOutline) return;
+        if (!obj.material) return;
+        for (const m of wornAndOwnMaterials(obj)) this._applyWireframeToMaterial(m);
+        let overlay = obj.userData.wireframeOverlay;
+        if (this.wireframeMode === 2) {
+            if (!overlay) {
+                overlay = this._createWireOverlay(obj);
+                obj.userData.wireframeOverlay = overlay;
+                obj.add(overlay);
+            } else {
+                overlay.material.clippingPlanes = this.v._activeClippingPlanes();
+                overlay.material.needsUpdate = true;
             }
-            let overlay = obj.userData.wireframeOverlay;
-            if (wantOverlay) {
-                if (!overlay) {
-                    overlay = this._createWireOverlay(obj);
-                    obj.userData.wireframeOverlay = overlay;
-                    obj.add(overlay);
-                } else {
-                    overlay.material.clippingPlanes = this.v._activeClippingPlanes();
-                    overlay.material.needsUpdate = true;
-                }
-                overlay.visible = true;
-            } else if (overlay) {
-                overlay.visible = false;
-            }
-        });
+            overlay.visible = true;
+        } else if (overlay) {
+            overlay.visible = false;
+        }
     }
 
     /** @param {any} parentMesh */
@@ -6299,19 +6490,43 @@ class ShadingDebugController {
         return null;
     }
 
+    _getClayMaterial() {
+        if (!this._clayMat) {
+            this._clayMat = new THREE.MeshLambertMaterial({ color: CLAY_COLOR });
+            this._syncClip(this._clayMat);
+        }
+        return this._clayMat;
+    }
+
+    /**
+     * Clay replaces opaque lit surfaces only. Translucent, vertex-coloured and
+     * polygon-offset overlays carry data (reach maps, heat colours), and
+     * unlit/shader materials are markers or furniture, so they keep theirs.
+     * @param {any} obj
+     */
+    _clayEligible(obj) {
+        return ownMaterials(obj).every((/** @type {any} */ m) => m
+            && (m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshLambertMaterial)
+            && !m.transparent && m.opacity >= 1 && !m.vertexColors && !m.polygonOffset);
+    }
+
     /** @param {any} obj @param {number} mode */
     _applyDebugMaterial(obj, mode) {
         const debugMat = this._getDebugMaterial(mode);
-        if (!debugMat) return;
+        if (debugMat) this._swapMaterial(obj, debugMat);
+    }
+
+    /** @param {any} obj @param {any} mat */
+    _swapMaterial(obj, mat) {
         if (obj.userData.originalMaterial === undefined) {
             obj.userData.originalMaterial = obj.material;
         }
-        // A tube split into geometry groups for the per-draw index cap
-        // (#113) only renders every group when its material is an array;
-        // wrap the debug material to match so a >cap tube doesn't truncate
-        // in normals/UV debug view.
-        const grouped = obj.geometry && obj.geometry.groups && obj.geometry.groups.length > 1;
-        obj.material = grouped ? [debugMat] : debugMat;
+        const orig = obj.userData.originalMaterial;
+        // Mirror the original's shape: a tube chunked for the per-draw index
+        // cap (#113) is already an array, while a single material over a
+        // grouped geometry (BoxGeometry's six faces) draws in one call, and a
+        // one-entry array would draw only group 0.
+        obj.material = Array.isArray(orig) ? orig.map(() => mat) : mat;
     }
 
     /** @param {any} obj */
@@ -6319,27 +6534,55 @@ class ShadingDebugController {
         if (obj.userData.originalMaterial === undefined) return;
         obj.material = obj.userData.originalMaterial;
         delete obj.userData.originalMaterial;
-        // Clipping state may have changed while the debug material was active.
-        // Re-sync clippingPlanes + side + clipShadows to match what
-        // _updateClipMaterials would set right now, so toggling N-key off
-        // while clipping is enabled doesn't leave the restored material with
-        // stale sidedness/clip flags.
-        const planes = this.v._activeClippingPlanes();
-        const clipEnabled = this.v._clipEnabled;
+        // Clipping state may have changed while a swap material was active.
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of mats) {
-            if (!m) continue;
-            m.clippingPlanes = planes;
-            m.clipShadows = true;
-            if (clipEnabled) {
-                if (m.userData.originalSide === undefined) m.userData.originalSide = m.side;
-                m.side = THREE.DoubleSide;
-            } else if (m.userData.originalSide !== undefined) {
-                m.side = m.userData.originalSide;
-                delete m.userData.originalSide;
-            }
-            m.needsUpdate = true;
+        for (const m of mats) if (m) this._syncClip(m);
+    }
+
+    /**
+     * Match clippingPlanes + side + clipShadows to what _updateClipMaterials
+     * would set right now, so a material swapped in or back while clipping is
+     * enabled doesn't keep stale sidedness/clip flags.
+     * @param {any} m
+     */
+    _syncClip(m) {
+        m.clippingPlanes = this.v._activeClippingPlanes();
+        m.clipShadows = true;
+        if (this.v._clipEnabled) {
+            if (m.userData.originalSide === undefined) m.userData.originalSide = m.side;
+            m.side = THREE.DoubleSide;
+        } else if (m.userData.originalSide !== undefined) {
+            m.side = m.userData.originalSide;
+            delete m.userData.originalSide;
         }
+        m.needsUpdate = true;
+    }
+
+    /**
+     * Pick the material a user mesh should wear now: debug view, clay, or its own.
+     * @param {any} obj
+     */
+    _applyMaterialMode(obj) {
+        const mode = this.shadingMode;
+        if (mode === 1 || mode === 2) this._applyDebugMaterial(obj, mode);
+        else if (this.clay && this._clayEligible(obj)) this._swapMaterial(obj, this._getClayMaterial());
+        else this._restoreOriginalMaterial(obj);
+    }
+
+    /**
+     * Re-evaluate the display material under one object (a new add, or a
+     * set_color/set_opacity that may change clay eligibility).
+     * @param {any} root
+     */
+    refreshObject(root) {
+        const swap = this.clay || this.shadingMode === 1 || this.shadingMode === 2;
+        // Outside these modes nothing is swapped and nothing is wireframed.
+        if (!swap && this.wireframeMode === 0) return;
+        root.traverse((/** @type {any} */ obj) => {
+            if (!this._isUserMesh(obj)) return;
+            if (swap) this._applyMaterialMode(obj);
+            this._applyWireframeTo(obj);
+        });
     }
 
     /** @param {(obj: any) => void} cb */
@@ -6349,27 +6592,28 @@ class ShadingDebugController {
         // marker, clip anchor) whose materials often lack the fields our
         // debug swaps assume (e.g. MeshNormalMaterial has no `.color`).
         for (const root of this.v._objects.values()) {
-            root.traverse((/** @type {any} */ obj) => {
-                if (!obj.isMesh) return;
-                if (obj.userData.isWireOverlay) return;
-                if (obj.userData.isDebugHelper) return;
-                if (obj.userData.isGrid) return;
-                // Selection-silhouette hulls are Meshes (issue #165): a debug
-                // material swap would turn the outline into a solid shell.
-                if (obj.userData.__highlightOutline) return;
-                cb(obj);
-            });
+            root.traverse((/** @type {any} */ obj) => { if (this._isUserMesh(obj)) cb(obj); });
         }
+    }
+
+    /** @param {any} obj */
+    _isUserMesh(obj) {
+        if (!obj.isMesh) return false;
+        const ud = obj.userData;
+        // Selection-silhouette hulls are Meshes (issue #165): a material swap
+        // would turn the outline into a solid shell. Same for primitive outlines.
+        return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
+            || ud.__highlightOutline || ud.__primitiveOutline);
     }
 
     applyShading() {
         const mode = this.shadingMode;
+        this.v._shadowDirty = true;
+        if (this._clayMat) this._syncClip(this._clayMat);
         this._forEachUserMesh((obj) => {
-            if (mode === 1 || mode === 2) {
-                this._applyDebugMaterial(obj, mode);
-            } else {
-                this._restoreOriginalMaterial(obj);
-            }
+            this._applyMaterialMode(obj);
+            // The swapped-in (or restored) material must carry the M state.
+            this._applyWireframeTo(obj);
 
             let helper = obj.userData.vertexNormalsHelper;
             if (mode === 3) {
@@ -6498,6 +6742,112 @@ function inflateGzipBase64(b64) {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
     return new Response(stream).arrayBuffer();
+}
+
+/**
+ * Decode a Radiance RGBE (.hdr) image to half-float RGBA, the way three's
+ * HDRLoader does (value = byte * 2^(e-128) / 255, clamped to the float16
+ * max). In-file so the viewer imports neither HDRLoader nor
+ * HDRCubeTextureLoader from three/addons: an embedder serving its own copy of
+ * the addons only has to ship what the model loaders already need.
+ * Header: `#?RADIANCE`, then lines until a blank one, then `-Y <h> +X <w>`
+ * (rows top-down). Pixels are new-style RLE scanlines when the width is in
+ * [8, 32767] and the stream starts 02 02, else flat RGBE quads.
+ * @param {ArrayBuffer} buffer
+ * @returns {{width: number, height: number, data: Uint16Array}}
+ */
+function decodeRadianceHDR(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let pos = 0;
+    const readLine = () => {
+        const end = bytes.indexOf(0x0a, pos);
+        if (end < 0) throw new Error('decodeRadianceHDR: truncated header');
+        const line = String.fromCharCode.apply(null, /** @type {any} */ (bytes.subarray(pos, end)));
+        pos = end + 1;
+        return line;
+    };
+    if (!readLine().startsWith('#?')) throw new Error('decodeRadianceHDR: not a Radiance file');
+    for (let line = readLine(); line !== ''; line = readLine()) {
+        if (line.startsWith('FORMAT=') && line !== 'FORMAT=32-bit_rle_rgbe') {
+            throw new Error(`decodeRadianceHDR: unsupported ${line}`);
+        }
+    }
+    const dims = /^-Y (\d+) \+X (\d+)$/.exec(readLine());
+    if (!dims) throw new Error('decodeRadianceHDR: unsupported orientation (need -Y h +X w)');
+    const height = parseInt(dims[1], 10), width = parseInt(dims[2], 10);
+    const rgbe = new Uint8Array(width * height * 4);
+    const rle = width >= 8 && width <= 0x7fff
+        && bytes[pos] === 2 && bytes[pos + 1] === 2 && !(bytes[pos + 2] & 0x80);
+    if (rle) {
+        const scan = new Uint8Array(width * 4);
+        for (let y = 0; y < height; y++) {
+            if (bytes[pos] !== 2 || bytes[pos + 1] !== 2
+                || ((bytes[pos + 2] << 8) | bytes[pos + 3]) !== width) {
+                throw new Error('decodeRadianceHDR: bad scanline header');
+            }
+            pos += 4;
+            // Four planes (r, g, b, e), each a stream of runs: count > 128 is
+            // count-128 copies of one byte, else count literal bytes.
+            for (let ptr = 0; ptr < scan.length;) {
+                let count = bytes[pos++];
+                const run = count > 128;
+                if (run) count -= 128;
+                if (!(count > 0) || ptr + count > scan.length || pos >= bytes.length) {
+                    throw new Error('decodeRadianceHDR: bad scanline data');
+                }
+                if (run) scan.fill(bytes[pos++], ptr, ptr + count);
+                else { scan.set(bytes.subarray(pos, pos + count), ptr); pos += count; }
+                ptr += count;
+            }
+            const row = y * width * 4;
+            for (let x = 0; x < width; x++) {
+                rgbe[row + x * 4] = scan[x];
+                rgbe[row + x * 4 + 1] = scan[width + x];
+                rgbe[row + x * 4 + 2] = scan[2 * width + x];
+                rgbe[row + x * 4 + 3] = scan[3 * width + x];
+            }
+        }
+    } else {
+        if (bytes.length - pos < rgbe.length) throw new Error('decodeRadianceHDR: truncated pixel data');
+        rgbe.set(bytes.subarray(pos, pos + rgbe.length));
+    }
+    const data = new Uint16Array(width * height * 4);
+    const one = THREE.DataUtils.toHalfFloat(1);
+    for (let i = 0; i < data.length; i += 4) {
+        const scale = Math.pow(2, rgbe[i + 3] - 128) / 255;
+        data[i] = THREE.DataUtils.toHalfFloat(Math.min(rgbe[i] * scale, 65504));
+        data[i + 1] = THREE.DataUtils.toHalfFloat(Math.min(rgbe[i + 1] * scale, 65504));
+        data[i + 2] = THREE.DataUtils.toHalfFloat(Math.min(rgbe[i + 2] * scale, 65504));
+        data[i + 3] = one;
+    }
+    return { width, height, data };
+}
+
+/**
+ * Six Radiance .hdr faces (px, nx, py, ny, pz, nz) as a CubeTexture with the
+ * settings HDRCubeTextureLoader uses for HalfFloatType: linear-sRGB, linear
+ * filters, no mipmaps, rows top-down (DataTexture's flipY is false).
+ * @param {ArrayBuffer[]} buffers
+ * @returns {THREE.CubeTexture}
+ */
+function buildHDRCubeTexture(buffers) {
+    const cube = new THREE.CubeTexture();
+    cube.type = THREE.HalfFloatType;
+    cube.colorSpace = THREE.LinearSRGBColorSpace;
+    cube.minFilter = cube.magFilter = THREE.LinearFilter;
+    cube.generateMipmaps = false;
+    cube.images = buffers.map((buf) => {
+        const { width, height, data } = decodeRadianceHDR(buf);
+        const face = new THREE.DataTexture(data, width, height);
+        face.type = cube.type;
+        face.colorSpace = cube.colorSpace;
+        face.format = cube.format;
+        face.minFilter = face.magFilter = THREE.LinearFilter;
+        face.generateMipmaps = false;
+        return face;
+    });
+    cube.needsUpdate = true;
+    return cube;
 }
 
 /**
@@ -7297,6 +7647,9 @@ class DepthCueController {
         // scope (no real mode is negative).
         this._lastFogScopeWireframeMode = -1;
         this._lastFogScopeShadingMode = -1;
+        // Low display quality swaps in a shared clay the same way; null forces
+        // the first scope.
+        this._lastFogScopeClay = null;
         this._toastEl = null;
         this._toastTimer = 0;
     }
@@ -7411,23 +7764,27 @@ class DepthCueController {
         // (acceptable: a fading grid is itself a depth cue, not a regression).
         for (const obj of this.v._objects.values()) {
             if (this._isPolyline(obj)) continue;
-            obj.traverse((node) => {
-                const mat = node.material;
-                if (!mat) return;
-                if (Array.isArray(mat)) {
-                    for (const m of mat) this._scopeMeshMaterialFog(m, on);
-                } else {
-                    this._scopeMeshMaterialFog(mat, on);
-                }
+            obj.traverse((/** @type {any} */ node) => {
+                if (!node.material) return;
+                // Worn and own: a parked original restored by a later
+                // clay/debug switch must not come back fogged, and a swap
+                // worn now must not fog either.
+                for (const m of wornAndOwnMaterials(node)) this._scopeMeshMaterialFog(m, on);
             });
         }
         this._lastFogScopeGen = this.v._objGeneration;
         // Remember the shading-debug modes this pass scoped against, so update()
-        // re-scopes after the next `M`/`N` material swap (see constructor note).
+        // re-scopes after the next `M`/`N`/clay material swap (see constructor note).
         const sd = this.v._shading;
         if (sd) {
+            // The shared swap materials are scoped even while nobody wears
+            // them, so a later swap does not bring back a stale flag.
+            for (const m of [sd._clayMat, sd._normalMat, sd._uvMat]) {
+                if (m) this._scopeMeshMaterialFog(m, on);
+            }
             this._lastFogScopeWireframeMode = sd.wireframeMode;
             this._lastFogScopeShadingMode = sd.shadingMode;
+            this._lastFogScopeClay = sd.clay;
         }
     }
 
@@ -7623,7 +7980,9 @@ class DepthCueController {
         // PERSISTS, so a pre-pass with the background still set would leave
         // RenderPass clearing to an opaque #222222 (then tone-mapped) regardless.
         const prevBg = v._scene.background;
-        v._scene.background = null;
+        // A cubemap background (setEnvironmentBackground) is scene content, not
+        // a clear colour: leave it in so the composer draws it.
+        if (!(prevBg instanceof THREE.Texture)) v._scene.background = null;
 
         // Line-only depth pre-pass: render JUST the polyline layer into
         // _lineDepthTarget so the EDL pass (which reads tDepth) shades and
@@ -7668,7 +8027,8 @@ class DepthCueController {
             const sd = this.v._shading;
             if (this.v._objGeneration !== this._lastFogScopeGen
                 || (sd && sd.wireframeMode !== this._lastFogScopeWireframeMode)
-                || (sd && sd.shadingMode !== this._lastFogScopeShadingMode)) {
+                || (sd && sd.shadingMode !== this._lastFogScopeShadingMode)
+                || (sd && sd.clay !== this._lastFogScopeClay)) {
                 this._applyFogScope(true);
             }
             this._updateFogRange();
@@ -9049,6 +9409,7 @@ class TransformGizmoController {
     // parent is identity / translation-only (the usual case) that is the world grid.
     /** @param {Gizmo} g */
     _onObjectChange(g) {
+        this.v._shadowDirty = true;
         const s = this.translateSnap;
         if (s && this.translateSnapRelative && g.object
             && g.control.getMode() === 'translate') {
@@ -10043,10 +10404,26 @@ export class ThreeJSViewer {
         // URL param is always authoritative (developer's explicit choice) — panel edits go to
         // localStorage but don't override a URL-provided value on reload.
         this._lightingDefaults = resolveLightingDefaults(options, urlParams);
+        this._sunDefaults = resolveSunDefaults(options, urlParams);
+        // Display quality, applied once the lights exist. URL `display_quality` > option > high.
+        this._displayQuality = parseDisplayQuality(urlParams.get('display_quality'))
+            ?? parseDisplayQuality(options.displayQuality) ?? 'high';
         // IBL environment map on/off (uglier-but-faster toggle). The PMREM map
         // is retained on `_envMap` so the toggle can restore it without a rebuild.
         this._envEnabled = this._lightingDefaults.envEnabled;
         this._envMap = null;
+        /** @type {THREE.WebGLRenderTarget|null} PMREM target that owns `_envMap` (disposed with it) */
+        this._envTarget = null;
+        /** @type {THREE.CubeTexture|null} raw HDR cube, the visible-background source */
+        this._envCube = null;
+        /** @type {Promise<void>} resolves once the initial cubemap has loaded (or failed) */
+        this._cubemapsReady = Promise.resolve();
+        /** @type {Object<string, {format: string, faces?: Object<string, string>}>} named cubemap sets (_initCubemaps) */
+        this._cubemapSets = {};
+        // Show the environment cubemap as the background. URL `env_background` > option > off.
+        this._envBackground = parseBoolOption(urlParams.get('env_background'))
+            ?? parseBoolOption(options.environmentBackground) ?? false;
+        this._backgroundColor = new THREE.Color(VIEWER_BACKGROUND_COLOR);
 
         // Perspective camera FOV. Precedence: URL `fov` param > `fov` option > default.
         this._fov = resolveFov(options, urlParams);
@@ -10060,6 +10437,9 @@ export class ThreeJSViewer {
 
         // State
         this._objects = new Map();
+        // Embedder grid-colour override (setGridColor); null = each grid's own colour.
+        /** @type {{color: number, centerColor: number|null}|null} */
+        this._gridColorOverride = null;
         this._mixers = new Map();
         // Ids already warned about a set_clip_progress with no mixer.
         /** @type {Set<string>} */
@@ -10357,6 +10737,14 @@ export class ThreeJSViewer {
         this._lightingAmbientSlider = q('.tjsv-lighting-ambient');
         this._lightingAmbientValue = q('.tjsv-lighting-ambient-value');
         this._lightingToneMappingSelect = q('.tjsv-lighting-tone-mapping');
+        this._lightingCubemapSelect = q('.tjsv-lighting-cubemap');
+        this._lightingSunCheck = q('.tjsv-lighting-sun');
+        this._lightingSunIntensitySlider = q('.tjsv-lighting-sun-intensity');
+        this._lightingSunIntensityValue = q('.tjsv-lighting-sun-intensity-value');
+        this._lightingSunAzimuthSlider = q('.tjsv-lighting-sun-azimuth');
+        this._lightingSunAzimuthValue = q('.tjsv-lighting-sun-azimuth-value');
+        this._lightingSunElevationSlider = q('.tjsv-lighting-sun-elevation');
+        this._lightingSunElevationValue = q('.tjsv-lighting-sun-elevation-value');
         this._lightingResetBtn = q('.tjsv-lighting-reset');
         this._lightingCloseBtn = q('.tjsv-lighting-close');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
@@ -10410,7 +10798,7 @@ export class ThreeJSViewer {
 
         // Scene
         this._scene = new THREE.Scene();
-        this._scene.background = new THREE.Color(VIEWER_BACKGROUND_COLOR);
+        this._applyBackground();
 
         // Cameras
         this._perspCamera = new THREE.PerspectiveCamera(this._fov, w / h, 0.1, 1000);
@@ -10444,8 +10832,10 @@ export class ThreeJSViewer {
         this._renderer.localClippingEnabled = true;
         this.el.appendChild(this._renderer.domElement);
 
-        // Environment cubemap
-        this._loadCubemap();
+        // Environment cubemap. Intensity is set up front (not when the async
+        // load lands) so it is right immediately and survives cubemap switches.
+        this._scene.environmentIntensity = this._lightingDefaults.envIntensity;
+        this._cubemapsReady = this._initCubemaps();
 
         // Controls: bespoke ViewerControls (one implementation, two modes).
         // - turntable: yaw around world-Z, pitch around camera-right (clamped near pole)
@@ -10566,6 +10956,7 @@ export class ThreeJSViewer {
                 dst.set(showSrc.subarray(0, copyLen));
                 posAttr.needsUpdate = true;
                 if (meshObj.geometry.boundingSphere) meshObj.geometry.computeBoundingSphere();
+                this._shadowDirty = true;
                 return;
             }
             this._lodWorkerBusy = false;
@@ -10579,6 +10970,7 @@ export class ThreeJSViewer {
 
             // Worker built geometry — upload to GPU
             applyWorkerGeometry(obj, msg);
+            this._shadowDirty = true;
 
             // Re-sync colors: the worker may have used stale colors if a
             // color update arrived while it was busy rebuilding geometry.
@@ -10787,6 +11179,43 @@ export class ThreeJSViewer {
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
         this._scene.add(this._ambientLight);
 
+        // Sun: one shadow-casting DirectionalLight, re-aimed and its shadow
+        // camera re-fitted to the content sphere by _updateSun each frame.
+        // The shadow map is refreshed once per frame (autoUpdate off +
+        // needsUpdate), not once per renderer.render() call — the EDL line
+        // pre-pass, gizmo overlay and view helper are extra render calls.
+        this._renderer.shadowMap.enabled = true;
+        this._renderer.shadowMap.type = THREE.PCFShadowMap;
+        this._renderer.shadowMap.autoUpdate = false;
+        this._sun = new THREE.DirectionalLight(0xffffff, 0);
+        this._sun.castShadow = true;
+        this._sun.shadow.mapSize.set(SUN_SHADOW_MAP_SIZE, SUN_SHADOW_MAP_SIZE);
+        this._sun.shadow.radius = SUN_SHADOW_RADIUS;
+        this._scene.add(this._sun, this._sun.target);
+        /** @type {SunState} */
+        this._sunState = {
+            enabled: this._sunDefaults.enabled,
+            intensity: this._sunDefaults.intensity,
+            azimuth: this._sunDefaults.azimuth,
+            elevation: this._sunDefaults.elevation,
+        };
+        this._sunFitKey = '';
+        this._sunShadowGen = -1;
+        // The shadow map is re-rendered only when something that lands in it
+        // changed (see requestShadowUpdate); a static scene costs no depth pass.
+        this._shadowDirty = true;
+        this.setSun(this._sunState);
+
+        // Low display quality rig (hidden on high): sky/ground fill plus a
+        // headlight that follows the camera, neither casting shadows.
+        this._lowHemi = new THREE.HemisphereLight(LOW_HEMI_SKY, LOW_HEMI_GROUND, LOW_HEMI_INTENSITY);
+        this._lowHemi.position.set(0, 0, 1);
+        this._lowHemi.visible = false;
+        this._headlight = new THREE.DirectionalLight(0xffffff, LOW_HEADLIGHT_INTENSITY);
+        this._headlight.visible = false;
+        this._scene.add(this._lowHemi, this._headlight, this._headlight.target);
+        this.setDisplayQuality(this._displayQuality);
+
         // Grid helper on XY plane (Z-up) — hidden by default
         this._gridHelper = new THREE.GridHelper(10, 10);
         this._gridHelper.rotation.x = Math.PI / 2;
@@ -10847,44 +11276,159 @@ export class ThreeJSViewer {
         this._resizeObserver.observe(this.container);
     }
 
-    _loadCubemap() {
-        const cubemapData = this._options.cubemapData;
-        if (!cubemapData) {
-            console.warn('ThreeJSViewer: no cubemapData provided, skipping environment map');
-            return;
-        }
-        const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+    /**
+     * Load the environment cubemap. Face source, in precedence order:
+     *   1. named set `name` — from `options.cubemaps` (`{format, faces}`, faces
+     *      gzip+base64, inlined by build.py), or from `static/cubemaps/index.json`
+     *      when the `viewer/` source dir is served (ribweaver), in which case
+     *      the faces are fetched from `static/cubemaps/<name>/<face>.<format>`.
+     *      Picked in the Lighting panel.
+     *   2. `options.cubemapData` — gzip+base64 Radiance HDR per face, inlined by
+     *      build.py; the standalone viewer.html path, works under `file://`.
+     *   3. `static/cubemaps/paul-lobe-haus/<face>.hdr` next to this module —
+     *      works when an embedder serves the `viewer/` source directory as
+     *      static files (ribweaver).
+     * cubemapData in any other shape (the pre-HDR base64 JPEGs, or base64 of a
+     * 404 body from an embedder still fetching `static/*.jpg`) falls to 3.
+     * HDR faces are decoded in-file (`decodeRadianceHDR`); LDR sets go through
+     * `CubeTextureLoader`. A later call replaces (and disposes) the previous
+     * cube and PMREM target; a call superseded by a newer one, or by
+     * `destroy()`, before it finishes is discarded.
+     * @param {string|null} [name] key into `options.cubemaps`
+     */
+    async _loadCubemap(name = null) {
         const faces = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
-        const cubeTexture = new THREE.CubeTexture();
-        cubeTexture.colorSpace = THREE.SRGBColorSpace;
-        let loaded = 0;
-        let failed = false;
-        const scene = this._scene;
-        faces.forEach((face, i) => {
-            const img = new Image();
-            img.onload = () => {
-                if (failed) return;
-                cubeTexture.images[i] = img;
-                loaded++;
-                if (loaded === 6) {
-                    cubeTexture.needsUpdate = true;
-                    const envMap = pmremGenerator.fromCubemap(cubeTexture).texture;
-                    this._envMap = envMap;
-                    scene.environment = this._envEnabled ? envMap : null;
-                    scene.environmentIntensity = this._lightingDefaults.envIntensity;
-                    cubeTexture.dispose();
-                    pmremGenerator.dispose();
+        const set = name ? this._cubemapSets[name] : null;
+        const cubemapData = set ? set.faces : this._options.cubemapData;
+        const format = set ? set.format : 'hdr';
+        // Every gzip stream starts 1f 8b 08, which base64-encodes as "H4sI".
+        const inline = cubemapData && faces.every(f => String(cubemapData[f] ?? '').startsWith('H4sI'));
+        if (cubemapData && !inline && !set) {
+            console.warn('ThreeJSViewer: cubemapData is not gzip+base64 HDR; '
+                + 'loading static/cubemaps/paul-lobe-haus/*.hdr next to the viewer module instead');
+        }
+        const token = (this._cubemapToken = (this._cubemapToken || 0) + 1);
+        const stale = () => token !== this._cubemapToken || this._destroyed;
+        const dir = set ? `static/cubemaps/${name}` : 'static/cubemaps/paul-lobe-haus';
+        const staticUrls = () => faces.map(f => new URL(`${dir}/${f}.${format}`, import.meta.url).href);
+        /** @type {string[]} */
+        let blobUrls = [];
+        try {
+            /** @type {THREE.CubeTexture} */
+            let cubeTexture;
+            if (format === 'hdr') {
+                const buffers = await Promise.all(inline
+                    ? faces.map(f => inflateGzipBase64(cubemapData[f]))
+                    : staticUrls().map(u => fetchArrayBuffer(u, `cubemap '${name ?? 'default'}'`)));
+                if (stale()) return;
+                cubeTexture = buildHDRCubeTexture(buffers);
+            } else {
+                let urls = staticUrls();
+                if (inline) {
+                    const buffers = await Promise.all(faces.map(f => inflateGzipBase64(cubemapData[f])));
+                    const mime = `image/${format === 'jpg' ? 'jpeg' : format}`;
+                    urls = blobUrls = buffers.map(b => URL.createObjectURL(new Blob([b], { type: mime })));
                 }
-            };
-            img.onerror = () => {
-                if (failed) return;
-                failed = true;
-                console.error(`Failed to load cubemap face: ${face}`);
+                cubeTexture = await new THREE.CubeTextureLoader().loadAsync(urls);
+                cubeTexture.colorSpace = THREE.SRGBColorSpace;
+            }
+            if (stale()) {
                 cubeTexture.dispose();
-                pmremGenerator.dispose();
-            };
-            img.src = 'data:image/jpeg;base64,' + cubemapData[face];
-        });
+                return;
+            }
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const target = pmremGenerator.fromCubemap(cubeTexture);
+            pmremGenerator.dispose();
+            // The render target owns the PMREM texture and its framebuffer;
+            // disposing the texture alone would leak the framebuffer.
+            this._envTarget?.dispose();
+            this._envCube?.dispose();
+            // The raw cube is kept (not disposed) for the optional visible background.
+            this._envCube = cubeTexture;
+            this._envTarget = target;
+            this._envMap = target.texture;
+            this._cubemapName = name;
+            this._syncEnvironment();
+            this._applyBackground();
+        } catch (err) {
+            if (!this._destroyed) console.error('Failed to load environment cubemap:', err);
+        } finally {
+            blobUrls.forEach(u => URL.revokeObjectURL(u));
+        }
+    }
+
+    /** @returns {string[]} names of the available cubemap sets (build.py order, default first) */
+    getCubemapNames() {
+        return Object.keys(this._cubemapSets || {});
+    }
+
+    /**
+     * Resolve the available cubemap sets, fill the Lighting panel picker and
+     * load the initial one. Sets come from `options.cubemaps` (viewer.html) or,
+     * failing that, `static/cubemaps/index.json` next to this module (an
+     * embedder serving the `viewer/` source dir); with neither, the single
+     * default HDR loads as before.
+     */
+    async _initCubemaps() {
+        /** @type {Object<string, {format: string, faces?: Object<string, string>}>} */
+        let sets = this._options.cubemaps || {};
+        if (!Object.keys(sets).length) {
+            try {
+                const resp = await fetch(new URL('static/cubemaps/index.json', import.meta.url).href);
+                if (resp.ok) {
+                    sets = {};
+                    for (const e of await resp.json()) sets[e.name] = { format: e.format };
+                }
+            } catch (e) { /* no manifest: single default cubemap */ }
+        }
+        this._cubemapSets = sets;
+        const names = this.getCubemapNames();
+        const initial = this._resolveInitialCubemap();
+        const select = this._lightingCubemapSelect;
+        if (select) {
+            select.replaceChildren(...names.map(n => {
+                const opt = document.createElement('option');
+                opt.value = opt.textContent = n;
+                return opt;
+            }));
+            if (initial) select.value = initial;
+            const section = select.closest('.lighting-section');
+            if (section) /** @type {HTMLElement} */ (section).style.display = names.length > 1 ? '' : 'none';
+        }
+        await this._loadCubemap(initial);
+    }
+
+    /**
+     * Switch the environment cubemap to a named set from `options.cubemaps`.
+     * Temporary picker for comparing environments; persists in localStorage.
+     * @param {string} name
+     * @returns {Promise<void>}
+     */
+    setCubemap(name) {
+        if (!this._cubemapSets?.[name]) {
+            console.warn(`ThreeJSViewer: unknown cubemap '${name}'`);
+            return Promise.resolve();
+        }
+        this._writeLightingLocalStorage(LS_KEY_CUBEMAP, name);
+        return this._applyCubemap(name);
+    }
+
+    /** Load a known set and mirror it into the picker, without persisting. @param {string} name */
+    _applyCubemap(name) {
+        if (this._lightingCubemapSelect) this._lightingCubemapSelect.value = name;
+        return this._loadCubemap(name);
+    }
+
+    /** Initial cubemap set: URL `cubemap` > localStorage > first (default) set. */
+    _resolveInitialCubemap() {
+        const names = this.getCubemapNames();
+        if (!names.length) return null;
+        const url = new URLSearchParams(window.location.search).get('cubemap');
+        if (url && names.includes(url)) return url;
+        let stored = null;
+        try { stored = localStorage.getItem(LS_KEY_CUBEMAP); } catch (e) { /* ignore */ }
+        if (stored && names.includes(stored)) return stored;
+        return names[0];
     }
 
     _initClipping() {
@@ -11028,6 +11572,8 @@ export class ThreeJSViewer {
     }
 
     _updatePlaneConstants() {
+        // Materials carry clipShadows, so a plane move changes the shadow map.
+        this._shadowDirty = true;
         if (this._clipSlabMode) {
             const halfT = this._clipSlabThickness / 2;
             this._clipPlane.constant = -(this._clipPosition - halfT);
@@ -11152,6 +11698,7 @@ export class ThreeJSViewer {
     }
 
     _updateClipMaterials() {
+        this._shadowDirty = true;
         this._scene.traverse(/** @param {any} child */ child => {
             if (!child.material) return;
             if (this._isClipHelper(child)) return;
@@ -11252,6 +11799,7 @@ export class ThreeJSViewer {
         posAttr.needsUpdate = true;
         if (obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
         obj.userData.strandCollapseEnabled = enabled;
+        this._shadowDirty = true;
     }
 
     /**
@@ -11297,8 +11845,13 @@ export class ThreeJSViewer {
      */
     _applyEnvironmentEnabled(enabled) {
         this._envEnabled = enabled;
-        this._scene.environment = enabled ? (this._envMap || null) : null;
+        this._syncEnvironment();
         if (this._lightingEnvSlider) this._lightingEnvSlider.disabled = !enabled;
+    }
+
+    _syncEnvironment() {
+        const on = this._envEnabled && this._displayQuality !== 'low';
+        this._scene.environment = on ? (this._envMap || null) : null;
     }
 
     _applyAmbientIntensity(value) {
@@ -11349,6 +11902,14 @@ export class ThreeJSViewer {
         try { localStorage.removeItem(LS_KEY_ENVIRONMENT_MAP); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_AMBIENT_INTENSITY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING); } catch (e) { /* ignore */ }
+        for (const k of [LS_KEY_SUN, LS_KEY_SUN_INTENSITY, LS_KEY_SUN_AZIMUTH, LS_KEY_SUN_ELEVATION,
+            LS_KEY_CUBEMAP]) {
+            try { localStorage.removeItem(k); } catch (e) { /* ignore */ }
+        }
+        this.setSun(this._sunDefaults.reset);
+        // Back to URL `cubemap` > the first set; a reload only when that differs.
+        const cubemap = this._resolveInitialCubemap();
+        if (cubemap && cubemap !== this._cubemapName) this._applyCubemap(cubemap);
         this._applyToneMapping(d.toneMapping);
         this._applyToneMappingExposure(d.exposure);
         this._applyEnvironmentIntensity(d.envIntensity);
@@ -11378,6 +11939,18 @@ export class ThreeJSViewer {
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
         this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
+
+        // Cubemap picker: options are filled by _initCubemaps once the sets are
+        // known; hidden until then (and when there is only one set).
+        const cubemapSection = this._lightingCubemapSelect?.closest('.lighting-section');
+        if (cubemapSection && !this.getCubemapNames().length) {
+            /** @type {HTMLElement} */ (cubemapSection).style.display = 'none';
+        }
+        if (this._lightingCubemapSelect) {
+            this._lightingCubemapSelect.addEventListener('change', () => {
+                this.setCubemap(this._lightingCubemapSelect.value);
+            });
+        }
 
         this._lightingToneMappingSelect.addEventListener('change', () => {
             const mode = this._lightingToneMappingSelect.value;
@@ -11411,6 +11984,24 @@ export class ThreeJSViewer {
             this._lightingAmbientValue.textContent = v.toFixed(2);
             this._writeLightingLocalStorage(LS_KEY_AMBIENT_INTENSITY, v);
         });
+        this._syncSunPanel();
+        this._lightingSunCheck.addEventListener('change', () => {
+            const enabled = this._lightingSunCheck.checked;
+            this.setSun({ enabled });
+            this._writeLightingLocalStorage(LS_KEY_SUN, enabled);
+        });
+        for (const [slider, field, lsKey] of /** @type {const} */ ([
+            [this._lightingSunIntensitySlider, 'intensity', LS_KEY_SUN_INTENSITY],
+            [this._lightingSunAzimuthSlider, 'azimuth', LS_KEY_SUN_AZIMUTH],
+            [this._lightingSunElevationSlider, 'elevation', LS_KEY_SUN_ELEVATION],
+        ])) {
+            slider.addEventListener('input', () => {
+                const v = parseFloat(slider.value);
+                if (!Number.isFinite(v)) return;
+                this.setSun({ [field]: v });
+                this._writeLightingLocalStorage(lsKey, v);
+            });
+        }
         this._lightingResetBtn.addEventListener('click', () => this._resetLightingPanel());
     }
 
@@ -11492,7 +12083,13 @@ export class ThreeJSViewer {
     _setOpacity(id, opacity) {
         const obj = this._objects.get(id);
         if (!obj) return;
+        this._setObjectOpacity(obj, opacity);
+    }
+
+    /** Opacity decides clay eligibility, so re-pick the display material after. @param {any} obj @param {number} opacity */
+    _setObjectOpacity(obj, opacity) {
         applyOpacity(obj, opacity);
+        this._shading.refreshObject(obj);
     }
 
     /** @param {THREE.Object3D} obj @param {string | null | undefined} parentId */
@@ -11540,7 +12137,9 @@ export class ThreeJSViewer {
     _registerObject(id, obj) {
         this._objects.set(id, obj);
         this._objGeneration++;
+        this._shadowDirty = true;
         this._menus?.applyEyes();
+        this._shading.refreshObject(obj);
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -12545,6 +13144,7 @@ export class ThreeJSViewer {
             this._objects.delete(id);
             this._objGeneration++;
             this._sceneBoundsDirty = true;
+            this._shadowDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse(/** @param {any} child */ (child) => {
@@ -12561,6 +13161,7 @@ export class ThreeJSViewer {
                     delete child.userData.vertexNormalsHelper;
                 }
                 if (child.userData.originalMaterial !== undefined) {
+                    child.material = child.userData.originalMaterial;
                     delete child.userData.originalMaterial;
                 }
                 if (child.geometry && !this._modelCache.ownsGeometry(child.geometry)) child.geometry.dispose();
@@ -12818,6 +13419,7 @@ export class ThreeJSViewer {
         // tightened perspective near fit can't front-clip an object that
         // animates out of the last bounds snapshot (see updateNearFar).
         this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
 
         const frames = this._animation.frames;
         const frame = frames[frameIndex];
@@ -12881,8 +13483,7 @@ export class ThreeJSViewer {
                 }
                 obj.traverse(/** @param {any} child */ (child) => {
                     if (!child.material) return;
-                    const mats = Array.isArray(child.material) ? child.material : [child.material];
-                    for (const mat of mats) { if (mat.color) mat.color.setHex(hex); }
+                    for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(hex); }
                 });
             }
         }
@@ -13198,6 +13799,7 @@ export class ThreeJSViewer {
             captureBillboardBase(obj);
         }
         this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
     }
 
     /** @param {number} time */
@@ -13446,6 +14048,8 @@ export class ThreeJSViewer {
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
             if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
+            // Several keys change what lands in the shadow map (M/N/S/C, eyes).
+            this._shadowDirty = true;
             if (this._menus.anyOpen()) {
                 if (e.code === 'Escape') { this._menus.closeAll(); return; }
                 // Shortcuts keep working with a menu open; refresh its labels
@@ -13713,6 +14317,9 @@ export class ThreeJSViewer {
      * @returns {Promise<any>} the reply payload for query messages, else null.
      */
     async handleMessage(data) {
+        // Every message may change what the shadow map should hold; a query
+        // buys one spurious cheap refresh rather than a denylist here.
+        this._shadowDirty = true;
         switch (data.type) {
             case 'hello':
                 console.log(`Python client v${data.client_version}`);
@@ -13765,15 +14372,15 @@ export class ThreeJSViewer {
                         // Composes with set_highlight: the outline child keeps
                         // its own selection colour.
                         if (!child.material || child.userData.__highlightOutline) return;
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const mat of mats) { if (mat.color) mat.color.setHex(data.color); }
+                        for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(data.color); }
                     });
                     if (data.opacity != null) applyOpacity(colorObj, data.opacity);
+                    this._shading.refreshObject(colorObj);
                 });
                 break;
             }
             case 'set_opacity':
-                this._withObject(data.id, 'set_opacity', (obj) => applyOpacity(obj, data.opacity));
+                this._withObject(data.id, 'set_opacity', (obj) => this._setObjectOpacity(obj, data.opacity));
                 break;
             case 'set_highlight':
                 // Toggle a persistent selection outline (issue #147). Transient
@@ -15561,6 +16168,23 @@ export class ThreeJSViewer {
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
                 break;
+            case 'set_display_quality':
+                this.setDisplayQuality(data.quality);
+                break;
+            case 'set_environment_background':
+                this.setEnvironmentBackground(!!data.enabled);
+                break;
+            case 'set_cubemap':
+                this.setCubemap(String(data.name));
+                break;
+            case 'set_sun':
+                // Programmatic twin of the Lighting panel's Sun section.
+                this.setSun({
+                    enabled: data.enabled, intensity: data.intensity,
+                    azimuth: data.azimuth, elevation: data.elevation,
+                });
+                break;
+
             case 'set_depth_cue': {
                 // Programmatic equivalent of the D / Shift+D keys.
                 if (data.fog != null) this._depthCue.setFog(data.fog);
@@ -15642,6 +16266,7 @@ export class ThreeJSViewer {
                 break;
             case 'add_grid': {
                 const grid = buildFloorGridMesh(data);
+                if (this._gridColorOverride) applyGridColor(grid, this._gridColorOverride);
                 grid.name = data.id;
                 grid.userData.id = data.id;
                 if (data.transform) this._applyTransform(grid, data.transform);
@@ -15678,6 +16303,12 @@ export class ThreeJSViewer {
                 this._enableBillboard(data.id, billboard, data);
                 break;
             }
+            case 'set_background':
+                this.setBackground(data.color);
+                break;
+            case 'set_grid_color':
+                this.setGridColor(data.color ?? null, data.center_color ?? null);
+                break;
             case 'show_grid':
                 this._gridHelper.visible = !!data.visible;
                 if (data.size != null && data.divisions != null) {
@@ -15725,6 +16356,8 @@ export class ThreeJSViewer {
         captureBillboardBase(obj);
         this._billboards.set(id, obj);
         this._billboardOrderDirty = true;
+        // Billboards never cast a shadow; _updateSun re-flags on the bump.
+        this._objGeneration++;
         applyBillboard(obj, this._camera);
     }
 
@@ -15737,6 +16370,7 @@ export class ThreeJSViewer {
         disableBillboard(obj);
         this._billboards.delete(id);
         this._billboardOrderDirty = true;
+        this._objGeneration++;
     }
 
     /**
@@ -15830,6 +16464,8 @@ export class ThreeJSViewer {
         this._controls.update();
         this._depthCue.update();
         this._updateNearFar();
+        this._updateSun();
+        this._updateHeadlight();
 
         // Billboards: re-face the camera after controls have moved it.
         this._updateBillboards();
@@ -16583,6 +17219,230 @@ export class ThreeJSViewer {
      */
     setControlsEnabled(enabled) { this._controls.enabled = !!enabled; }
 
+    /**
+     * Set the scene background colour, for embedders that theme the viewer.
+     * Drives both render paths: `scene.background` (direct) and the canvas CSS
+     * colour the EDL composer path shows through (see renderComposer), and the
+     * container's `--tjsv-menu-bg` token (the rail's solid background, PR
+     * #241) so themed menus stay the viewer's colour.
+     * @param {number|string|null} color hex int or a CSS colour string three.js
+     *     parses; null restores the default
+     */
+    setBackground(color) {
+        this._backgroundColor = new THREE.Color(color ?? VIEWER_BACKGROUND_COLOR);
+        const css = `#${this._backgroundColor.getHexString()}`;
+        this._renderer.domElement.style.backgroundColor = css;
+        this.el.style.setProperty('--tjsv-menu-bg', css);
+        this._applyBackground();
+    }
+
+    /**
+     * Set the sun (shadow-casting directional light). Fields left out are
+     * unchanged. Transient: the Lighting panel persists its own edits, this
+     * does not.
+     * @param {Partial<SunState>} opts
+     *   enabled — on/off; intensity — light intensity (>= 0); azimuth — degrees
+     *   in the XY plane from +X toward +Y; elevation — degrees above the XY
+     *   plane, clamped to [0, 90].
+     */
+    setSun(opts = {}) {
+        const st = this._sunState;
+        if (opts.enabled != null) st.enabled = !!opts.enabled;
+        for (const k of /** @type {const} */ (['intensity', 'azimuth', 'elevation'])) {
+            const v = opts[k];
+            if (v != null && Number.isFinite(Number(v))) st[k] = Number(v);
+        }
+        st.intensity = Math.max(0, st.intensity);
+        // Above the horizon only: a sun below it lights from underneath.
+        st.elevation = Math.min(90, Math.max(0, st.elevation));
+        this._sun.visible = st.enabled && this._displayQuality !== 'low';
+        this._sun.intensity = st.intensity;
+        this._sunFitKey = '';  // force a re-aim on the next frame
+        this._shadowDirty = true;
+        this._syncSunPanel();
+    }
+
+    /** @returns {SunState} a copy of the sun's current state */
+    getSun() {
+        return { ...this._sunState };
+    }
+
+    /**
+     * Ask for one shadow-map refresh on the next frame. The viewer flags this
+     * itself for everything it moves or changes (messages, animation ticks,
+     * follow paths, gizmo drags, LOD swaps, clipping, key toggles); call it
+     * after mutating an Object3D obtained through getObject() or an overlay.
+     */
+    requestShadowUpdate() {
+        this._shadowDirty = true;
+    }
+
+    /**
+     * Switch render quality. "low" puts one shared matte clay material on
+     * every opaque lit mesh and swaps the IBL + sun + shadows for a hemisphere
+     * light and a camera headlight; "high" restores materials and lighting.
+     * The sun and environment settings are kept, only suppressed. Transient.
+     * @param {string} quality "high" or "low"
+     */
+    setDisplayQuality(quality) {
+        const q = parseDisplayQuality(quality);
+        if (!q) {
+            console.warn(`setDisplayQuality: unknown quality '${quality}'`);
+            return;
+        }
+        this._displayQuality = q;
+        const low = q === 'low';
+        this._lowHemi.visible = low;
+        this._headlight.visible = low;
+        this.setSun({});  // also flags the shadow map dirty
+        this._syncEnvironment();
+        this._shading.clay = low;
+        this._shading.applyShading();
+    }
+
+    /** @returns {string} the current display quality, "high" or "low" */
+    getDisplayQuality() {
+        return this._displayQuality;
+    }
+
+    /** Aim the low-quality headlight at the orbit target from just above-left of the eye. */
+    _updateHeadlight() {
+        if (!this._headlight.visible) return;
+        const cam = this._camera;
+        const target = this._controls.target;
+        const d = cam.position.distanceTo(target);
+        const right = _headlightRight.setFromMatrixColumn(cam.matrixWorld, 0);
+        const up = _headlightUp.setFromMatrixColumn(cam.matrixWorld, 1);
+        this._headlight.position.copy(cam.position)
+            .addScaledVector(right, LOW_HEADLIGHT_RIGHT * d)
+            .addScaledVector(up, LOW_HEADLIGHT_UP * d);
+        this._headlight.target.position.copy(target);
+        this._headlight.target.updateMatrixWorld();
+    }
+
+    /**
+     * Per-frame sun upkeep: (1) re-flag shadow casters/receivers when the
+     * object set changed, (2) re-aim the light and re-fit its orthographic
+     * shadow camera around the content sphere when either moved, (3) render
+     * the shadow map this frame if anything flagged it dirty. The shadow
+     * camera follows the content, not the view, so orbiting alone never
+     * re-renders it.
+     */
+    _updateSun() {
+        if (!this._sun.visible) return;
+        if (this._sunShadowGen !== this._objGeneration) {
+            this._sunShadowGen = this._objGeneration;
+            this._shadowDirty = true;
+            for (const root of this._objects.values()) {
+                // A billboard re-poses every frame the camera moves, so its
+                // shadow would swing with the view and need a per-frame map
+                // refresh; a camera-facing tag casts nothing instead.
+                const billboard = this._underBillboard(root);
+                root.traverse((/** @type {any} */ o) => {
+                    if (!o.isMesh) return;
+                    const role = shadowRoleFor(o);
+                    if (billboard) o.userData.__noCast = true;
+                    else delete o.userData.__noCast;
+                    o.castShadow = role.cast && !billboard;
+                    o.receiveShadow = role.receive;
+                });
+            }
+        }
+        if (this._sceneBoundsDirty) this._camController.updateSceneBounds();
+        const sph = this._sceneSphere;
+        const st = this._sunState;
+        const key = `${sph.center.x},${sph.center.y},${sph.center.z},${sph.radius},${st.azimuth},${st.elevation}`;
+        if (key !== this._sunFitKey) {
+            this._sunFitKey = key;
+            this._shadowDirty = true;
+            const r = Math.max(sph.radius, 1e-3);
+            const az = THREE.MathUtils.degToRad(st.azimuth);
+            const el = THREE.MathUtils.degToRad(st.elevation);
+            const dir = new THREE.Vector3(
+                Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el));
+            this._sun.target.position.copy(sph.center);
+            this._sun.position.copy(sph.center).addScaledVector(dir, 2 * r);
+            this._sun.target.updateMatrixWorld();
+            this._sun.updateMatrixWorld();
+            const cam = this._sun.shadow.camera;
+            cam.left = cam.bottom = -r;
+            cam.right = cam.top = r;
+            cam.near = 0.5 * r;
+            cam.far = 3.5 * r;
+            cam.updateProjectionMatrix();
+            // Bias in world units scales with the scene: ~1.5 shadow texels
+            // along the normal kills acne on curved/thin geometry without
+            // visibly detaching contact shadows.
+            this._sun.shadow.normalBias = 1.5 * (2 * r / SUN_SHADOW_MAP_SIZE);
+            this._sun.shadow.bias = -0.0002;
+        }
+        if (this._shadowDirty) {
+            this._renderer.shadowMap.needsUpdate = true;
+            this._shadowDirty = false;
+        }
+    }
+
+    /** @param {any} obj @returns {boolean} obj or an ancestor is a registered billboard */
+    _underBillboard(obj) {
+        for (let p = obj; p; p = p.parent) {
+            if (p.userData.id && this._billboards.has(p.userData.id)) return true;
+        }
+        return false;
+    }
+
+    /** Mirror _sunState into the Lighting panel widgets (no-op before they exist). */
+    _syncSunPanel() {
+        if (!this._lightingSunCheck) return;
+        const st = this._sunState;
+        this._lightingSunCheck.checked = st.enabled;
+        this._lightingSunIntensitySlider.value = String(st.intensity);
+        this._lightingSunIntensityValue.textContent = st.intensity.toFixed(2);
+        this._lightingSunAzimuthSlider.value = String(st.azimuth);
+        this._lightingSunAzimuthValue.textContent = `${Math.round(st.azimuth)}°`;
+        this._lightingSunElevationSlider.value = String(st.elevation);
+        this._lightingSunElevationValue.textContent = `${Math.round(st.elevation)}°`;
+        for (const el of [this._lightingSunIntensitySlider, this._lightingSunAzimuthSlider,
+            this._lightingSunElevationSlider]) {
+            el.disabled = !st.enabled;
+        }
+    }
+
+    /**
+     * Show the environment cubemap as the scene background instead of the flat
+     * colour (a debug view of the IBL; off by default). Takes effect once the
+     * cubemap has loaded if called earlier.
+     * @param {boolean} enabled
+     */
+    setEnvironmentBackground(enabled) {
+        this._envBackground = !!enabled;
+        this._applyBackground();
+    }
+
+    _applyBackground() {
+        this._scene.background = this._envBackground && this._envCube
+            ? this._envCube : this._backgroundColor;
+    }
+
+    /**
+     * Override the line colour of every shader floor grid (`add_grid`), including
+     * grids added later, so an embedder theme survives a producer re-pushing its
+     * grid. `null` drops the override for future grids; existing ones keep the
+     * last colour until re-added.
+     * @param {number|string|null} color
+     * @param {number|string|null} [centerColor] axis-line colour; null keeps each grid's own
+     */
+    setGridColor(color, centerColor = null) {
+        if (color == null) { this._gridColorOverride = null; return; }
+        const style = {
+            color: new THREE.Color(color).getHex(),
+            centerColor: centerColor == null ? null : new THREE.Color(centerColor).getHex(),
+        };
+        this._gridColorOverride = style;
+        for (const obj of this._objects.values()) {
+            if (obj.userData.isGrid) applyGridColor(/** @type {THREE.Mesh} */ (obj), style);
+        }
+    }
+
     // ========== Embedder animation transport / object / overlay / status API
     // (issues #74, #75, #76, #78) ==========
 
@@ -17222,6 +18082,13 @@ export class ThreeJSViewer {
         this._axisControls.dispose();
         this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
+        // An in-flight _loadCubemap sees the bumped token and discards its result.
+        this._cubemapToken = (this._cubemapToken || 0) + 1;
+        this._scene.environment = null;
+        if (this._scene.background === this._envCube) this._scene.background = null;
+        this._envTarget?.dispose();
+        this._envCube?.dispose();
+        this._envTarget = this._envCube = this._envMap = null;
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();

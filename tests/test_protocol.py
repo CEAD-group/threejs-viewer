@@ -24,6 +24,14 @@ def client():
     return c
 
 
+@pytest.fixture
+def connected_client(client):
+    """The mocked client with a viewer "connected": methods that record state
+    for the reconnect replay only send while ``_ws`` is set."""
+    client._ws = object()
+    return client
+
+
 # === add_group ===
 
 
@@ -1865,3 +1873,100 @@ def test_add_mesh_render_flags_omitted_by_default(client):
     client.add_mesh("m", pos, idx)
     header, _ = client._binary_messages[-1]
     assert "transparent" not in header and "renderOrder" not in header
+
+
+# === set_background / set_grid_color ===
+
+
+def test_set_background(client):
+    client.set_background(0x1C2128)
+    client.set_background("#1c2128")
+    client.set_background(None)
+    assert client._messages == [
+        {"type": "set_background", "color": 0x1C2128},
+        {"type": "set_background", "color": "#1c2128"},
+        {"type": "set_background", "color": None},
+    ]
+
+
+def test_set_grid_color(client):
+    client.set_grid_color(0x3B434E)
+    client.set_grid_color("#3b434e", center_color="#5e81ac")
+    assert client._messages == [
+        {"type": "set_grid_color", "color": 0x3B434E},
+        {"type": "set_grid_color", "color": "#3b434e", "center_color": "#5e81ac"},
+    ]
+
+
+# === set_display_quality ===
+
+
+def test_set_display_quality_sends_and_records(connected_client):
+    client = connected_client
+    client.set_display_quality("LOW")
+    assert client._messages == [{"type": "set_display_quality", "quality": "low"}]
+    assert client._display_quality_state == "low"
+    with pytest.raises(ValueError):
+        client.set_display_quality("medium")
+
+
+# === set_sun ===
+
+
+def test_set_sun_sends_only_given_fields(connected_client):
+    client = connected_client
+    client.set_sun(enabled=True, azimuth=45)
+    client.set_sun(intensity=3, elevation=20)
+    assert client._messages == [
+        {"type": "set_sun", "enabled": True, "azimuth": 45.0},
+        {"type": "set_sun", "intensity": 3.0, "elevation": 20.0},
+    ]
+    # Accumulated for the reconnect replay.
+    assert client._sun_state == {
+        "enabled": True,
+        "azimuth": 45.0,
+        "intensity": 3.0,
+        "elevation": 20.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"intensity": -0.1},
+        {"elevation": -1},
+        {"elevation": 90.5},
+        {"azimuth": float("nan")},
+    ],
+)
+def test_set_sun_validates(client, kwargs):
+    with pytest.raises(ValueError):
+        client.set_sun(**kwargs)
+    assert client._messages == []
+
+
+# === set_environment_background / set_cubemap ===
+
+
+def test_set_environment_background_sends_and_records(connected_client):
+    client = connected_client
+    client.set_environment_background()
+    client.set_environment_background(False)
+    assert client._messages == [
+        {"type": "set_environment_background", "enabled": True},
+        {"type": "set_environment_background", "enabled": False},
+    ]
+    assert client._environment_background_state is False
+    with pytest.raises(ValueError):
+        client.set_environment_background("yes")
+
+
+def test_set_cubemap_sends_and_records(connected_client):
+    client = connected_client
+    client.set_cubemap("paul-lobe-haus")
+    assert client._messages == [{"type": "set_cubemap", "name": "paul-lobe-haus"}]
+    assert client._cubemap_state == "paul-lobe-haus"
+    for bad in ("", None, 3):
+        with pytest.raises(ValueError):
+            client.set_cubemap(bad)
+    assert len(client._messages) == 1

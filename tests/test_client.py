@@ -95,6 +95,13 @@ def test_viewer_url_environment_map_true():
     assert params["environment_map"] == ["true"]
 
 
+def test_viewer_url_environment_background():
+    """environment_background=True emits env_background=true; default omits it."""
+    params = _params(ViewerClient(environment_background=True).viewer_url)
+    assert params["env_background"] == ["true"]
+    assert "env_background" not in _params(ViewerClient().viewer_url)
+
+
 def test_viewer_url_default_omits_environment_map():
     """No environment_map kwarg → no param (viewer/localStorage default)."""
     client = ViewerClient()
@@ -946,3 +953,68 @@ def test_reconnect_replays_bindings_and_axis_controls(bound_client):
     assert seen["bind_clip"] == bound_client._clip_bindings["bellows"]
     assert seen["add_axis_control"]["id"] == "j1"
     assert seen["set_move_gizmo"]["scale"] == 1.5
+
+
+def test_viewer_url_sun_params():
+    """Sun kwargs ride the URL; the default omits every sun param."""
+    params = _params(
+        ViewerClient(
+            sun=False, sun_intensity=3.5, sun_azimuth=120, sun_elevation=30
+        ).viewer_url
+    )
+    assert params["sun"] == ["false"]
+    assert params["sun_intensity"] == ["3.5"]
+    assert params["sun_azimuth"] == ["120.0"]
+    assert params["sun_elevation"] == ["30.0"]
+    default = _params(ViewerClient().viewer_url)
+    assert not {"sun", "sun_intensity", "sun_azimuth", "sun_elevation"} & set(default)
+
+
+def test_viewer_url_display_quality():
+    """display_quality rides the URL lowercased; the default omits it."""
+    assert _params(ViewerClient(display_quality="Low").viewer_url)[
+        "display_quality"
+    ] == ["low"]
+    assert "display_quality" not in _params(ViewerClient().viewer_url)
+    with pytest.raises(ValueError):
+        ViewerClient(display_quality="ultra")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sun": 1},
+        {"sun_intensity": -1},
+        {"sun_intensity": float("nan")},
+        {"sun_elevation": 91},
+        {"sun_elevation": -1},
+        {"sun_azimuth": float("inf")},
+    ],
+)
+def test_viewer_sun_kwargs_validated(kwargs):
+    with pytest.raises(ValueError):
+        ViewerClient(**kwargs)
+
+
+def test_reconnect_replays_runtime_lighting_state(bound_client):
+    """set_sun, set_display_quality, set_environment_background and
+    set_cubemap are recorded before any viewer connects and sent on connect."""
+    bound_client.set_sun(enabled=True, azimuth=30)
+    bound_client.set_display_quality("low")
+    bound_client.set_environment_background(True)
+    bound_client.set_cubemap("paul-lobe-haus")
+    want = {
+        "set_sun",
+        "set_display_quality",
+        "set_environment_background",
+        "set_cubemap",
+    }
+    seen = {}
+    with ws_connect(f"ws://127.0.0.1:{bound_client.port}", open_timeout=5) as ws:
+        while not want <= set(seen):
+            msg = json.loads(ws.recv(timeout=5))
+            seen[msg["type"]] = msg
+    assert seen["set_sun"] == {"type": "set_sun", "enabled": True, "azimuth": 30.0}
+    assert seen["set_display_quality"]["quality"] == "low"
+    assert seen["set_environment_background"]["enabled"] is True
+    assert seen["set_cubemap"]["name"] == "paul-lobe-haus"

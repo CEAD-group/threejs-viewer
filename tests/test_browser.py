@@ -63,6 +63,43 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
 
 
 @pytest.mark.browser
+def test_set_background_and_grid_color(viewer_client, viewer_page):
+    """set_background recolours both render paths and writes the menu
+    background token on the container; set_grid_color outlives a re-add."""
+    # The container's own --tjsv-menu-bg (PR #241 gives the rail its CSS);
+    # unset until the first set_background.
+    menu_bg = "() => window.threejsViewer.el.style.getPropertyValue('--tjsv-menu-bg')"
+    assert viewer_page.evaluate(menu_bg) == ""
+    viewer_client.add_grid("floor", color=0x555555)
+    viewer_client.set_background("#1c2128")
+    viewer_client.set_grid_color(0x3B434E)
+    settle(viewer_client)
+    read = (
+        "() => { const v = window.threejsViewer;"
+        " return { bg: v._scene.background.getHex(),"
+        "          css: v._renderer.domElement.style.backgroundColor,"
+        "          grid: v._objects.get('floor').material.uniforms.uColor.value.getHex() }; }"
+    )
+    state = viewer_page.evaluate(read)
+    assert state["bg"] == 0x1C2128
+    assert state["css"] == "rgb(28, 33, 40)"
+    assert state["grid"] == 0x3B434E
+    assert viewer_page.evaluate(menu_bg) == "#1c2128"
+    # A producer re-pushing its grid with its own colour keeps the override.
+    viewer_client.add_grid("floor", color=0x555555)
+    settle(viewer_client)
+    assert viewer_page.evaluate(read)["grid"] == 0x3B434E
+    viewer_client.set_background(None)
+    viewer_client.set_grid_color(None)
+    viewer_client.add_grid("floor", color=0x555555)
+    settle(viewer_client)
+    state = viewer_page.evaluate(read)
+    assert state["bg"] == 0x222222
+    assert state["grid"] == 0x555555
+    assert viewer_page.evaluate(menu_bg) == "#222222"
+
+
+@pytest.mark.browser
 def test_grouping(viewer_client, viewer_page):
     """Parent-child hierarchy works end-to-end."""
     viewer_client.add_group("arm")
@@ -3275,6 +3312,30 @@ def test_lighting_panel_edits_persist_in_localstorage(page):
         )
         assert ls_value == "0.25"
 
+        # Reset clears the persisted cubemap pick too, and keeps the loaded
+        # set when it is already the one Reset resolves to (no reload).
+        page.wait_for_function(
+            "() => window.threejsViewer._cubemapName === 'paul-lobe-haus'",
+            timeout=10_000,
+        )
+        reset_state = page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                localStorage.setItem('tjsv.cubemap', 'paul-lobe-haus');
+                const cube = v._envCube;
+                v._resetLightingPanel();
+                return [localStorage.getItem('tjsv.cubemap'), v._envCube === cube];
+            }"""
+        )
+        assert reset_state == [None, True]
+        page.evaluate(
+            """() => {
+                const slider = window.threejsViewer._lightingExposureSlider;
+                slider.value = '0.25';
+                slider.dispatchEvent(new Event('input', { bubbles: true }));
+            }"""
+        )
+
         # Reload: with no URL param, localStorage should drive the initial value.
         page.reload()
         _wait_for_viewer(page)
@@ -3403,6 +3464,298 @@ def test_environment_map_url_param_starts_disabled(page):
         )
     finally:
         client.disconnect()
+
+
+@pytest.mark.browser
+def test_environment_map_falls_back_to_module_static_dir(page, tmp_path):
+    """An embedder serving the viewer/ source dir (ribweaver) that passes
+    cubemapData in a non-HDR shape (base64 of the retired static/*.jpg, now a
+    404 body) still gets the env map: the viewer loads the default
+    static/cubemaps/ set next to viewer.js instead, and offers every set listed
+    in static/cubemaps/index.json."""
+    import functools
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+
+    viewer_dir = Path(__file__).parent.parent / "src" / "threejs_viewer" / "viewer"
+    (tmp_path / "index.html").write_text(
+        """<!doctype html><html><head>
+<script type="importmap">{"imports": {
+  "three": "https://unpkg.com/three@0.183.2/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.183.2/examples/jsm/"}}</script>
+</head><body style="margin:0"><div id="c" style="width:400px;height:300px"></div>
+<script type="module">
+const { ThreeJSViewer } = await import('/viewer/viewer.js');
+const htmlTemplate = await (await fetch('/viewer/template.html')).text();
+const junk = btoa('Not Found');
+const cubemapData = Object.fromEntries(
+  ['px','nx','py','ny','pz','nz'].map(f => [f, junk]));
+window.v = new ThreeJSViewer(document.getElementById('c'),
+  { htmlTemplate, cubemapData, autoConnect: false });
+</script></body></html>"""
+    )
+
+    class Handler(SimpleHTTPRequestHandler):
+        def translate_path(self, path):
+            if path.startswith("/viewer/"):
+                return str(viewer_dir / path[len("/viewer/") :].split("?")[0])
+            return str(tmp_path / path.lstrip("/").split("?")[0])
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        page.goto(f"http://127.0.0.1:{server.server_address[1]}/index.html")
+        page.wait_for_function(
+            "() => window.v?._envMap != null && window.v._envCube?.isCubeTexture",
+            timeout=20_000,
+        )
+        assert page.evaluate("() => window.v._scene.environment != null")
+        # The named sets come from static/cubemaps/index.json (written by
+        # build.py) and switching fetches that set's faces as static files.
+        names = page.evaluate("() => window.v.getCubemapNames()")
+        assert names[0] == "paul-lobe-haus"
+        options = page.evaluate(
+            "() => [...document.querySelectorAll('.tjsv-lighting-cubemap option')]"
+            ".map(o => o.value)"
+        )
+        assert options == names
+        for name in names[1:]:
+            page.evaluate(f"() => window.v.setCubemap('{name}')")
+            page.wait_for_function(
+                f"() => window.v._cubemapName === '{name}'", timeout=20_000
+            )
+        assert page.evaluate("() => window.v._scene.environment === window.v._envMap")
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.browser
+def test_environment_background_toggle(page):
+    """env_background=true shows the HDR cubemap as the background once it
+    loads; setEnvironmentBackground(false) restores the flat colour."""
+    client = _start_client()
+    try:
+        page.goto(
+            f"{client.viewer_path.resolve().as_uri()}"
+            f"?ws_port={client.port}&env_background=true"
+        )
+        _wait_for_viewer(page)
+        page.wait_for_function(
+            "() => window.threejsViewer._scene.background?.isCubeTexture === true",
+            timeout=10_000,
+        )
+        page.evaluate("() => window.threejsViewer.setEnvironmentBackground(false)")
+        assert page.evaluate(
+            "() => window.threejsViewer._scene.background.getHex() === 0x222222"
+        )
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.browser
+def test_set_environment_background_and_cubemap_messages(viewer_client, viewer_page):
+    """The Python runtime setters reach the JS setters: the cube becomes the
+    background and back, a known set name reloads, an unknown one warns and
+    keeps the current set."""
+    warnings = []
+    viewer_page.on(
+        "console", lambda m: warnings.append(m.text) if m.type == "warning" else None
+    )
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envCube?.isCubeTexture === true", timeout=10_000
+    )
+    viewer_client.set_environment_background(True)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._scene.background?.isCubeTexture === true"
+    )
+    viewer_client.set_environment_background(False)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._scene.background.getHex() === 0x222222"
+    )
+    viewer_client.set_cubemap("paul-lobe-haus")
+    settle(viewer_client)
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._cubemapName === 'paul-lobe-haus'", timeout=10_000
+    )
+    viewer_client.set_cubemap("no-such-set")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.threejsViewer._cubemapName") == (
+        "paul-lobe-haus"
+    )
+    assert any("no-such-set" in w for w in warnings), warnings
+    viewer_page.evaluate("() => localStorage.removeItem('tjsv.cubemap')")
+
+
+_CUBE_FACES = ("px", "nx", "py", "ny", "pz", "nz")
+
+
+def _hdr_face(w, h, pixels, rle):
+    """A Radiance .hdr byte string of ``(r, g, b, e)`` quads, top-down rows.
+
+    ``rle`` writes new-style RLE scanlines, one run per plane: a repeat run
+    when the plane is constant, else a literal run (``w`` must be <= 128).
+    """
+    out = bytearray(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n")
+    out += f"-Y {h} +X {w}\n".encode()
+    if not rle:
+        for px in pixels:
+            out += bytes(px)
+        return bytes(out)
+    for y in range(h):
+        row = pixels[y * w : (y + 1) * w]
+        out += bytes((2, 2, w >> 8, w & 255))
+        for c in range(4):
+            plane = [px[c] for px in row]
+            if len(set(plane)) == 1:
+                out += bytes((128 + w, plane[0]))
+            else:
+                out += bytes([w] + plane)
+    return bytes(out)
+
+
+_HALF_TO_FLOAT_JS = (
+    "const h2f = (h) => { const s = h >> 15 & 1, e = h >> 10 & 0x1f, m = h & 0x3ff;"
+    " const v = e === 0 ? m * 2 ** -24 : e === 31 ? (m ? NaN : Infinity)"
+    "   : (1 + m / 1024) * 2 ** (e - 15);"
+    " return s ? -v : v; };"
+)
+
+
+@pytest.mark.browser
+def test_hdr_decoder_pins_pixels_and_texture_settings(viewer_client, viewer_page):
+    """The in-file Radiance decoder stands in for three's HDRCubeTextureLoader
+    (dropped so an embedder's vendored addons need not ship HDRLoader): RLE
+    and flat faces decode to the same known half-float values, top-down, with
+    that loader's texture settings. The committed 128x128 set loads first."""
+    import gzip
+
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envCube?.isCubeTexture === true", timeout=10_000
+    )
+    assert viewer_page.evaluate(
+        "() => { const im = window.threejsViewer._envCube.images[0].image;"
+        " return [im.width, im.height, im.data.length]; }"
+    ) == [128, 128, 128 * 128 * 4]
+
+    w, h = 8, 2
+    pixels = [
+        (x * 32 % 256, 255 - x * 16, y * 100, 128 + (x % 3) - 1 if y else 128)
+        for y in range(h)
+        for x in range(w)
+    ]
+    expected = [c * 2.0 ** (e - 128) / 255 for r, g, b, e in pixels for c in (r, g, b)]
+
+    def gz(b):
+        return base64.b64encode(gzip.compress(b, mtime=0)).decode()
+
+    sets = {}
+    for name, rle in (("tiny_rle", True), ("tiny_flat", False)):
+        face = _hdr_face(w, h, pixels, rle)
+        assert (b"\n\n-Y 2 +X 8\n\x02\x02" in face) == rle
+        sets[name] = {"format": "hdr", "faces": {f: gz(face) for f in _CUBE_FACES}}
+    viewer_page.evaluate(
+        "(sets) => Object.assign(window.threejsViewer._cubemapSets, sets)", sets
+    )
+    read = (
+        "() => { const v = window.threejsViewer; const cube = v._envCube;"
+        " const face = cube.images[0], im = face.image;"
+        + _HALF_TO_FLOAT_JS
+        + " const rgb = [];"
+        " for (let i = 0; i < im.data.length; i += 4)"
+        "   rgb.push(h2f(im.data[i]), h2f(im.data[i + 1]), h2f(im.data[i + 2]));"
+        " const alpha = Array.from(im.data).filter((_, i) => i % 4 === 3)"
+        "   .every(a => h2f(a) === 1);"
+        " return { name: v._cubemapName, width: im.width, height: im.height,"
+        "   rgb, alpha, faces: cube.images.length, types: [cube.type, face.type],"
+        "   spaces: [cube.colorSpace, face.colorSpace], flipY: face.flipY,"
+        "   mipmaps: cube.generateMipmaps || face.generateMipmaps,"
+        "   filters: [cube.minFilter, cube.magFilter, face.minFilter, face.magFilter],"
+        "   env: !!v._envMap && v._scene.environment === v._envMap }; }"
+    )
+    try:
+        for name in ("tiny_rle", "tiny_flat"):
+            viewer_page.evaluate(f"() => window.threejsViewer.setCubemap('{name}')")
+            state = viewer_page.evaluate(read)
+            assert state["name"] == name
+            assert (state["width"], state["height"], state["faces"]) == (w, h, 6)
+            assert len(state["rgb"]) == len(expected)
+            for got, want in zip(state["rgb"], expected):
+                # Half floats carry ~11 bits of mantissa.
+                assert abs(got - want) <= 1.5e-3 * max(1.0, abs(want)), (
+                    name,
+                    got,
+                    want,
+                )
+            assert state["alpha"] is True
+            # HalfFloatType, LinearSRGBColorSpace, LinearFilter.
+            assert state["types"] == [1016, 1016]
+            assert state["spaces"] == ["srgb-linear", "srgb-linear"]
+            assert state["flipY"] is False and state["mipmaps"] is False
+            assert state["filters"] == [1006] * 4
+            assert state["env"] is True
+    finally:
+        viewer_page.evaluate("() => localStorage.removeItem('tjsv.cubemap')")
+
+
+@pytest.mark.browser
+def test_cubemap_reload_disposes_previous_env(viewer_client, viewer_page):
+    """Replacing the cubemap disposes the previous PMREM render target (which
+    owns the environment texture and its framebuffer) and the raw cube."""
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envTarget != null", timeout=10_000
+    )
+    result = viewer_page.evaluate(
+        "async () => { const v = window.threejsViewer;"
+        " const target = v._envTarget, cube = v._envCube, map = v._envMap;"
+        " const calls = { target: 0, cube: 0 };"
+        " const t0 = target.dispose.bind(target);"
+        " target.dispose = () => { calls.target++; t0(); };"
+        " const c0 = cube.dispose.bind(cube);"
+        " cube.dispose = () => { calls.cube++; c0(); };"
+        " await v._loadCubemap(v._cubemapName);"
+        " return { ...calls,"
+        "   replaced: v._envTarget !== target && v._envCube !== cube && v._envMap !== map,"
+        "   env: v._scene.environment === v._envMap }; }"
+    )
+    assert result == {"target": 1, "cube": 1, "replaced": True, "env": True}
+
+
+@pytest.mark.browser
+def test_destroy_disposes_env_and_discards_inflight_cubemap(viewer_client, viewer_page):
+    """destroy() frees the PMREM target and raw cube, and a cubemap load still
+    in flight at destroy() lands nowhere (no environment on a dead scene)."""
+    errors = []
+    viewer_page.on(
+        "console", lambda m: errors.append(m.text) if m.type == "error" else None
+    )
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._envTarget != null", timeout=10_000
+    )
+    result = viewer_page.evaluate(
+        "async () => { const first = window.threejsViewer;"
+        " const make = () => { const el = document.createElement('div');"
+        "   el.style.cssText = 'width:200px;height:150px';"
+        "   document.body.appendChild(el);"
+        "   return new first.constructor(el, { ...first._options, autoConnect: false }); };"
+        " const a = make(); await a._cubemapsReady;"
+        " const calls = { target: 0, cube: 0 };"
+        " const t = a._envTarget, c = a._envCube;"
+        " const t0 = t.dispose.bind(t); t.dispose = () => { calls.target++; t0(); };"
+        " const c0 = c.dispose.bind(c); c.dispose = () => { calls.cube++; c0(); };"
+        " a.destroy();"
+        " const b = make(); b.destroy(); await b._cubemapsReady;"
+        " const freed = (v) => v._envTarget === null && v._envCube === null"
+        "   && v._envMap === null && v._scene.environment === null;"
+        " return { ...calls, a: freed(a), b: freed(b) }; }"
+    )
+    assert result == {"target": 1, "cube": 1, "a": True, "b": True}
+    assert not [e for e in errors if "cubemap" in e.lower()], errors
 
 
 @pytest.mark.browser
@@ -4048,6 +4401,122 @@ def test_depth_cue_fog_rescopes_on_shading_toggle(viewer_client, viewer_page):
     assert overlay_fog is False, (
         f"wireframe overlay material must be fog-scoped off, got {overlay_fog!r}"
     )
+
+
+_FOG_STATE_JS = (
+    "() => { const v = window.threejsViewer; const box = v._objects.get('fogqbox');"
+    " const worn = Array.isArray(box.material) ? box.material[0] : box.material;"
+    " const own = box.userData.originalMaterial ?? box.material;"
+    " const line = v._objects.get('fogqline');"
+    " const lm = Array.isArray(line.material) ? line.material[0] : line.material;"
+    " return { worn: worn.fog, own: own.fog, clay: v._shading._clayMat?.fog ?? null,"
+    "   line: lm.fog, isClay: worn === v._shading._clayMat }; }"
+)
+
+
+def _wait_fog_state(page, want):
+    """Poll the fog flags until every key in ``want`` matches (the scope pass
+    runs from the render loop, one frame after the switch)."""
+    state = None
+    for _ in range(40):
+        state = page.evaluate(_FOG_STATE_JS)
+        if all(state[k] == v for k, v in want.items()):
+            return state
+        time.sleep(0.05)
+    pytest.fail(f"fog scope never reached {want!r}, last {state!r}")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("fog_first", [True, False])
+def test_depth_cue_fog_rescopes_on_display_quality(
+    viewer_client, viewer_page, fog_first
+):
+    """Low quality swaps in a shared MeshLambertMaterial clay (fog:true by
+    default) without bumping _objGeneration, and high restores the parked
+    originals. Fog must stay off both the worn and the own material in either
+    order (fog then low, or low then fog), and come back on both when fog is
+    switched off."""
+    viewer_client.add_box("fogqbox")
+    pts = np.array([[-2, 0, 0], [0, 1, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("fogqline", pts, color=0x44AAFF, line_width=4)
+    settle(viewer_client)
+    if fog_first:
+        viewer_client.set_depth_cue(fog=True)
+        _wait_fog_state(viewer_page, {"worn": False, "line": True})
+        viewer_client.set_display_quality("low")
+    else:
+        viewer_client.set_display_quality("low")
+        settle(viewer_client)
+        frames(viewer_page)
+        assert viewer_page.evaluate(_FOG_STATE_JS)["isClay"] is True
+        viewer_client.set_depth_cue(fog=True)
+    state = _wait_fog_state(viewer_page, {"worn": False, "own": False, "line": True})
+    assert state["isClay"] is True and state["clay"] is False
+    viewer_client.set_display_quality("high")
+    state = _wait_fog_state(viewer_page, {"worn": False, "own": False, "line": True})
+    assert state["isClay"] is False
+    viewer_client.set_depth_cue(fog=False)
+    state = _wait_fog_state(viewer_page, {"worn": True, "own": True})
+    assert state["clay"] is True
+
+
+_WIRE_STATE_JS = (
+    "() => { const v = window.threejsViewer;"
+    " const mat = (id) => { const o = v._objects.get(id);"
+    "   return Array.isArray(o.material) ? o.material[0] : o.material; };"
+    " const own = (id) => v._objects.get(id).userData.originalMaterial ?? mat(id);"
+    " return { worn: mat('wqbox').wireframe, own: own('wqbox').wireframe,"
+    "   cage: mat('wqcage').wireframe, cageOwn: own('wqcage').wireframe,"
+    "   clay: v._shading._clayMat?.wireframe ?? null,"
+    "   isClay: mat('wqbox') === v._shading._clayMat, mode: v._shading.wireframeMode }; }"
+)
+
+
+@pytest.mark.browser
+def test_wireframe_composes_with_display_quality(viewer_client, viewer_page):
+    """M mode 1 survives a low/high switch (the swapped-in clay and the
+    restored original both carry it), cycling M back to 0 clears it from both,
+    and a cage added with wireframe=True keeps its own flag throughout."""
+    viewer_client.add_box("wqbox", color=0x3366CC)
+    viewer_client.add_box("wqcage", color=0xCC3333, wireframe=True, position=[2, 0, 0])
+    settle(viewer_client)
+    _press_key(viewer_page, "KeyM")
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert (state["mode"], state["worn"], state["cage"]) == (1, True, True)
+
+    viewer_client.set_display_quality("low")
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert state["isClay"] is True
+    assert (state["worn"], state["clay"], state["own"], state["cage"]) == (True,) * 4
+
+    viewer_client.set_display_quality("high")
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert state["isClay"] is False
+    assert (state["worn"], state["cage"]) == (True, True)
+
+    _press_key(viewer_page, "KeyM")  # 2: overlay
+    _press_key(viewer_page, "KeyM")  # 0
+    frames(viewer_page)
+    state = viewer_page.evaluate(_WIRE_STATE_JS)
+    assert (state["mode"], state["worn"], state["clay"]) == (0, False, False)
+    # The cage's own wireframe=True is restored, not clobbered.
+    assert state["cage"] is True
+
+    # And an object added while M is on comes in wireframed too.
+    viewer_client.set_display_quality("low")
+    _press_key(viewer_page, "KeyM")
+    viewer_client.add_box("wqlate", color=0x33CC33, position=[4, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate(
+        "() => { const o = window.threejsViewer._objects.get('wqlate');"
+        " return [o.material.wireframe, o.userData.originalMaterial.wireframe]; }"
+    ) == [True, True]
 
 
 # Move/rotate gizmo: top-down camera so a horizontal drag maps to world +X.
@@ -9708,3 +10177,226 @@ def test_rail_panel_opens_upward_and_tabs_stay_on_top(viewer_client, viewer_page
     assert r["bodyTop"] < r["tabTop"], r
     assert r["bodyBottom"] <= r["railBottom"] + 0.5, r
     assert r["otherTabOnTop"] is True, r
+
+
+@pytest.mark.browser
+def test_sun_casts_shadow_and_set_sun_toggles(viewer_client, viewer_page):
+    """The default sun (azimuth -80°, elevation 50°) throws a box's shadow
+    toward +Y onto a floor: that floor spot reads darker than open floor.
+    set_sun(enabled=False) removes it and syncs the Lighting panel."""
+    viewer_client.add_box("floor", 10, 10, 0.2, color=0x777777, position=[0, 0, -0.1])
+    viewer_client.add_box("tower", 1, 1, 2, color=0x3366CC, position=[0, 0, 1])
+    viewer_client.add_box(
+        "glass", 1, 1, 1, color=0xFFFFFF, opacity=0.3, position=[3, -3, 0.5]
+    )
+    viewer_client.set_camera(position=[0, 0, 14], target=[0, 0, 0], up=[0, 1, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+
+    flags = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const m = (id) => v._objects.get(id);"
+        " return [m('tower').castShadow, m('floor').receiveShadow,"
+        "         m('glass').castShadow, m('glass').receiveShadow, v._sun.visible]; }"
+    )
+    assert flags == [True, True, False, True, True]
+
+    def floor_luma(points):
+        # Render with the shadow map as the viewer left it (never forced here,
+        # so a stale map would show) and read floor pixels in one JS turn, no
+        # preserveDrawingBuffer.
+        return viewer_page.evaluate(
+            "(pts) => { const v = window.threejsViewer;"
+            " v._renderer.render(v._scene, v._camera);"
+            " const gl = v._renderer.getContext();"
+            " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
+            " const px = new Uint8Array(4);"
+            " return pts.map(([x, y, z]) => {"
+            "  const p = v._camera.position.clone().set(x, y, z).project(v._camera);"
+            "  gl.readPixels(Math.round((p.x + 1) / 2 * w), Math.round((p.y + 1) / 2 * h),"
+            "                1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);"
+            "  return px[0] + px[1] + px[2]; }); }",
+            points,
+        )
+
+    # Shadow spot: +Y of the tower, off its top-view footprint; open spot: -Y,
+    # toward the sun.
+    shadow_spot, lit_spot = [-0.2, 1.4, 0], [0, -2.5, 0]
+    shadow, lit = floor_luma([shadow_spot, lit_spot])
+    gap_on = lit - shadow
+
+    # Move the tower 3 m along +X: the map must follow without any test-side
+    # needsUpdate poke (the message flags the shadow map dirty).
+    viewer_client.set_matrix("tower", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 1, 1])
+    settle(viewer_client)
+    frames(viewer_page)
+    old_spot, new_spot = floor_luma([shadow_spot, [2.8, 1.4, 0]])
+    assert old_spot - new_spot > 40, (old_spot, new_spot)
+
+    viewer_client.set_sun(enabled=False)
+    settle(viewer_client)
+    frames(viewer_page)
+    shadow, lit = floor_luma([shadow_spot, lit_spot])
+    gap_off = lit - shadow
+    # The IBL lights the floor unevenly on its own (gap_off is not 0), so
+    # compare the gaps: the shadow darkens its spot by ~50-70 summed RGB.
+    assert gap_on - gap_off > 40, (gap_on, gap_off)
+    assert viewer_page.evaluate(
+        "() => [window.threejsViewer._sun.visible,"
+        " document.querySelector('.tjsv-lighting-sun').checked]"
+    ) == [False, False]
+
+
+_SHADOW_RENDER_COUNTER_JS = (
+    "() => { const sm = window.threejsViewer._renderer.shadowMap;"
+    " if (!sm.__orig) { sm.__orig = sm.render; sm.__count = 0;"
+    "   sm.render = function (lights, scene, camera) {"
+    "     const before = sm.needsUpdate; sm.__orig.call(this, lights, scene, camera);"
+    "     if (before && !sm.needsUpdate) sm.__count++; }; }"
+    " const n = sm.__count; sm.__count = 0; return n; }"
+)
+
+
+@pytest.mark.browser
+def test_shadow_map_refreshes_only_when_dirty(viewer_client, viewer_page):
+    """A static scene renders no shadow pass: the map is refreshed once per
+    change (message, animation tick), not once per frame."""
+    viewer_client.add_box("floor", 10, 10, 0.2, color=0x777777, position=[0, 0, -0.1])
+    viewer_client.add_box("tower", 1, 1, 2, color=0x3366CC, position=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS)  # install + zero
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 0
+    # One transform message (fed directly, so no query_scene barrier message
+    # adds a refresh of its own) = one refresh, then idle again.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.handleMessage({ type: 'update_transform',"
+        " id: 'tower', transform: { position: [2, 0, 1] } })"
+    )
+    frames(viewer_page, 2)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 1
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 0
+    # requestShadowUpdate is the escape hatch for an embedder that moved an
+    # Object3D behind the viewer's back.
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v.getObject('tower').position.x = -2;"
+        " v.requestShadowUpdate(); }"
+    )
+    frames(viewer_page, 2)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 1
+    # A playing animation moves objects every frame, so every frame refreshes.
+    viewer_client.load_animation(_spin_animation("tower", n=40, duration=2.0))
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS)
+    frames(viewer_page, 6)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) >= 4
+    viewer_client.pause_animation()
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS)
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 0
+
+
+@pytest.mark.browser
+def test_shadow_caster_follows_opacity(viewer_client, viewer_page):
+    """castShadow tracks the mesh's own opacity through set_opacity and
+    set_color(opacity=), not only the object-set generation."""
+    viewer_client.add_box("solid", 1, 1, 1, color=0x3366CC)
+    viewer_client.add_box(
+        "glass", 1, 1, 1, color=0xFFFFFF, opacity=0.3, position=[2, 0, 0]
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    casts = "() => ['solid', 'glass'].map(id => window.threejsViewer._objects.get(id).castShadow)"
+    assert viewer_page.evaluate(casts) == [True, False]
+    viewer_client.set_opacity("solid", 0.3)
+    viewer_client.set_opacity("glass", 1.0)
+    settle(viewer_client)
+    assert viewer_page.evaluate(casts) == [False, True]
+    viewer_client.set_color("solid", 0x3366CC, opacity=1.0)
+    viewer_client.set_color("glass", 0xFFFFFF, opacity=0.5)
+    settle(viewer_client)
+    assert viewer_page.evaluate(casts) == [True, False]
+
+
+@pytest.mark.browser
+def test_billboard_does_not_cast_shadow(viewer_client, viewer_page):
+    """A billboard re-poses per camera move; rather than refreshing the shadow
+    map every frame it casts nothing, and set_opacity keeps that."""
+    viewer_client.add_billboard("tag", 1, 1, color=0xFFFFFF, position=[0, 0, 2])
+    viewer_client.add_box("box", 1, 1, 1, color=0x3366CC)
+    settle(viewer_client)
+    frames(viewer_page)
+    casts = "() => ['tag', 'box'].map(id => window.threejsViewer._objects.get(id).castShadow)"
+    assert viewer_page.evaluate(casts) == [False, True]
+    viewer_client.set_billboard("box", mode="aim")
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate(casts) == [False, False]
+    viewer_client.set_opacity("box", 1.0)
+    settle(viewer_client)
+    assert viewer_page.evaluate(casts) == [False, False]
+    viewer_client.set_billboard("box", enabled=False)
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate(casts) == [False, True]
+
+
+@pytest.mark.browser
+def test_display_quality_low_clays_opaque_meshes_and_simplifies_lighting(
+    viewer_client, viewer_page
+):
+    """Low: opaque lit meshes share one clay material, translucent ones keep
+    theirs, the sun + IBL give way to the hemisphere/headlight rig. set_color
+    while low edits the mesh's own material, and high restores it."""
+    viewer_client.add_box("a", 1, 1, 1, color=0x3366CC, position=[0, 0, 0.5])
+    viewer_client.add_box("b", 1, 1, 1, color=0xCC3333, position=[2, 0, 0.5])
+    viewer_client.add_box(
+        "glass", 1, 1, 1, color=0xFFFFFF, opacity=0.3, position=[4, 0, 0.5]
+    )
+    viewer_client.set_display_quality("low")
+    viewer_client.add_box("late", 1, 1, 1, color=0x33CC33, position=[6, 0, 0.5])
+    viewer_client.set_color("a", 0xFF8800)
+    settle(viewer_client)
+    frames(viewer_page)
+
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; const m = (id) => v._objects.get(id).material;"
+        " const clay = v._shading._clayMat;"
+        " return { quality: v.getDisplayQuality(),"
+        "  shared: [m('a'), m('b'), m('late')].every(x => x === clay),"
+        "  clayLambert: !!clay && clay.isMeshLambertMaterial,"
+        "  clayHex: clay.color.getHex(),"
+        "  glassOwn: m('glass') !== clay,"
+        "  aOwnHex: v._objects.get('a').userData.originalMaterial.color.getHex(),"
+        "  sun: v._sun.visible, env: v._scene.environment,"
+        "  hemi: v._lowHemi.visible, head: v._headlight.visible }; }"
+    )
+    assert state["quality"] == "low"
+    assert state["shared"] and state["clayLambert"] and state["glassOwn"]
+    assert state["clayHex"] == 0xA8A6A2
+    assert state["aOwnHex"] == 0xFF8800
+    assert state["sun"] is False and state["env"] is None
+    assert state["hemi"] is True and state["head"] is True
+
+    viewer_client.set_display_quality("high")
+    settle(viewer_client)
+    frames(viewer_page)
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; const m = (id) => v._objects.get(id).material;"
+        " return { std: ['a', 'b', 'late'].every(id => m(id).isMeshStandardMaterial"
+        "            && v._objects.get(id).userData.originalMaterial === undefined),"
+        "  aHex: m('a').color.getHex(), sun: v._sun.visible,"
+        "  env: v._scene.environment !== null, hemi: v._lowHemi.visible }; }"
+    )
+    assert state == {
+        "std": True,
+        "aHex": 0xFF8800,
+        "sun": True,
+        "env": True,
+        "hemi": False,
+    }

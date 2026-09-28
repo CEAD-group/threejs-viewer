@@ -19,7 +19,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
@@ -38,6 +38,8 @@ from .points_lod import (
 _ALLOWED_TONE_MAPPING_MODES = frozenset(
     {"none", "linear", "reinhard", "cineon", "aces", "agx", "neutral"}
 )
+
+_ALLOWED_DISPLAY_QUALITIES = frozenset({"high", "low"})
 
 _ALLOWED_GIZMO_MODES = frozenset({"translate", "rotate"})
 _ALLOWED_GIZMO_SPACES = frozenset({"world", "local"})
@@ -163,6 +165,32 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number (got {value!r})")
     return f
+
+
+def _validate_display_quality(quality: Optional[str]) -> Optional[str]:
+    """Normalize a display quality to lowercase (``None`` passes through)."""
+    if quality is None:
+        return None
+    normalized = str(quality).lower()
+    if normalized not in _ALLOWED_DISPLAY_QUALITIES:
+        raise ValueError(f"display_quality must be 'high' or 'low' (got {quality!r})")
+    return normalized
+
+
+def _validate_sun(
+    intensity: Optional[float],
+    azimuth: Optional[float],
+    elevation: Optional[float],
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Validate the sun's numeric fields (``None`` passes through)."""
+    intensity = _validate_finite("sun intensity", intensity)
+    azimuth = _validate_finite("sun azimuth", azimuth)
+    elevation = _validate_finite("sun elevation", elevation)
+    if intensity is not None and intensity < 0:
+        raise ValueError(f"sun intensity must be >= 0 (got {intensity!r})")
+    if elevation is not None and not 0 <= elevation <= 90:
+        raise ValueError(f"sun elevation must be in [0, 90] (got {elevation!r})")
+    return intensity, azimuth, elevation
 
 
 GizmoAxisMask = Union[Dict[str, bool], Tuple[bool, bool, bool], List[bool]]
@@ -565,8 +593,14 @@ class ViewerClient:
         tone_mapping_exposure: Optional[float] = None,
         environment_intensity: Optional[float] = None,
         environment_map: Optional[bool] = None,
+        environment_background: bool = False,
         ambient_intensity: Optional[float] = None,
         tone_mapping: Optional[str] = None,
+        sun: Optional[bool] = None,
+        sun_intensity: Optional[float] = None,
+        sun_azimuth: Optional[float] = None,
+        sun_elevation: Optional[float] = None,
+        display_quality: Optional[str] = None,
         fov: Optional[float] = None,
         toolbar: Optional[bool] = None,
         view_helper_size: Optional[float] = None,
@@ -590,8 +624,24 @@ class ViewerClient:
                 (default ``True``). Pass ``False`` for a flatter, uglier, but
                 faster render (drops the per-pixel PBR reflection lookups).
                 Toggleable at runtime from the browser Lighting panel.
+            environment_background: Show the environment cubemap as the
+                scene background instead of the flat colour (default
+                ``False``; a debug view of the IBL).
             ambient_intensity: Override the ambient light's ``intensity``
                 (default ``1.5``). Must be finite.
+            sun: Shadow-casting sun (directional light) on/off (default
+                ``True``). ``sun_intensity`` (default ``2.0``), ``sun_azimuth``
+                (degrees in the XY plane from +X toward +Y, default ``-80``)
+                and ``sun_elevation`` (degrees above the XY plane, default
+                ``50``, range ``[0, 90]``) set its strength and direction.
+                Like the other lighting kwargs these ride the viewer URL and
+                win over the Lighting panel's localStorage; change them at
+                runtime with :meth:`set_sun`.
+            display_quality: ``"high"`` (default) or ``"low"``. Low puts one
+                matte clay material on every opaque lit mesh and swaps the IBL,
+                sun and shadows for a hemisphere light plus a camera headlight.
+                Rides the URL; change it at runtime with
+                :meth:`set_display_quality`.
             tone_mapping: Tone-mapping mode, one of ``"none"``, ``"linear"``,
                 ``"reinhard"``, ``"cineon"``, ``"aces"`` (default), ``"agx"``,
                 ``"neutral"``. Case-insensitive; stored lowercase. Invalid
@@ -647,8 +697,19 @@ class ViewerClient:
                 f"environment_map must be a bool or None, got {environment_map!r}"
             )
         self.environment_map = environment_map
+        if not isinstance(environment_background, bool):
+            raise ValueError(
+                f"environment_background must be a bool, got {environment_background!r}"
+            )
+        self.environment_background = environment_background
         self.ambient_intensity = _validate_finite(
             "ambient_intensity", ambient_intensity
+        )
+        if sun is not None and not isinstance(sun, bool):
+            raise ValueError(f"sun must be a bool or None, got {sun!r}")
+        self.sun = sun
+        self.sun_intensity, self.sun_azimuth, self.sun_elevation = _validate_sun(
+            sun_intensity, sun_azimuth, sun_elevation
         )
         # Validate tone_mapping (case-insensitive, stored lowercase).  Matches
         # the seven Three.js modes exposed in the viewer's lighting panel.
@@ -662,6 +723,7 @@ class ViewerClient:
             self.tone_mapping = normalized
         else:
             self.tone_mapping = None
+        self.display_quality = _validate_display_quality(display_quality)
         # Perspective camera FOV (degrees). `None` means "use the viewer default".
         self.fov = _validate_fov(fov)
         if toolbar is not None and not isinstance(toolbar, bool):
@@ -675,6 +737,15 @@ class ViewerClient:
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
+        # Accumulated set_sun fields, re-sent on reconnect.
+        self._sun_state: Dict[str, Any] = {}
+        # Runtime set_display_quality value, re-sent on reconnect.
+        self._display_quality_state: Optional[str] = None
+        # Runtime set_environment_background / set_cubemap values, re-sent on
+        # reconnect (the browser remembers the cubemap in localStorage, but a
+        # different profile or a cleared one would not).
+        self._environment_background_state: Optional[bool] = None
+        self._cubemap_state: Optional[str] = None
         # Client-defined menus (add_menu): id -> the add_menu message, kept
         # current through update_menu_item so a reconnect replays the latest
         # state; plus the callbacks fed by the viewer's menu_action messages.
@@ -808,7 +879,9 @@ class ViewerClient:
         Always includes `ws_port`; adds `ws_host` when ``host`` is not
         ``"localhost"`` (the viewer's default). Appends `tone_mapping`,
         `tone_mapping_exposure`, `environment_intensity`, `environment_map`,
-        `ambient_intensity`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
+        `env_background`,
+        `ambient_intensity`, `sun`, `sun_intensity`, `sun_azimuth`,
+        `sun_elevation`, `display_quality`, `fov`, `toolbar`, and/or `view_helper_size` query params when the caller passed
         explicit overrides —
         those act as authoritative defaults in the browser (the lighting ones
         win over the panel's localStorage on reload).
@@ -826,8 +899,18 @@ class ViewerClient:
             params.append(
                 ("environment_map", "true" if self.environment_map else "false")
             )
+        if self.environment_background:
+            params.append(("env_background", "true"))
         if self.ambient_intensity is not None:
             params.append(("ambient_intensity", str(self.ambient_intensity)))
+        if self.sun is not None:
+            params.append(("sun", "true" if self.sun else "false"))
+        for name in ("sun_intensity", "sun_azimuth", "sun_elevation"):
+            value = getattr(self, name)
+            if value is not None:
+                params.append((name, str(value)))
+        if self.display_quality is not None:
+            params.append(("display_quality", self.display_quality))
         if self.fov is not None:
             params.append(("fov", str(self.fov)))
         if self.toolbar is not None:
@@ -907,6 +990,48 @@ class ViewerClient:
         if self._toolbar_visible is not None:
             try:
                 websocket.send(json.dumps(self._toolbar_visible))
+            except Exception:
+                pass
+
+        # Re-apply runtime sun changes (set_sun).
+        if self._sun_state:
+            try:
+                websocket.send(json.dumps({"type": "set_sun", **self._sun_state}))
+            except Exception:
+                pass
+
+        # Re-apply a runtime display quality (set_display_quality).
+        if self._display_quality_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {
+                            "type": "set_display_quality",
+                            "quality": self._display_quality_state,
+                        }
+                    )
+                )
+            except Exception:
+                pass
+
+        # Re-apply the runtime environment background and cubemap choice.
+        if self._environment_background_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {
+                            "type": "set_environment_background",
+                            "enabled": self._environment_background_state,
+                        }
+                    )
+                )
+            except Exception:
+                pass
+        if self._cubemap_state is not None:
+            try:
+                websocket.send(
+                    json.dumps({"type": "set_cubemap", "name": self._cubemap_state})
+                )
             except Exception:
                 pass
 
@@ -4010,6 +4135,135 @@ class ViewerClient:
             msg["size"] = size
             msg["divisions"] = divisions
         self._send(msg)
+
+    def set_background(self, color: int | str | None) -> None:
+        """Set the scene background colour.
+
+        Transient viewer state like :meth:`set_color` (not replayed on
+        reconnect).
+
+        Args:
+            color: Hex int (``0x1C2128``) or a CSS colour string
+                (``"#1c2128"``). ``None`` restores the viewer default.
+        """
+        self._send({"type": "set_background", "color": color})
+
+    def set_grid_color(
+        self, color: int | str | None, center_color: int | str | None = None
+    ) -> None:
+        """Override the line colour of every shader floor grid (:meth:`add_grid`).
+
+        The override also applies to grids added later, so it survives a grid
+        being re-pushed with its own ``color``. Transient viewer state like
+        :meth:`set_color` (not replayed on reconnect).
+
+        Args:
+            color: Hex int or CSS colour string. ``None`` drops the override for
+                grids added from now on; existing grids keep their colour.
+            center_color: Axis-line colour. ``None`` keeps each grid's own.
+        """
+        msg: dict = {"type": "set_grid_color", "color": color}
+        if center_color is not None:
+            msg["center_color"] = center_color
+        self._send(msg)
+
+    def set_sun(
+        self,
+        enabled: Optional[bool] = None,
+        intensity: Optional[float] = None,
+        azimuth: Optional[float] = None,
+        elevation: Optional[float] = None,
+    ) -> None:
+        """Change the sun (shadow-casting directional light) at runtime.
+
+        The programmatic twin of the Lighting panel's Sun section (``E``).
+        The sun aims at the centre of the scene content and its shadow map
+        is fitted to the content bounds, so it works at any scene scale.
+        Opaque meshes cast and receive shadows; translucent ones only
+        receive; lines, point clouds and floor grids do neither.
+
+        Args:
+            enabled: On/off. ``None`` leaves it unchanged.
+            intensity: Light intensity (default ``2.0``), ``>= 0``.
+            azimuth: Degrees in the XY plane from +X toward +Y (default
+                ``-80``).
+            elevation: Degrees above the XY plane (default ``50``), in
+                ``[0, 90]``; the sun never lights from below the horizon.
+
+        Fields left ``None`` are unchanged. Recorded and re-sent on
+        reconnect, so a browser refresh keeps the requested sun; may be called
+        before a viewer connects.
+        """
+        intensity, azimuth, elevation = _validate_sun(intensity, azimuth, elevation)
+        msg: Dict[str, Any] = {}
+        if enabled is not None:
+            msg["enabled"] = bool(enabled)
+        if intensity is not None:
+            msg["intensity"] = intensity
+        if azimuth is not None:
+            msg["azimuth"] = azimuth
+        if elevation is not None:
+            msg["elevation"] = elevation
+        self._sun_state.update(msg)
+        if self._ws is not None:
+            self._send({"type": "set_sun", **msg})
+
+    def set_display_quality(self, quality: str) -> None:
+        """Switch render quality at runtime.
+
+        ``"low"`` puts one shared matte clay material on every opaque lit mesh
+        (translucent, vertex-coloured and polygon-offset overlays keep theirs)
+        and replaces the IBL, sun and shadows with a hemisphere light plus a
+        camera headlight. ``"high"`` restores materials and lighting; the sun
+        and environment settings are kept throughout, only suppressed.
+
+        Recorded and re-sent on reconnect, so a browser refresh keeps the
+        requested quality; may be called before a viewer connects.
+        """
+        normalized = _validate_display_quality(quality)
+        if normalized is None:
+            raise ValueError("display_quality must be 'high' or 'low' (got None)")
+        self._display_quality_state = normalized
+        if self._ws is not None:
+            self._send({"type": "set_display_quality", "quality": normalized})
+
+    def set_environment_background(self, enabled: bool = True) -> None:
+        """Show the environment cubemap as the scene background at runtime.
+
+        The runtime twin of ``ViewerClient(environment_background=True)``:
+        ``True`` replaces the flat background colour with the raw HDR cube (a
+        debug view of the image-based lighting), ``False`` restores the flat
+        colour (:meth:`set_background`). Takes effect once the cubemap has
+        loaded if sent earlier.
+
+        Recorded and re-sent on reconnect, so a browser refresh keeps the
+        requested background; may be called before a viewer connects.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError(f"enabled must be a bool, got {enabled!r}")
+        self._environment_background_state = enabled
+        if self._ws is not None:
+            self._send({"type": "set_environment_background", "enabled": enabled})
+
+    def set_cubemap(self, name: str) -> None:
+        """Switch the environment cubemap to a named set at runtime.
+
+        ``name`` is a folder under the viewer's ``static/cubemaps/`` (the
+        Lighting panel's Cubemap picker lists the same names; only
+        ``"paul-lobe-haus"`` ships today). The viewer keeps its current set
+        and logs a console warning for a name it does not have: Python
+        cannot see the browser's list, so no validation beyond a non-empty
+        string happens here. The browser also persists the choice in
+        localStorage like a panel pick.
+
+        Recorded and re-sent on reconnect, so a browser refresh keeps the
+        requested set; may be called before a viewer connects.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"cubemap name must be a non-empty string, got {name!r}")
+        self._cubemap_state = name
+        if self._ws is not None:
+            self._send({"type": "set_cubemap", "name": name})
 
     def set_depth_cue(
         self,
