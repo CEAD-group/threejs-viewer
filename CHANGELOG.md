@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.60
+
+### Environment cubemap, sun and display quality (#240)
+
+- **HDR environment cubemap** (`paul-lobe-haus`) replaces the old JPEG faces. It is decoded by an in-file Radiance HDR decoder, so `viewer.js` imports no HDR loader from `three/addons`. `set_environment_background(True)` (option `environmentBackground`, URL `env_background`) shows it as the scene background; `set_cubemap(name)` picks a set when more than one is built in.
+- **Sun**: one shadow-casting directional light, on by default, with soft shadows fitted to the content. Set it with `ViewerClient(sun=, sun_intensity=, sun_azimuth=, sun_elevation=)`, `set_sun(...)`, JS `viewer.setSun()` / `getSun()`, or the Lighting panel. The shadow map is re-rendered only when the scene changes, so orbiting a static scene costs no extra depth pass; `viewer.requestShadowUpdate()` covers an embedder that moves objects itself. Translucent meshes and billboards do not cast.
+- **`set_display_quality("low")`** (option `displayQuality`, URL `display_quality`) swaps opaque lit meshes onto one shared clay material and turns off the sun and image-based lighting for a cheaper render. `"high"` restores everything. It composes with the `M` wireframe cycle and distance fog.
+- **`set_background(color)` / `set_grid_color(...)`** (JS `setBackground` / `setGridColor`) recolour the canvas and grid for a themed embedder.
+- `set_sun`, `set_display_quality`, `set_environment_background` and `set_cubemap` may be called before a viewer connects and are replayed on reconnect.
+
+### Solid menu background (#241)
+
+- **Rail tabs and slide-out menus are opaque** instead of translucent with a backdrop blur. Their colour is the `--tjsv-menu-bg` token, which follows `setBackground()` unless an embedder sets it: `.threejs-viewer { --tjsv-menu-bg: ... }` in a stylesheet now survives later `setBackground()` calls.
+
+### Render loop pauses while hidden; pixel-ratio cap (#237, #242)
+
+- **A hidden viewer (`display: none`, zero size) no longer renders.** It used to keep rendering every frame, and the queued GPU work played out as a long stall when it was shown again. Rendering, the animation clock, LOD work and bindings all stop, and playback resumes where it froze instead of jumping.
+- **`viewer.pause()` / `resume()` / `isPaused()`** (JS only) do the same on request, for an embedder that hides the viewer some other way. This is not `setAnimationPlaying(false)`: `getAnimationState().playing` keeps the user's play state, and messages are still handled while paused.
+- **`maxPixelRatio`** (option, URL `max_pixel_ratio`, `ViewerClient(max_pixel_ratio=)`) caps the renderer's pixel ratio at `min(devicePixelRatio, maxPixelRatio)`. The default is no cap. On a 3x phone screen, a cap of 1 renders 9x fewer pixels. The ratio is also re-applied when a window moves to a monitor with a different `devicePixelRatio`.
+
 ## 0.0.59
 
 ### Axis-control range widgets (#230)
