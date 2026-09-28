@@ -64,16 +64,12 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
 
 @pytest.mark.browser
 def test_set_background_and_grid_color(viewer_client, viewer_page):
-    """set_background recolours both render paths and the slide-out menus;
-    set_grid_color outlives a re-add."""
-    menu_bg = (
-        "() => { const r = document.querySelector('.tjsv-rail-panel');"
-        " return [r.querySelector(':scope > .tjsv-menu-btn'),"
-        "         r.querySelector(':scope > .tjsv-menu')]"
-        "   .map(e => getComputedStyle(e).backgroundColor); }"
-    )
-    # Default: the menus already wear the viewer's #222222.
-    assert viewer_page.evaluate(menu_bg) == ["rgb(34, 34, 34)"] * 2
+    """set_background recolours both render paths and writes the menu
+    background token on the container; set_grid_color outlives a re-add."""
+    # The container's own --tjsv-menu-bg (PR #241 gives the rail its CSS);
+    # unset until the first set_background.
+    menu_bg = "() => window.threejsViewer.el.style.getPropertyValue('--tjsv-menu-bg')"
+    assert viewer_page.evaluate(menu_bg) == ""
     viewer_client.add_grid("floor", color=0x555555)
     viewer_client.set_background("#1c2128")
     viewer_client.set_grid_color(0x3B434E)
@@ -88,7 +84,7 @@ def test_set_background_and_grid_color(viewer_client, viewer_page):
     assert state["bg"] == 0x1C2128
     assert state["css"] == "rgb(28, 33, 40)"
     assert state["grid"] == 0x3B434E
-    assert viewer_page.evaluate(menu_bg) == ["rgb(28, 33, 40)"] * 2
+    assert viewer_page.evaluate(menu_bg) == "#1c2128"
     # A producer re-pushing its grid with its own colour keeps the override.
     viewer_client.add_grid("floor", color=0x555555)
     settle(viewer_client)
@@ -100,7 +96,7 @@ def test_set_background_and_grid_color(viewer_client, viewer_page):
     state = viewer_page.evaluate(read)
     assert state["bg"] == 0x222222
     assert state["grid"] == 0x555555
-    assert viewer_page.evaluate(menu_bg) == ["rgb(34, 34, 34)"] * 2
+    assert viewer_page.evaluate(menu_bg) == "#222222"
 
 
 @pytest.mark.browser
