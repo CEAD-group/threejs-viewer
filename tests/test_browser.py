@@ -3316,6 +3316,30 @@ def test_lighting_panel_edits_persist_in_localstorage(page):
         )
         assert ls_value == "0.25"
 
+        # Reset clears the persisted cubemap pick too, and keeps the loaded
+        # set when it is already the one Reset resolves to (no reload).
+        page.wait_for_function(
+            "() => window.threejsViewer._cubemapName === 'paul-lobe-haus'",
+            timeout=10_000,
+        )
+        reset_state = page.evaluate(
+            """() => {
+                const v = window.threejsViewer;
+                localStorage.setItem('tjsv.cubemap', 'paul-lobe-haus');
+                const cube = v._envCube;
+                v._resetLightingPanel();
+                return [localStorage.getItem('tjsv.cubemap'), v._envCube === cube];
+            }"""
+        )
+        assert reset_state == [None, True]
+        page.evaluate(
+            """() => {
+                const slider = window.threejsViewer._lightingExposureSlider;
+                slider.value = '0.25';
+                slider.dispatchEvent(new Event('input', { bubbles: true }));
+            }"""
+        )
+
         # Reload: with no URL param, localStorage should drive the initial value.
         page.reload()
         _wait_for_viewer(page)

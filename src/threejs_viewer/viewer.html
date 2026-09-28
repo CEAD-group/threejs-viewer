@@ -12987,8 +12987,13 @@ class ThreeJSViewer {
             console.warn(`ThreeJSViewer: unknown cubemap '${name}'`);
             return Promise.resolve();
         }
-        if (this._lightingCubemapSelect) this._lightingCubemapSelect.value = name;
         this._writeLightingLocalStorage(LS_KEY_CUBEMAP, name);
+        return this._applyCubemap(name);
+    }
+
+    /** Load a known set and mirror it into the picker, without persisting. @param {string} name */
+    _applyCubemap(name) {
+        if (this._lightingCubemapSelect) this._lightingCubemapSelect.value = name;
         return this._loadCubemap(name);
     }
 
@@ -13475,10 +13480,14 @@ class ThreeJSViewer {
         try { localStorage.removeItem(LS_KEY_ENVIRONMENT_MAP); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_AMBIENT_INTENSITY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(LS_KEY_TONE_MAPPING); } catch (e) { /* ignore */ }
-        for (const k of [LS_KEY_SUN, LS_KEY_SUN_INTENSITY, LS_KEY_SUN_AZIMUTH, LS_KEY_SUN_ELEVATION]) {
+        for (const k of [LS_KEY_SUN, LS_KEY_SUN_INTENSITY, LS_KEY_SUN_AZIMUTH, LS_KEY_SUN_ELEVATION,
+            LS_KEY_CUBEMAP]) {
             try { localStorage.removeItem(k); } catch (e) { /* ignore */ }
         }
         this.setSun(this._sunDefaults.reset);
+        // Back to URL `cubemap` > the first set; a reload only when that differs.
+        const cubemap = this._resolveInitialCubemap();
+        if (cubemap && cubemap !== this._cubemapName) this._applyCubemap(cubemap);
         this._applyToneMapping(d.toneMapping);
         this._applyToneMappingExposure(d.exposure);
         this._applyEnvironmentIntensity(d.envIntensity);
