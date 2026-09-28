@@ -3752,14 +3752,19 @@ class ViewerClient:
                 ``prefix`` naming the viewer objects it shows/hides
                 (``checked`` defaults to ``True``); ``select`` and
                 ``segmented`` take ``options`` (a list of values or of
-                ``{"value", "label"}`` dicts) and ``value``.
+                ``{"value", "label"}`` dicts) and ``value``. A ``label`` with
+                ``collapsible=True`` (and an ``id``) is a header that folds
+                the rows after it up to the next ``divider``; ``collapsed``
+                (default ``False``) is its starting state, and folds come
+                back as a ``menu_action`` whose ``value`` is the new
+                ``collapsed``.
             label: The tab text. Every menu is a vertical tab folded against
                 the viewer's right edge; clicking it slides the body out.
             mode: ``"dropdown"`` (default: starts folded, an outside click
                 folds it back) or ``"panel"`` (starts open and stays open
                 across outside clicks, for a legend).
-            storage_key: Persist toggle/eye/select/segmented values in the
-                browser's localStorage under this key.
+            storage_key: Persist toggle/eye/select/segmented values and
+                folded sections in the browser's localStorage under this key.
             title: Tooltip on the tab.
             body_width: CSS width of the body (default ``"190px"``).
 
@@ -3797,6 +3802,15 @@ class ViewerClient:
             )
         if kind not in ("label", "divider") and not item.get("id"):
             raise ValueError(f"menu item of type {kind!r} needs an 'id': {item!r}")
+        for key in ("collapsible", "collapsed"):
+            if key in item:
+                if kind != "label":
+                    raise ValueError(f"{key!r} applies to label items only: {item!r}")
+                if not isinstance(item[key], bool):
+                    raise ValueError(f"{key!r} must be a bool: {item!r}")
+        if item.get("collapsible") and not item.get("id"):
+            # The id is what update_menu_item and a browser fold address.
+            raise ValueError(f"a collapsible label needs an 'id': {item!r}")
         out = {"type": kind}
         for key in (
             "id",
@@ -3810,6 +3824,8 @@ class ViewerClient:
             "prefix",
             "disabled",
             "hidden",
+            "collapsible",
+            "collapsed",
         ):
             if key in item:
                 out[key] = item[key]
@@ -3826,12 +3842,15 @@ class ViewerClient:
 
         Accepts the item keys of :meth:`add_menu` (``label``, ``state``,
         ``checked``, ``value``, ``options``, ``disabled``, ``hidden``,
-        ``hint``). The stored menu is updated too, so a reconnect replays the
-        patched state.
+        ``hint``, and ``collapsed`` to fold or unfold a collapsible label).
+        The stored menu is updated too, so a reconnect replays the patched
+        state.
         """
         msg = self._menus.get(menu)
         if msg is None:
             raise ValueError(f"no menu {menu!r} (add it with add_menu first)")
+        if "collapsed" in patch and not isinstance(patch["collapsed"], bool):
+            raise ValueError(f"'collapsed' must be a bool (got {patch['collapsed']!r})")
         if "options" in patch:
             patch["options"] = [
                 o if isinstance(o, dict) else {"value": o} for o in patch["options"]
@@ -3869,6 +3888,13 @@ class ViewerClient:
         }
         if "value" in data:
             action["value"] = data["value"]
+        if action["type"] == "label" and isinstance(action.get("value"), bool):
+            # A fold done in the browser: keep it in the stored spec for replay.
+            msg = self._menus.get(action["menu"])
+            for it in msg["menu"]["items"] if msg else ():
+                if it.get("id") == action["item"]:
+                    it["collapsed"] = action["value"]
+                    break
         for cb in list(self._menu_callbacks):
             try:
                 cb(action)

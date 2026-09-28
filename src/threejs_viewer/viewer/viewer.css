@@ -109,6 +109,9 @@
     padding: 6px 26px 8px 8px;
     color: var(--tjsv-text);
     font-size: 12px;
+    /* A scroll that reaches the end stays in the body instead of moving the page. */
+    overscroll-behavior: contain;
+    touch-action: pan-y;
 }
 .threejs-viewer .tjsv-menu-status {
     color: var(--tjsv-text-dim);
@@ -135,6 +138,29 @@
     color: var(--tjsv-text-dim);
     margin: 6px 0 2px;
 }
+/* Collapsible caption: a focusable header that folds the rows up to the next divider */
+.threejs-viewer .tjsv-menu-fold {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    user-select: none;
+    border-radius: 3px;
+}
+.threejs-viewer .tjsv-menu-fold[hidden] { display: none; }
+.threejs-viewer .tjsv-menu-fold:hover { color: var(--tjsv-text); }
+.threejs-viewer .tjsv-menu-fold:focus { outline: none; }
+.threejs-viewer .tjsv-menu-fold:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
+.threejs-viewer .tjsv-menu-fold.disabled { cursor: default; opacity: 0.5; }
+.threejs-viewer .tjsv-menu-chevron {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    transition: transform 0.15s;
+}
+.threejs-viewer .tjsv-menu-fold.collapsed .tjsv-menu-chevron { transform: rotate(-90deg); }
 .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 6px 0; }
 .threejs-viewer .tjsv-menu-custom { margin: 2px 0; }
 

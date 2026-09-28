@@ -797,6 +797,52 @@ def test_add_menu_rejects_bad_specs(kwargs, match):
         client.add_menu(**kwargs)
 
 
+def test_add_menu_collapsible_label_and_fold_replay():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_menu(
+        "demo",
+        items=[
+            {"type": "label", "id": "sec", "label": "Scene", "collapsible": True},
+            {"type": "toggle", "id": "a", "label": "A"},
+        ],
+    )
+    assert sent[0]["menu"]["items"][0] == {
+        "type": "label",
+        "id": "sec",
+        "label": "Scene",
+        "collapsible": True,
+    }
+    client.update_menu_item("demo", "sec", collapsed=True)
+    assert sent[-1]["patch"] == {"collapsed": True}
+    assert client._menus["demo"]["menu"]["items"][0]["collapsed"] is True
+    with pytest.raises(ValueError, match="must be a bool"):
+        client.update_menu_item("demo", "sec", collapsed=1)
+
+    # A fold done in the browser lands in the stored spec for reconnect replay.
+    client._dispatch_menu_action(
+        {"menu": "demo", "item": "sec", "itemType": "label", "value": False}
+    )
+    assert client._menus["demo"]["menu"]["items"][0]["collapsed"] is False
+
+
+@pytest.mark.parametrize(
+    "item, match",
+    [
+        ({"type": "label", "id": "s", "collapsible": "yes"}, "must be a bool"),
+        ({"type": "label", "id": "s", "collapsed": 0}, "must be a bool"),
+        ({"type": "toggle", "id": "t", "collapsed": True}, "label items only"),
+        ({"type": "label", "collapsible": True}, "needs an 'id'"),
+    ],
+)
+def test_add_menu_rejects_bad_collapsible(item, match):
+    client = ViewerClient()
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match=match):
+        client.add_menu("m", items=[item])
+
+
 def test_update_menu_item_unknown_raises():
     client = ViewerClient()
     client._send = lambda m: None

@@ -5653,14 +5653,16 @@ class CameraController {
 //   `match(objId)` (custom ownership) and/or `apply(on)` (custom show/hide,
 //   replacing the object walk) for layers that are not plain id shapes;
 //   an `apply` that returns `false` vetoes the flip (the row reverts and
-//   onChange does not fire).
+//   onChange does not fire). A `label` with `collapsible: true` is a
+//   focusable header that folds the rows after it up to the next divider;
+//   `collapsed` is its starting state, persisted like a toggle.
 
 /** @typedef {{
  *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
  *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
  *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
  *   match?: (objId: string) => boolean, apply?: (on: boolean, item: MenuItemSpec) => (boolean|void),
- *   disabled?: any, hidden?: any,
+ *   disabled?: any, hidden?: any, collapsible?: boolean, collapsed?: any,
  *   onClick?: (item: MenuItemSpec) => void,
  *   onChange?: (value: any, item: MenuItemSpec) => void,
  *   render?: (el: HTMLElement, item: MenuItemSpec) => void,
@@ -5830,6 +5832,7 @@ class MenuController {
             spec: { ...spec, mode, items: (spec.items || []).map(it => ({ ...it })) },
             open: false, root: null, button: null, body: null,
             /** @type {Map<string, any>} */ items: new Map(),
+            /** @type {any[]} every item record in body order, with or without an id */ recs: [],
             state: /** @type {Record<string, any>} */ ({}),
         };
         if (spec.storageKey) {
@@ -5978,6 +5981,26 @@ class MenuController {
         if (type === 'divider') {
             el = document.createElement('div');
             el.className = 'tjsv-menu-divider';
+        } else if (type === 'label' && it.collapsible) {
+            // A div with role=button rather than a <button>, so it keeps the
+            // caption look; being focusable stops touch adjustment moving a
+            // tap on it onto the next control.
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-caption tjsv-menu-fold';
+            el.setAttribute('role', 'button');
+            el.tabIndex = 0;
+            el.innerHTML = '<span class="tjsv-menu-chevron" aria-hidden="true"></span>';
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            el.appendChild(lab);
+            el.addEventListener('click', () => this._activate(m, rec));
+            el.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                e.stopPropagation();
+                this._activate(m, rec);
+            });
         } else if (type === 'label') {
             el = document.createElement('div');
             el.className = 'tjsv-menu-caption';
@@ -6071,6 +6094,7 @@ class MenuController {
             }
         }
         if (it.id) m.items.set(it.id, rec);
+        m.recs.push(rec);
         m.body.appendChild(el);
     }
 
@@ -6081,6 +6105,7 @@ class MenuController {
         if (!it) return undefined;
         const type = it.type || 'button';
         if (it.id && it.id in m.state) return m.state[it.id];
+        if (type === 'label') return !!evalProp(it.collapsed, it);
         if (type === 'toggle' || type === 'eye') {
             const c = evalProp(it.checked, it);
             return c === undefined ? type === 'eye' : !!c;
@@ -6105,6 +6130,14 @@ class MenuController {
         const type = it.type || 'button';
         if (type === 'toggle' || type === 'eye') {
             this._commit(m, rec, !this._valueOf(m, it));
+            return;
+        }
+        if (type === 'label') {
+            if (!it.collapsible) return;
+            // An id-less header folds locally: no state key to persist or report under.
+            if (it.id) this._commit(m, rec, !this._valueOf(m, it));
+            else { rec.collapsed = !(rec.collapsed ?? this._valueOf(m, it)); this.refresh(m); }
+            if (m.open) this._placeBody(m);
             return;
         }
         if (typeof it.onClick === 'function') it.onClick(it);
@@ -6150,8 +6183,9 @@ class MenuController {
         const it = rec.spec;
         Object.assign(it, patch || {});
         if ('options' in patch) it.options = normalizeOptions(it.options);
-        if ('checked' in patch || 'value' in patch) {
-            const v = 'checked' in patch ? !!patch.checked : patch.value;
+        if ('checked' in patch || 'value' in patch || ('collapsed' in patch && (it.type || '') === 'label')) {
+            const v = 'collapsed' in patch && (it.type || '') === 'label' ? !!patch.collapsed
+                : 'checked' in patch ? !!patch.checked : patch.value;
             if (it.id) m.state[it.id] = v;
             this._persist(m);
             if ((it.type || '') === 'eye') this._applyEye(it, !!v);
@@ -6177,15 +6211,32 @@ class MenuController {
             else if ((it.type || '') === 'label' && rec.el) rec.el.textContent = it.label || '';
         }
         this.refresh(m);
+        if (m.open) this._placeBody(m);
         return true;
     }
 
-    /** Re-evaluate every function-valued property and repaint. @param {any} [only] */
+    /**
+     * Re-evaluate every function-valued property and repaint, then fold: a
+     * collapsed header hides every row after it up to the next divider, on
+     * top of the row's own `hidden`, so unfolding restores exactly that.
+     * @param {any} [only]
+     */
     refresh(only) {
         const targets = only ? [only] : [...this._menus.values()];
         for (const m of targets) {
-            for (const rec of m.items.values()) this._paint(m, rec);
-            // Items without an id (dividers, captions) never change.
+            let folded = false;
+            for (const rec of m.recs) {
+                this._paint(m, rec);
+                const it = rec.spec;
+                const type = it.type || 'button';
+                if (type === 'divider') folded = false;
+                else if (type === 'label' && it.collapsible) {
+                    if (folded) rec.el.hidden = true;
+                    else folded = !!(it.id ? this._valueOf(m, it) : (rec.collapsed ?? this._valueOf(m, it)));
+                    continue;
+                }
+                if (folded) rec.el.hidden = true;
+            }
         }
     }
 
@@ -6199,7 +6250,13 @@ class MenuController {
         const disabled = !!evalProp(it.disabled, it);
         el.classList.toggle('disabled', disabled);
         if (el instanceof HTMLButtonElement) el.disabled = disabled;
-        if (type === 'button') {
+        if (type === 'label' && it.collapsible) {
+            const collapsed = !!(it.id ? this._valueOf(m, it) : (rec.collapsed ?? this._valueOf(m, it)));
+            el.classList.toggle('collapsed', collapsed);
+            el.setAttribute('aria-expanded', String(!collapsed));
+            el.setAttribute('aria-disabled', String(disabled));
+            el.tabIndex = disabled ? -1 : 0;
+        } else if (type === 'button') {
             el.classList.toggle('active', !!evalProp(it.active, it));
             const st = el.querySelector('.tjsv-menu-state');
             if (st) st.textContent = evalProp(it.state, it) ?? '';

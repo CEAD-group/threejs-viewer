@@ -7033,6 +7033,175 @@ def test_add_menu_reserved_shortcut_is_not_bound(viewer_client, viewer_page):
     assert any("is a viewer key" in w for w in warned)
 
 
+_FOLD_MENU = (
+    "(opts) => {"
+    " const v = window.threejsViewer;"
+    " window.__foldActions = [];"
+    " v.onMenuAction(a => { if (a.type === 'label') window.__foldActions.push(a); });"
+    " return v.addMenu({id: 'fold', label: 'Sections', storageKey: 'tjsv-test.fold', items: ["
+    "   {type: 'label', id: 'sec', label: 'Scene', collapsible: true},"
+    "   {type: 'toggle', id: 'a', label: 'A'},"
+    "   {type: 'toggle', id: 'hid', label: 'Hidden', hidden: true},"
+    "   {type: 'divider'},"
+    "   {type: 'toggle', id: 'b', label: 'B'},"
+    "   {type: 'label', id: 'sec2', label: 'More', collapsible: true, collapsed: true},"
+    "   {type: 'toggle', id: 'c', label: 'C'},"
+    "   {type: 'toggle', id: 'd', label: 'D', hidden: () => window.__hideD},"
+    " ]}).id;"
+    "}"
+)
+_FOLD_STATE = (
+    "() => { const q = id => document.querySelector(`[data-menu=fold] [data-item=${id}]`);"
+    " return {rows: Object.fromEntries(['a', 'hid', 'b', 'c', 'd'].map(id => [id, !q(id).hidden])),"
+    "   sec: q('sec').getAttribute('aria-expanded'), sec2: q('sec2').getAttribute('aria-expanded')}; }"
+)
+
+
+@pytest.mark.browser
+def test_add_menu_collapsible_label_folds_section(viewer_client, viewer_page):
+    """A collapsible label folds the rows after it up to the next divider, by
+    click or Enter/Space; an item's own `hidden` survives an unfold; the fold
+    fires onMenuAction, persists under storageKey, and setItem drives it."""
+    page = viewer_page
+    page.evaluate(
+        "() => { try { localStorage.removeItem('tjsv-test.fold'); } catch (e) {}"
+        " window.__hideD = true; }"
+    )
+    page.evaluate(_FOLD_MENU)
+    header = page.locator("[data-menu=fold] [data-item=sec]")
+    assert page.evaluate(
+        "() => { const h = document.querySelector('[data-menu=fold] [data-item=sec]');"
+        " return [h.getAttribute('role'), h.tabIndex, !!h.querySelector('.tjsv-menu-chevron')]; }"
+    ) == ["button", 0, True]
+    # sec2 starts collapsed; `hid` and `d` are hidden by their own spec.
+    assert page.evaluate(_FOLD_STATE) == {
+        "rows": {"a": True, "hid": False, "b": True, "c": False, "d": False},
+        "sec": "true",
+        "sec2": "false",
+    }
+
+    page.locator("[data-menu=fold] .tjsv-menu-btn").click()
+    header.click()
+    state = page.evaluate(_FOLD_STATE)
+    assert state["rows"] == {
+        "a": False,
+        "hid": False,
+        "b": True,
+        "c": False,
+        "d": False,
+    }
+    assert state["sec"] == "false"
+    assert page.evaluate("() => window.__foldActions") == [
+        {"menu": "fold", "item": "sec", "type": "label", "value": True}
+    ]
+
+    # Keyboard: Enter unfolds sec2, Space unfolds sec. A row hidden by its own
+    # (function-valued) spec stays hidden after the unfold, and follows it on refresh.
+    page.locator("[data-menu=fold] [data-item=sec2]").focus()
+    page.keyboard.press("Enter")
+    header.focus()
+    page.keyboard.press(" ")
+    assert page.evaluate(_FOLD_STATE) == {
+        "rows": {"a": True, "hid": False, "b": True, "c": True, "d": False},
+        "sec": "true",
+        "sec2": "true",
+    }
+    page.evaluate(
+        "() => { window.__hideD = false; window.threejsViewer.getMenu('fold').refresh(); }"
+    )
+    assert page.evaluate(_FOLD_STATE)["rows"]["d"] is True
+    assert [a["value"] for a in page.evaluate("() => window.__foldActions")] == [
+        True,
+        False,
+        False,
+    ]
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('tjsv-test.fold'))"
+    ) == {
+        "sec": False,
+        "sec2": False,
+    }
+
+    # setItem folds programmatically, and a later refresh() keeps the fold.
+    page.evaluate(
+        "() => { const m = window.threejsViewer.getMenu('fold');"
+        " m.setItem('sec2', {collapsed: true}); m.refresh(); }"
+    )
+    state = page.evaluate(_FOLD_STATE)
+    assert state["rows"]["c"] is False and state["sec2"] == "false"
+
+    # A fresh mount under the same storageKey starts from the stored folds,
+    # which win over the spec default (sec has none, so it would start open).
+    header.click()
+    page.evaluate(_FOLD_MENU)
+    state = page.evaluate(_FOLD_STATE)
+    assert state["sec"] == "false" and state["sec2"] == "false"
+    assert state["rows"]["a"] is False and state["rows"]["c"] is False
+
+
+@pytest.mark.browser
+def test_add_menu_fold_replaces_open_body(viewer_client, viewer_page):
+    """Folding a tall section re-places the open body at once: a low tab's
+    body that was lifted to use the space above it drops back to its tab."""
+    page = viewer_page
+    result = page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v.addMenu({id: 'filler', label: 'Filler', items: [{type: 'toggle', id: 'x', label: 'X'}]});"
+        " const rows = Array.from({length: 12}, (_, i) => ({type: 'toggle', id: 'r' + i, label: 'Row ' + i}));"
+        " const m = v.addMenu({id: 'tall', label: 'Tall', items: ["
+        "   {type: 'label', id: 'sec', label: 'Rows', collapsible: true}, ...rows]});"
+        " m.open();"
+        " const body = m.el.querySelector('.tjsv-menu');"
+        " const before = parseFloat(body.style.marginTop);"
+        " m.el.querySelector('[data-item=sec]').click();"
+        " return {before, after: parseFloat(body.style.marginTop),"
+        "   short: body.offsetHeight <= m.el.querySelector('.tjsv-menu-btn').offsetHeight};"
+        "}"
+    )
+    assert result["before"] < 0, result
+    assert result == {"before": result["before"], "after": 0, "short": True}
+
+
+@pytest.mark.browser
+def test_python_add_menu_collapsible_round_trip(viewer_client, viewer_page):
+    """A browser fold reaches on_menu_action and is kept in the stored spec
+    for replay; update_menu_item(collapsed=...) folds from Python."""
+    import threading
+
+    page = viewer_page
+    got = []
+    ev = threading.Event()
+
+    def cb(action):
+        got.append(action)
+        ev.set()
+
+    viewer_client.on_menu_action(cb)
+    viewer_client.add_menu(
+        "pyfold",
+        label="PyFold",
+        items=[
+            {"type": "label", "id": "sec", "label": "Section", "collapsible": True},
+            {"type": "toggle", "id": "flag", "label": "Flag"},
+        ],
+    )
+    settle(viewer_client)
+    page.locator("[data-menu=pyfold] .tjsv-menu-btn").click()
+    page.locator("[data-menu=pyfold] [data-item=sec]").click()
+    assert ev.wait(5), "no menu_action reached Python"
+    assert got == [{"menu": "pyfold", "item": "sec", "type": "label", "value": True}]
+    assert viewer_client._menus["pyfold"]["menu"]["items"][0]["collapsed"] is True
+
+    flag_shown = (
+        "() => !document.querySelector('[data-menu=pyfold] [data-item=flag]').hidden"
+    )
+    assert page.evaluate(flag_shown) is False
+    viewer_client.update_menu_item("pyfold", "sec", collapsed=False)
+    settle(viewer_client)
+    assert page.evaluate(flag_shown) is True
+
+
 @pytest.mark.browser
 def test_python_add_menu_round_trip(viewer_client, viewer_page):
     """add_menu from Python renders in the viewer; a click comes back as a
