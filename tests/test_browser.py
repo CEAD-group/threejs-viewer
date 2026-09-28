@@ -9951,3 +9951,153 @@ def test_display_quality_low_clays_opaque_meshes_and_simplifies_lighting(
         "env": True,
         "hemi": False,
     }
+
+
+# === Dimension annotations ===
+
+_DIM_STATE = """() => {
+  const c = window.threejsViewer._dimensions;
+  const out = {};
+  for (const [id, r] of c.dims) {
+    out[id] = { visible: r.group.visible, value: r.geom.value, direction: r.direction,
+                a: r.geom.a.toArray(), b: r.geom.b.toArray(), n: r.geom.n.toArray() };
+  }
+  return out;
+}"""
+
+_DIM_PROJECT = """(p) => {
+  const v = window.threejsViewer;
+  const rect = v._renderer.domElement.getBoundingClientRect();
+  const q = new window.tjsv.THREE.Vector3(p[0], p[1], p[2]).project(v._camera);
+  return { x: rect.left + (q.x + 1) / 2 * rect.width, y: rect.top + (1 - q.y) / 2 * rect.height };
+}"""
+
+
+def _dim_state(viewer_page):
+    frames(viewer_page)
+    return viewer_page.evaluate(_DIM_STATE)
+
+
+def _dim_click(viewer_page, world):
+    p = viewer_page.evaluate(_DIM_PROJECT, world)
+    viewer_page.mouse.move(p["x"], p["y"])
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    return p
+
+
+@pytest.mark.browser
+def test_dimension_geometry_and_clear_scene(viewer_client, viewer_page):
+    """A single-axis dimension measures that axis only, its dimension line runs
+    through draw_origin, and a scene clear leaves annotations alone."""
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[2, 1, 0], draw_origin=[1, 2, 0], direction="x"
+    )
+    settle(viewer_client)
+    state = _dim_state(viewer_page)["d"]
+    assert state["direction"] == "X"
+    assert state["value"] == pytest.approx(2.0)
+    assert state["a"] == pytest.approx([0, 2, 0])
+    assert state["b"] == pytest.approx([2, 2, 0])
+    assert [abs(c) for c in state["n"]] == pytest.approx([0, 0, 1])
+
+    viewer_client.add_dimension("d2", p1=[0, 0, 0], p2=[3, 4, 0], draw_origin=[1, 1, 0])
+    viewer_client.clear()
+    settle(viewer_client)
+    state = _dim_state(viewer_page)
+    assert state["d2"]["value"] == pytest.approx(5.0)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getDimensions().length") == 2
+    )
+
+    viewer_client.remove_dimension("d")
+    settle(viewer_client)
+    assert list(_dim_state(viewer_page)) == ["d2"]
+    viewer_client.clear_dimensions()
+    settle(viewer_client)
+    assert _dim_state(viewer_page) == {}
+
+
+@pytest.mark.browser
+def test_dimension_in_view_mode_follows_camera(viewer_client, viewer_page):
+    """'in_view' draws only dimensions whose plane faces the camera."""
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_dimension("xy", p1=[0, 0, 0], p2=[2, 0, 0], draw_origin=[1, 1, 0])
+    viewer_client.add_dimension("xz", p1=[0, 0, 0], p2=[2, 0, 0], draw_origin=[1, 0, 1])
+    viewer_client.set_dimension_display("in_view")
+    settle(viewer_client)
+    state = _dim_state(viewer_page)
+    assert state["xy"]["visible"] and not state["xz"]["visible"]
+
+    viewer_client.set_dimension_display("all")
+    settle(viewer_client)
+    state = _dim_state(viewer_page)
+    assert state["xy"]["visible"] and state["xz"]["visible"]
+
+    viewer_client.set_dimension_display("none")
+    settle(viewer_client)
+    state = _dim_state(viewer_page)
+    assert not state["xy"]["visible"] and not state["xz"]["visible"]
+
+
+@pytest.mark.browser
+def test_dimension_tool_direction_follows_cursor(viewer_client, viewer_page):
+    """Click, click, move: near the diagonal the tool measures XY, far above
+    the points it measures X, and the placing click reports the spec."""
+    events = []
+    viewer_client.on_dimension_create(events.append)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.start_dimension_tool()
+    settle(viewer_client)
+    _wait_for(viewer_page, "() => window.threejsViewer.isDimensionToolActive()")
+
+    _dim_click(viewer_page, [0, 0, 0])
+    _dim_click(viewer_page, [2, 1, 0])
+    near = viewer_page.evaluate(_DIM_PROJECT, [1.02, 0.5, 0])
+    viewer_page.mouse.move(near["x"], near["y"])
+    frames(viewer_page)
+    preview = _dim_state(viewer_page)["__dimension_preview__"]
+    assert preview["direction"] == "XY"
+    assert preview["value"] == pytest.approx(math.sqrt(5), rel=1e-6)
+
+    above = viewer_page.evaluate(_DIM_PROJECT, [1, 2.5, 0])
+    viewer_page.mouse.move(above["x"], above["y"])
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    deadline = time.time() + 5
+    while not events and time.time() < deadline:
+        time.sleep(0.05)
+    assert events and events[0]["event"] == "created"
+    assert events[0]["direction"] == "X"
+    assert events[0]["value"] == pytest.approx(2.0, rel=1e-3)
+    assert events[0]["draw_origin"][1] == pytest.approx(2.5, abs=0.05)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer.isDimensionToolActive()"
+    )
+    assert _dim_state(viewer_page) == {}
+
+
+@pytest.mark.browser
+def test_dimension_tool_snaps_to_axis_and_escape_cancels(viewer_client, viewer_page):
+    """A second point a few pixels off p1's X axis snaps onto it, locking the
+    direction to X; Esc ends the tool with a cancel event."""
+    events = []
+    viewer_client.on_dimension_create(events.append)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_page.evaluate("() => window.threejsViewer.startDimensionTool()")
+    _dim_click(viewer_page, [0, 0, 0])
+    p2 = viewer_page.evaluate(_DIM_PROJECT, [2, 0, 0])
+    viewer_page.mouse.move(p2["x"], p2["y"] - 4)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    off = viewer_page.evaluate(_DIM_PROJECT, [1, -1, 0])
+    viewer_page.mouse.move(off["x"], off["y"])
+    preview = _dim_state(viewer_page)["__dimension_preview__"]
+    assert preview["direction"] == "X"
+    assert preview["value"] == pytest.approx(2.0, abs=0.05)
+
+    viewer_page.keyboard.press("Escape")
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer.isDimensionToolActive()"
+    )
+    assert _dim_state(viewer_page) == {}
