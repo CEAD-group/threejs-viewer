@@ -17223,8 +17223,8 @@ export class ThreeJSViewer {
      * Set the scene background colour, for embedders that theme the viewer.
      * Drives both render paths: `scene.background` (direct) and the canvas CSS
      * colour the EDL composer path shows through (see renderComposer), and the
-     * container's `--tjsv-menu-bg` token (the rail's solid background, PR
-     * #241) so themed menus stay the viewer's colour.
+     * container's `--tjsv-menu-bg` token (the rail tabs' and slide-out
+     * bodies' solid background) so themed menus stay the viewer's colour.
      * @param {number|string|null} color hex int or a CSS colour string three.js
      *     parses; null restores the default
      */
