@@ -23,6 +23,9 @@
            container. */
         .threejs-viewer {
             --tjsv-float-bg: rgba(30, 30, 30, 0.95);
+            /* Rail tab + slide-out body: solid, following the viewer background that
+               setBackground() writes to --tjsv-background. */
+            --tjsv-menu-bg: var(--tjsv-background, #222222);
             --tjsv-panel-2: #2a2a2a;
             --tjsv-panel-3: #333;
             --tjsv-border: #3a3a3a;
@@ -73,11 +76,10 @@
             font: inherit;
             font-size: 11px;
             color: var(--tjsv-text);
-            background: rgba(34, 34, 34, 0.9);
+            background: var(--tjsv-menu-bg);
             border: 1px solid var(--tjsv-border);
             border-right: none;
             border-radius: 4px 0 0 4px;
-            backdrop-filter: blur(2px);
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -107,13 +109,12 @@
             width: var(--tjsv-body-w, 190px);
             box-sizing: border-box;
             overflow-y: auto;
-            background: rgba(30, 30, 30, 0.94);
+            background: var(--tjsv-menu-bg);
             border: 1px solid var(--tjsv-border);
             border-right: none;
             /* Resting shape: square top-left, flush against its tab. When open,
                MenuController._placeBody sets max-height, the upward lift and the corners. */
             border-radius: 0 0 0 4px;
-            backdrop-filter: blur(3px);
             /* Extra right padding: a stacked tab below can overlap an open body's
                right edge, so rows keep clear of it. */
             padding: 6px 26px 8px 8px;
@@ -18800,8 +18801,8 @@ class ThreeJSViewer {
      * Set the scene background colour, for embedders that theme the viewer.
      * Drives both render paths: `scene.background` (direct) and the canvas CSS
      * colour the EDL composer path shows through (see renderComposer), and the
-     * container's `--tjsv-menu-bg` token (the rail's solid background, PR
-     * #241) so themed menus stay the viewer's colour.
+     * container's `--tjsv-background`, which `--tjsv-menu-bg` defaults to, so
+     * themed menus follow the canvas unless the embedder sets that token.
      * @param {number|string|null} color hex int or a CSS colour string three.js
      *     parses; null restores the default
      */
@@ -18809,7 +18810,7 @@ class ThreeJSViewer {
         this._backgroundColor = new THREE.Color(color ?? VIEWER_BACKGROUND_COLOR);
         const css = `#${this._backgroundColor.getHexString()}`;
         this._renderer.domElement.style.backgroundColor = css;
-        this.el.style.setProperty('--tjsv-menu-bg', css);
+        this.el.style.setProperty('--tjsv-background', css);
         this._applyBackground();
     }
 
