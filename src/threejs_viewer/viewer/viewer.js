@@ -1446,6 +1446,27 @@ function ownMaterials(obj) {
 }
 
 /**
+ * Whether a mesh under a tracked object casts / receives the sun's shadow.
+ * Fat lines are instanced Meshes whose depth pass is meaningless; grids,
+ * highlight/primitive outlines and wire overlays are furniture. A translucent
+ * volume casting a full-black shadow reads wrong (ribweaver's workzone fill),
+ * so it only receives; judged on the mesh's own materials, past a clay/debug
+ * swap. Read by _updateSun's re-flag walk and by applyOpacity, the one place
+ * transparent/opacity change afterwards.
+ * @param {any} o
+ * @returns {{cast: boolean, receive: boolean}}
+ */
+function shadowRoleFor(o) {
+    const ud = o.userData;
+    if (o.isLine2 || o.isLineSegments2 || ud.isGrid || ud.__highlightOutline || ud.__primitiveOutline
+        || (o.parent && o.parent.userData.wireframeOverlay === o)) {
+        return { cast: false, receive: false };
+    }
+    const translucent = ownMaterials(o).some((/** @type {any} */ m) => m && (m.transparent || m.opacity < 1));
+    return { cast: !translucent, receive: true };
+}
+
+/**
  * @param {THREE.Object3D} obj
  * @param {number} opacity
  */
@@ -1467,6 +1488,11 @@ function applyOpacity(obj, opacity) {
             if (!mat.userData || !mat.userData.__depthWriteExplicit) mat.depthWrite = opacity >= 1;
             if (mat.transparent !== wasTransparent) mat.needsUpdate = true;
         }
+        // A mesh made translucent stops casting the sun's shadow (and an
+        // opaque one starts); castShadow is otherwise only re-flagged when
+        // the object set changes. A billboard root is re-flagged from
+        // _updateSun's walk, which never casts, so keep that decision.
+        if (child.isMesh && !child.userData.__noCast) child.castShadow = shadowRoleFor(child).cast;
         // transparent/depthWrite just changed, and a silhouette highlight is
         // only legible on a depth-priming mesh (see resolveHighlightStyle) — so a highlight
         // riding on this mesh may need to swap style. Collected and re-applied
@@ -6196,6 +6222,7 @@ class MenuController {
 
     /** @param {MenuItemSpec} it @param {boolean} on */
     _applyEye(it, on) {
+        this._viewer._shadowDirty = true;
         if (typeof it.apply === 'function') return it.apply(on, it) !== false;
         for (const [objId, obj] of this._viewer._objects) {
             if (obj && this._eyeOwns(it, objId)) obj.visible = on;
@@ -6535,6 +6562,7 @@ class ShadingDebugController {
 
     applyShading() {
         const mode = this.shadingMode;
+        this.v._shadowDirty = true;
         if (this._clayMat) this._syncClip(this._clayMat);
         this._forEachUserMesh((obj) => {
             this._applyMaterialMode(obj);
@@ -9325,6 +9353,7 @@ class TransformGizmoController {
     // parent is identity / translation-only (the usual case) that is the world grid.
     /** @param {Gizmo} g */
     _onObjectChange(g) {
+        this.v._shadowDirty = true;
         const s = this.translateSnap;
         if (s && this.translateSnapRelative && g.object
             && g.control.getMode() === 'translate') {
@@ -10871,6 +10900,7 @@ export class ThreeJSViewer {
                 dst.set(showSrc.subarray(0, copyLen));
                 posAttr.needsUpdate = true;
                 if (meshObj.geometry.boundingSphere) meshObj.geometry.computeBoundingSphere();
+                this._shadowDirty = true;
                 return;
             }
             this._lodWorkerBusy = false;
@@ -10884,6 +10914,7 @@ export class ThreeJSViewer {
 
             // Worker built geometry — upload to GPU
             applyWorkerGeometry(obj, msg);
+            this._shadowDirty = true;
 
             // Re-sync colors: the worker may have used stale colors if a
             // color update arrived while it was busy rebuilding geometry.
@@ -11114,6 +11145,9 @@ export class ThreeJSViewer {
         };
         this._sunFitKey = '';
         this._sunShadowGen = -1;
+        // The shadow map is re-rendered only when something that lands in it
+        // changed (see requestShadowUpdate); a static scene costs no depth pass.
+        this._shadowDirty = true;
         this.setSun(this._sunState);
 
         // Low display quality rig (hidden on high): sky/ground fill plus a
@@ -11477,6 +11511,8 @@ export class ThreeJSViewer {
     }
 
     _updatePlaneConstants() {
+        // Materials carry clipShadows, so a plane move changes the shadow map.
+        this._shadowDirty = true;
         if (this._clipSlabMode) {
             const halfT = this._clipSlabThickness / 2;
             this._clipPlane.constant = -(this._clipPosition - halfT);
@@ -11601,6 +11637,7 @@ export class ThreeJSViewer {
     }
 
     _updateClipMaterials() {
+        this._shadowDirty = true;
         this._scene.traverse(/** @param {any} child */ child => {
             if (!child.material) return;
             if (this._isClipHelper(child)) return;
@@ -11701,6 +11738,7 @@ export class ThreeJSViewer {
         posAttr.needsUpdate = true;
         if (obj.geometry.boundingSphere) obj.geometry.computeBoundingSphere();
         obj.userData.strandCollapseEnabled = enabled;
+        this._shadowDirty = true;
     }
 
     /**
@@ -12034,6 +12072,7 @@ export class ThreeJSViewer {
     _registerObject(id, obj) {
         this._objects.set(id, obj);
         this._objGeneration++;
+        this._shadowDirty = true;
         this._menus?.applyEyes();
         this._shading.refreshObject(obj);
         const waiting = this._pendingReparent.get(id);
@@ -13040,6 +13079,7 @@ export class ThreeJSViewer {
             this._objects.delete(id);
             this._objGeneration++;
             this._sceneBoundsDirty = true;
+            this._shadowDirty = true;
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse(/** @param {any} child */ (child) => {
@@ -13314,6 +13354,7 @@ export class ThreeJSViewer {
         // tightened perspective near fit can't front-clip an object that
         // animates out of the last bounds snapshot (see updateNearFar).
         this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
 
         const frames = this._animation.frames;
         const frame = frames[frameIndex];
@@ -13693,6 +13734,7 @@ export class ThreeJSViewer {
             captureBillboardBase(obj);
         }
         this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
     }
 
     /** @param {number} time */
@@ -13941,6 +13983,8 @@ export class ThreeJSViewer {
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
             if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
+            // Several keys change what lands in the shadow map (M/N/S/C, eyes).
+            this._shadowDirty = true;
             if (this._menus.anyOpen()) {
                 if (e.code === 'Escape') { this._menus.closeAll(); return; }
                 // Shortcuts keep working with a menu open; refresh its labels
@@ -14208,6 +14252,9 @@ export class ThreeJSViewer {
      * @returns {Promise<any>} the reply payload for query messages, else null.
      */
     async handleMessage(data) {
+        // Every message may change what the shadow map should hold; a query
+        // buys one spurious cheap refresh rather than a denylist here.
+        this._shadowDirty = true;
         switch (data.type) {
             case 'hello':
                 console.log(`Python client v${data.client_version}`);
@@ -16238,6 +16285,8 @@ export class ThreeJSViewer {
         captureBillboardBase(obj);
         this._billboards.set(id, obj);
         this._billboardOrderDirty = true;
+        // Billboards never cast a shadow; _updateSun re-flags on the bump.
+        this._objGeneration++;
         applyBillboard(obj, this._camera);
     }
 
@@ -16250,6 +16299,7 @@ export class ThreeJSViewer {
         disableBillboard(obj);
         this._billboards.delete(id);
         this._billboardOrderDirty = true;
+        this._objGeneration++;
     }
 
     /**
@@ -17134,12 +17184,23 @@ export class ThreeJSViewer {
         this._sun.visible = st.enabled && this._displayQuality !== 'low';
         this._sun.intensity = st.intensity;
         this._sunFitKey = '';  // force a re-aim on the next frame
+        this._shadowDirty = true;
         this._syncSunPanel();
     }
 
     /** @returns {SunState} a copy of the sun's current state */
     getSun() {
         return { ...this._sunState };
+    }
+
+    /**
+     * Ask for one shadow-map refresh on the next frame. The viewer flags this
+     * itself for everything it moves or changes (messages, animation ticks,
+     * follow paths, gizmo drags, LOD swaps, clipping, key toggles); call it
+     * after mutating an Object3D obtained through getObject() or an overlay.
+     */
+    requestShadowUpdate() {
+        this._shadowDirty = true;
     }
 
     /**
@@ -17159,7 +17220,7 @@ export class ThreeJSViewer {
         const low = q === 'low';
         this._lowHemi.visible = low;
         this._headlight.visible = low;
-        this.setSun({});
+        this.setSun({});  // also flags the shadow map dirty
         this._syncEnvironment();
         this._shading.clay = low;
         this._shading.applyShading();
@@ -17188,30 +17249,28 @@ export class ThreeJSViewer {
     /**
      * Per-frame sun upkeep: (1) re-flag shadow casters/receivers when the
      * object set changed, (2) re-aim the light and re-fit its orthographic
-     * shadow camera around the content sphere when either moved, (3) ask for
-     * one shadow-map refresh this frame (objects may be animating).
+     * shadow camera around the content sphere when either moved, (3) render
+     * the shadow map this frame if anything flagged it dirty. The shadow
+     * camera follows the content, not the view, so orbiting alone never
+     * re-renders it.
      */
     _updateSun() {
         if (!this._sun.visible) return;
         if (this._sunShadowGen !== this._objGeneration) {
             this._sunShadowGen = this._objGeneration;
+            this._shadowDirty = true;
             for (const root of this._objects.values()) {
+                // A billboard re-poses every frame the camera moves, so its
+                // shadow would swing with the view and need a per-frame map
+                // refresh; a camera-facing tag casts nothing instead.
+                const billboard = this._underBillboard(root);
                 root.traverse((/** @type {any} */ o) => {
                     if (!o.isMesh) return;
-                    const ud = o.userData;
-                    // Fat lines are instanced Meshes whose depth pass is
-                    // meaningless; grids/outlines/wire overlays are furniture.
-                    if (o.isLine2 || o.isLineSegments2 || ud.isGrid || root.userData.isGrid
-                        || ud.__highlightOutline || ud.__primitiveOutline
-                        || (o.parent && o.parent.userData.wireframeOverlay === o)) {
-                        o.castShadow = o.receiveShadow = false;
-                        return;
-                    }
-                    const mats = Array.isArray(o.material) ? o.material : [o.material];
-                    // A translucent volume casting a full-black shadow reads
-                    // wrong (ribweaver's workzone fill); it still receives.
-                    o.castShadow = !mats.some((/** @type {any} */ m) => m && (m.transparent || m.opacity < 1));
-                    o.receiveShadow = true;
+                    const role = shadowRoleFor(o);
+                    if (billboard) o.userData.__noCast = true;
+                    else delete o.userData.__noCast;
+                    o.castShadow = role.cast && !billboard;
+                    o.receiveShadow = role.receive;
                 });
             }
         }
@@ -17221,6 +17280,7 @@ export class ThreeJSViewer {
         const key = `${sph.center.x},${sph.center.y},${sph.center.z},${sph.radius},${st.azimuth},${st.elevation}`;
         if (key !== this._sunFitKey) {
             this._sunFitKey = key;
+            this._shadowDirty = true;
             const r = Math.max(sph.radius, 1e-3);
             const az = THREE.MathUtils.degToRad(st.azimuth);
             const el = THREE.MathUtils.degToRad(st.elevation);
@@ -17242,7 +17302,18 @@ export class ThreeJSViewer {
             this._sun.shadow.normalBias = 1.5 * (2 * r / SUN_SHADOW_MAP_SIZE);
             this._sun.shadow.bias = -0.0002;
         }
-        this._renderer.shadowMap.needsUpdate = true;
+        if (this._shadowDirty) {
+            this._renderer.shadowMap.needsUpdate = true;
+            this._shadowDirty = false;
+        }
+    }
+
+    /** @param {any} obj @returns {boolean} obj or an ancestor is a registered billboard */
+    _underBillboard(obj) {
+        for (let p = obj; p; p = p.parent) {
+            if (p.userData.id && this._billboards.has(p.userData.id)) return true;
+        }
+        return false;
     }
 
     /** Mirror _sunState into the Lighting panel widgets (no-op before they exist). */

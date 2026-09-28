@@ -10029,31 +10029,42 @@ def test_sun_casts_shadow_and_set_sun_toggles(viewer_client, viewer_page):
     )
     assert flags == [True, True, False, True, True]
 
-    def floor_luma():
-        # Render (with a fresh shadow map) and read two floor pixels in one JS
-        # turn — no preserveDrawingBuffer. Shadow spot: +Y of the tower, off
-        # its top-view footprint; open spot: -Y, toward the sun.
+    def floor_luma(points):
+        # Render with the shadow map as the viewer left it (never forced here,
+        # so a stale map would show) and read floor pixels in one JS turn, no
+        # preserveDrawingBuffer.
         return viewer_page.evaluate(
-            "() => { const v = window.threejsViewer;"
-            " v._renderer.shadowMap.needsUpdate = true;"
+            "(pts) => { const v = window.threejsViewer;"
             " v._renderer.render(v._scene, v._camera);"
             " const gl = v._renderer.getContext();"
             " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
             " const px = new Uint8Array(4);"
-            " return [[-0.2, 1.4, 0], [0, -2.5, 0]].map(([x, y, z]) => {"
+            " return pts.map(([x, y, z]) => {"
             "  const p = v._camera.position.clone().set(x, y, z).project(v._camera);"
             "  gl.readPixels(Math.round((p.x + 1) / 2 * w), Math.round((p.y + 1) / 2 * h),"
             "                1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);"
-            "  return px[0] + px[1] + px[2]; }); }"
+            "  return px[0] + px[1] + px[2]; }); }",
+            points,
         )
 
-    shadow, lit = floor_luma()
+    # Shadow spot: +Y of the tower, off its top-view footprint; open spot: -Y,
+    # toward the sun.
+    shadow_spot, lit_spot = [-0.2, 1.4, 0], [0, -2.5, 0]
+    shadow, lit = floor_luma([shadow_spot, lit_spot])
     gap_on = lit - shadow
+
+    # Move the tower 3 m along +X: the map must follow without any test-side
+    # needsUpdate poke (the message flags the shadow map dirty).
+    viewer_client.set_matrix("tower", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 1, 1])
+    settle(viewer_client)
+    frames(viewer_page)
+    old_spot, new_spot = floor_luma([shadow_spot, [2.8, 1.4, 0]])
+    assert old_spot - new_spot > 40, (old_spot, new_spot)
 
     viewer_client.set_sun(enabled=False)
     settle(viewer_client)
     frames(viewer_page)
-    shadow, lit = floor_luma()
+    shadow, lit = floor_luma([shadow_spot, lit_spot])
     gap_off = lit - shadow
     # The IBL lights the floor unevenly on its own (gap_off is not 0), so
     # compare the gaps: the shadow darkens its spot by ~50-70 summed RGB.
@@ -10064,6 +10075,106 @@ def test_sun_casts_shadow_and_set_sun_toggles(viewer_client, viewer_page):
     ) == [False, False]
 
 
+_SHADOW_RENDER_COUNTER_JS = (
+    "() => { const sm = window.threejsViewer._renderer.shadowMap;"
+    " if (!sm.__orig) { sm.__orig = sm.render; sm.__count = 0;"
+    "   sm.render = function (lights, scene, camera) {"
+    "     const before = sm.needsUpdate; sm.__orig.call(this, lights, scene, camera);"
+    "     if (before && !sm.needsUpdate) sm.__count++; }; }"
+    " const n = sm.__count; sm.__count = 0; return n; }"
+)
+
+
+@pytest.mark.browser
+def test_shadow_map_refreshes_only_when_dirty(viewer_client, viewer_page):
+    """A static scene renders no shadow pass: the map is refreshed once per
+    change (message, animation tick), not once per frame."""
+    viewer_client.add_box("floor", 10, 10, 0.2, color=0x777777, position=[0, 0, -0.1])
+    viewer_client.add_box("tower", 1, 1, 2, color=0x3366CC, position=[0, 0, 1])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS)  # install + zero
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 0
+    # One transform message (fed directly, so no query_scene barrier message
+    # adds a refresh of its own) = one refresh, then idle again.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.handleMessage({ type: 'update_transform',"
+        " id: 'tower', transform: { position: [2, 0, 1] } })"
+    )
+    frames(viewer_page, 2)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 1
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 0
+    # requestShadowUpdate is the escape hatch for an embedder that moved an
+    # Object3D behind the viewer's back.
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v.getObject('tower').position.x = -2;"
+        " v.requestShadowUpdate(); }"
+    )
+    frames(viewer_page, 2)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 1
+    # A playing animation moves objects every frame, so every frame refreshes.
+    viewer_client.load_animation(_spin_animation("tower", n=40, duration=2.0))
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS)
+    frames(viewer_page, 6)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) >= 4
+    viewer_client.pause_animation()
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS)
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate(_SHADOW_RENDER_COUNTER_JS) == 0
+
+
+@pytest.mark.browser
+def test_shadow_caster_follows_opacity(viewer_client, viewer_page):
+    """castShadow tracks the mesh's own opacity through set_opacity and
+    set_color(opacity=), not only the object-set generation."""
+    viewer_client.add_box("solid", 1, 1, 1, color=0x3366CC)
+    viewer_client.add_box(
+        "glass", 1, 1, 1, color=0xFFFFFF, opacity=0.3, position=[2, 0, 0]
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    casts = "() => ['solid', 'glass'].map(id => window.threejsViewer._objects.get(id).castShadow)"
+    assert viewer_page.evaluate(casts) == [True, False]
+    viewer_client.set_opacity("solid", 0.3)
+    viewer_client.set_opacity("glass", 1.0)
+    settle(viewer_client)
+    assert viewer_page.evaluate(casts) == [False, True]
+    viewer_client.set_color("solid", 0x3366CC, opacity=1.0)
+    viewer_client.set_color("glass", 0xFFFFFF, opacity=0.5)
+    settle(viewer_client)
+    assert viewer_page.evaluate(casts) == [True, False]
+
+
+@pytest.mark.browser
+def test_billboard_does_not_cast_shadow(viewer_client, viewer_page):
+    """A billboard re-poses per camera move; rather than refreshing the shadow
+    map every frame it casts nothing, and set_opacity keeps that."""
+    viewer_client.add_billboard("tag", 1, 1, color=0xFFFFFF, position=[0, 0, 2])
+    viewer_client.add_box("box", 1, 1, 1, color=0x3366CC)
+    settle(viewer_client)
+    frames(viewer_page)
+    casts = "() => ['tag', 'box'].map(id => window.threejsViewer._objects.get(id).castShadow)"
+    assert viewer_page.evaluate(casts) == [False, True]
+    viewer_client.set_billboard("box", mode="aim")
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate(casts) == [False, False]
+    viewer_client.set_opacity("box", 1.0)
+    settle(viewer_client)
+    assert viewer_page.evaluate(casts) == [False, False]
+    viewer_client.set_billboard("box", enabled=False)
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate(casts) == [False, True]
+
+
+@pytest.mark.browser
 def test_display_quality_low_clays_opaque_meshes_and_simplifies_lighting(
     viewer_client, viewer_page
 ):
