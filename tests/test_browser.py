@@ -10432,3 +10432,175 @@ def test_display_quality_low_clays_opaque_meshes_and_simplifies_lighting(
         "env": True,
         "hemi": False,
     }
+
+
+def _load_long_animation(client, page):
+    """A 100 s non-looping animation, playing, for render-loop clock tests."""
+    client.add_box("clock_box")
+    settle(client)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=100, transforms={})],
+        loop=False,
+    )
+    client.load_animation(anim)
+    _wait_for_animation_loaded(page)
+
+
+_RENDER_STATE_JS = """() => {
+    const v = window.threejsViewer;
+    const s = v.getAnimationState();
+    return {frame: v._renderer.info.render.frame, time: s.time, playing: s.playing};
+}"""
+
+
+@pytest.mark.browser
+def test_render_loop_skips_while_container_hidden(viewer_client, viewer_page):
+    """A 0x0 (display:none) container renders nothing and holds the playback
+    clock; showing it again resumes rendering without a playhead jump (#237)."""
+    _load_long_animation(viewer_client, viewer_page)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(
+        "() => { window.threejsViewer.container.style.display = 'none'; }"
+    )
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._containerHidden === true", timeout=2000
+    )
+    frames(viewer_page)
+    before = viewer_page.evaluate(_RENDER_STATE_JS)
+    # Wall-clock wait on purpose: the hidden gap must exceed the 0.25 s
+    # per-frame stall cap for a missing clock reset to show up as a jump.
+    time.sleep(0.6)
+    frames(viewer_page, 5)
+    hidden = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert hidden["frame"] == before["frame"], "rendered while hidden"
+    assert hidden["time"] == before["time"], "playback clock ran while hidden"
+
+    viewer_page.evaluate("() => { window.threejsViewer.container.style.display = ''; }")
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._containerHidden === false", timeout=2000
+    )
+    frames(viewer_page, 3)
+    shown = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert shown["frame"] > hidden["frame"], "rendering did not resume"
+    assert shown["playing"] is True
+    assert 0 < shown["time"] - hidden["time"] < 0.2, (hidden, shown)
+
+
+@pytest.mark.browser
+def test_pause_resume_render_loop(viewer_client, viewer_page):
+    """pause() stops rendering and the playback clock without touching the
+    play state; resume() continues without a jump; WS messages are still
+    handled while paused (#237)."""
+    _load_long_animation(viewer_client, viewer_page)
+    frames(viewer_page, 3)
+    before = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v.pause(); v.pause();"
+        " return {paused: v.isPaused(), frame: v._renderer.info.render.frame,"
+        " time: v.getAnimationState().time}; }"
+    )
+    assert before["paused"] is True
+    # Wall-clock gap longer than the 0.25 s stall cap (see the hidden test).
+    time.sleep(0.6)
+    viewer_client.add_sphere("added_while_paused")
+    settle(viewer_client)
+    paused = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert paused["frame"] == before["frame"], "rendered while paused"
+    assert paused["time"] == before["time"], "playback clock ran while paused"
+    assert paused["playing"] is True, "pause() must not flip the play state"
+    assert "added_while_paused" in viewer_client.query_scene()["objects"]
+
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v.resume(); v.resume(); }"
+    )
+    frames(viewer_page, 3)
+    resumed = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert viewer_page.evaluate("() => window.threejsViewer.isPaused()") is False
+    assert resumed["frame"] > paused["frame"]
+    assert 0 < resumed["time"] - paused["time"] < 0.2, (paused, resumed)
+
+    # destroy() after pause() stays clean and resume() is then a no-op.
+    assert viewer_page.evaluate(
+        "() => { const Viewer = window.threejsViewer.constructor;"
+        " const div = document.createElement('div');"
+        " div.style.cssText = 'width:200px;height:100px';"
+        " document.body.appendChild(div);"
+        " const v = new Viewer(div, {...window.threejsViewer._options, autoConnect: false});"
+        " v.pause(); v.destroy(); v.resume();"
+        " const ok = v.isPaused() && v._animationFrameId === 0;"
+        " div.remove(); return ok; }"
+    )
+
+
+@pytest.mark.browser
+def test_max_pixel_ratio_precedence(viewer_client, browser):
+    """maxPixelRatio caps devicePixelRatio: URL param > option > no cap, with
+    a 0.5 floor; the EDL composer follows a runtime change (#237)."""
+    context = browser.new_context(
+        device_scale_factor=3, viewport={"width": 400, "height": 300}
+    )
+    try:
+        page = context.new_page()
+        viewer_path = viewer_client.viewer_path.resolve()
+        page.goto(
+            f"{viewer_path.as_uri()}?ws_port={viewer_client.port}&max_pixel_ratio=1.5",
+            timeout=90_000,
+        )
+        assert viewer_client._connected_event.wait(timeout=120)
+        assert page.evaluate("() => window.devicePixelRatio") == 3
+        assert page.evaluate(
+            "() => window.threejsViewer._renderer.getPixelRatio()"
+        ) == pytest.approx(1.5)
+
+        ratios = page.evaluate(
+            """() => {
+            const Viewer = window.threejsViewer.constructor;
+            const make = (opts) => {
+                const div = document.createElement('div');
+                div.style.cssText = 'width:200px;height:100px';
+                document.body.appendChild(div);
+                const v = new Viewer(div, {...window.threejsViewer._options, autoConnect: false, ...opts});
+                const pr = v._renderer.getPixelRatio();
+                v.destroy();
+                div.remove();
+                return pr;
+            };
+            const out = {urlBeatsOption: make({maxPixelRatio: 2})};
+            history.replaceState(null, '', location.pathname);
+            out.option = make({maxPixelRatio: 2});
+            out.floor = make({maxPixelRatio: 0.1});
+            out.nanFallsThrough = make({maxPixelRatio: NaN});
+            out.none = make({});
+            return out;
+        }"""
+        )
+        assert ratios == {
+            "urlBeatsOption": 1.5,
+            "option": 2,
+            "floor": 0.5,
+            "nanFallsThrough": 3,
+            "none": 3,
+        }
+
+        # A runtime cap change reaches the renderer and the EDL targets.
+        viewer_client.set_edl(True)
+        settle(viewer_client)
+        frames(page, 3)
+        page.evaluate("() => { window.threejsViewer._maxPixelRatio = 1; }")
+        frames(page, 3)
+        sizes = page.evaluate(
+            """() => {
+            const v = window.threejsViewer;
+            const dc = v._depthCue;
+            return {pr: v._renderer.getPixelRatio(),
+                    canvas: v._renderer.domElement.width,
+                    css: v.container.clientWidth,
+                    rt: dc._composer.renderTarget2.width,
+                    line: dc._lineDepthTarget.width};
+        }"""
+        )
+        assert sizes["pr"] == 1
+        assert sizes["canvas"] == sizes["css"]
+        assert sizes["rt"] == sizes["canvas"]
+        assert sizes["line"] == sizes["canvas"]
+    finally:
+        context.close()

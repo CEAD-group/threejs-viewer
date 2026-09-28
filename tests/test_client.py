@@ -166,6 +166,19 @@ def test_viewer_client_rejects_bad_view_helper_size(bad):
         ViewerClient(view_helper_size=bad)
 
 
+def test_viewer_url_max_pixel_ratio():
+    """max_pixel_ratio rides the URL only when given (issue #237)."""
+    assert "max_pixel_ratio" not in _params(ViewerClient().viewer_url)
+    params = _params(ViewerClient(max_pixel_ratio=1.5).viewer_url)
+    assert params["max_pixel_ratio"] == ["1.5"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_viewer_client_rejects_bad_max_pixel_ratio(bad):
+    with pytest.raises(ValueError, match="max_pixel_ratio must be"):
+        ViewerClient(max_pixel_ratio=bad)
+
+
 def test_viewer_client_rejects_invalid_tone_mapping():
     with pytest.raises(ValueError, match="tone_mapping must be one of"):
         ViewerClient(tone_mapping="bogus")
