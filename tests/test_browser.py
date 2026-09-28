@@ -64,10 +64,12 @@ def test_add_grid_appears_and_is_excluded_from_bounds(viewer_client, viewer_page
 
 @pytest.mark.browser
 def test_set_background_and_grid_color(viewer_client, viewer_page):
-    """set_background recolours both render paths and writes the menu
-    background token on the container; set_grid_color outlives a re-add."""
-    # The container's own --tjsv-menu-bg, unset until the first set_background.
-    menu_bg = "() => window.threejsViewer.el.style.getPropertyValue('--tjsv-menu-bg')"
+    """set_background recolours both render paths and the menu rail (unless
+    the embedder set --tjsv-menu-bg itself); set_grid_color outlives a re-add."""
+    # The container's own --tjsv-background, unset until the first set_background.
+    menu_bg = (
+        "() => window.threejsViewer.el.style.getPropertyValue('--tjsv-background')"
+    )
     rail_bg = (
         "() => getComputedStyle(document.querySelector("
         "'.tjsv-rail-panel > .tjsv-menu')).backgroundColor"
@@ -102,6 +104,13 @@ def test_set_background_and_grid_color(viewer_client, viewer_page):
     assert state["grid"] == 0x555555
     assert viewer_page.evaluate(menu_bg) == "#222222"
     assert viewer_page.evaluate(rail_bg) == "rgb(34, 34, 34)"
+    # An embedder-set menu colour is not clobbered by a later set_background.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.el.style.setProperty('--tjsv-menu-bg', '#2a3038')"
+    )
+    viewer_client.set_background("#1c2128")
+    settle(viewer_client)
+    assert viewer_page.evaluate(rail_bg) == "rgb(42, 48, 56)"
 
 
 @pytest.mark.browser
