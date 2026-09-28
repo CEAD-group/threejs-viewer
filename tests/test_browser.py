@@ -10838,3 +10838,52 @@ def test_dimension_tool_quick_picks_do_not_reframe(viewer_client, viewer_page):
     )
     assert after == pytest.approx(before)
     assert viewer_page.evaluate("() => window.threejsViewer.isDimensionToolActive()")
+
+
+@pytest.mark.browser
+def test_dimension_redraws_on_point_change_and_plane_holds_axis(
+    viewer_client, viewer_page
+):
+    """Moving any of the three points rebuilds the dimension; an axis-locked
+    dimension lies on the plane of its axis and draw origin, an XYZ one on the
+    plane of the three points."""
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[2, 1, 1], draw_origin=[1, -1, 0], direction="X"
+    )
+    settle(viewer_client)
+    d = _dim_state(viewer_page)["d"]
+    assert d["value"] == pytest.approx(2.0)
+    assert d["n"][0] == pytest.approx(0, abs=1e-9)  # the plane holds the X axis
+
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[3, 1, 1], draw_origin=[1, -1, 0], direction="X"
+    )
+    settle(viewer_client)
+    assert _dim_state(viewer_page)["d"]["value"] == pytest.approx(3.0)
+
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[3, 1, 1], draw_origin=[1, -1, 0], direction="XYZ"
+    )
+    settle(viewer_client)
+    d = _dim_state(viewer_page)["d"]
+    n = d["n"]
+    for v in ([3, 1, 1], [1, -1, 0]):
+        assert sum(a * b for a, b in zip(n, v)) == pytest.approx(0, abs=1e-9)
+
+
+@pytest.mark.browser
+def test_dimension_label_plate_follows_background(viewer_client, viewer_page):
+    """The label plate is painted in the viewer background colour."""
+    corner = (
+        "() => { const r = window.threejsViewer._dimensions.dims.get('d');"
+        " const c = r.text.material.map.image.getContext('2d');"
+        " return Array.from(c.getImageData(12, 12, 1, 1).data.slice(0, 3)); }"
+    )
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[1, 0, 0], draw_origin=[0.5, 0.5, 0]
+    )
+    settle(viewer_client)
+    assert viewer_page.evaluate(corner) == [0x22, 0x22, 0x22]
+    viewer_client.set_background("#1c2128")
+    settle(viewer_client)
+    assert viewer_page.evaluate(corner) == [0x1C, 0x21, 0x28]
