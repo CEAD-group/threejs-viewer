@@ -7721,6 +7721,63 @@ def test_orbit_pivot_falls_back_to_bounds_center(viewer_client, viewer_page):
     assert abs(result["z"] - 30.0) < 1.0
 
 
+@pytest.mark.browser
+def test_orbit_pivot_lands_on_grid_plane_under_cursor(viewer_client, viewer_page):
+    """A click that misses every component but crosses a visible `add_grid`
+    plane pivots on that floor point. Past the plane's finite extent, or with
+    the grid hidden, it falls back to the content center as before."""
+    viewer_client.add_box("b", position=[10.0, 20.0, 30.0])
+    viewer_client.add_grid("floor", cell_size=1.0, extent=100.0)
+    assert "floor" in viewer_client.query_scene()["objects"]
+    frames(viewer_page)  # grid matrixWorld is refreshed by the render loop
+
+    def fallback(origin, direction):
+        return viewer_page.evaluate(
+            "async ([o, d]) => {"
+            " const T = await import('three');"
+            " const ray = new T.Ray(new T.Vector3(...o), new T.Vector3(...d).normalize());"
+            " const fb = window.threejsViewer._controls._fallbackPivotGetter(ray);"
+            " return fb ? fb.toArray() : null;"
+            "}",
+            [origin, direction],
+        )
+
+    # Straight down onto the floor at (3, 4): pivot on the grid point.
+    on_grid = fallback([3.0, 4.0, 10.0], [0.0, 0.0, -1.0])
+    assert on_grid == pytest.approx([3.0, 4.0, 0.0], abs=1e-6)
+    # Aimed past the 100 x 100 plane's edge: the content center wins.
+    past_edge = fallback([500.0, 0.0, 10.0], [0.0, 0.0, -1.0])
+    assert past_edge == pytest.approx([10.0, 20.0, 30.0], abs=1.0)
+    # A hidden grid is not a pivot target.
+    viewer_client.set_visible("floor", False)
+    settle(viewer_client)
+    hidden = fallback([3.0, 4.0, 10.0], [0.0, 0.0, -1.0])
+    assert hidden == pytest.approx([10.0, 20.0, 30.0], abs=1.0)
+    viewer_client.set_visible("floor", True)
+    settle(viewer_client)
+
+    # End to end: a real click on the canvas centre while looking straight
+    # down at (3, 4, 0) moves the orbit target onto that floor point.
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [3, 4, 50], target: [3, 4, 0], up: [0, 1, 0]})"
+    )
+    frames(viewer_page)
+    box = viewer_page.evaluate(
+        "() => { const r = window.threejsViewer._renderer.domElement.getBoundingClientRect();"
+        " return [r.left + r.width / 2, r.top + r.height / 2]; }"
+    )
+    viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.set(999, 999, 999)"
+    )
+    viewer_page.mouse.click(box[0], box[1])
+    frames(viewer_page)
+    target = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    assert target == pytest.approx([3.0, 4.0, 0.0], abs=0.05)
+
+
 # A KHR_draco_mesh_compression-encoded unit quad: 4 verts, 2 triangles, POSITION
 # only, EDGEBREAKER, 14-bit quantization — 75 bytes, the smallest useful Draco
 # payload. Checked in as base64 rather than as a binary fixture file because the

@@ -1213,9 +1213,11 @@ class ViewerControls extends THREE.EventDispatcher {
 
     /**
      * Register the fallback orbit-pivot source used when a click hits no
-     * pickable component. Getter returns a world-space THREE.Vector3 (the
-     * scene bounding-box center) or null to leave the pivot unchanged.
-     * @param {() => (THREE.Vector3 | null)} getter
+     * pickable component. The getter receives the click ray (world space) so
+     * it can intersect furniture the component raycast skips, such as floor
+     * grids, and returns a world-space THREE.Vector3 (a grid hit or the scene
+     * bounding-box center) or null to leave the pivot unchanged.
+     * @param {(ray?: THREE.Ray) => (THREE.Vector3 | null)} getter
      */
     setFallbackPivot(getter) {
         this._fallbackPivotGetter = getter;
@@ -1390,11 +1392,12 @@ class ViewerControls extends THREE.EventDispatcher {
             }
         }
 
-        // No component hit: fall back to the scene bounding-box center (never
-        // the old z=0 floor-plane intersection, which put the pivot at an
-        // arbitrary point far off the model on a near-parallel click). If no
-        // bounds are available, leave the pivot where it is.
-        const fallback = this._fallbackPivotGetter && this._fallbackPivotGetter();
+        // No component hit: the viewer's fallback intersects visible floor
+        // grids along the ray (finite planes, so a grazing click past the
+        // grid edge misses instead of landing far off-model like the old
+        // infinite z=0 plane did), then falls back to the scene bounding-box
+        // center. If neither is available, leave the pivot where it is.
+        const fallback = this._fallbackPivotGetter && this._fallbackPivotGetter(this._raycaster.ray);
         if (!fallback) return;
         this.target.copy(fallback);
         this.dispatchEvent({ type: 'pivot', point: fallback.clone(), hit: false });
@@ -12134,6 +12137,8 @@ class ThreeJSViewer {
 
         // State
         this._objects = new Map();
+        /** @type {THREE.Raycaster | null} lazily built by _pickGridPivot */
+        this._gridPivotRaycaster = null;
         // Embedder grid-colour override (setGridColor); null = each grid's own colour.
         /** @type {{color: number, centerColor: number|null}|null} */
         this._gridColorOverride = null;
@@ -12564,7 +12569,13 @@ class ThreeJSViewer {
         // helpers (both grid kinds, clip gizmos, move-gizmo helpers, the
         // pivot marker), so the pivot lands on what the user can see.
         // Returns null (pivot left unchanged) when nothing is visible.
-        this._controls.setFallbackPivot(() => {
+        // Before the bounds center, a visible floor grid (`add_grid`) under
+        // the click counts as a hit: orbiting about the floor point under the
+        // cursor is what a click on the floor means, and the plane is finite,
+        // so a click past its edge still falls through to the content center.
+        this._controls.setFallbackPivot((ray) => {
+            const onGrid = ray ? this._pickGridPivot(ray) : null;
+            if (onGrid) return onGrid;
             const bbox = this._collectFrameableBounds();
             if (bbox.isEmpty()) return null;
             return bbox.getCenter(new THREE.Vector3());
@@ -18384,6 +18395,35 @@ class ThreeJSViewer {
     /** @returns {boolean} whether pause() has stopped the render loop */
     isPaused() {
         return this._paused;
+    }
+
+    /**
+     * Nearest point where `ray` meets a visible `add_grid` plane, or null.
+     * Grid meshes stub out `raycast` so `viewer.pick` and click-select pass
+     * through them; the pivot pick calls the stock Mesh raycast on them
+     * directly, which honours the plane's transform and finite extent.
+     * @param {THREE.Ray} ray world-space click ray
+     * @returns {THREE.Vector3 | null}
+     */
+    _pickGridPivot(ray) {
+        const raycaster = this._gridPivotRaycaster ?? (this._gridPivotRaycaster = new THREE.Raycaster());
+        raycaster.ray.copy(ray);
+        raycaster.near = 0;
+        raycaster.far = Infinity;
+        /** @type {THREE.Intersection[]} */
+        const hits = [];
+        for (const obj of this._objects.values()) {
+            if (!obj || !obj.userData.isGrid) continue;
+            let shown = true;
+            for (let n = obj; n; n = n.parent) {
+                if (n.visible === false || n.userData.pickable === false) { shown = false; break; }
+            }
+            if (!shown) continue;
+            THREE.Mesh.prototype.raycast.call(/** @type {THREE.Mesh} */ (obj), raycaster, hits);
+        }
+        if (hits.length === 0) return null;
+        hits.sort((a, b) => a.distance - b.distance);
+        return hits[0].point.clone();
     }
 
     /** @param {THREE.Object3D} object */

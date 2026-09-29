@@ -10556,6 +10556,8 @@ export class ThreeJSViewer {
 
         // State
         this._objects = new Map();
+        /** @type {THREE.Raycaster | null} lazily built by _pickGridPivot */
+        this._gridPivotRaycaster = null;
         // Embedder grid-colour override (setGridColor); null = each grid's own colour.
         /** @type {{color: number, centerColor: number|null}|null} */
         this._gridColorOverride = null;
@@ -10986,7 +10988,13 @@ export class ThreeJSViewer {
         // helpers (both grid kinds, clip gizmos, move-gizmo helpers, the
         // pivot marker), so the pivot lands on what the user can see.
         // Returns null (pivot left unchanged) when nothing is visible.
-        this._controls.setFallbackPivot(() => {
+        // Before the bounds center, a visible floor grid (`add_grid`) under
+        // the click counts as a hit: orbiting about the floor point under the
+        // cursor is what a click on the floor means, and the plane is finite,
+        // so a click past its edge still falls through to the content center.
+        this._controls.setFallbackPivot((ray) => {
+            const onGrid = ray ? this._pickGridPivot(ray) : null;
+            if (onGrid) return onGrid;
             const bbox = this._collectFrameableBounds();
             if (bbox.isEmpty()) return null;
             return bbox.getCenter(new THREE.Vector3());
@@ -16806,6 +16814,35 @@ export class ThreeJSViewer {
     /** @returns {boolean} whether pause() has stopped the render loop */
     isPaused() {
         return this._paused;
+    }
+
+    /**
+     * Nearest point where `ray` meets a visible `add_grid` plane, or null.
+     * Grid meshes stub out `raycast` so `viewer.pick` and click-select pass
+     * through them; the pivot pick calls the stock Mesh raycast on them
+     * directly, which honours the plane's transform and finite extent.
+     * @param {THREE.Ray} ray world-space click ray
+     * @returns {THREE.Vector3 | null}
+     */
+    _pickGridPivot(ray) {
+        const raycaster = this._gridPivotRaycaster ?? (this._gridPivotRaycaster = new THREE.Raycaster());
+        raycaster.ray.copy(ray);
+        raycaster.near = 0;
+        raycaster.far = Infinity;
+        /** @type {THREE.Intersection[]} */
+        const hits = [];
+        for (const obj of this._objects.values()) {
+            if (!obj || !obj.userData.isGrid) continue;
+            let shown = true;
+            for (let n = obj; n; n = n.parent) {
+                if (n.visible === false || n.userData.pickable === false) { shown = false; break; }
+            }
+            if (!shown) continue;
+            THREE.Mesh.prototype.raycast.call(/** @type {THREE.Mesh} */ (obj), raycaster, hits);
+        }
+        if (hits.length === 0) return null;
+        hits.sort((a, b) => a.distance - b.distance);
+        return hits[0].point.clone();
     }
 
     /** @param {THREE.Object3D} object */
