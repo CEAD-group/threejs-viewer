@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.61
+
+### Soft sun shadows without surface stippling (#245)
+
+- **Sun shadows no longer stipple thin, sloping panels.** Strong sunlight on a panel that shadowed itself produced a speckled surface; on a synthetic reproduction 79% of panel samples were falsely dark, now 0% across 30 sun directions. The soft edge is 1.9x wider than the interim hard fix and about half the width of the old noisy filter.
+- The filter is a fixed 5x5 tent evaluated with 9 hardware comparison reads plus receiver-plane depth correction, so a sloping surface is compared against its own depth at each sample. Map size, bias and the dirty-only refresh are unchanged; measured GPU cost is about 0.035 ms per render on a small scene.
+- The patch is applied to the viewer's receiver materials through chained `onBeforeCompile` hooks, never to global Three.js shader chunks, so another renderer on the page keeps its own shadow filtering. Existing material hooks and program cache keys are preserved, clones are covered, and point/spot lights and non-PCF shadow types keep Three's stock reads.
+- `bench/shadow_lab/` reproduces the artifact and records the quality and GPU comparisons.
+
 ## 0.0.60
 
 ### Environment cubemap, sun and display quality (#240)
