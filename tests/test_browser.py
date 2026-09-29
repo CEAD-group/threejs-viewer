@@ -9937,9 +9937,16 @@ def test_axis_control_drives_mounted_child_transform(viewer_client, viewer_page)
     # doubled, which is what would happen if the control were attached
     # directly to the moving child instead of the static mount).
     _drag_axis_control(viewer_page, "elz", 2, 0)
+    # Wait for the child too: a throttled mid-drag report already satisfies
+    # `value > v1`, while the final value still has to round-trip via Python.
     _wait_for(
         viewer_page,
-        f"() => window.threejsViewer._axisControls.controls.get('elz').value > {v1}",
+        f"""() => {{
+            const v = window.threejsViewer;
+            const value = v._axisControls.controls.get('elz').value;
+            return value > {v1}
+                && Math.abs(v._objects.get('child').position.x - value) < 1e-3;
+        }}""",
     )
     v2 = control_value()
     assert child_x() == pytest.approx(v2, abs=1e-3)
