@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Shadow lab</title>
+<style>
+body { margin: 0; background: #222; color: #eee; font: 14px system-ui; }
+header { padding: 10px; } button, select { margin: 0 6px; }
+iframe { width: 100%; height: calc(100vh - 90px); border: 0; }
+pre { margin: 4px 10px; }
+</style>
+<header>Shadow comparison <select id="preset"></select><button id="bench">Measure current preset</button>
+<span>Orbit and zoom inside the viewer. Measurements use GPU timer queries.</span></header>
+<pre id="result">Loading…</pre>
+<iframe></iframe>
+<script type="module">
+const frame = document.querySelector('iframe');
+const loaded = new Promise(resolve => frame.addEventListener('load', resolve, {once: true}));
+// A comparison must use the latest generated bundle, including after rebuilds.
+frame.src = '../../src/threejs_viewer/viewer.html?ws_port=59999&shadow_lab=' + Date.now();
+await loaded;
+while (!frame.contentWindow.threejsViewer) await new Promise(resolve => setTimeout(resolve, 50));
+const script = frame.contentDocument.createElement('script');
+script.type = 'module'; script.src = '/bench/shadow_lab/scene.js?t=' + Date.now();
+frame.contentDocument.body.append(script);
+while (!frame.contentWindow.shadowLab) await new Promise(resolve => setTimeout(resolve, 50));
+const lab = frame.contentWindow.shadowLab;
+window.shadowLab = lab;
+for (const name of Object.keys(lab.presets)) preset.add(new Option(name, name));
+preset.value = 'baseline';
+preset.onchange = () => { result.textContent = JSON.stringify(lab.apply(preset.value)); };
+preset.onchange();
+bench.onclick = async () => {
+    bench.disabled = true; result.textContent = 'Measuring…';
+    try { result.textContent = JSON.stringify([await lab.benchmark(preset.value), await lab.benchmark(preset.value, true)]); }
+    finally { bench.disabled = false; }
+};
+</script>
+</html>

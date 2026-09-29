@@ -1076,7 +1076,11 @@ const DEFAULT_SUN_INTENSITY = 2.0;
 const DEFAULT_SUN_AZIMUTH = -80;
 const DEFAULT_SUN_ELEVATION = 50;
 const SUN_SHADOW_MAP_SIZE = 2048;
-const SUN_SHADOW_RADIUS = 4;
+// Wide PCF kernels sample beyond the normal bias on thin/sloping receivers,
+// producing stippled self-shadowing. A one-texel kernel keeps filtering within
+// the bias footprint without larger maps or detached contact shadows.
+// Reproduction and GPU measurements: bench/shadow_lab/.
+const SUN_SHADOW_RADIUS = 1;
 
 // Low display quality (setDisplayQuality): opaque lit meshes share one matte
 // clay material, and a hemisphere light plus a camera headlight (no shadows)
