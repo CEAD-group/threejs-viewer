@@ -2654,7 +2654,86 @@ const DEFAULT_SUN_INTENSITY = 2.0;
 const DEFAULT_SUN_AZIMUTH = -80;
 const DEFAULT_SUN_ELEVATION = 50;
 const SUN_SHADOW_MAP_SIZE = 2048;
-const SUN_SHADOW_RADIUS = 4;
+// The sun uses the fixed 5x5 tent below (support extends up to 3 texels with
+// bilinear reconstruction), rather than Three's sparse randomized disk.
+const SUN_SHADOW_RADIUS = 3;
+
+// Keep the patch on viewer-owned receiver materials, not global ShaderChunk:
+// another renderer in the embedding page must retain its own shadow policy.
+const sunShadowMaterials = new WeakSet();
+const SUN_SHADOW_GLSL = /* glsl */ `
+#if defined(USE_SHADOWMAP) && defined(SHADOWMAP_TYPE_PCF)
+float tjsvSunShadow(sampler2DShadow shadowMap, vec2 mapSize, float intensity,
+    float bias, float radius, vec4 coord) {
+    coord.xyz /= coord.w;
+    // Receiver-plane depth correction: each offset sample compares against
+    // the plane's depth there, not the centre depth. Compute derivatives before
+    // the frustum branch; clamp degenerate/grazing projections for stability.
+    vec3 dx = dFdx(coord.xyz), dy = dFdy(coord.xyz);
+    float det = dx.x * dy.y - dx.y * dy.x;
+    vec2 slope = abs(det) > 1e-12
+        ? vec2(dy.y * dx.z - dx.y * dy.z, dx.x * dy.z - dy.x * dx.z) / det
+        : vec2(0.0);
+    coord.z += bias;
+    float visibility = 1.0;
+    if (coord.x >= 0.0 && coord.x <= 1.0 && coord.y >= 0.0 && coord.y <= 1.0 && coord.z <= 1.0) {
+        vec2 texel = 1.0 / mapSize;
+        vec2 f = fract(coord.xy * mapSize - 0.5);
+        // Separable [1,2,3,2,1] tent. Pair adjacent texels into one hardware
+        // bilinear comparison: 25 weighted taps require only 9 texture reads.
+        // Fractional weights track the texel grid, avoiding gaps and per-pixel
+        // random rotations (the visible stippling of the stock wide filter).
+        vec3 wx = vec3(3.0 - 2.0 * f.x, 5.0, 1.0 + 2.0 * f.x);
+        vec3 wy = vec3(3.0 - 2.0 * f.y, 5.0, 1.0 + 2.0 * f.y);
+        vec3 ox = vec3(-2.0 + (2.0 - f.x) / wx.x, (2.0 + f.x) / 5.0, 2.0 + f.x / wx.z);
+        vec3 oy = vec3(-2.0 + (2.0 - f.y) / wy.x, (2.0 + f.y) / 5.0, 2.0 + f.y / wy.z);
+        visibility = 0.0;
+        for (int y = 0; y < 3; y++) {
+            for (int x = 0; x < 3; x++) {
+                vec2 offset = (vec2(ox[x], oy[y]) - f) * texel;
+                float correction = clamp(dot(slope, offset), -0.01, 0.01);
+                visibility += wx[x] * wy[y] * texture(shadowMap,
+                    vec3(coord.xy + offset, coord.z + correction));
+            }
+        }
+        visibility /= 81.0;
+    }
+    return mix(1.0, visibility, intensity);
+}
+#define TJSV_DIRECTIONAL_SHADOW tjsvSunShadow
+#else
+#define TJSV_DIRECTIONAL_SHADOW getShadow
+#endif
+`;
+
+/** Preserve existing material hooks and their program keys, including clones.
+ * @param {THREE.Material} material
+ */
+function softenSunShadows(material) {
+    const m = /** @type {any} */ (material);
+    if (!m || sunShadowMaterials.has(m)
+        || !(m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshLambertMaterial || m.isShadowMaterial)) return;
+    sunShadowMaterials.add(m);
+    const before = material.onBeforeCompile;
+    const previousKey = material.customProgramCacheKey;
+    const stockKey = previousKey === THREE.Material.prototype.customProgramCacheKey;
+    material.onBeforeCompile = function (shader, renderer) {
+        before.call(this, shader, renderer);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <shadowmap_pars_fragment>',
+            '#include <shadowmap_pars_fragment>\n' + SUN_SHADOW_GLSL);
+        // Only directional lights; preserve Three's point/spot filtering and
+        // its fallback when an embedder selects a different shadow-map type.
+        for (const name of /** @type {const} */ (['lights_fragment_begin', 'shadowmask_pars_fragment'])) {
+            shader.fragmentShader = shader.fragmentShader.replace(`#include <${name}>`,
+                THREE.ShaderChunk[name].replaceAll('getShadow( directionalShadowMap',
+                    'TJSV_DIRECTIONAL_SHADOW( directionalShadowMap'));
+        }
+    };
+    material.customProgramCacheKey = function () {
+        return (stockKey ? before.toString() : previousKey.call(this)) + '|tjsv-sun-tent5-v1';
+    };
+    material.needsUpdate = true;
+}
 
 // Low display quality (setDisplayQuality): opaque lit meshes share one matte
 // clay material, and a hemisphere light plus a camera headlight (no shadows)
@@ -8168,6 +8247,7 @@ class ShadingDebugController {
         if (mode === 1 || mode === 2) this._applyDebugMaterial(obj, mode);
         else if (this.clay && this._clayEligible(obj)) this._swapMaterial(obj, this._getClayMaterial());
         else this._restoreOriginalMaterial(obj);
+        for (const material of currentMaterials(obj)) softenSunShadows(material);
     }
 
     /**
@@ -19018,6 +19098,7 @@ class ThreeJSViewer {
                     else delete o.userData.__noCast;
                     o.castShadow = role.cast && !billboard;
                     o.receiveShadow = role.receive;
+                    if (role.receive) for (const material of wornAndOwnMaterials(o)) softenSunShadows(material);
                 });
             }
         }
@@ -19043,9 +19124,9 @@ class ThreeJSViewer {
             cam.near = 0.5 * r;
             cam.far = 3.5 * r;
             cam.updateProjectionMatrix();
-            // Bias in world units scales with the scene: ~1.5 shadow texels
-            // along the normal kills acne on curved/thin geometry without
-            // visibly detaching contact shadows.
+            // Retain a small scene-scaled offset for bilinear depth error.
+            // The receiver-plane filter handles slope across its wider kernel,
+            // so softness does not require pushing contact shadows farther out.
             this._sun.shadow.normalBias = 1.5 * (2 * r / SUN_SHADOW_MAP_SIZE);
             this._sun.shadow.bias = -0.0002;
         }
