@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.62
+
+### Orbit about the floor grid under the cursor (#247)
+
+- **A click that hits no component but crosses a visible `add_grid` plane pivots on that floor point.** Click-to-pivot now has three stages: the nearest visible pickable component, then the nearest visible `add_grid` plane along the click ray, then the centre of the visible content as before. Grid planes are still passthrough for `viewer.pick`, click-select and object click.
+- The plane is finite and follows the grid's transform, so a click past its edge, on a hidden grid, or on a grid added with `pickable=False` falls through to the content centre. The far-off pivots of the old infinite z=0 plane do not return.
+- JS: the `ViewerControls.setFallbackPivot` getter now receives the click ray; callers without one keep the old behaviour.
+
 ## 0.0.61
 
 ### Soft sun shadows without surface stippling (#245)
