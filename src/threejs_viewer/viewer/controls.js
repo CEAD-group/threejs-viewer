@@ -174,9 +174,11 @@ class ViewerControls extends THREE.EventDispatcher {
 
     /**
      * Register the fallback orbit-pivot source used when a click hits no
-     * pickable component. Getter returns a world-space THREE.Vector3 (the
-     * scene bounding-box center) or null to leave the pivot unchanged.
-     * @param {() => (THREE.Vector3 | null)} getter
+     * pickable component. The getter receives the click ray (world space) so
+     * it can intersect furniture the component raycast skips, such as floor
+     * grids, and returns a world-space THREE.Vector3 (a grid hit or the scene
+     * bounding-box center) or null to leave the pivot unchanged.
+     * @param {(ray?: THREE.Ray) => (THREE.Vector3 | null)} getter
      */
     setFallbackPivot(getter) {
         this._fallbackPivotGetter = getter;
@@ -351,11 +353,12 @@ class ViewerControls extends THREE.EventDispatcher {
             }
         }
 
-        // No component hit: fall back to the scene bounding-box center (never
-        // the old z=0 floor-plane intersection, which put the pivot at an
-        // arbitrary point far off the model on a near-parallel click). If no
-        // bounds are available, leave the pivot where it is.
-        const fallback = this._fallbackPivotGetter && this._fallbackPivotGetter();
+        // No component hit: the viewer's fallback intersects visible floor
+        // grids along the ray (finite planes, so a grazing click past the
+        // grid edge misses instead of landing far off-model like the old
+        // infinite z=0 plane did), then falls back to the scene bounding-box
+        // center. If neither is available, leave the pivot where it is.
+        const fallback = this._fallbackPivotGetter && this._fallbackPivotGetter(this._raycaster.ray);
         if (!fallback) return;
         this.target.copy(fallback);
         this.dispatchEvent({ type: 'pivot', point: fallback.clone(), hit: false });
