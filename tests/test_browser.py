@@ -10872,18 +10872,227 @@ def test_dimension_redraws_on_point_change_and_plane_holds_axis(
 
 
 @pytest.mark.browser
-def test_dimension_label_plate_follows_background(viewer_client, viewer_page):
-    """The label plate is painted in the viewer background colour."""
-    corner = (
-        "() => { const r = window.threejsViewer._dimensions.dims.get('d');"
-        " const c = r.text.material.map.image.getContext('2d');"
-        " return Array.from(c.getImageData(12, 12, 1, 1).data.slice(0, 3)); }"
-    )
+def test_annotation_labels_are_plain_html_text(viewer_client, viewer_page):
+    """Labels are HTML text in the CSS3D layer, in the annotation colour, with
+    no plate or outline, and the layer lets clicks through to the canvas."""
     viewer_client.add_dimension(
-        "d", p1=[0, 0, 0], p2=[1, 0, 0], draw_origin=[0.5, 0.5, 0]
+        "d", p1=[0, 0, 0], p2=[1, 0, 0], draw_origin=[0.5, 0.5, 0], color=0x3FA7D6
+    )
+    viewer_client.set_dimension_format(unit_scale=1000, decimals=0, unit="mm")
+    settle(viewer_client)
+    frames(viewer_page)
+    got = viewer_page.evaluate(
+        """() => {
+          const v = window.threejsViewer;
+          const el = v._dimensions.dims.get('d').text.element;
+          const cs = getComputedStyle(el);
+          const layer = v._dimensions.css.domElement;
+          return { text: el.textContent, color: cs.color, shadow: cs.textShadow,
+                   stroke: cs.webkitTextStrokeWidth, bg: cs.backgroundColor,
+                   inLayer: layer.contains(el), events: getComputedStyle(el).pointerEvents,
+                   layerEvents: getComputedStyle(layer).pointerEvents };
+        }"""
+    )
+    assert got["text"] == "1000 mm" and got["inLayer"]
+    assert got["color"] == "rgb(63, 167, 214)"
+    assert got["shadow"] == "none" and got["stroke"] in ("0px", "")
+    assert got["bg"] == "rgba(0, 0, 0, 0)"
+    assert got["events"] == "none" and got["layerEvents"] == "none"
+    viewer_client.remove_dimension("d")
+    settle(viewer_client)
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._dimensions.css.domElement"
+            ".querySelectorAll('.tjsv-annotation-label').length"
+        )
+        == 0
+    )
+
+
+_DIM_LABEL_FRAME = """(id) => new Promise(res => requestAnimationFrame(() => requestAnimationFrame(() => {
+  const r = window.threejsViewer._dimensions.dims.get(id);
+  const e = r.text.matrix.elements;
+  res({ x: e.slice(0, 3), y: e.slice(4, 7), z: e.slice(8, 11), c: e.slice(12, 15) });
+})))"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_dimension_is_fixed_in_world_space(viewer_client, viewer_page, ortho):
+    """A dimension label lies flat on its plane with its font sized to the
+    format's world text height, just off the line on the side away from the
+    points, and neither zooming nor a small orbit moves or rescales it."""
+    viewer_client.set_dimension_format(text_height=0.2)
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[2, 0, 0], draw_origin=[1, -1, 0], direction="X"
     )
     settle(viewer_client)
-    assert viewer_page.evaluate(corner) == [0x22, 0x22, 0x22]
-    viewer_client.set_background("#1c2128")
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_page.evaluate(
+        f"() => window.threejsViewer._switchCamera({str(ortho).lower()})"
+    )
+    first = viewer_page.evaluate(_DIM_LABEL_FRAME, "d")
+    font_px = viewer_page.evaluate(
+        "() => parseFloat(window.threejsViewer._dimensions.dims.get('d').text.element.style.fontSize)"
+    )
+    assert math.hypot(*first["y"]) * font_px == pytest.approx(0.2)
+    assert first["z"][0] == pytest.approx(0, abs=1e-12)  # flat on the XY plane
+    assert first["z"][1] == pytest.approx(0, abs=1e-12)
+    assert first["c"][1] < -1 - 0.6 * 0.2  # below the line, away from the points
+    for scale in (3.0, 0.2):
+        viewer_page.evaluate(
+            f"() => window.threejsViewer._controls._applyZoom({scale})"
+        )
+        assert viewer_page.evaluate(_DIM_LABEL_FRAME, "d") == pytest.approx(first)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v._camera.position.set(1, -2, 8); v._camera.lookAt(0, 0, 0);"
+        " v._camera.updateMatrixWorld(true); }"
+    )
+    assert viewer_page.evaluate(_DIM_LABEL_FRAME, "d") == pytest.approx(first)
+
+
+@pytest.mark.browser
+def test_dimension_label_flips_instead_of_reading_mirrored(viewer_client, viewer_page):
+    """Seen from below the plane, the label turns 180 degrees in place rather
+    than reading mirrored: its normal still faces the camera."""
+    viewer_client.add_dimension(
+        "d", p1=[0, 0, 0], p2=[2, 0, 0], draw_origin=[1, -1, 0], direction="X"
+    )
     settle(viewer_client)
-    assert viewer_page.evaluate(corner) == [0x1C, 0x21, 0x28]
+    for z in (8, -8):
+        viewer_page.evaluate(
+            f"() => {{ const v = window.threejsViewer; v._camera.position.set(0, 0, {z});"
+            " v._camera.up.set(0, 1, 0); v._camera.lookAt(0, 0, 0);"
+            " v._camera.updateMatrixWorld(true); }"
+        )
+        got = viewer_page.evaluate(_DIM_LABEL_FRAME, "d")
+        assert got["z"][2] * z > 0
+
+
+_POINT_LABEL_PX = """(id) => new Promise(res => requestAnimationFrame(() => requestAnimationFrame(() => {
+  const v = window.threejsViewer;
+  const r = v._dimensions.dims.get(id);
+  const el = v._renderer.domElement;
+  const S = (x, y) => {
+    const q = new window.tjsv.THREE.Vector3(x, y, 0).applyMatrix4(r.text.matrix).project(v._camera);
+    return [(q.x + 1) / 2 * el.clientWidth, (1 - q.y) / 2 * el.clientHeight];
+  };
+  const a = S(0, 0), b = S(0, 100);
+  res([Math.hypot(a[0] - b[0], a[1] - b[1]),
+       r.text.element.firstChild.getBoundingClientRect().height]);
+})))"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_point_labels_keep_their_pixel_size_when_zooming(
+    viewer_client, viewer_page, ortho
+):
+    """A point label faces the screen one CSS pixel to the screen pixel,
+    whatever the zoom, including off-centre under perspective."""
+    viewer_client.add_point_annotation("p", position=[1.5, 1, 0.5], label="datum")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        f"() => window.threejsViewer._switchCamera({str(ortho).lower()})"
+    )
+    for scale in (1.0, 3.0, 0.2):
+        viewer_page.evaluate(
+            f"() => window.threejsViewer._controls._applyZoom({scale})"
+        )
+        hundred, box = viewer_page.evaluate(_POINT_LABEL_PX, "p")
+        assert hundred == pytest.approx(100, abs=0.5), scale
+        assert box == pytest.approx(18, abs=1), scale  # 15 px font, 1.2 line height
+
+
+def _ann_visible(viewer_page):
+    frames(viewer_page)
+    return viewer_page.evaluate(
+        "() => Object.fromEntries([...window.threejsViewer._dimensions.dims]"
+        ".map(([id, r]) => [id, r.group.visible]))"
+    )
+
+
+@pytest.mark.browser
+def test_point_and_polyline_annotations_draw_and_follow_in_view(
+    viewer_client, viewer_page
+):
+    """Points and polylines join the layer: a scene clear keeps them, in_view
+    keeps every point and a planar polyline facing the camera, hides one seen
+    edge-on, and clear_dimensions drops them."""
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_point_annotation("p", position=[0, 0, 1])
+    viewer_client.add_polyline_annotation(
+        "flat", points=[[0, 0, 0], [1, 0, 0], [1, 1, 0]]
+    )
+    viewer_client.add_polyline_annotation(
+        "wall", points=[[0, 0, 0], [1, 0, 0], [1, 0, 1]]
+    )
+    viewer_client.add_polyline_annotation("line", points=[[0, 0, 0], [0, 0, 2]])
+    viewer_client.clear()
+    viewer_client.set_dimension_display("in_view")
+    settle(viewer_client)
+    assert _ann_visible(viewer_page) == {
+        "p": True,
+        "flat": True,
+        "wall": False,
+        "line": True,
+    }
+    kinds = viewer_page.evaluate(
+        "() => Object.fromEntries(window.threejsViewer.getAnnotations()"
+        ".map(a => [a.id, a.kind]))"
+    )
+    assert kinds == {
+        "p": "point",
+        "flat": "polyline",
+        "wall": "polyline",
+        "line": "polyline",
+    }
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getDimensions().length") == 0
+    )
+    viewer_client.clear_dimensions()
+    settle(viewer_client)
+    assert _ann_visible(viewer_page) == {}
+
+
+@pytest.mark.browser
+def test_point_and_polyline_tools(viewer_page):
+    """The point tool creates on one click; the polyline tool collects
+    vertices, drops one on Backspace and closes on a click on the first
+    vertex, and a double-click on the last finishes an open one."""
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_page.evaluate(
+        "() => { window.__ann = []; const v = window.threejsViewer;"
+        " window.__annTool = (k) => v[k]({ onCreate: s => window.__ann.push(s) }); }"
+    )
+    viewer_page.evaluate("() => window.__annTool('startPointTool')")
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getAnnotationTool()")
+        == "point"
+    )
+    _dim_click(viewer_page, [1, 1, 0])
+    got = viewer_page.evaluate("() => window.__ann.pop()")
+    assert got["position"] == pytest.approx([1, 1, 0], abs=0.02)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer.isDimensionToolActive()"
+    )
+
+    viewer_page.evaluate("() => window.__annTool('startPolylineTool')")
+    for w in ([0, 0, 0], [2, 0, 0], [2, 2, 0], [0.5, 2.5, 0]):
+        _dim_click(viewer_page, w)
+    viewer_page.keyboard.press("Backspace")
+    _dim_click(viewer_page, [0, 0, 0])
+    got = viewer_page.evaluate("() => window.__ann.pop()")
+    assert got["closed"] is True and len(got["points"]) == 3
+    assert got["points"][1] == pytest.approx([2, 0, 0], abs=0.02)
+
+    viewer_page.evaluate("() => window.__annTool('startPolylineTool')")
+    _dim_click(viewer_page, [0, 0, 0])
+    p = viewer_page.evaluate(_DIM_PROJECT, [1, 1, 0])
+    viewer_page.mouse.dblclick(p["x"], p["y"])
+    got = viewer_page.evaluate("() => window.__ann.pop()")
+    assert got["closed"] is False and len(got["points"]) == 2
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer.isDimensionToolActive()"
+    )

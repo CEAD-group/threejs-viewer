@@ -182,9 +182,17 @@ def _validate_point3(name: str, value) -> List[float]:
     return pt
 
 
-def _normalize_dimension_direction(direction: str) -> str:
-    """Canonical axis order (``"yx"`` -> ``"XY"``); raises on anything else."""
-    raw = str(direction).upper()
+def _normalize_dimension_direction(direction) -> Union[str, List[float], None]:
+    """Canonical axis order (``"yx"`` -> ``"XY"``), a finite non-zero vector as
+    floats, or ``None``; raises on anything else."""
+    if direction is None:
+        return None
+    if not isinstance(direction, str):
+        vec = _validate_point3("direction", direction)
+        if not any(vec):
+            raise ValueError("direction vector must not be all zero")
+        return vec
+    raw = direction.upper()
     normalized = "".join(a for a in "XYZ" if a in raw)
     if set(raw) - set("XYZ") or normalized not in _ALLOWED_DIMENSION_DIRECTIONS:
         allowed = ", ".join(sorted(_ALLOWED_DIMENSION_DIRECTIONS))
@@ -5136,8 +5144,8 @@ class ViewerClient:
         *,
         p1: List[float],
         p2: List[float],
-        draw_origin: List[float],
-        direction: str = "XYZ",
+        draw_origin: Optional[List[float]] = None,
+        direction: Union[str, List[float], None] = "XYZ",
         color: Optional[int] = None,
         label: Optional[str] = None,
     ) -> None:
@@ -5146,10 +5154,12 @@ class ViewerClient:
         ``direction`` names the measured axes: ``"X"``, ``"Y"``, ``"Z"``,
         ``"XY"``, ``"XZ"``, ``"YZ"`` or ``"XYZ"``. The value is the length of
         ``p2 - p1`` with the other components zeroed, so ``"X"`` is ``|dx|``
-        and ``"XYZ"`` the true distance. The dimension line runs along that
-        direction through ``draw_origin``, where the label sits, and the
-        extension lines, arrowheads and label all lie on the plane through the
-        three points. Lines, arrows and label keep a constant screen size and
+        and ``"XYZ"`` the true distance. A vector ``[x, y, z]`` measures along
+        it instead, and ``None`` is the true distance. The dimension line runs
+        along that direction through ``draw_origin``, where the label sits, and
+        the extension lines, arrowheads and label all lie on the plane through
+        the three points. Without ``draw_origin`` the line runs through the
+        midpoint of the points on the plane that faces the camera best. Lines, arrows and label keep a constant screen size and
         draw over the scene. ``label`` replaces the formatted value.
 
         Dimensions are annotations, not scene objects: :meth:`clear` leaves
@@ -5158,14 +5168,16 @@ class ViewerClient:
 
         Raises:
             ValueError: For a point that is not 3 finite numbers or an unknown
-                ``direction``.
+                ``direction`` (a vector must be 3 finite numbers, not all zero).
         """
         spec = {
             "type": "add_dimension",
             "id": id,
             "p1": _validate_point3("p1", p1),
             "p2": _validate_point3("p2", p2),
-            "draw_origin": _validate_point3("draw_origin", draw_origin),
+            "draw_origin": None
+            if draw_origin is None
+            else _validate_point3("draw_origin", draw_origin),
             "direction": _normalize_dimension_direction(direction),
             "color": color,
             "label": label,
@@ -5174,15 +5186,78 @@ class ViewerClient:
         if self._ws is not None:
             self._send(spec)
 
+    def add_point_annotation(
+        self,
+        id: str,
+        *,
+        position: List[float],
+        color: Optional[int] = None,
+        label: Optional[str] = None,
+    ) -> None:
+        """Add (or replace) a point annotation: a fixed-size marker at
+        ``position`` with an optional ``label`` beside it.
+
+        Points share the dimension layer: :meth:`remove_dimension`,
+        :meth:`clear_dimensions` and :meth:`set_dimension_display` apply to
+        them (``"in_view"`` always draws a point), and a reconnect re-adds them.
+
+        Raises:
+            ValueError: For a position that is not 3 finite numbers.
+        """
+        spec = {
+            "type": "add_point_annotation",
+            "id": id,
+            "position": _validate_point3("position", position),
+            "color": color,
+            "label": label,
+        }
+        self._dimensions[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def add_polyline_annotation(
+        self,
+        id: str,
+        *,
+        points: List[List[float]],
+        closed: bool = False,
+        color: Optional[int] = None,
+    ) -> None:
+        """Add (or replace) a polyline annotation through ``points`` (two or
+        more), joined back to the first when ``closed``. Drawn at a constant
+        screen width over the scene.
+
+        Polylines share the dimension layer like points do; under
+        ``"in_view"`` a planar polyline draws only while its plane faces the
+        camera.
+
+        Raises:
+            ValueError: For fewer than two points or a point that is not 3
+                finite numbers.
+        """
+        pts = [_validate_point3(f"points[{i}]", p) for i, p in enumerate(points)]
+        if len(pts) < 2:
+            raise ValueError(f"points must hold two or more points (got {len(pts)})")
+        spec = {
+            "type": "add_polyline_annotation",
+            "id": id,
+            "points": pts,
+            "closed": bool(closed),
+            "color": color,
+        }
+        self._dimensions[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
     def remove_dimension(self, id: str) -> None:
-        """Remove a dimension added with :meth:`add_dimension`. A no-op if
+        """Remove a dimension, point or polyline annotation. A no-op if
         ``id`` doesn't exist."""
         self._dimensions.pop(id, None)
         if self._ws is not None:
             self._send({"type": "remove_dimension", "id": id})
 
     def clear_dimensions(self) -> None:
-        """Remove every dimension annotation."""
+        """Remove every annotation: dimensions, points and polylines."""
         self._dimensions = {}
         if self._ws is not None:
             self._send({"type": "clear_dimensions"})
@@ -5206,17 +5281,24 @@ class ViewerClient:
         decimals: Optional[int] = None,
         unit: Optional[str] = None,
         in_view_tolerance_deg: Optional[float] = None,
+        text_height: Optional[float] = None,
     ) -> None:
         """Label format for every dimension: the scene-unit value times
         ``unit_scale`` (``1000`` shows metres as mm), with ``decimals`` places
         and a ``unit`` suffix. ``in_view_tolerance_deg`` is the angle between
         the view direction and a dimension's plane normal that ``"in_view"``
-        still draws (default 10). Omitted fields keep their current value.
+        still draws (default 10). ``text_height`` is the dimension glyph height
+        in scene units (default 0.1): a dimension is a world-space object, so
+        its label, arrowheads and gaps scale with the view like geometry.
+        Omitted fields keep their current value.
         Re-sent on reconnect."""
         unit_scale = _validate_finite("unit_scale", unit_scale)
         tol = _validate_finite("in_view_tolerance_deg", in_view_tolerance_deg)
         if tol is not None and tol <= 0:
             raise ValueError(f"in_view_tolerance_deg must be > 0 (got {tol!r})")
+        text_height = _validate_finite("text_height", text_height)
+        if text_height is not None and text_height <= 0:
+            raise ValueError(f"text_height must be > 0 (got {text_height!r})")
         if decimals is not None and (
             int(decimals) != decimals or not 0 <= decimals <= 6
         ):
@@ -5227,6 +5309,7 @@ class ViewerClient:
             ("decimals", decimals),
             ("unit", unit),
             ("in_view_tolerance_deg", tol),
+            ("text_height", text_height),
         ):
             if value is not None:
                 msg[key] = value
