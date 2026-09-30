@@ -1031,6 +1031,8 @@ def test_reconnect_replays_runtime_lighting_state(bound_client):
     assert seen["set_display_quality"]["quality"] == "low"
     assert seen["set_environment_background"]["enabled"] is True
     assert seen["set_cubemap"]["name"] == "paul-lobe-haus"
+
+
 def test_dimension_specs_record_for_reconnect_and_survive_clear():
     """add_dimension normalises and records its spec without a connected
     viewer; clear() keeps dimensions, clear_dimensions() drops them."""

@@ -10668,6 +10668,8 @@ def test_max_pixel_ratio_precedence(viewer_client, browser):
         assert sizes["line"] == sizes["canvas"]
     finally:
         context.close()
+
+
 # === Dimension annotations ===
 
 _DIM_STATE = """() => {
@@ -11095,4 +11097,43 @@ def test_point_and_polyline_tools(viewer_page):
     assert got["closed"] is False and len(got["points"]) == 2
     assert not viewer_page.evaluate(
         "() => window.threejsViewer.isDimensionToolActive()"
+    )
+
+
+@pytest.mark.browser
+def test_replacing_annotations_disposes_labels_and_preserves_literal_text(
+    viewer_client, viewer_page
+):
+    viewer_client.add_dimension("same", p1=[0, 0, 0], p2=[1, 0, 0])
+    settle(viewer_client)
+    label = '<img src=x onerror="window.annotationInjected=true">'
+    viewer_client.add_point_annotation("same", position=[0, 0, 0], label=label)
+    settle(viewer_client)
+    frames(viewer_page)
+    got = viewer_page.evaluate(
+        """() => {
+          const v = window.threejsViewer;
+          const layer = v._dimensions.css.domElement;
+          const labels = [...layer.querySelectorAll('.tjsv-annotation-label')];
+          return { count: labels.length, text: labels[0]?.textContent,
+                   images: layer.querySelectorAll('img').length,
+                   injected: !!window.annotationInjected,
+                   kinds: v.getAnnotations().map(a => a.kind) };
+        }"""
+    )
+    assert got == {
+        "count": 1,
+        "text": label,
+        "images": 0,
+        "injected": False,
+        "kinds": ["point"],
+    }
+    viewer_client.clear_dimensions()
+    settle(viewer_client)
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._dimensions.css.domElement"
+            ".querySelectorAll('.tjsv-annotation-label').length"
+        )
+        == 0
     )

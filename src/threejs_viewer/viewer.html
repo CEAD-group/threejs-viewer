@@ -9835,9 +9835,13 @@ class DepthCueController {
 // lines, a dimension line with arrowheads, and a label. `direction` picks the
 // measured axes ('X', 'Y', 'Z', 'XY', 'XZ', 'YZ', 'XYZ'): the value is the
 // length of (p2 - p1) with the other components zeroed, so 'X' is |dx| and
-// 'XYZ' the true distance. The dimension line runs along that measured
+// 'XYZ' the true distance. `direction` may instead be a vector [x, y, z]: the
+// value is then the length of (p2 - p1) projected onto it. Omitted, it is the
+// true distance, like 'XYZ'. The dimension line runs along that measured
 // direction through `drawOrigin`, and the lines lie on the plane through p1,
-// p2 and drawOrigin.
+// p2 and drawOrigin. Without a `drawOrigin` the line runs through the midpoint
+// of p1 and p2 on the plane that holds the measured direction and faces the
+// camera best, so the dimension turns with the view.
 //
 // Point markers (a disc, with an optional label beside it) and polylines
 // (optionally closed) through world points.
@@ -9943,23 +9947,49 @@ function autoDimensionDirection(p1, p2, c, nearDiagonal) {
 }
 
 /**
+ * A dimension's `direction`: an axis string, a unit vector, or null for the
+ * true distance. Throws on anything else. @param {any} d @param {string} id
+ * @returns {string|THREE.Vector3|null}
+ */
+function parseDimensionDirection(d, id) {
+    if (d == null || d === '') return null;
+    if (typeof d === 'object') {
+        const v = toDimVec(d);
+        if (!v || v.lengthSq() === 0) throw new Error(`addDimension '${id}': a direction vector must be 3 finite numbers, not all zero`);
+        return v.normalize();
+    }
+    const s = normalizeDimensionDirection(d);
+    if (!s) throw new Error(`addDimension '${id}': direction must be a vector or one of ${[...DIM_DIRECTIONS].join(', ')}`);
+    return s;
+}
+
+/**
  * World-space construction of one dimension: the measured value, the measured
  * unit direction `u`, the dimension-line feet `a`/`b` (where the extension lines
- * from p1/p2 meet the line through drawOrigin) and the plane normal `n`.
- * @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {THREE.Vector3} d @param {string} direction
+ * from p1/p2 meet the line through `d`) and the plane normal `n`. A null `d`
+ * draws through the midpoint; the caller then turns `n` towards the camera.
+ * @param {THREE.Vector3} p1 @param {THREE.Vector3} p2 @param {THREE.Vector3|null} d
+ * @param {string|THREE.Vector3|null} direction
  */
 function dimensionGeometry(p1, p2, d, direction) {
     const delta = new THREE.Vector3().subVectors(p2, p1);
-    const m = new THREE.Vector3(
-        direction.includes('X') ? delta.x : 0,
-        direction.includes('Y') ? delta.y : 0,
-        direction.includes('Z') ? delta.z : 0,
-    );
+    if (!d) d = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+    let m, fallback;
+    if (direction && typeof direction === 'object') {
+        m = direction.clone().multiplyScalar(delta.dot(direction));
+        fallback = direction;
+    } else {
+        const axes = direction || 'XYZ';
+        m = new THREE.Vector3(
+            axes.includes('X') ? delta.x : 0,
+            axes.includes('Y') ? delta.y : 0,
+            axes.includes('Z') ? delta.z : 0,
+        );
+        fallback = new THREE.Vector3(axes[0] === 'X' ? 1 : 0, axes[0] === 'Y' ? 1 : 0, axes[0] === 'Z' ? 1 : 0);
+    }
     const value = m.length();
     const scale = Math.max(1e-9, delta.length(), p1.distanceTo(d), p2.distanceTo(d));
-    const u = value > 1e-12 * scale
-        ? m.clone().divideScalar(value)
-        : new THREE.Vector3(direction[0] === 'X' ? 1 : 0, direction[0] === 'Y' ? 1 : 0, direction[0] === 'Z' ? 1 : 0);
+    const u = value > 1e-12 * scale ? m.clone().divideScalar(value) : fallback.clone();
     const a = d.clone().addScaledVector(u, new THREE.Vector3().subVectors(p1, d).dot(u));
     const b = d.clone().addScaledVector(u, new THREE.Vector3().subVectors(p2, d).dot(u));
     // The plane holds the measured direction and the draw origin. For a
@@ -9973,7 +10003,7 @@ function dimensionGeometry(p1, p2, d, direction) {
         n.crossVectors(u, helper);
     }
     n.normalize();
-    return { value, u, a, b, n, scale };
+    return { value, u, a, b, n, d, scale };
 }
 
 /** Unit normal of a planar polyline (Newell), or null when the vertices are
@@ -10051,10 +10081,10 @@ class DimensionController {
     add(id, spec) {
         if (!id) throw new Error('addDimension: id is required');
         const p1 = toDimVec(spec && spec.p1), p2 = toDimVec(spec && spec.p2);
-        const d = toDimVec(spec && (spec.drawOrigin ?? spec.draw_origin));
-        const direction = normalizeDimensionDirection(spec && spec.direction);
-        if (!p1 || !p2 || !d) throw new Error(`addDimension '${id}': p1, p2 and drawOrigin must be finite 3-vectors`);
-        if (!direction) throw new Error(`addDimension '${id}': direction must be one of ${[...DIM_DIRECTIONS].join(', ')}`);
+        const rawD = spec && (spec.drawOrigin ?? spec.draw_origin);
+        const d = rawD == null ? null : toDimVec(rawD);
+        if (!p1 || !p2 || (rawD != null && !d)) throw new Error(`addDimension '${id}': p1, p2 and drawOrigin must be finite 3-vectors`);
+        const direction = parseDimensionDirection(spec && spec.direction, id);
         const label = spec.label == null ? null : String(spec.label);
         this._put(id, 'dimension', { p1, p2, d, direction, color: new THREE.Color(spec.color ?? DIM_DEFAULT_COLOR), label });
     }
@@ -10088,9 +10118,7 @@ class DimensionController {
         const sig = this._sig(kind, input);
         const prev = this.dims.get(id);
         if (prev && prev.sig === sig) return;
-        this._remove(id);
-        this.dims.set(id, this._build(id, kind, input));
-        this._dirty = true;
+        this._rebuild(id, kind, input, false);
     }
 
     /** @param {string} kind @param {any} input */
@@ -10183,8 +10211,9 @@ class DimensionController {
         if (r.kind === 'point') return { ...base, position: r.position.toArray(), label: r.label };
         if (r.kind === 'polyline') return { ...base, points: r.points.map((/** @type {THREE.Vector3} */ p) => p.toArray()), closed: r.closed };
         return {
-            ...base, p1: r.p1.toArray(), p2: r.p2.toArray(), drawOrigin: r.d.toArray(),
-            direction: r.direction, value: r.geom.value, label: r.label,
+            ...base, p1: r.p1.toArray(), p2: r.p2.toArray(), drawOrigin: r.d ? r.d.toArray() : null,
+            direction: r.direction && r.direction.isVector3 ? r.direction.toArray() : r.direction,
+            value: r.geom.value, label: r.label,
         };
     }
 
@@ -10231,11 +10260,49 @@ class DimensionController {
         return dots;
     }
 
-    /** @param {string} id @param {string} kind @param {any} input @param {boolean} [preview] */
-    _build(id, kind, input, preview = false) {
-        const group = new THREE.Group();
-        group.name = `${kind}:${id}`;
-        group.renderOrder = 2000;
+    /** Replace one record, keeping its group and label element when the kind
+     * matches: a fresh CSS3D element takes a frame to show, so recreating the
+     * label on every change (a jog, a drag, the tool preview) made it flicker.
+     * @param {string} id @param {string} kind @param {any} input @param {boolean} preview */
+    _rebuild(id, kind, input, preview) {
+        const prev = this.dims.get(id);
+        if (prev && prev.kind === kind) {
+            this.dims.set(id, this._build(id, kind, input, preview, prev));
+        } else {
+            this._remove(id);
+            this.dims.set(id, this._build(id, kind, input, preview));
+        }
+        this._dirty = true;
+    }
+
+    /** @param {THREE.Object3D} o */
+    _dispose(o) {
+        o.traverse((/** @type {any} */ n) => {
+            if (n.geometry) n.geometry.dispose();
+            if (n.material) {
+                if (n.material.map) n.material.map.dispose();
+                n.material.dispose();
+            }
+        });
+    }
+
+    /** Build a record; with `reuse` (the same id's previous record, same kind)
+     * its group and label are kept and only the WebGL parts are replaced.
+     * @param {string} id @param {string} kind @param {any} input @param {boolean} [preview] @param {any} [reuse] */
+    _build(id, kind, input, preview = false, reuse = null) {
+        let group;
+        if (reuse) {
+            group = reuse.group;
+            for (const o of [...group.children]) {
+                if (o === reuse.text) continue;
+                group.remove(o);
+                this._dispose(o);
+            }
+        } else {
+            group = new THREE.Group();
+            group.name = `${kind}:${id}`;
+            group.renderOrder = 2000;
+        }
         /** @type {any} */
         const rec = { id, kind, input, sig: this._sig(kind, input), ...input, preview, group, lines: null, text: null };
         if (kind === 'point') {
@@ -10260,11 +10327,20 @@ class DimensionController {
             if (preview) group.add(this._dots([input.p1, input.p2], input.color, 7));
         }
         const text = kind === 'dimension' ? (input.label ?? this._formatValue(rec.geom.value, rec)) : kind === 'point' ? input.label : null;
-        if (text) {
+        const old = reuse ? reuse.text : null;
+        if (text && old) {
+            rec.text = old;
+            const span = /** @type {HTMLElement} */ (old.element.firstChild);
+            if (span.textContent !== text) span.textContent = text;
+            old.element.style.color = `#${input.color.getHexString()}`;
+        } else if (text) {
             rec.text = this._label(text, input.color, kind);
             group.add(rec.text);
+        } else if (old) {
+            group.remove(old);   // CSS3DObject drops its element on 'removed'
+            old.element.remove();
         }
-        this.scene.add(group);
+        if (!reuse) this.scene.add(group);
         return rec;
     }
 
@@ -10274,13 +10350,7 @@ class DimensionController {
         if (!r) return false;
         this.scene.remove(r.group);
         if (r.text) r.text.element.remove();   // CSS3DObject only unhooks itself when removed directly
-        r.group.traverse((/** @type {any} */ o) => {
-            if (o.geometry) o.geometry.dispose();
-            if (o.material) {
-                if (o.material.map) o.material.map.dispose();
-                o.material.dispose();
-            }
-        });
+        this._dispose(r.group);
         this.dims.delete(id);
         return true;
     }
@@ -10315,6 +10385,7 @@ class DimensionController {
         const cosTol = Math.cos(THREE.MathUtils.degToRad(this.inViewToleranceDeg));
         for (const r of this.dims.values()) {
             if (r.lines) r.lines.material.resolution.set(w, h);
+            if (r.kind === 'dimension' && !r.d) this._faceCamera(r.geom);
             let show = r.preview || this.mode === 'all';
             if (!r.preview && this.mode === 'in_view') {
                 const n = r.kind === 'dimension' ? r.geom.n : r.kind === 'polyline' ? r.normal : null;
@@ -10330,6 +10401,15 @@ class DimensionController {
                 this._placeLabel(r, at, this._camRight.clone(), this._camUp.clone(), wpp);
             }
         }
+    }
+
+    /** Turn a dimension without a draw origin onto the plane that holds its
+     * measured direction and faces the camera best. @param {any} g */
+    _faceCamera(g) {
+        const n = g.n.copy(this._camFwd).addScaledVector(g.u, -this._camFwd.dot(g.u));
+        if (n.lengthSq() < 1e-12) n.crossVectors(g.u, this._camUp);
+        if (n.lengthSq() < 1e-12) n.crossVectors(g.u, this._camRight);
+        n.normalize();
     }
 
     /** Put a label's origin at `at`, its CSS x/y along the unit vectors `x`/`y`,
@@ -10368,7 +10448,7 @@ class DimensionController {
         wv.normalize();
         // Too short for two arrows between the extension lines: arrows go outside.
         const inside = span >= 2.5 * L;
-        const sd = _dimV1.subVectors(r.d, a).dot(t);
+        const sd = _dimV1.subVectors(r.geom.d, a).dot(t);
         const lo = Math.min(0, sd, inside ? 0 : -1.6 * L);
         const hi = Math.max(span, sd, inside ? span : span + 1.6 * L);
         seg(a.clone().addScaledVector(t, lo), a.clone().addScaledVector(t, hi));
@@ -10385,14 +10465,18 @@ class DimensionController {
         // measured points. Only its reading direction follows the camera: it
         // flips so it reads left-to-right (bottom-to-top when vertical on
         // screen) and never mirrored.
-        const away = _dimV1.subVectors(a, r.p1).dot(wv) || _dimV1.subVectors(b, r.p2).dot(wv);
+        // Without a draw origin the line runs between the points: the label
+        // goes on its upper side on screen.
+        const away = r.d
+            ? _dimV1.subVectors(a, r.p1).dot(wv) || _dimV1.subVectors(b, r.p2).dot(wv)
+            : wv.dot(this._camUp) || wv.dot(this._camRight);
         const side = wv.clone().multiplyScalar(away < 0 ? -1 : 1);
         const x = t.clone();
         const onRight = x.dot(this._camRight);
         if (onRight < -1e-3 || (Math.abs(onRight) <= 1e-3 && x.dot(this._camUp) < 0)) x.negate();
         const y = wv.clone();
         if (_dimV1.crossVectors(x, y).dot(this._camFwd) > 0) y.negate();
-        const center = r.d.clone().addScaledVector(side, (DIM_LABEL_LINE / 2 + DIM_LABEL_GAP_H) * H);
+        const center = r.geom.d.clone().addScaledVector(side, (DIM_LABEL_LINE / 2 + DIM_LABEL_GAP_H) * H);
         this._placeLabel(r, center, x, y, H / DIM_LABEL_FONT_PX);
     }
 
@@ -10600,9 +10684,8 @@ class DimensionController {
 
     /** @param {string} kind @param {any} input */
     _preview(kind, input) {
-        this._remove(DIM_PREVIEW_ID);
-        const rec = this._build(DIM_PREVIEW_ID, kind, input, true);
-        this.dims.set(DIM_PREVIEW_ID, rec);
+        this._rebuild(DIM_PREVIEW_ID, kind, input, true);
+        const rec = this.dims.get(DIM_PREVIEW_ID);
         this._dirty = true;
         return rec;
     }
@@ -20656,9 +20739,11 @@ class ThreeJSViewer {
 
     /**
      * Add (or replace) a linear dimension annotation. `spec`: `{p1, p2,
-     * drawOrigin, direction, color?, label?}`; points are `[x, y, z]` or
+     * drawOrigin?, direction?, color?, label?}`; points are `[x, y, z]` or
      * `{x, y, z}` in scene units, `direction` one of 'X', 'Y', 'Z', 'XY', 'XZ',
-     * 'YZ', 'XYZ' (the measured axes), `label` overrides the formatted value.
+     * 'YZ', 'XYZ' (the measured axes) or a vector to measure along (omitted:
+     * the true distance), `label` overrides the formatted value. Without a
+     * `drawOrigin` the dimension sits between the points, facing the camera.
      * See the DimensionController banner. Throws on a malformed spec.
      * @param {string} id @param {any} spec
      */
@@ -20690,7 +20775,7 @@ class ThreeJSViewer {
     /** Remove every annotation, dimensions, points and polylines alike. */
     clearDimensions() { this._dimensions.clear(); }
 
-    /** @returns {Array<{id:string, kind:'dimension', p1:number[], p2:number[], drawOrigin:number[], direction:string, value:number, color:number, label:string|null}>} */
+    /** @returns {Array<{id:string, kind:'dimension', p1:number[], p2:number[], drawOrigin:number[]|null, direction:string|number[]|null, value:number, color:number, label:string|null}>} */
     getDimensions() { return this._dimensions.list('dimension'); }
 
     /** Every annotation's spec, each tagged with its `kind`. @returns {Array<any>} */
