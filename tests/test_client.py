@@ -1029,11 +1029,23 @@ def test_dimension_specs_record_for_reconnect_and_survive_clear():
     assert client._dimensions == {}
 
 
+def test_add_dimension_takes_a_vector_direction_and_no_draw_origin():
+    client = ViewerClient()
+    client.add_dimension("v", p1=[0, 0, 0], p2=[1, 1, 0], direction=(1, 1, 0))
+    client.add_dimension("n", p1=[0, 0, 0], p2=[1, 1, 0], direction=None)
+    assert client._dimensions["v"]["direction"] == [1.0, 1.0, 0.0]
+    assert client._dimensions["v"]["draw_origin"] is None
+    assert client._dimensions["n"]["direction"] is None
+
+
 @pytest.mark.parametrize(
     "kwargs, match",
     [
         ({"direction": "W"}, "direction"),
         ({"direction": ""}, "direction"),
+        ({"direction": [0, 0, 0]}, "direction"),
+        ({"direction": [1, 0]}, "direction"),
+        ({"draw_origin": [0, 1]}, "draw_origin"),
         ({"p1": [0, 0]}, "p1"),
         ({"p2": [0, float("nan"), 0]}, "p2"),
     ],
@@ -1046,6 +1058,37 @@ def test_add_dimension_validates(kwargs, match):
     assert client._dimensions == {}
 
 
+def test_point_and_polyline_annotations_record_and_validate():
+    """Points and polylines share the dimension store: recorded for reconnect,
+    removed by remove_dimension, validated before anything is sent."""
+    client = ViewerClient()
+    client.add_point_annotation("p", position=(1, 2, 3), label="datum")
+    client.add_polyline_annotation(
+        "l", points=[(0, 0, 0), [1, 0, 0], [1, 1, 0]], closed=True
+    )
+    assert client._dimensions["p"] == {
+        "type": "add_point_annotation",
+        "id": "p",
+        "position": [1.0, 2.0, 3.0],
+        "color": None,
+        "label": "datum",
+    }
+    assert client._dimensions["l"]["points"][2] == [1.0, 1.0, 0.0]
+    assert client._dimensions["l"]["closed"] is True
+    client._send = lambda data: None
+    client.remove_dimension("p")
+    assert list(client._dimensions) == ["l"]
+    client.clear_dimensions()
+    assert client._dimensions == {}
+    with pytest.raises(ValueError, match="position"):
+        client.add_point_annotation("p", position=[0, 0])
+    with pytest.raises(ValueError, match="two or more"):
+        client.add_polyline_annotation("l", points=[[0, 0, 0]])
+    with pytest.raises(ValueError, match=r"points\[1\]"):
+        client.add_polyline_annotation("l", points=[[0, 0, 0], [0, float("inf"), 0]])
+    assert client._dimensions == {}
+
+
 def test_dimension_display_and_format_validate():
     client = ViewerClient()
     with pytest.raises(ValueError, match="mode"):
@@ -1054,6 +1097,10 @@ def test_dimension_display_and_format_validate():
         client.set_dimension_format(decimals=9)
     with pytest.raises(ValueError, match="in_view_tolerance_deg"):
         client.set_dimension_format(in_view_tolerance_deg=0)
+    with pytest.raises(ValueError, match="text_height"):
+        client.set_dimension_format(text_height=0)
+    client.set_dimension_format(text_height=0.15)
+    assert client._dimension_format["text_height"] == 0.15
 
 
 def test_dimension_tool_events_reach_callbacks():
