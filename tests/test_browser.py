@@ -11140,13 +11140,21 @@ def test_replacing_annotations_disposes_labels_and_preserves_literal_text(
 
 
 @pytest.mark.browser
-def test_annotation_colours_ignore_tone_mapping_and_exposure(viewer_client, viewer_page):
+def test_annotation_colours_ignore_tone_mapping_and_exposure(
+    viewer_client, viewer_page
+):
     """Dimension, point and polyline pixels keep their colours as exposure changes."""
     viewer_page.evaluate(_GIZMO_TOPDOWN)
     viewer_client.add_dimension(
-        "lighting_dim", p1=[-1, -1, 0], p2=[1, -1, 0], draw_origin=[0, -2, 0], color="#3fa7d6"
+        "lighting_dim",
+        p1=[-1, -1, 0],
+        p2=[1, -1, 0],
+        draw_origin=[0, -2, 0],
+        color="#3fa7d6",
     )
-    viewer_client.add_point_annotation("lighting_point", position=[0, 0, 0], color="#e05a47")
+    viewer_client.add_point_annotation(
+        "lighting_point", position=[0, 0, 0], color="#e05a47"
+    )
     viewer_client.add_polyline_annotation(
         "lighting_line", points=[[-1, 1, 0], [1, 1, 0]], color="#f2c14e"
     )
