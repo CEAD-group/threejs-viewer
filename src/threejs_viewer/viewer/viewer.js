@@ -8600,6 +8600,7 @@ class DimensionController {
         const mat = new LineMaterial({
             color: color.getHex(), linewidth: DIM_LINE_WIDTH_PX, worldUnits: false,
             depthTest: false, depthWrite: false, transparent: true, opacity: preview ? 0.85 : 1,
+            toneMapped: false, fog: false,
         });
         const lines = new LineSegments2(new LineSegmentsGeometry(), mat);
         lines.frustumCulled = false;
@@ -8631,6 +8632,7 @@ class DimensionController {
             new THREE.PointsMaterial({
                 size: sizePx, sizeAttenuation: false, map: makePointMarker(color, this.v._backgroundColor),
                 transparent: true, alphaTest: 0.05, depthTest: false, depthWrite: false,
+                toneMapped: false, fog: false,
             }),
         );
         dots.frustumCulled = false;

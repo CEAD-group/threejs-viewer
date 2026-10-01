@@ -11137,3 +11137,61 @@ def test_replacing_annotations_disposes_labels_and_preserves_literal_text(
         )
         == 0
     )
+
+
+@pytest.mark.browser
+def test_annotation_colours_ignore_tone_mapping_and_exposure(viewer_client, viewer_page):
+    """Dimension, point and polyline pixels keep their colours as exposure changes."""
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.add_dimension(
+        "lighting_dim", p1=[-1, -1, 0], p2=[1, -1, 0], draw_origin=[0, -2, 0], color="#3fa7d6"
+    )
+    viewer_client.add_point_annotation("lighting_point", position=[0, 0, 0], color="#e05a47")
+    viewer_client.add_polyline_annotation(
+        "lighting_line", points=[[-1, 1, 0], [1, 1, 0]], color="#f2c14e"
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    colours = viewer_page.evaluate("""() => {
+  const v = window.threejsViewer, renderer = v._renderer, layer = v._dimensions;
+  const gl = renderer.getContext();
+  const exposure = renderer.toneMappingExposure, mode = renderer.toneMapping;
+  const clear = renderer.getClearColor(layer.dims.values().next().value.color.clone());
+  const alpha = renderer.getClearAlpha(), autoClear = renderer.autoClear;
+  const visibility = new Map([...layer.dims.values()].map(r => [r.group, r.group.visible]));
+  const results = {};
+  const pixels = (toneMapping, toneMappingExposure) => {
+    renderer.toneMapping = toneMapping;
+    renderer.toneMappingExposure = toneMappingExposure;
+    renderer.clear();
+    renderer.render(layer.scene, v._camera);
+    const data = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+    gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    return data;
+  };
+  try {
+    renderer.setClearColor(0x000000, 1);
+    renderer.autoClear = false;
+    for (const kind of ['dimension', 'point', 'polyline']) {
+      for (const r of layer.dims.values()) r.group.visible = r.kind === kind;
+      const before = pixels(0, 1);
+      const after = pixels(4, 3);
+      let drawn = 0, changed = 0;
+      for (let i = 0; i < before.length; i += 4) {
+        if (before[i] || before[i + 1] || before[i + 2]) drawn++;
+        if (before[i] !== after[i] || before[i + 1] !== after[i + 1] || before[i + 2] !== after[i + 2]) changed++;
+      }
+      results[kind] = { drawn, changed };
+    }
+  } finally {
+    renderer.toneMapping = mode;
+    renderer.toneMappingExposure = exposure;
+    renderer.setClearColor(clear, alpha);
+    renderer.autoClear = autoClear;
+    for (const [group, visible] of visibility) group.visible = visible;
+  }
+  return results;
+}""")
+    for kind, result in colours.items():
+        assert result["drawn"] > 0, (kind, result)
+        assert result["changed"] == 0, (kind, result)
