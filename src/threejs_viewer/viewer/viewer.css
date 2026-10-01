@@ -831,3 +831,44 @@
     color: white;
     opacity: 1;
 }
+
+/* Cursor-following prompt while the dimension tool is active */
+/* Annotation labels: a CSS3DRenderer layer over the canvas (DimensionController). */
+.threejs-viewer .tjsv-annotation-labels {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+}
+.threejs-viewer .tjsv-annotation-label {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-weight: 600;
+    line-height: 1.2;   /* DIM_LABEL_LINE */
+    white-space: nowrap;
+    pointer-events: none;
+    user-select: none;
+}
+/* A point label starts at its origin: a zero-width box the text overflows. */
+.threejs-viewer .tjsv-annotation-label-start {
+    width: 0;
+    height: 1.2em;
+}
+.threejs-viewer .tjsv-annotation-label-start > span {
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+
+.threejs-viewer .tjsv-dim-hint {
+    position: absolute;
+    background: rgba(30, 30, 30, 0.85);
+    color: #eee;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    z-index: 10;
+}
