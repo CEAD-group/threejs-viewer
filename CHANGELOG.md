@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.63
+
+### Dimension, point and polyline annotations (#250)
+
+- **Linear dimensions, labelled points and polylines as a scene layer.** Python: `add_dimension`, `add_point_annotation`, `add_polyline_annotation`, `remove_dimension`, `clear_dimensions`, `set_dimension_display` (all / in view / none) and `set_dimension_format` (text size). A dimension measures along `X`, `Y`, `Z`, a pair, `XYZ` or a vector; extension lines, arrowheads and the label sit on the plane through `draw_origin`, and labels are world-sized text on a plate in the background colour.
+- Annotations survive `clear_scene` and a reconnect, and interactive drawing in the browser round-trips through the same WS messages.
+- Annotation colours ignore tone mapping and exposure, so they stay legible when the lighting settings change.
+
 ## 0.0.62
 
 ### Orbit about the floor grid under the cursor (#247)
