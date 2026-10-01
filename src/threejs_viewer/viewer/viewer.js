@@ -2617,6 +2617,13 @@ const TUBE_MITER_LIMIT = 2;
 // segments stay exactly zero.
 const TUBE_DEPOSITION_BIAS = 1e-3;
 
+// Length of bead (world units) one repeat of a bead texture covers when the
+// producer gives none.
+const TUBE_TEXTURE_DEFAULT_LENGTH = 25;
+// `texture` header field -> material slot. All maps share the bead's uv set
+// and tile length; only `map` is sRGB.
+const TUBE_TEXTURE_SLOTS = [['url', 'map'], ['normalUrl', 'normalMap'], ['roughnessUrl', 'roughnessMap']];
+
 // Per-spine-point miter frames + directional miter data. At interior points
 // the tangent is the unit bisector of the incoming/outgoing segment
 // directions (not the central-difference average — the two agree for equal
@@ -2892,6 +2899,141 @@ function writeCapRingVerts(positions, ringBase, section, nCs,
         positions[ringBase + j * 3 + 1] = sy + cu * cosT * Uy + cv * Vy + tOff * Ty;
         positions[ringBase + j * 3 + 2] = sz + cu * cosT * Uz + cv * Vz + tOff * Tz;
     }
+}
+
+// ---- Tube texture coordinates ----
+//
+// A textured bead is unrolled like a tube: `u` runs ALONG the bead and is the
+// arc length of the spine in world units (the texture's `repeat.x = 1/length`
+// turns that into tiles, so the image repeats every `length` units for ever),
+// `v` runs ACROSS it in 0..1. Every vertex of a ring shares the ring's centre-
+// line arc length, so the image follows the toolpath through every curve and
+// corner with its columns staying perpendicular to the path: on a bend the
+// outside of the bead stretches and the inside compresses, exactly as a bent
+// tube would. (Accumulating arc length per strand instead keeps texels square
+// on the outside of a bend but shears the image across the bead by 2π·width
+// per full turn, without bound on a spiral.) Arc lengths are taken on the
+// FULL-resolution spine and sampled at the kept points, so the texture does
+// not swim when LOD re-reduces the spine.
+
+// Across-the-bead texture coordinate of the 6 cross-section vertices, in the
+// vertex order of sampleChamferedRect. v walks the perimeter from the +U side
+// (0) over the top to the -U side (1) and the bottom half MIRRORS the top, so
+// there is no seam and no duplicated seam vertex. For a bead taller than wide
+// the mirror axis crosses the two side walls mid-height, so each wall takes a
+// single v. Shared with the LOD worker via toString() injection: keep it
+// dependency-free.
+/**
+ * @param {Float32Array} out - length 6
+ * @param {number} width
+ * @param {number} height
+ */
+function tubeSectionTexV(out, width, height) {
+    const hw = width * 0.5, hh = height * 0.5;
+    const c = Math.min(hw, hh);
+    if (!(c > 0)) {
+        // Collapsed section (travel point): any monotone spread will do.
+        out[0] = 0; out[1] = 1 / 3; out[2] = 2 / 3; out[3] = 1; out[4] = 2 / 3; out[5] = 1 / 3;
+        return;
+    }
+    const diag = c * Math.SQRT2;
+    if (width >= height) {
+        // right tip → chamfer → flat top → chamfer → left tip
+        const a = diag / (2 * diag + (width - 2 * c));
+        out[0] = 0; out[1] = a; out[2] = 1 - a; out[3] = 1; out[4] = 1 - a; out[5] = a;
+    } else {
+        // mid right wall → chamfer → top tip → chamfer → mid left wall
+        const wall = hh - c;
+        const a = wall / (2 * (wall + diag));
+        out[0] = a; out[1] = a; out[2] = 0.5; out[3] = 1 - a; out[4] = 1 - a; out[5] = 0.5;
+    }
+}
+
+// Write one ring of texture coordinates: u for the whole ring, texV across it.
+// With `section`, the ring is a revolution-cap ring at sin(θ) = sinT (signed
+// by the cap's direction): each vertex sweeps along the tangent by |cu|·sinT
+// (see writeCapRingVerts), so u advances by the same distance and the image
+// runs on over the dome. Shared with the LOD worker via toString() injection.
+/**
+ * @param {any} uv - Float32Array (raw) or typed-array view from BufferAttribute
+ * @param {number} vertBase
+ * @param {number} nCs
+ * @param {Float32Array} texV
+ * @param {number} u
+ * @param {Float32Array | null} section
+ * @param {number} sinT
+ */
+function writeTubeRingUVs(uv, vertBase, nCs, texV, u, section, sinT) {
+    for (let j = 0; j < nCs; j++) {
+        const dst = (vertBase + j) * 2;
+        uv[dst] = section ? u + Math.abs(section[j * 2]) * sinT : u;
+        uv[dst + 1] = texV[j];
+    }
+}
+
+// Fill the whole uv buffer of a tube geometry, in its vertex layout:
+// rings | start cap | end cap | break-cap rims (two per break, ascending).
+// `arc` is the per-ring arc length along the (full-resolution) spine. Shared
+// with the LOD worker via toString() injection; sampleChamferedRect resolves
+// to each scope's own copy.
+/**
+ * @param {Float32Array} uv - length totalVerts * 2
+ * @param {Float32Array} arc
+ * @param {Float32Array} widths
+ * @param {Float32Array} heights
+ * @param {number} nSpine
+ * @param {number} nCs
+ * @param {number} nCapRings
+ * @param {Uint8Array | null} [breakMask]
+ */
+function writeTubeUVs(uv, arc, widths, heights, nSpine, nCs, nCapRings, breakMask) {
+    const texV = new Float32Array(nCs);
+    const section = new Float32Array(nCs * 2);
+    for (let i = 0; i < nSpine; i++) {
+        tubeSectionTexV(texV, widths[i], heights[i]);
+        writeTubeRingUVs(uv, i * nCs, nCs, texV, arc[i], null, 0);
+    }
+    const startCapBase = nSpine * nCs;
+    const endCapBase = startCapBase + nCapRings * nCs;
+    for (let e = 0; e < 2; e++) {
+        const i = e === 0 ? 0 : nSpine - 1;
+        const capBase = e === 0 ? startCapBase : endCapBase;
+        const tSign = e === 0 ? -1 : 1;
+        sampleChamferedRect(section, widths[i], heights[i]);
+        tubeSectionTexV(texV, widths[i], heights[i]);
+        for (let k = 0; k < nCapRings; k++) {
+            const sinT = Math.sin(((k + 1) / nCapRings) * (Math.PI * 0.5)) * tSign;
+            writeTubeRingUVs(uv, capBase + k * nCs, nCs, texV, arc[i], section, sinT);
+        }
+    }
+    if (breakMask) {
+        // Break-cap rims copy the strip-end rings they close.
+        let cap = endCapBase + nCapRings * nCs;
+        for (let i = 1; i < nSpine; i++) {
+            if (!breakMask[i]) continue;
+            uv.copyWithin(cap * 2, (i - 1) * nCs * 2, i * nCs * 2);
+            cap += nCs;
+            uv.copyWithin(cap * 2, i * nCs * 2, (i + 1) * nCs * 2);
+            cap += nCs;
+        }
+    }
+}
+
+// Cumulative arc length at every spine point, accumulated in double precision.
+/**
+ * @param {Float32Array} spine
+ * @param {number} n
+ */
+function tubeArcLengths(spine, n) {
+    const arc = new Float32Array(n);
+    let s = 0;
+    for (let i = 1; i < n; i++) {
+        s += Math.hypot(spine[i * 3] - spine[i * 3 - 3],
+                        spine[i * 3 + 1] - spine[i * 3 - 2],
+                        spine[i * 3 + 2] - spine[i * 3 - 1]);
+        arc[i] = s;
+    }
+    return arc;
 }
 
 // Closest-pair midpoint between two 3D segments (P0,P1) and (Q0,Q1), with
@@ -3822,6 +3964,12 @@ ${polylineSegSegMidpoint.toString()}
 
 ${collapseTubeStrandFolds.toString()}
 
+${tubeSectionTexV.toString()}
+
+${writeTubeRingUVs.toString()}
+
+${writeTubeUVs.toString()}
+
 function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
                                   width, height, localFrames, spineIdx, tSign,
                                   sectionScratch, sectionNormalsScratch,
@@ -4097,6 +4245,8 @@ self.onmessage = function(e) {
             nPoints: msg.nPoints,
             vOffs: msg.vOffs || null,
             breakMask: msg.breakMask || null,
+            // Full-resolution arc lengths; present only for textured tubes.
+            arc: msg.arc || null,
             boundingRadius: msg.boundingRadius || 0,
             epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
             // Stored as the original value (bool | {maxSnapFactor: number}) so
@@ -4227,12 +4377,14 @@ self.onmessage = function(e) {
     const redHeights = new Float32Array(nRed);
     let redColors = ringColors ? new Float32Array(nRed * 3) : null;
     const redVOffs = vOffs ? new Float32Array(nRed) : null;
+    const redArc = tube.arc ? new Float32Array(nRed) : null;
     for (let i = 0; i < nRed; i++) {
         const oi = keptIndices[i];
         redSpine[i*3]=spine[oi*3]; redSpine[i*3+1]=spine[oi*3+1]; redSpine[i*3+2]=spine[oi*3+2];
         redWidths[i]=widths[oi]; redHeights[i]=heights[oi];
         if (redColors) { redColors[i*3]=ringColors[oi*3]; redColors[i*3+1]=ringColors[oi*3+1]; redColors[i*3+2]=ringColors[oi*3+2]; }
         if (redVOffs) redVOffs[i] = vOffs[oi];
+        if (redArc) redArc[i] = tube.arc[oi];
     }
 
     // Remap the break mask onto the reduced spine: a reduced pair (j-1, j)
@@ -4251,6 +4403,14 @@ self.onmessage = function(e) {
 
     // Build geometry in worker
     const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, redVOffs, redBreakMask);
+
+    // Texture coordinates (textured tubes only): the kept points keep their
+    // full-resolution arc length, so the image stays put across LOD levels.
+    let uv = null;
+    if (redArc) {
+        uv = new Float32Array(geo.totalVerts * 2);
+        writeTubeUVs(uv, redArc, redWidths, redHeights, nRed, N_CS, N_CAP_RINGS, redBreakMask);
+    }
 
     // Strand-collapse pass on the reduced spine. The reduced mesh sees
     // the same fold geometry as the full-resolution main-thread build,
@@ -4275,10 +4435,12 @@ self.onmessage = function(e) {
     if (redColors) transfer.push(redColors.buffer);
     if (redVOffs) transfer.push(redVOffs.buffer);
     if (uncollapsedPositions) transfer.push(uncollapsedPositions.buffer);
+    if (uv) transfer.push(uv.buffer, redArc.buffer);
 
     self.postMessage({
         tubeId, allReused: false,
         positions: geo.positions, normals: geo.normals, colors: geo.colors, indices: geo.indices,
+        uv, reducedArc: redArc,
         localFrames: geo.localFrames, miters: geo.miters, tangents: geo.tangents,
         capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
         ringPairs: geo.ringPairs, indicesPerRingPair: geo.indicesPerRingPair,
@@ -5014,6 +5176,7 @@ class ParametricTube {
         geometry.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
         geometry.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
         if (msg.colors) geometry.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
+        if (msg.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(msg.uv, 2));
         geometry.setIndex(new THREE.BufferAttribute(msg.indices, 1));
 
         mesh.geometry.dispose();
@@ -5073,6 +5236,8 @@ class ParametricTube {
             savedCapIndices: new (/** @type {any} */ (msg.endCapPattern.constructor))(msg.endCapPattern.length),
             savedCapOffset: -1,
             vOffs: msg.reducedVOffs || null,
+            arc: msg.reducedArc || null,
+            savedRingUVs: null,
         };
 
         lod.keptIndices = msg.keptIndices;
@@ -5107,6 +5272,14 @@ class ParametricTube {
                 colAttr.array.set(md.savedRingColors, ringBase);
                 colAttr.addUpdateRange(ringBase, rangeCount);
                 colAttr.needsUpdate = true;
+            }
+        }
+        if (md.savedRingUVs) {
+            const uvAttr = obj.geometry.getAttribute('uv');
+            if (uvAttr) {
+                uvAttr.array.set(md.savedRingUVs, md.savedRingIndex * nCs * 2);
+                uvAttr.addUpdateRange(md.savedRingIndex * nCs * 2, nCs * 2);
+                uvAttr.needsUpdate = true;
             }
         }
         md.savedRingIndex = null;
@@ -5154,6 +5327,11 @@ class ParametricTube {
                     if (!md.savedRingColors) md.savedRingColors = new Float32Array(nCs * 3);
                     md.savedRingColors.set(colAttr.array.subarray(ringBase, ringBase + nCs * 3));
                 }
+            }
+            const uvSrc = md.arc && obj.geometry.getAttribute('uv');
+            if (uvSrc) {
+                if (!md.savedRingUVs) md.savedRingUVs = new Float32Array(nCs * 2);
+                md.savedRingUVs.set(uvSrc.array.subarray(iB * nCs * 2, (iB + 1) * nCs * 2));
             }
             md.savedRingIndex = iB;
         }
@@ -5232,6 +5410,20 @@ class ParametricTube {
         posAttr.addUpdateRange(ringBase, rangeCount);
         posAttr.needsUpdate = true;
 
+        // Texture: the frontier ring sits at the interpolated arc length, so
+        // the image is revealed in place instead of the last segment's worth
+        // of it being squeezed into the partial pair.
+        const uvAttr = md.arc && obj.geometry.getAttribute('uv');
+        if (uvAttr) {
+            const u = md.arc[iA] * (1 - frac) + md.arc[iB] * frac;
+            md.morphedState.u = u;
+            if (!md._texVScratch) md._texVScratch = new Float32Array(nCs);
+            tubeSectionTexV(md._texVScratch, w, h);
+            writeTubeRingUVs(uvAttr.array, iB * nCs, nCs, md._texVScratch, u, null, 0);
+            uvAttr.addUpdateRange(iB * nCs * 2, nCs * 2);
+            uvAttr.needsUpdate = true;
+        }
+
         if (ud.tubeHasColors && md.ringColors) {
             const colAttr = obj.geometry.getAttribute('color');
             if (colAttr) {
@@ -5307,6 +5499,19 @@ class ParametricTube {
         const capRangeCount = nCapRings * nCs * 3;
         posAttr.addUpdateRange(capRangeStart, capRangeCount);
         posAttr.needsUpdate = true;
+
+        const uvAttr = md.arc && obj.geometry.getAttribute('uv');
+        if (uvAttr) {
+            const u = md.morphedState ? md.morphedState.u : md.arc[lastVisibleRing];
+            if (!md._texVScratch) md._texVScratch = new Float32Array(nCs);
+            tubeSectionTexV(md._texVScratch, w, h);
+            for (let k = 0; k < nCapRings; k++) {
+                writeTubeRingUVs(uvAttr.array, ecBase + k * nCs, nCs, md._texVScratch,
+                                 u, md.section, Math.sin(md.capAngles[k]));
+            }
+            uvAttr.addUpdateRange(ecBase * 2, nCapRings * nCs * 2);
+            uvAttr.needsUpdate = true;
+        }
 
         if (ud.tubeHasColors && md.ringColors) {
             const colAttr = obj.geometry.getAttribute('color');
@@ -11646,6 +11851,9 @@ export class ThreeJSViewer {
         // densely-spaced keys to dt=0.
         /** @type {Map<string, {times: Float64Array, data: Float32Array}>} */
         this._followPaths = new Map();
+        // Shared bead textures (see _acquireTubeTexture).
+        /** @type {Map<string, {promise: Promise<THREE.Texture>, refs: number}>} */
+        this._tubeTextures = new Map();
 
         // Billboards (add_billboard): id -> mesh re-oriented toward the
         // active camera every frame in _updateBillboards.
@@ -14250,6 +14458,10 @@ export class ThreeJSViewer {
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
                 }
+                if (child.userData.tubeTextureKeys) {
+                    for (const k of child.userData.tubeTextureKeys) this._releaseTubeTexture(k);
+                    delete child.userData.tubeTextureKeys;
+                }
                 if (child.userData.vertexNormalsHelper) {
                     const h = child.userData.vertexNormalsHelper;
                     if (h.parent) h.parent.remove(h);
@@ -14271,6 +14483,58 @@ export class ThreeJSViewer {
                 }
             });
         }
+    }
+
+    // Bead textures are shared: add_toolpath splits one toolpath into many
+    // segment tubes that all name the same image, so one fetch, one decode
+    // and one GPU texture serve all of them. Keyed by url + tile length
+    // (`repeat` lives on the Texture) + colour space, reference-counted per
+    // tube, disposed with the last one. `srgb` is true for the colour map and
+    // false for data maps (normal, roughness), which must stay linear. Takes a
+    // reference synchronously and returns the key; the entry's `promise`
+    // resolves to the texture.
+    /**
+     * @param {string} url
+     * @param {number} [length]
+     * @param {boolean} [srgb]
+     */
+    _acquireTubeTexture(url, length, srgb = true) {
+        length = length > 0 ? length : TUBE_TEXTURE_DEFAULT_LENGTH;
+        const key = `${srgb ? 'srgb' : 'linear'}|${length}|${url}`;
+        let entry = this._tubeTextures.get(key);
+        if (!entry) {
+            const promise = (async () => {
+                const buf = await fetchArrayBuffer(url, 'tube texture');
+                const objectUrl = URL.createObjectURL(new Blob([buf]));
+                try {
+                    const tex = await new THREE.TextureLoader().loadAsync(objectUrl);
+                    if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+                    // u is arc length in world units: one tile per `length`,
+                    // repeating for ever. v stays in 0..1; mirrored wrap makes
+                    // the filter see the mirrored bottom half past either edge.
+                    tex.wrapS = THREE.RepeatWrapping;
+                    tex.wrapT = THREE.MirroredRepeatWrapping;
+                    tex.repeat.set(1 / length, 1);
+                    tex.anisotropy = this._renderer.capabilities.getMaxAnisotropy();
+                    return tex;
+                } finally {
+                    URL.revokeObjectURL(objectUrl);
+                }
+            })();
+            promise.catch(() => {});
+            entry = { promise, refs: 0 };
+            this._tubeTextures.set(key, entry);
+        }
+        entry.refs++;
+        return key;
+    }
+
+    /** @param {string} key */
+    _releaseTubeTexture(key) {
+        const entry = this._tubeTextures.get(key);
+        if (!entry || --entry.refs > 0) return;
+        this._tubeTextures.delete(key);
+        entry.promise.then(/** @param {THREE.Texture} tex */ (tex) => tex.dispose(), () => {});
     }
 
     /** @param {string} id @param {boolean} visible */
@@ -16412,10 +16676,34 @@ export class ThreeJSViewer {
                 const abortCtl = this._trackFetch(data.id, { supersede: true });
                 (async () => {
                     let fetched = false;
+                    // Shared-texture references, released in `finally` unless
+                    // the mesh took them over.
+                    /** @type {string[] | null} */
+                    let texKeys = null;
+                    /** @type {Record<string, THREE.Texture>} */
+                    const maps = {};
                     try {
                         const buffer = await fetchArrayBuffer(
                             data.blob_url, `add_parametric_tube_binary '${data.id}'`, abortCtl.signal);
                         fetched = true;
+                        // Textures (optional colour, normal and roughness maps):
+                        // loaded before the staleness checks so they cover these
+                        // awaits too. A failed image leaves the bead without that
+                        // map rather than missing.
+                        if (data.texture) {
+                            texKeys = [];
+                            for (const [field, slot] of TUBE_TEXTURE_SLOTS) {
+                                const url = data.texture[field];
+                                if (!url) continue;
+                                const key = this._acquireTubeTexture(url, data.texture.length, slot === 'map');
+                                texKeys.push(key);
+                                try {
+                                    maps[slot] = await this._tubeTextures.get(key).promise;
+                                } catch (e) {
+                                    console.warn(`add_parametric_tube_binary '${data.id}': ${slot} failed to load:`, e);
+                                }
+                            }
+                        }
                         if (this._sceneGeneration !== capturedScene) {
                             console.log('Discarding stale parametric tube fetch');
                             deferred.reject(new Error('stale'));
@@ -16504,6 +16792,12 @@ export class ThreeJSViewer {
                             }
                         }
 
+                        // Texture coordinates are built only on request (`texture`,
+                        // or a bare `uv: true` for an embedder's own material):
+                        // they cost 2 floats per vertex on every other tube.
+                        const arc = (data.texture || data.uv) ? tubeArcLengths(spine, n) : null;
+                        let buildArc = arc;
+
                         // LOD: for large tubes, reduce spine before building geometry.
                         // Per-tube config via `data.lod` (see parseLodConfig).
                         const lodCfg = parseLodConfig(data.lod);
@@ -16552,8 +16846,10 @@ export class ThreeJSViewer {
                             buildVOffs = vOffs ? new Float32Array(nRed) : null;
                             buildOrientations = null; // orientations not preserved through LOD
                             buildN = nRed;
+                            if (arc) buildArc = new Float32Array(nRed);
                             for (let i = 0; i < nRed; i++) {
                                 const oi = keptIndices[i];
+                                if (arc) buildArc[i] = arc[oi];
                                 buildSpine[i * 3] = spine[oi * 3]; buildSpine[i * 3 + 1] = spine[oi * 3 + 1]; buildSpine[i * 3 + 2] = spine[oi * 3 + 2];
                                 buildWidths[i] = widths[oi];
                                 buildHeights[i] = heights[oi];
@@ -16580,6 +16876,7 @@ export class ThreeJSViewer {
                                 originalRingColors: ringColors ? new Float32Array(ringColors) : null,
                                 originalVOffs: vOffs ? new Float32Array(vOffs) : null,
                                 originalBreakMask: breakMask ? new Uint8Array(breakMask) : null,
+                                originalArc: arc,
                                 originalCount: n,
                                 upVector,
                                 keptIndices,
@@ -16618,6 +16915,12 @@ export class ThreeJSViewer {
                             buildSpine, buildWidths, buildHeights,
                             buildOrientations, upVector, buildRingColors, buildVOffs, buildBreakMask,
                         );
+                        if (buildArc) {
+                            const uv = new Float32Array(geometry.getAttribute('position').count * 2);
+                            writeTubeUVs(uv, buildArc, buildWidths, buildHeights, buildN, nCs,
+                                         capAngles.length, buildBreakMask);
+                            geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+                        }
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
                             color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
@@ -16628,12 +16931,16 @@ export class ThreeJSViewer {
                             depthWrite: opacity >= 1,
                             side: THREE.DoubleSide,
                             vertexColors: hasColors,
+                            ...maps,
                             clippingPlanes: this._activeClippingPlanes(),
                         });
                         const mesh = new THREE.Mesh(geometry, material);
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
+                        // The mesh now owns the texture references; _deleteObject
+                        // releases them.
+                        if (texKeys) { mesh.userData.tubeTextureKeys = texKeys; texKeys = null; }
                         // Retained single material so applyTubeDrawCap can flip
                         // between plain / [material] as the geometry crosses the
                         // per-draw index cap across LOD rebuilds (#113/#114).
@@ -16686,6 +16993,8 @@ export class ThreeJSViewer {
                             savedCapIndices: new (/** @type {any} */ (endCapPattern.constructor))(endCapPattern.length),
                             savedCapOffset: -1,
                             vOffs: buildVOffs ? new Float32Array(buildVOffs) : null,
+                            arc: buildArc,
+                            savedRingUVs: null,
                         };
                         // Dispose any existing object at this id BEFORE posting
                         // worker messages so the worker's queue order is
@@ -16716,6 +17025,7 @@ export class ThreeJSViewer {
                                 nPoints: tubeLOD.originalCount,
                                 vOffs: tubeLOD.originalVOffs,
                                 breakMask: tubeLOD.originalBreakMask,
+                                arc: tubeLOD.originalArc,
                                 boundingRadius: tubeLOD.boundingRadius,
                                 epsilonDivisor: tubeLOD.epsilonDivisor,
                                 strandCollapse: strandCollapseCfg,
@@ -16776,6 +17086,7 @@ export class ThreeJSViewer {
                               scene: capturedScene, fetchStage: !fetched });
                         deferred.reject(e);
                     } finally {
+                        if (texKeys) for (const k of texKeys) this._releaseTubeTexture(k);
                         this._untrackFetch(data.id, abortCtl);
                         if (this._inflightLoads.get(data.id) === deferred) {
                             this._inflightLoads.delete(data.id);
