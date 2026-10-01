@@ -2150,3 +2150,45 @@ def test_parametric_tube_texture_uvs_survive_lod(viewer_client, viewer_page):
     else:
         pytest.fail("LOD worker never rebuilt the tube")
     assert check() != first
+
+
+@pytest.mark.browser
+def test_parametric_tube_texture_u_wraps_on_long_bead(viewer_client, viewer_page):
+    """A float32 arc length loses texel precision on a long bead, so u is
+    stored wrapped to a whole number of tiles, in two phases whose wrap points
+    never fall in the same segment; the shader samples the continuous one."""
+    from conftest import settle
+
+    # 3 km of bead in 10-unit segments, tile length 25: the period is 2048 tiles.
+    n = 301
+    x = np.arange(n, dtype=np.float64) * 10_000.0
+    spine = np.stack([x, np.zeros(n), np.zeros(n)], axis=1).astype(np.float32)
+    viewer_client.add_parametric_tube(
+        "bead",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+        lod=False,
+    )
+    settle(viewer_client)
+    info = viewer_page.evaluate(
+        """() => {
+            const o = window.threejsViewer._objects.get('bead');
+            const uv = o.geometry.getAttribute('uv').array;
+            const alt = o.geometry.getAttribute('uvAlt').array;
+            const n = o.userData.tubeNumSpinePoints;
+            const a = [], b = [];
+            for (let i = 0; i < n; i++) { a.push(uv[i * 6 * 2]); b.push(alt[i * 6]); }
+            return { a, b };
+        }"""
+    )
+    period = 2048 * 25.0  # already more than four times the longest segment
+    a, b = np.array(info["a"]), np.array(info["b"])
+    assert np.abs(a).max() <= period / 2 and 0 <= b.min() and b.max() < period
+    # Both phases are the arc length up to whole periods (so whole tiles).
+    for wrapped in (a, b):
+        turns = (x - wrapped) / period
+        assert turns == pytest.approx(np.round(turns), abs=1e-6)
+    # No segment has both phases wrapping.
+    assert not ((np.abs(np.diff(a)) > 10_001) & (np.abs(np.diff(b)) > 10_001)).any()

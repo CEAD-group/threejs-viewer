@@ -4576,21 +4576,53 @@ function tubeSectionTexV(out, width, height) {
 // by the cap's direction): each vertex sweeps along the tangent by |cu|·sinT
 // (see writeCapRingVerts), so u advances by the same distance and the image
 // runs on over the dome. Shared with the LOD worker via toString() injection.
+//
+// u is stored WRAPPED to one `period` (a whole number of tiles, see
+// tubeUVPeriod), twice: `uv.x` wraps at period/2 + k·period and `alt` at
+// k·period. A float32 arc length runs out of texel precision after a few
+// hundred metres of bead and the image turns blocky; the wrapped values stay
+// small. No triangle is long enough to cross both wrap points, so one of the
+// two is always continuous across it, and the fragment shader picks that one
+// (patchTubeTextureMaterial). `period` 0 stores the arc length as is.
 /**
  * @param {any} uv - Float32Array (raw) or typed-array view from BufferAttribute
+ * @param {any} alt - one float per vertex, or null
  * @param {number} vertBase
  * @param {number} nCs
  * @param {Float32Array} texV
  * @param {number} u
  * @param {Float32Array | null} section
  * @param {number} sinT
+ * @param {number} period
  */
-function writeTubeRingUVs(uv, vertBase, nCs, texV, u, section, sinT) {
+function writeTubeRingUVs(uv, alt, vertBase, nCs, texV, u, section, sinT, period) {
     for (let j = 0; j < nCs; j++) {
         const dst = (vertBase + j) * 2;
-        uv[dst] = section ? u + Math.abs(section[j * 2]) * sinT : u;
+        const x = section ? u + Math.abs(section[j * 2]) * sinT : u;
+        uv[dst] = period > 0 ? x - period * Math.round(x / period) : x;
         uv[dst + 1] = texV[j];
+        if (alt) alt[vertBase + j] = period > 0 ? x - period * Math.floor(x / period) : x;
     }
+}
+
+// Wrap period of a tube's texture coordinate, in world units: a whole number
+// of tiles (so wrapping never shows), at least 2048 of them, and at least four
+// times the longest segment so a triangle can cross only one wrap point and
+// the wrapped copy's screen-space derivative stays well clear of the
+// continuous one's. 2048 tiles keep u within 1/8 texel of a 1024 px image.
+// Shared with the LOD worker via toString() injection.
+/**
+ * @param {Float64Array} arc
+ * @param {number} n
+ * @param {number} length - tile length, 0 for no wrapping
+ */
+function tubeUVPeriod(arc, n, length) {
+    if (!(length > 0)) return 0;
+    let maxSeg = 0;
+    for (let i = 1; i < n; i++) maxSeg = Math.max(maxSeg, arc[i] - arc[i - 1]);
+    let tiles = 2048;
+    while (tiles * length < 4 * maxSeg) tiles *= 2;
+    return tiles * length;
 }
 
 // Fill the whole uv buffer of a tube geometry, in its vertex layout:
@@ -4600,20 +4632,22 @@ function writeTubeRingUVs(uv, vertBase, nCs, texV, u, section, sinT) {
 // to each scope's own copy.
 /**
  * @param {Float32Array} uv - length totalVerts * 2
- * @param {Float32Array} arc
+ * @param {Float32Array} alt - length totalVerts
+ * @param {Float64Array} arc
  * @param {Float32Array} widths
  * @param {Float32Array} heights
  * @param {number} nSpine
  * @param {number} nCs
  * @param {number} nCapRings
- * @param {Uint8Array | null} [breakMask]
+ * @param {Uint8Array | null} breakMask
+ * @param {number} period
  */
-function writeTubeUVs(uv, arc, widths, heights, nSpine, nCs, nCapRings, breakMask) {
+function writeTubeUVs(uv, alt, arc, widths, heights, nSpine, nCs, nCapRings, breakMask, period) {
     const texV = new Float32Array(nCs);
     const section = new Float32Array(nCs * 2);
     for (let i = 0; i < nSpine; i++) {
         tubeSectionTexV(texV, widths[i], heights[i]);
-        writeTubeRingUVs(uv, i * nCs, nCs, texV, arc[i], null, 0);
+        writeTubeRingUVs(uv, alt, i * nCs, nCs, texV, arc[i], null, 0, period);
     }
     const startCapBase = nSpine * nCs;
     const endCapBase = startCapBase + nCapRings * nCs;
@@ -4625,7 +4659,7 @@ function writeTubeUVs(uv, arc, widths, heights, nSpine, nCs, nCapRings, breakMas
         tubeSectionTexV(texV, widths[i], heights[i]);
         for (let k = 0; k < nCapRings; k++) {
             const sinT = Math.sin(((k + 1) / nCapRings) * (Math.PI * 0.5)) * tSign;
-            writeTubeRingUVs(uv, capBase + k * nCs, nCs, texV, arc[i], section, sinT);
+            writeTubeRingUVs(uv, alt, capBase + k * nCs, nCs, texV, arc[i], section, sinT, period);
         }
     }
     if (breakMask) {
@@ -4634,20 +4668,23 @@ function writeTubeUVs(uv, arc, widths, heights, nSpine, nCs, nCapRings, breakMas
         for (let i = 1; i < nSpine; i++) {
             if (!breakMask[i]) continue;
             uv.copyWithin(cap * 2, (i - 1) * nCs * 2, i * nCs * 2);
+            alt.copyWithin(cap, (i - 1) * nCs, i * nCs);
             cap += nCs;
             uv.copyWithin(cap * 2, i * nCs * 2, (i + 1) * nCs * 2);
+            alt.copyWithin(cap, i * nCs, (i + 1) * nCs);
             cap += nCs;
         }
     }
 }
 
-// Cumulative arc length at every spine point, accumulated in double precision.
+// Cumulative arc length at every spine point, in double precision: float32
+// cannot hold a texel's worth of a long toolpath.
 /**
  * @param {Float32Array} spine
  * @param {number} n
  */
 function tubeArcLengths(spine, n) {
-    const arc = new Float32Array(n);
+    const arc = new Float64Array(n);
     let s = 0;
     for (let i = 1; i < n; i++) {
         s += Math.hypot(spine[i * 3] - spine[i * 3 - 3],
@@ -4656,6 +4693,38 @@ function tubeArcLengths(spine, n) {
         arc[i] = s;
     }
     return arc;
+}
+
+// Make a textured tube's material sample its maps at the continuous one of
+// the two wrapped u coordinates (see writeTubeRingUVs). Across a triangle
+// that crosses a wrap point the wrapped copy runs backwards through almost a
+// whole period, so its screen-space derivative is at least three times the
+// other's; everywhere else the two agree up to whole tiles and uv.x is used.
+/**
+ * @param {THREE.Material} material
+ * @param {number} length - tile length in world units
+ */
+function patchTubeTextureMaterial(material, length) {
+    const repeat = { value: 1 / length };
+    material.onBeforeCompile = (shader) => {
+        shader.uniforms.tubeTexRepeat = repeat;
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <uv_pars_vertex>', `#include <uv_pars_vertex>
+attribute float uvAlt;
+uniform float tubeTexRepeat;
+varying vec3 vTubeUv;`)
+            .replace('#include <uv_vertex>', `#include <uv_vertex>
+vTubeUv = vec3( uv.x * tubeTexRepeat, uvAlt * tubeTexRepeat, uv.y );`);
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <uv_pars_fragment>', `#include <uv_pars_fragment>
+varying vec3 vTubeUv;`)
+            .replace('void main() {', `void main() {
+vec2 tubeUv = vec2( fwidth( vTubeUv.x ) <= 2.0 * fwidth( vTubeUv.y ) ? vTubeUv.x : vTubeUv.y, vTubeUv.z );
+#define vMapUv tubeUv
+#define vNormalMapUv tubeUv
+#define vRoughnessMapUv tubeUv`);
+    };
+    material.customProgramCacheKey = () => 'tjsv-tube-texture-wrap-v1';
 }
 
 // Closest-pair midpoint between two 3D segments (P0,P1) and (Q0,Q1), with
@@ -5590,6 +5659,8 @@ ${tubeSectionTexV.toString()}
 
 ${writeTubeRingUVs.toString()}
 
+${tubeUVPeriod.toString()}
+
 ${writeTubeUVs.toString()}
 
 function writeAnalyticCapNormalsW(normalArr, capBaseVert, nCapRings, capAngles,
@@ -5869,6 +5940,7 @@ self.onmessage = function(e) {
             breakMask: msg.breakMask || null,
             // Full-resolution arc lengths; present only for textured tubes.
             arc: msg.arc || null,
+            texLength: msg.texLength || 0,
             boundingRadius: msg.boundingRadius || 0,
             epsilonDivisor: msg.epsilonDivisor || LOD_EPSILON_DIVISOR,
             // Stored as the original value (bool | {maxSnapFactor: number}) so
@@ -5999,7 +6071,7 @@ self.onmessage = function(e) {
     const redHeights = new Float32Array(nRed);
     let redColors = ringColors ? new Float32Array(nRed * 3) : null;
     const redVOffs = vOffs ? new Float32Array(nRed) : null;
-    const redArc = tube.arc ? new Float32Array(nRed) : null;
+    const redArc = tube.arc ? new Float64Array(nRed) : null;
     for (let i = 0; i < nRed; i++) {
         const oi = keptIndices[i];
         redSpine[i*3]=spine[oi*3]; redSpine[i*3+1]=spine[oi*3+1]; redSpine[i*3+2]=spine[oi*3+2];
@@ -6028,10 +6100,12 @@ self.onmessage = function(e) {
 
     // Texture coordinates (textured tubes only): the kept points keep their
     // full-resolution arc length, so the image stays put across LOD levels.
-    let uv = null;
+    let uv = null, uvAlt = null, uvPeriod = 0;
     if (redArc) {
         uv = new Float32Array(geo.totalVerts * 2);
-        writeTubeUVs(uv, redArc, redWidths, redHeights, nRed, N_CS, N_CAP_RINGS, redBreakMask);
+        uvAlt = new Float32Array(geo.totalVerts);
+        uvPeriod = tubeUVPeriod(redArc, nRed, tube.texLength);
+        writeTubeUVs(uv, uvAlt, redArc, redWidths, redHeights, nRed, N_CS, N_CAP_RINGS, redBreakMask, uvPeriod);
     }
 
     // Strand-collapse pass on the reduced spine. The reduced mesh sees
@@ -6057,12 +6131,12 @@ self.onmessage = function(e) {
     if (redColors) transfer.push(redColors.buffer);
     if (redVOffs) transfer.push(redVOffs.buffer);
     if (uncollapsedPositions) transfer.push(uncollapsedPositions.buffer);
-    if (uv) transfer.push(uv.buffer, redArc.buffer);
+    if (uv) transfer.push(uv.buffer, uvAlt.buffer, redArc.buffer);
 
     self.postMessage({
         tubeId, allReused: false,
         positions: geo.positions, normals: geo.normals, colors: geo.colors, indices: geo.indices,
-        uv, reducedArc: redArc,
+        uv, uvAlt, uvPeriod, reducedArc: redArc,
         localFrames: geo.localFrames, miters: geo.miters, tangents: geo.tangents,
         capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
         ringPairs: geo.ringPairs, indicesPerRingPair: geo.indicesPerRingPair,
@@ -6798,7 +6872,10 @@ class ParametricTube {
         geometry.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
         geometry.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
         if (msg.colors) geometry.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
-        if (msg.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(msg.uv, 2));
+        if (msg.uv) {
+            geometry.setAttribute('uv', new THREE.BufferAttribute(msg.uv, 2));
+            geometry.setAttribute('uvAlt', new THREE.BufferAttribute(msg.uvAlt, 1));
+        }
         geometry.setIndex(new THREE.BufferAttribute(msg.indices, 1));
 
         mesh.geometry.dispose();
@@ -6859,7 +6936,9 @@ class ParametricTube {
             savedCapOffset: -1,
             vOffs: msg.reducedVOffs || null,
             arc: msg.reducedArc || null,
+            uvPeriod: msg.uvPeriod || 0,
             savedRingUVs: null,
+            savedRingUVAlt: null,
         };
 
         lod.keptIndices = msg.keptIndices;
@@ -6902,6 +6981,12 @@ class ParametricTube {
                 uvAttr.array.set(md.savedRingUVs, md.savedRingIndex * nCs * 2);
                 uvAttr.addUpdateRange(md.savedRingIndex * nCs * 2, nCs * 2);
                 uvAttr.needsUpdate = true;
+            }
+            const altAttr = obj.geometry.getAttribute('uvAlt');
+            if (altAttr && md.savedRingUVAlt) {
+                altAttr.array.set(md.savedRingUVAlt, md.savedRingIndex * nCs);
+                altAttr.addUpdateRange(md.savedRingIndex * nCs, nCs);
+                altAttr.needsUpdate = true;
             }
         }
         md.savedRingIndex = null;
@@ -6954,6 +7039,11 @@ class ParametricTube {
             if (uvSrc) {
                 if (!md.savedRingUVs) md.savedRingUVs = new Float32Array(nCs * 2);
                 md.savedRingUVs.set(uvSrc.array.subarray(iB * nCs * 2, (iB + 1) * nCs * 2));
+                const altSrc = obj.geometry.getAttribute('uvAlt');
+                if (altSrc) {
+                    if (!md.savedRingUVAlt) md.savedRingUVAlt = new Float32Array(nCs);
+                    md.savedRingUVAlt.set(altSrc.array.subarray(iB * nCs, (iB + 1) * nCs));
+                }
             }
             md.savedRingIndex = iB;
         }
@@ -7041,9 +7131,15 @@ class ParametricTube {
             md.morphedState.u = u;
             if (!md._texVScratch) md._texVScratch = new Float32Array(nCs);
             tubeSectionTexV(md._texVScratch, w, h);
-            writeTubeRingUVs(uvAttr.array, iB * nCs, nCs, md._texVScratch, u, null, 0);
+            const altAttr = obj.geometry.getAttribute('uvAlt');
+            writeTubeRingUVs(uvAttr.array, altAttr ? altAttr.array : null, iB * nCs, nCs,
+                             md._texVScratch, u, null, 0, md.uvPeriod);
             uvAttr.addUpdateRange(iB * nCs * 2, nCs * 2);
             uvAttr.needsUpdate = true;
+            if (altAttr) {
+                altAttr.addUpdateRange(iB * nCs, nCs);
+                altAttr.needsUpdate = true;
+            }
         }
 
         if (ud.tubeHasColors && md.ringColors) {
@@ -7127,12 +7223,17 @@ class ParametricTube {
             const u = md.morphedState ? md.morphedState.u : md.arc[lastVisibleRing];
             if (!md._texVScratch) md._texVScratch = new Float32Array(nCs);
             tubeSectionTexV(md._texVScratch, w, h);
+            const altAttr = obj.geometry.getAttribute('uvAlt');
             for (let k = 0; k < nCapRings; k++) {
-                writeTubeRingUVs(uvAttr.array, ecBase + k * nCs, nCs, md._texVScratch,
-                                 u, md.section, Math.sin(md.capAngles[k]));
+                writeTubeRingUVs(uvAttr.array, altAttr ? altAttr.array : null, ecBase + k * nCs, nCs,
+                                 md._texVScratch, u, md.section, Math.sin(md.capAngles[k]), md.uvPeriod);
             }
             uvAttr.addUpdateRange(ecBase * 2, nCapRings * nCs * 2);
             uvAttr.needsUpdate = true;
+            if (altAttr) {
+                altAttr.addUpdateRange(ecBase, nCapRings * nCs);
+                altAttr.needsUpdate = true;
+            }
         }
 
         if (ud.tubeHasColors && md.ringColors) {
@@ -18419,6 +18520,11 @@ class ThreeJSViewer {
                         // they cost 2 floats per vertex on every other tube.
                         const arc = (data.texture || data.uv) ? tubeArcLengths(spine, n) : null;
                         let buildArc = arc;
+                        // Tile length the wrapped u is built for; 0 (a bare
+                        // `uv: true`) keeps u the plain arc length.
+                        const texLength = !data.texture ? 0
+                            : data.texture.length > 0 ? data.texture.length : TUBE_TEXTURE_DEFAULT_LENGTH;
+                        let uvPeriod = 0;
 
                         // LOD: for large tubes, reduce spine before building geometry.
                         // Per-tube config via `data.lod` (see parseLodConfig).
@@ -18468,7 +18574,7 @@ class ThreeJSViewer {
                             buildVOffs = vOffs ? new Float32Array(nRed) : null;
                             buildOrientations = null; // orientations not preserved through LOD
                             buildN = nRed;
-                            if (arc) buildArc = new Float32Array(nRed);
+                            if (arc) buildArc = new Float64Array(nRed);
                             for (let i = 0; i < nRed; i++) {
                                 const oi = keptIndices[i];
                                 if (arc) buildArc[i] = arc[oi];
@@ -18538,10 +18644,14 @@ class ThreeJSViewer {
                             buildOrientations, upVector, buildRingColors, buildVOffs, buildBreakMask,
                         );
                         if (buildArc) {
-                            const uv = new Float32Array(geometry.getAttribute('position').count * 2);
-                            writeTubeUVs(uv, buildArc, buildWidths, buildHeights, buildN, nCs,
-                                         capAngles.length, buildBreakMask);
+                            const nVerts = geometry.getAttribute('position').count;
+                            const uv = new Float32Array(nVerts * 2);
+                            const uvAlt = new Float32Array(nVerts);
+                            uvPeriod = tubeUVPeriod(buildArc, buildN, texLength);
+                            writeTubeUVs(uv, uvAlt, buildArc, buildWidths, buildHeights, buildN, nCs,
+                                         capAngles.length, buildBreakMask, uvPeriod);
                             geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+                            geometry.setAttribute('uvAlt', new THREE.BufferAttribute(uvAlt, 1));
                         }
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
@@ -18556,6 +18666,7 @@ class ThreeJSViewer {
                             ...maps,
                             clippingPlanes: this._activeClippingPlanes(),
                         });
+                        if (texLength > 0 && Object.keys(maps).length) patchTubeTextureMaterial(material, texLength);
                         const mesh = new THREE.Mesh(geometry, material);
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
@@ -18616,7 +18727,9 @@ class ThreeJSViewer {
                             savedCapOffset: -1,
                             vOffs: buildVOffs ? new Float32Array(buildVOffs) : null,
                             arc: buildArc,
+                            uvPeriod,
                             savedRingUVs: null,
+                            savedRingUVAlt: null,
                         };
                         // Dispose any existing object at this id BEFORE posting
                         // worker messages so the worker's queue order is
@@ -18648,6 +18761,7 @@ class ThreeJSViewer {
                                 vOffs: tubeLOD.originalVOffs,
                                 breakMask: tubeLOD.originalBreakMask,
                                 arc: tubeLOD.originalArc,
+                                texLength,
                                 boundingRadius: tubeLOD.boundingRadius,
                                 epsilonDivisor: tubeLOD.epsilonDivisor,
                                 strandCollapse: strandCollapseCfg,
