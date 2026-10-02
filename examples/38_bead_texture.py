@@ -140,7 +140,7 @@ n = len(spine)
 
 v.add_grid("floor", cell_size=TILE_MM, extent=1200.0, position=[SIDE / 2, SIDE / 2, 0])
 
-maps = texture_set(color="#0b0c0c", width=BEAD_W, height=BEAD_H, length=TILE_MM)
+maps = texture_set(color="#0b0c0c", width=BEAD_W, height=BEAD_H, length=TILE_MM, fibers=True)
 v.add_parametric_tube(
     "bead",
     spine,

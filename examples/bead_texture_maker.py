@@ -198,13 +198,18 @@ def make_maps(args):
         0.006 * args.ripple * fill * sharkskin + 0.006 * fill * grain + 0.020 * waviness
     )
     height += (0.3 + 0.7 * relief) * 0.022 * args.streaks * die_lines
-    height += (0.3 + 0.7 * relief) * 0.012 * fibers
 
     # The nozzle wipes the flat top of the bead as it lays it: flatter, less
     # streaky and a little glossier there, while the free sides keep the full
     # extruded surface. `keep` is 1 on the sides and 1 - wipe on the top.
     keep = 1 - args.wipe * top_band(cv, args.width, args.height)[:, None]
     height *= keep
+
+    # Fibres stand proud of the surface as ridges. They go on after the wipe
+    # and do not scale with smoothness, so they read in the height and normal
+    # maps on a smooth bead and on its flat top too.
+    matrix = height
+    height = matrix + 0.02 * args.bump_strength * fibers
 
     # Tangent-space normals (OpenGL convention: +X along u, +Y along v, and
     # v runs up the image). u tiles; v is mirrored at both edges by the viewer.
@@ -215,7 +220,8 @@ def make_maps(args):
     normal /= np.linalg.norm(normal, axis=2, keepdims=True)
 
     # Roughness: matte in the ripple valleys and grain, glossier on fibres.
-    detail = height - cv.blur(height, 0.6 / cv.dx)
+    # The cavities are the matrix's own, or every fibre would get a dark rim.
+    detail = matrix - cv.blur(matrix, 0.6 / cv.dx)
     cavity = np.clip(-detail / (detail.std() * 2 + 1e-9), 0, 1)
     roughness = args.roughness * (1 + (0.12 * grain + 0.08 * die_lines) * keep)
     roughness *= 0.7 + 0.3 * keep
