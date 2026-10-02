@@ -7,6 +7,7 @@ Runs a WebSocket server that the browser connects to directly.
 
 import errno
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -2725,7 +2726,7 @@ class ViewerClient:
         orientations: Optional[np.ndarray] = None,
         up_vector: Optional[list] = None,
         colors: Optional[np.ndarray] = None,
-        color: int = 0x7AB8CC,
+        color: Optional[int] = None,
         opacity: float = 1.0,
         metalness: float = 0.1,
         roughness: float = 0.8,
@@ -2742,6 +2743,10 @@ class ViewerClient:
         bias_index_total: Optional[int] = None,
         break_before: Optional[np.ndarray] = None,
         visible: bool = True,
+        texture: Optional[Union[str, Path, bytes]] = None,
+        texture_length: float = 25.0,
+        normal_map: Optional[Union[str, Path, bytes]] = None,
+        roughness_map: Optional[Union[str, Path, bytes]] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -2765,7 +2770,9 @@ class ViewerClient:
             colors: Optional (N,) uint32 packed 0x00RRGGBB per spine point.
                 Each ring is painted a single color. Use
                 ``update_parametric_tube_colors`` for cheap color-mode swaps.
-            color: Fallback color when ``colors`` is not provided.
+            color: Fallback color when ``colors`` is not provided. Defaults
+                to ``0x7AB8CC``, or to white for a textured tube (the color
+                multiplies the texture).
             opacity, metalness, roughness: Standard material properties.
             anchor: Cross-section anchor point. ``"center"`` (default) centers
                 the bead on the spine. ``"top"`` places the spine at the top
@@ -2867,6 +2874,25 @@ class ViewerClient:
                 it and is ignored. Breaks survive LOD simplification (they are
                 remapped onto the reduced spine). ``None`` (default) → the
                 current fully-connected tube, byte-identical on the wire.
+            texture: Optional image (path, or encoded PNG/JPEG/WebP bytes)
+                wrapped around the bead and repeated endlessly along it. The
+                image's horizontal axis runs along the bead: texture
+                coordinate ``u`` is the arc length of the spine, so the image
+                follows the toolpath through every curve and corner, and its
+                left edge should match its right edge. The vertical axis runs
+                across the bead from one side over the top to the other, and
+                the bottom half of the bead mirrors the top, so there is no
+                seam. Multiplied by ``colors``/``color``. Tubes that name the
+                same image share one texture in the viewer.
+            texture_length: Length of bead, in spine units, that one repeat of
+                the image covers (default 25). Shared by all three maps.
+            normal_map: Optional tangent-space normal map (OpenGL convention,
+                +Y up) laid out like ``texture``: surface relief without extra
+                geometry. Usable with or without ``texture``.
+            roughness_map: Optional grayscale roughness map laid out like
+                ``texture``. The viewer multiplies it by ``roughness``, so pass
+                ``roughness=1.0`` to use the map's values as they are.
+                ``examples/bead_texture_maker.py`` generates a matching set.
         """
         lod_header = _serialize_lod(lod)
 
@@ -2942,6 +2968,13 @@ class ViewerClient:
                 has_break_mask = True
                 parts.append(break_u8.tobytes())
 
+        if not (math.isfinite(texture_length) and texture_length > 0):
+            raise ValueError(
+                f"texture_length must be finite and > 0, got {texture_length}"
+            )
+        if color is None:
+            color = 0xFFFFFF if texture is not None else 0x7AB8CC
+
         header = {
             "type": "add_parametric_tube_binary",
             "id": id,
@@ -2984,10 +3017,30 @@ class ViewerClient:
             header["parent"] = parent
         if not visible:
             header["visible"] = False
+        maps = {"url": texture, "normalUrl": normal_map, "roughnessUrl": roughness_map}
+        if any(m is not None for m in maps.values()):
+            header["texture"] = {
+                key: self._texture_url(image)
+                for key, image in maps.items()
+                if image is not None
+            }
+            header["texture"]["length"] = float(texture_length)
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
+
+    def _texture_url(self, image: Union[str, Path, bytes]) -> str:
+        """Put an encoded image in the blob store and return its sidecar URL.
+
+        The key is a content hash, so the same image always gets the same URL
+        and the viewer loads it once however many tubes use it (a toolpath
+        split at travel moves sends one tube per extrusion run).
+        """
+        data = image if isinstance(image, bytes) else Path(image).read_bytes()
+        blob_key = f"/texture_{hashlib.sha1(data).hexdigest()}"
+        self._blob_store[blob_key] = data
+        return f"http://{_url_host(self.host)}:{self._http_port}{blob_key}"
 
     def update_parametric_tube_colors(
         self,
