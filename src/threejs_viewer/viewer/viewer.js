@@ -5252,6 +5252,24 @@ class ParametricTube {
     /** @param {any} mesh */
     constructor(mesh) {
         this._mesh = mesh;
+        // The renderer uploads attributes while building its render list,
+        // before onBeforeRender, so the pending full colour upload has
+        // happened by the time this runs (issue #264).
+        mesh.onBeforeRender = () => { mesh.userData._colorFullUploadNeeded = false; };
+    }
+
+    /**
+     * Flag a colour-attribute slice for upload. While a full upload is
+     * pending (`_colorFullUploadNeeded`, set by `update_parametric_tube_colors`),
+     * no range is added: with ranges present the renderer uploads only those
+     * and leaves the rest of the GPU copy stale (issue #264).
+     * @param {THREE.BufferAttribute} colAttr
+     * @param {number} start
+     * @param {number} count
+     */
+    _markColorDirty(colAttr, start, count) {
+        if (!this._mesh.userData._colorFullUploadNeeded) colAttr.addUpdateRange(start, count);
+        colAttr.needsUpdate = true;
     }
 
     // Apply pre-built geometry from LOD worker.
@@ -5365,8 +5383,7 @@ class ParametricTube {
             const colAttr = obj.geometry.getAttribute('color');
             if (colAttr) {
                 colAttr.array.set(md.savedRingColors, ringBase);
-                colAttr.addUpdateRange(ringBase, rangeCount);
-                colAttr.needsUpdate = true;
+                this._markColorDirty(colAttr, ringBase, rangeCount);
             }
         }
         if (md.savedRingUVs) {
@@ -5546,8 +5563,7 @@ class ParametricTube {
                 const cg = gA * (1 - frac) + gB * frac;
                 const cb = bA * (1 - frac) + bB * frac;
                 fillRGBBlock(cols, ringBase, nCs, cr, cg, cb);
-                colAttr.addUpdateRange(ringBase, rangeCount);
-                colAttr.needsUpdate = true;
+                this._markColorDirty(colAttr, ringBase, rangeCount);
             }
         }
 
@@ -5638,8 +5654,7 @@ class ParametricTube {
                 const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
                 const capVerts = nCapRings * nCs;
                 fillRGBBlock(cols, ecBase * 3, capVerts, cr, cg, cb);
-                colAttr.addUpdateRange(capRangeStart, capRangeCount);
-                colAttr.needsUpdate = true;
+                this._markColorDirty(colAttr, capRangeStart, capRangeCount);
             }
         }
     }
@@ -5799,20 +5814,6 @@ class ParametricTube {
         this.updateMorphedNormals(visiblePairs);
         this.relocateEndCap(visiblePairs);
         obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
-
-        // After a full color rewrite (_colorFullUploadNeeded), the morph path
-        // may have added partial addUpdateRange calls on the color attribute.
-        // With pending ranges, Three.js only uploads those ranges — not the
-        // full buffer. Clear them so needsUpdate triggers a complete upload
-        // on the next render.
-        if (ud._colorFullUploadNeeded) {
-            const colAttr = obj.geometry.getAttribute('color');
-            if (colAttr) {
-                colAttr.clearUpdateRanges();
-                colAttr.needsUpdate = true;
-            }
-            ud._colorFullUploadNeeded = false;
-        }
     }
 }
 
