@@ -664,7 +664,12 @@ class ViewerClient:
                 advertised verbatim in blob URLs and, when it is not
                 ``"localhost"``, passed to the viewer as the ``ws_host`` query
                 param so the WebSocket and the sidecar share one hostname.
-            port: WebSocket port (HTTP blob sidecar listens on ``port + 1``).
+            port: WebSocket port; the HTTP blob sidecar listens on ``port + 1``.
+                ``0`` lets the OS pick a free port on every address ``host``
+                resolves to, for the sidecar too: ``connect()`` then replaces
+                ``self.port`` with the picked port, which ``viewer_url`` and
+                the blob URLs advertise, and a later ``connect()`` after
+                ``disconnect()`` rebinds that same port.
             open_browser: Open the viewer in the system browser on ``connect()``.
             tone_mapping_exposure: Override the renderer's ``toneMappingExposure``
                 (default ``1.0``). Must be finite; ``NaN``/``Inf`` raise
