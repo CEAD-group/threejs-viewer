@@ -106,3 +106,62 @@ def test_constructor_open_browser_default():
     """open_browser should default to True."""
     client = ViewerClient()
     assert client.open_browser is True
+
+
+class _FakeWebSocket:
+    """Stands in for a websockets connection: iteration blocks until closed."""
+
+    def __init__(self):
+        self.released = threading.Event()
+        self.closed = False
+
+    def send(self, _data):
+        pass
+
+    def close(self):
+        self.closed = True
+        self.released.set()
+
+    def __iter__(self):
+        self.released.wait(timeout=5)
+        return iter(())
+
+
+def test_disconnect_clears_connected_state_synchronously():
+    """disconnect() closes the live socket and clears _connected_event itself,
+    so a connect() right after it waits for a new browser instead of returning
+    on the old connection's state (PR #271 review)."""
+    client = ViewerClient(port=0, open_browser=False)
+    ws = _FakeWebSocket()
+    t = threading.Thread(target=client._handle_connection, args=(ws,), daemon=True)
+    t.start()
+    assert client._connected_event.wait(timeout=5)
+    assert client._ws is ws
+
+    client.disconnect()
+    assert ws.closed
+    assert client._ws is None
+    assert not client._connected_event.is_set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
+def test_old_handler_does_not_clear_newer_connection():
+    """A handler whose socket was replaced must leave the newer connection's
+    _ws and _connected_event alone when it unwinds."""
+    client = ViewerClient(port=0, open_browser=False)
+    old = _FakeWebSocket()
+    t = threading.Thread(target=client._handle_connection, args=(old,), daemon=True)
+    t.start()
+    assert client._connected_event.wait(timeout=5)
+
+    # A newer browser connection has taken over before the old handler exits.
+    new = _FakeWebSocket()
+    client._ws = new
+    client._connected_event.set()
+    old.released.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert client._ws is new
+    assert client._connected_event.is_set()
+    client.disconnect()
