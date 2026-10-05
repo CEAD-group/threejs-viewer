@@ -1368,19 +1368,21 @@ def test_parametric_tube_color_swap_during_looping_animation(
 def test_parametric_tube_color_update_clears_pending_update_ranges(
     viewer_client, viewer_page
 ):
+    from conftest import frames
+
     """Race condition: morphFrontierRing adds addUpdateRange on the color attr.
     If update_parametric_tube_colors runs before the renderer consumes those
     ranges, Three.js only uploads the partial ranges instead of the full buffer.
 
-    The fix: color update sets _colorFullUploadNeeded, and
-    applyParametricTubeDrawRange clears all color update ranges at the end
-    when the flag is set.
+    The fix: the color update sets _colorFullUploadNeeded, the tube adds no
+    color update ranges while that flag is set, and the flag is cleared from
+    the mesh's onBeforeRender once the full upload has happened.
 
-    This test simulates the exact frame sequence:
+    This test simulates the frame sequence:
     1. morphFrontierRing adds partial color ranges (via set_draw_range)
     2. Color update writes full buffer, sets flag
-    3. Next set_draw_range runs — morphFrontierRing adds ranges again,
-       but cleanup at end clears them
+    3. Next set_draw_range runs; morphFrontierRing must add no ranges
+    4. A render clears the flag
     """
     n = 20
     spine = _straight_spine(n=n, length=4.0)
@@ -1427,14 +1429,14 @@ def test_parametric_tube_color_update_clears_pending_update_ranges(
                 }
             }
 
-            // Phase 3: Next draw_range update — morphFrontierRing runs again,
-            // but cleanup should clear all color ranges at the end
+            // Phase 3: Next draw_range update. morphFrontierRing runs again
+            // but must not add ranges while the full upload is pending.
             v._setDrawRange(id, 0.6);
 
             return {
                 rangesFromMorph,
                 rangesAfterFix: colAttr.updateRanges.length,
-                flagCleared: !ud._colorFullUploadNeeded,
+                flagStillPending: !!ud._colorFullUploadNeeded,
             };
         }""",
         "tube_race",
@@ -1444,11 +1446,108 @@ def test_parametric_tube_color_update_clears_pending_update_ranges(
     assert result["rangesFromMorph"] > 0, (
         "morphFrontierRing should add color update ranges"
     )
-    # Phase 3 cleanup should have cleared all color ranges
+    # Phase 3 must leave the attribute without ranges, so the next upload is full
     assert result["rangesAfterFix"] == 0, (
         f"Expected 0 pending color ranges after fix, got {result['rangesAfterFix']}"
     )
-    assert result["flagCleared"], "_colorFullUploadNeeded flag was not consumed"
+    assert result["flagStillPending"], (
+        "_colorFullUploadNeeded must stay set until the renderer has uploaded"
+    )
+
+    # Phase 4: a render performs the full upload and clears the flag
+    frames(viewer_page, 2)
+    assert not viewer_page.evaluate(
+        "(id) => !!window.threejsViewer._objects.get(id).userData._colorFullUploadNeeded",
+        "tube_race",
+    ), "_colorFullUploadNeeded was not cleared by a render"
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_update_survives_two_draw_range_writes_per_frame(
+    viewer_client, viewer_page
+):
+    """Issue #264: colours updated while a looping draw_range animation plays,
+    then two draw-range writes land in one frame (the animation tick plus an
+    embedder's own `_setDrawRange` from `onAnimationTime`). The second write
+    used to re-add partial colour ranges after the first had consumed the
+    full-upload flag, so the renderer uploaded only those ranges and the
+    already-drawn part kept its old GPU colours."""
+    from conftest import frames, settle
+
+    n = 20
+    spine = _straight_spine(n=n, length=4.0)
+    widths = np.full(n, 0.3, dtype=np.float32)
+    heights = np.full(n, 0.2, dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "tube_264",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=np.full(n, 0xFF0000, dtype=np.uint32),
+    )
+    settle(viewer_client)
+
+    n_frames = 60
+    anim = Animation(loop=True)
+    anim.set_frame_times(np.linspace(0, 3.0, n_frames, dtype=np.float32))
+    anim.set_draw_range_data(
+        ["tube_264"], np.linspace(0.0, 1.0, n_frames, dtype=np.float32).reshape(-1, 1)
+    )
+    viewer_client.load_animation(anim)
+    settle(viewer_client)
+    # Playback must advance the clock so the frontier is mid-pair and morphing.
+    time.sleep(0.5)
+
+    # Pause the render loop so nothing can perform the full upload before the
+    # two draw-range writes land. settle() polls query_scene, which needs no
+    # render, so the colour fetch still completes while paused.
+    viewer_page.evaluate("() => window.threejsViewer.pause()")
+    try:
+        viewer_client.update_parametric_tube_colors(
+            "tube_264", np.full(n, 0x0000FF, dtype=np.uint32)
+        )
+        settle(viewer_client)
+
+        # Two draw-range writes in one task, the way an embedder's per-tick
+        # write follows the animation's own, then inspect the attribute as the
+        # renderer would see it.
+        state = viewer_page.evaluate(
+            """(id) => {
+                const v = window.threejsViewer;
+                const obj = v._objects.get(id);
+                const col = obj.geometry.getAttribute('color');
+                const pendingBefore = !!obj.userData._colorFullUploadNeeded;
+                const st = v.getAnimationState();
+                const t = st.time / st.duration;
+                v._setDrawRange(id, Math.min(0.95, t + 0.013));
+                v._setDrawRange(id, Math.min(0.96, t + 0.017));
+                return {
+                    pendingBefore,
+                    pending: !!obj.userData._colorFullUploadNeeded,
+                    ranges: col.updateRanges.length,
+                    version: col.version,
+                };
+            }""",
+            "tube_264",
+        )
+    finally:
+        viewer_page.evaluate("() => window.threejsViewer.resume()")
+
+    assert state["pendingBefore"], "colour update did not request a full upload"
+    assert state["pending"], (
+        "_colorFullUploadNeeded was consumed by a draw-range write before any render"
+    )
+    assert state["ranges"] == 0, (
+        f"draw-range writes added {state['ranges']} partial colour ranges while a "
+        "full upload was pending"
+    )
+
+    # A render performs the full upload and clears the flag.
+    frames(viewer_page, 3)
+    assert not viewer_page.evaluate(
+        "(id) => !!window.threejsViewer._objects.get(id).userData._colorFullUploadNeeded",
+        "tube_264",
+    ), "_colorFullUploadNeeded was not cleared by a render"
 
 
 # 100-spine-point bead extracted from the ribweaver dump tube_8f5bba97.

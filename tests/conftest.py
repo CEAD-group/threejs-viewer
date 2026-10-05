@@ -1,6 +1,5 @@
 """Shared fixtures for threejs-viewer tests."""
 
-import socket
 import time
 
 import pytest
@@ -25,25 +24,18 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
-def _free_port():
-    """Find an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture()
 def viewer_client():
     """Start a ViewerClient on a random port (does not wait for browser).
 
-    The HTTP blob sidecar binds port 0 (the OS hands out a genuinely free
-    port, no allocate-release-rebind window): under parallel/full-suite load
-    the old `_free_port()`-then-bind dance intermittently lost the race and
-    errored the whole test at setup with "Address already in use" (#95). The
-    blob URLs embed the actual bound port, so it does not need to be ws+1.
+    Both servers bind port 0 (the OS hands out a genuinely free port, no
+    allocate-release-rebind window): under parallel/full-suite load the old
+    `_free_port()`-then-bind dance intermittently lost the race and errored
+    the whole test at setup with "Address already in use" (#95), and probing
+    IPv4 alone said nothing about ::1, where the same number could be taken
+    (#263). The viewer URL and blob URLs embed the ports actually bound.
     """
-    port = _free_port()
-    client = ViewerClient(port=port, open_browser=False)
+    client = ViewerClient(port=0, open_browser=False)
     client._start_servers(http_port=0)
 
     yield client
