@@ -2192,3 +2192,67 @@ def test_parametric_tube_texture_u_wraps_on_long_bead(viewer_client, viewer_page
         assert turns == pytest.approx(np.round(turns), abs=1e-6)
     # No segment has both phases wrapping.
     assert not ((np.abs(np.diff(a)) > 10_001) & (np.abs(np.diff(b)) > 10_001)).any()
+
+
+def test_parametric_tube_texture_fetch_aborts_on_delete(viewer_client, viewer_page):
+    """Deleting a tube while its image is still loading aborts the shared
+    texture fetch: no pending fetch is left, no cache entry survives, and
+    nothing is reported as an error."""
+    import time
+
+    from conftest import settle
+
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    hits = []
+    # Never answers, like a stalled sidecar.
+    viewer_page.route("**/texture_*", lambda route: hits.append(route.request.url))
+
+    spine = _bent_spine()
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "slow",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+    )
+    deadline = time.time() + 10
+    while not hits and time.time() < deadline:
+        viewer_page.wait_for_timeout(50)
+    assert hits, "texture request never started"
+    assert viewer_page.evaluate("window.threejsViewer._tubeTextures.size") == 1
+
+    viewer_client.delete("slow")
+    settle(viewer_client)
+    assert viewer_page.evaluate("window.threejsViewer._tubeTextures.size") == 0
+    assert not [m for m in messages if m[0] in ("error", "warning")], messages
+
+
+def test_parametric_tube_texture_color_defaults_to_white_in_viewer(
+    viewer_client, viewer_page, monkeypatch
+):
+    """A textured tube whose message omits `color` (a direct handleMessage
+    embedder) is white so the map is not tinted."""
+    from conftest import settle
+
+    send = viewer_client._send
+
+    def send_without_color(msg, *a, **k):
+        if msg.get("type") == "add_parametric_tube_binary":
+            msg.pop("color", None)
+        return send(msg, *a, **k)
+
+    monkeypatch.setattr(viewer_client, "_send", send_without_color)
+    spine = _bent_spine()
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "bare",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+    )
+    settle(viewer_client)
+    info = viewer_page.evaluate(_TUBE_UV_INFO, "bare")
+    assert info["hasMap"] and info["color"] == 0xFFFFFF

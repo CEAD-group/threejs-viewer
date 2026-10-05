@@ -2626,6 +2626,22 @@ function vec3Tuple(v) {
 }
 
 /**
+ * Race a promise against an AbortSignal, rejecting with an AbortError.
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {AbortSignal} signal
+ * @returns {Promise<T>}
+ */
+function abortable(promise, signal) {
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+        if (signal.aborted) return onAbort();
+        signal.addEventListener('abort', onAbort, { once: true });
+        promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
+}
+
+/**
  * Fetch a binary payload with an HTTP status guard (issue #142). Without the
  * guard a 404/500 error body (HTML/text) would be handed straight to a binary
  * parser or model loader, which fails deep inside with an opaque
@@ -13575,7 +13591,7 @@ class ThreeJSViewer {
         /** @type {Map<string, {times: Float64Array, data: Float32Array}>} */
         this._followPaths = new Map();
         // Shared bead textures (see _acquireTubeTexture).
-        /** @type {Map<string, {promise: Promise<THREE.Texture>, refs: number}>} */
+        /** @type {Map<string, {promise: Promise<THREE.Texture>, refs: number, abort: AbortController, settled: boolean}>} */
         this._tubeTextures = new Map();
 
         // Billboards (add_billboard): id -> mesh re-oriented toward the
@@ -16226,8 +16242,9 @@ class ThreeJSViewer {
         const key = `${srgb ? 'srgb' : 'linear'}|${length}|${url}`;
         let entry = this._tubeTextures.get(key);
         if (!entry) {
+            const abort = new AbortController();
             const promise = (async () => {
-                const buf = await fetchArrayBuffer(url, 'tube texture');
+                const buf = await fetchArrayBuffer(url, 'tube texture', abort.signal);
                 const objectUrl = URL.createObjectURL(new Blob([buf]));
                 try {
                     const tex = await new THREE.TextureLoader().loadAsync(objectUrl);
@@ -16245,7 +16262,8 @@ class ThreeJSViewer {
                 }
             })();
             promise.catch(() => {});
-            entry = { promise, refs: 0 };
+            entry = { promise, refs: 0, abort, settled: false };
+            promise.then(() => { entry.settled = true; }, () => { entry.settled = true; });
             this._tubeTextures.set(key, entry);
         }
         entry.refs++;
@@ -16257,6 +16275,8 @@ class ThreeJSViewer {
         const entry = this._tubeTextures.get(key);
         if (!entry || --entry.refs > 0) return;
         this._tubeTextures.delete(key);
+        // Nobody wants the image any more: stop a fetch still in flight.
+        if (!entry.settled) entry.abort.abort();
         entry.promise.then(/** @param {THREE.Texture} tex */ (tex) => tex.dispose(), () => {});
     }
 
@@ -18421,8 +18441,10 @@ class ThreeJSViewer {
                                 const key = this._acquireTubeTexture(url, data.texture.length, slot === 'map');
                                 texKeys.push(key);
                                 try {
-                                    maps[slot] = await this._tubeTextures.get(key).promise;
+                                    maps[slot] = await abortable(this._tubeTextures.get(key).promise, abortCtl.signal);
                                 } catch (e) {
+                                    // A delete/re-push of this tube ends the whole add, quietly.
+                                    if (abortCtl.signal.aborted) throw e;
                                     console.warn(`add_parametric_tube_binary '${data.id}': ${slot} failed to load:`, e);
                                 }
                             }
@@ -18655,7 +18677,7 @@ class ThreeJSViewer {
                         }
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
-                            color: hasColors ? 0xffffff : (data.color || 0x7ab8cc),
+                            color: hasColors ? 0xffffff : (data.color !== undefined ? data.color : (maps.map ? 0xffffff : 0x7ab8cc)),
                             metalness: data.metalness !== undefined ? data.metalness : 0.1,
                             roughness: data.roughness !== undefined ? data.roughness : 0.8,
                             opacity,
