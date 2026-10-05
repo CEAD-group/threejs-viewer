@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.64
+
+### Bead textures on parametric tubes (#252)
+
+- **`add_parametric_tube(..., texture=, normal_map=, roughness_map=, texture_length=25.0)`**, forwarded by `add_toolpath`: a colour, normal and roughness map wrapped around the bead and repeated along the path. `u` is the arc length of the full-resolution spine, so the image follows every curve and corner and does not swim between LOD levels; `v` runs across the bead with the bottom half mirroring the top, so there is no seam. A `draw_range` reveal uncovers the image in place.
+- Arc lengths are kept in float64 and `u` is stored wrapped in two phases, so the texture stays sharp on toolpaths hundreds of metres long.
+- Textures are shared: Python stores each image under a content-hash blob key and the viewer caches by url with a per-tube refcount, so a travel-split toolpath loads its image once. Deleting a tube while its image loads aborts the fetch. A textured tube defaults to a white base colour on both sides.
+- New examples: `38_bead_texture.py` (a 14-layer printed part), `bead_texture_maker.py` (generates a tiling extruded-plastic texture set with numpy only), `bead_uv_template.py` (OBJ export with the viewer's UV layout for painting in Blender). `11_toolpath.py` wears a generated set tinted by its colormap.
+
+### Animation toolbar in ribweaver's slider and step-button look (#260, issue #258)
+
+- Transport, speed and Loop buttons are 20 px step buttons with stroked SVG arrow icons; the scrubber keeps its markers but draws a 4 px track, a tinted played portion and an 11 px round thumb. The clip and lighting panel sliders share the same style. New `--tjsv-border-strong` token.
+
+### README gallery (#261)
+
+- The README opens with the textured bead print and carries a gallery of 26 screenshots and GIFs captured from the examples, grouped by topic.
+
 ## 0.0.63
 
 ### Dimension, point and polyline annotations (#250)
