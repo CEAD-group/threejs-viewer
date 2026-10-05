@@ -6810,6 +6810,40 @@ def test_parented_overlay_excluded_from_hits_and_framing(viewer_client, viewer_p
     settle(viewer_client)
     assert page.evaluate("() => window.__ov.material.color.getHex()") == 0x00FF00
 
+    # So do colour animations, binary channel and JSON frames alike.
+    read_colors = (
+        "() => { const v = window.threejsViewer;"
+        " return {parent: v.getObject('link').material.color.getHex(),"
+        "  overlay: window.__ov.material.color.getHex()}; }"
+    )
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    anim.add_channel(
+        "colors",
+        ["link"],
+        np.array([[0x0000FF], [0x0000FF]], dtype=np.uint32),
+        "uint32",
+    )
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(page)
+    page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    frames(page, 2)
+    assert page.evaluate(read_colors) == {"parent": 0x0000FF, "overlay": 0x00FF00}
+    json_anim = Animation(
+        frames=[
+            Frame(time=0.0, transforms={}, colors={"link": 0xFFFF00}),
+            Frame(time=2.0, transforms={}, colors={"link": 0xFFFF00}),
+        ],
+        loop=False,
+    )
+    viewer_client.load_animation(json_anim, autoplay=False)
+    _wait_for_animation_duration(page, 2.0)
+    page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    frames(page, 2)
+    assert page.evaluate(read_colors) == {"parent": 0xFFFF00, "overlay": 0x00FF00}
+    viewer_client.unload_animation()
+    settle(viewer_client)
+
     # Framing and scene bounds: excluded by default, included on request.
     bounds = page.evaluate(
         "() => { const v = window.threejsViewer;"
@@ -6877,6 +6911,39 @@ def test_parented_overlay_gets_active_clipping_planes(viewer_client, viewer_page
 
     viewer_client.disable_clipping_plane()
     settle(viewer_client)
+    assert page.evaluate("() => window.__ov.material.clippingPlanes.length") == 0
+
+    # Unmounted while clipping was on, remounted after it was turned off: the
+    # mount must clear the stale planes, since _updateClipMaterials only
+    # reaches mounted objects.
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    stale = page.evaluate(
+        "() => { const v = window.threejsViewer; const m = window.__ov.material;"
+        " const had = m.clippingPlanes.length > 0 && m.side === window.tjsv.THREE.DoubleSide;"
+        " v.removeOverlay('late'); return had; }"
+    )
+    assert stale is True
+    viewer_client.disable_clipping_plane()
+    settle(viewer_client)
+    assert page.evaluate(
+        "() => { const v = window.threejsViewer; const m = window.__ov.material;"
+        " v.addOverlay(window.__ov, {id: 'late', parentId: 'late_link'});"
+        " return m.clippingPlanes.length === 0 && m.side === window.tjsv.THREE.FrontSide"
+        "  && window.__ov.parent === v.getObject('late_link'); }"
+    )
+    # Same through the waiting path: parked by a delete, remounted by a re-add.
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    assert page.evaluate("() => window.__ov.material.clippingPlanes.length > 0")
+    viewer_client.delete("late_link")
+    settle(viewer_client)
+    viewer_client.disable_clipping_plane()
+    settle(viewer_client)
+    viewer_client.add_box("late_link")
+    _wait_for(
+        page, "() => window.__ov.parent === window.threejsViewer.getObject('late_link')"
+    )
     assert page.evaluate("() => window.__ov.material.clippingPlanes.length") == 0
 
 

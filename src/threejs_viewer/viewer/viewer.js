@@ -626,7 +626,8 @@ function makeChannelApply(viewer) {
                     color = lerpHexColor(color, colorB, t);
                 }
                 obj.traverse(/** @param {any} child */ (child) => {
-                    if (!child.material) return;
+                    // Embedder overlays under the object keep their own colour.
+                    if (!child.material || isUnderOverlay(child)) return;
                     for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(color); }
                 });
             }
@@ -15035,7 +15036,8 @@ export class ThreeJSViewer {
                     hex = lerpHexColor(color, nextC[id], t);
                 }
                 obj.traverse(/** @param {any} child */ (child) => {
-                    if (!child.material) return;
+                    // Embedder overlays under the object keep their own colour.
+                    if (!child.material || isUnderOverlay(child)) return;
                     for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(hex); }
                 });
             }
@@ -19546,8 +19548,9 @@ export class ThreeJSViewer {
     /**
      * Put an overlay where its metadata says: the scene root, its tracked
      * parent, or the waiting set when the parent is not registered yet.
-     * Materials get the active clipping planes, since `_updateClipMaterials`
-     * only runs on a clip toggle and would otherwise miss a late mount.
+     * Materials get the current clip state (planes or none) unconditionally:
+     * `_updateClipMaterials` only reaches mounted objects, so an overlay
+     * unmounted while clipping was on would otherwise keep stale planes.
      * @param {THREE.Object3D} obj
      */
     _mountOverlay(obj) {
@@ -19569,7 +19572,7 @@ export class ThreeJSViewer {
         }
         if (host) {
             host.add(obj); // plain add: the overlay's transform is parent-local
-            if (this._clipEnabled) this._applyClipToObject(obj);
+            this._applyClipToObject(obj);
         }
         this._objGeneration++;
         this._sceneBoundsDirty = true;
@@ -19611,7 +19614,7 @@ export class ThreeJSViewer {
             // parent while waiting; only claim it if it still points at us.
             if (!meta || meta.parentId !== id) continue;
             obj.add(overlay);
-            if (this._clipEnabled) this._applyClipToObject(overlay);
+            this._applyClipToObject(overlay);
         }
         this._objGeneration++;
         this._sceneBoundsDirty = true;
