@@ -3,7 +3,10 @@ Toolpath Visualization — draw_range + Bead demo
 
 Generates a spiral vase toolpath with animated draw_range and a nozzle
 following the tip.  Uses ``add_toolpath`` which renders the bead as a
-parametric tube (client-side geometry, smooth frontier morphing).
+parametric tube (client-side geometry, smooth frontier morphing).  The bead
+wears an extruded-plastic texture set (colour, normal and roughness maps from
+``bead_texture_maker``) that repeats along the path; the viridis colouring
+tints it.
 
 The animation uses one keyframe per spine point with linear interpolation,
 so even a 10k-point toolpath plays back smoothly at 60 fps without
@@ -15,6 +18,7 @@ Run: uv run python examples/11_toolpath.py
 import math
 
 import numpy as np
+from bead_texture_maker import texture_set
 
 from threejs_viewer import Animation, Toolpath, viewer
 
@@ -117,10 +121,33 @@ tp = Toolpath.from_points(
 
 # Bead (parametric tube — chamfered hex cross-section, built client-side)
 tp.colorize("viridis")
-v.add_toolpath("path_tube", tp, roughness=0.55, metalness=0.75)
+# Bead texture.  The maker works in millimetres and this scene's bead is
+# 0.12 x 0.03 units, so build the maps for a bead 100x that size (12 x 3 mm,
+# one tile per 36 mm) and repeat them every 0.36 units.  The colour map is a
+# light neutral because the viridis vertex colours multiply it; roughness=1.0
+# uses the roughness map's values as they are.
+bead_width = HEIGHT / N_TURNS * 4
+bead_height = HEIGHT / N_TURNS
+TEXTURE_SCALE = 100.0
+tile_length = 3 * bead_width
+maps = texture_set(
+    color="#d4d4d0",
+    width=bead_width * TEXTURE_SCALE,
+    height=bead_height * TEXTURE_SCALE,
+    length=tile_length * TEXTURE_SCALE,
+)
+v.add_toolpath(
+    "path_tube",
+    tp,
+    texture=maps["color"],
+    normal_map=maps["normal"],
+    roughness_map=maps["roughness"],
+    texture_length=tile_length,
+    roughness=1.0,
+    metalness=0.2,
+)
 
 # Nozzle: tapered cylinder hovering above the path tip
-bead_width = HEIGHT / N_TURNS * 4
 nozzle_height = bead_width * 3
 nozzle_gap = bead_width / 2  # gap between nozzle bottom and print surface
 v.add_cylinder(

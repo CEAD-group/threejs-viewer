@@ -1918,3 +1918,343 @@ def test_parametric_tube_under_cap_no_chunking(viewer_client, viewer_page):
     )
     assert not info["isArray"], "under-cap tube must keep a single material"
     assert info["nGroups"] == 0, "under-cap tube must have no geometry groups"
+
+
+# --- Bead texture (arc-length UVs) ---
+
+
+def _png_bytes(width=8, height=4):
+    """A tiny valid RGB PNG, built by hand (no image dependency)."""
+    import struct
+    import zlib
+
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = b"".join(b"\x00" + bytes((60 * y, 200, 128)) * width for y in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+_TUBE_UV_INFO = """(id) => {
+    const o = window.threejsViewer._objects.get(id);
+    const uv = o.geometry.getAttribute('uv');
+    const mat = Array.isArray(o.material) ? o.material[0] : o.material;
+    const lod = o.userData.tubeLOD;
+    return {
+        uv: uv ? Array.from(uv.array) : null,
+        nVerts: o.geometry.getAttribute('position').count,
+        nSpine: o.userData.tubeNumSpinePoints,
+        endCapBase: o.userData.tubeEndCapBase,
+        kept: lod && lod.keptIndices ? Array.from(lod.keptIndices) : null,
+        hasMap: !!mat.map,
+        normalMap: mat.normalMap ? [mat.normalMap.colorSpace, mat.normalMap.repeat.x] : null,
+        roughnessMap: mat.roughnessMap ? [mat.roughnessMap.colorSpace, mat.roughnessMap.repeat.x] : null,
+        mapColorSpace: mat.map ? mat.map.colorSpace : null,
+        repeat: mat.map ? [mat.map.repeat.x, mat.map.repeat.y] : null,
+        wrapS: mat.map ? mat.map.wrapS : null,
+        color: mat.color.getHex(),
+        textures: window.threejsViewer._tubeTextures.size,
+    };
+}"""
+
+
+def _bent_spine():
+    """Straight run, a 90 degree corner, then a climbing run: arc length is
+    not any single coordinate."""
+    return np.array(
+        [[0, 0, 0], [10, 0, 0], [20, 0, 0], [20, 15, 0], [20, 30, 5]],
+        dtype=np.float32,
+    )
+
+
+def _arc(spine):
+    return np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(spine, axis=0), axis=1))]
+    )
+
+
+def test_add_parametric_tube_texture_header(tmp_path):
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    sent = []
+    c._send = sent.append
+    spine = _bent_spine()
+    w = np.full(len(spine), 4.0, dtype=np.float32)
+    h = np.full(len(spine), 2.0, dtype=np.float32)
+    png = _png_bytes()
+    path = tmp_path / "bead.png"
+    path.write_bytes(png)
+
+    c.add_parametric_tube("a", spine, w, h, texture=png)
+    c.add_parametric_tube("b", spine, w, h, texture=path, texture_length=10)
+    c.add_parametric_tube("plain", spine, w, h)
+
+    a, b, plain = sent
+    assert a["texture"]["length"] == 25.0
+    assert b["texture"]["length"] == 10.0
+    # Same bytes, same URL: the viewer loads the image once.
+    assert a["texture"]["url"] == b["texture"]["url"]
+    key = "/" + a["texture"]["url"].rsplit("/", 1)[1]
+    assert c._blob_store[key] == png
+    # The colour multiplies the texture, so a textured bead defaults to white.
+    assert a["color"] == 0xFFFFFF
+    assert "texture" not in plain and plain["color"] == 0x7AB8CC
+
+    with pytest.raises(ValueError, match="texture_length"):
+        c.add_parametric_tube("bad", spine, w, h, texture=png, texture_length=0)
+
+    # Normal and roughness maps ride in the same header field, with or
+    # without a colour map (which is what turns the default colour white).
+    other = _png_bytes(4, 4)
+    c.add_parametric_tube("m", spine, w, h, normal_map=other, roughness_map=png)
+    maps = sent[-1]["texture"]
+    assert set(maps) == {"normalUrl", "roughnessUrl", "length"}
+    assert maps["roughnessUrl"] == a["texture"]["url"] != maps["normalUrl"]
+    assert sent[-1]["color"] == 0x7AB8CC
+
+
+@pytest.mark.browser
+def test_parametric_tube_texture_uvs_follow_arc_length(viewer_client, viewer_page):
+    """A textured bead gets u = arc length along the spine (so the image
+    follows the path round corners and repeats every texture_length) and a
+    v that mirrors top to bottom; an untextured bead gets no uv attribute."""
+    from conftest import settle
+
+    spine = _bent_spine()
+    n = len(spine)
+    w = np.full(n, 4.0, dtype=np.float32)
+    h = np.full(n, 2.0, dtype=np.float32)
+    png = _png_bytes()
+    viewer_client.add_parametric_tube(
+        "bead", spine, w, h, texture=png, texture_length=10
+    )
+    viewer_client.add_parametric_tube(
+        "twin",
+        spine + [0, 0, 20],
+        w,
+        h,
+        texture=png,
+        texture_length=10,
+        normal_map=png,
+        roughness_map=_png_bytes(4, 4),
+    )
+    viewer_client.add_parametric_tube("plain", spine + [0, 0, 40], w, h)
+    settle(viewer_client)
+
+    info = viewer_page.evaluate(_TUBE_UV_INFO, "bead")
+    assert info["hasMap"] and info["color"] == 0xFFFFFF
+    assert info["repeat"] == pytest.approx([0.1, 1.0])
+    assert info["wrapS"] == 1000  # THREE.RepeatWrapping
+    # One sRGB colour texture shared by both beads, plus the twin's two
+    # linear data maps (the same image as a normal map is a separate, linear
+    # texture).
+    assert info["textures"] == 3
+    assert info["mapColorSpace"] == "srgb"
+    twin = viewer_page.evaluate(_TUBE_UV_INFO, "twin")
+    assert twin["normalMap"] == ["", pytest.approx(0.1)]
+    assert twin["roughnessMap"] == ["", pytest.approx(0.1)]
+    assert info["normalMap"] is None and info["roughnessMap"] is None
+
+    uv = np.array(info["uv"]).reshape(-1, 2)
+    assert len(uv) == info["nVerts"]
+    rings = uv[: n * 6].reshape(n, 6, 2)
+    arc = _arc(spine)
+    assert rings[:, :, 0] == pytest.approx(np.repeat(arc[:, None], 6, axis=1), abs=1e-4)
+    # w >= h section: right tip, top-right, top-left, left tip, bottom-left,
+    # bottom-right. v runs 0 -> 1 across the top and the bottom mirrors it.
+    v = rings[0, :, 1]
+    assert v[0] == 0 and v[3] == 1
+    assert 0 < v[1] < v[2] < 1
+    assert v[4] == v[2] and v[5] == v[1]
+    # Caps carry the image on past the ends instead of smearing one column.
+    start_cap = uv[n * 6 : info["endCapBase"]]
+    end_cap = uv[info["endCapBase"] : info["endCapBase"] + len(start_cap)]
+    assert start_cap[:, 0].min() == pytest.approx(-2.0, abs=1e-2)
+    assert end_cap[:, 0].max() == pytest.approx(arc[-1] + 2.0, abs=1e-2)
+
+    assert viewer_page.evaluate(_TUBE_UV_INFO, "plain")["uv"] is None
+
+    # Half-way along pair (1, 2): the frontier ring takes the interpolated
+    # arc length, and the end cap rides on it.
+    viewer_client.set_draw_range("bead", 1.5 / (n - 1))
+    settle(viewer_client)
+    uv = np.array(viewer_page.evaluate(_TUBE_UV_INFO, "bead")["uv"]).reshape(-1, 2)
+    assert uv[2 * 6 : 3 * 6, 0] == pytest.approx(15.0, abs=1e-4)
+    base = info["endCapBase"]
+    assert uv[base : base + len(start_cap), 0].max() == pytest.approx(17.0, abs=1e-2)
+    viewer_client.set_draw_range("bead", 1.0)
+    settle(viewer_client)
+    uv = np.array(viewer_page.evaluate(_TUBE_UV_INFO, "bead")["uv"]).reshape(-1, 2)
+    assert uv[2 * 6 : 3 * 6, 0] == pytest.approx(arc[2], abs=1e-4)
+
+    # The shared texture is released with the last bead that uses it.
+    viewer_client.delete("bead")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.threejsViewer._tubeTextures.size") == 3
+    viewer_client.delete("twin")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.threejsViewer._tubeTextures.size") == 0
+
+
+@pytest.mark.browser
+def test_parametric_tube_texture_uvs_survive_lod(viewer_client, viewer_page):
+    """Under LOD the kept rings keep their FULL-resolution arc length, in both
+    the main-thread first build and the worker rebuild, so the image does not
+    swim as the reduction changes."""
+    from conftest import settle
+
+    t = np.linspace(0, 6 * np.pi, 400)
+    helix = np.stack([40 * np.cos(t), 40 * np.sin(t), 2 * t], axis=1)
+    # A collinear lead-out, which RDP thins at any camera distance.
+    lead = helix[-1] + np.outer(np.linspace(0.5, 200, 400), [0.0, 1.0, 0.0])
+    spine = np.concatenate([helix, lead]).astype(np.float32)
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "bead",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+        lod={"threshold": 0},
+    )
+    settle(viewer_client)
+    arc = _arc(spine)
+
+    def check():
+        info = viewer_page.evaluate(_TUBE_UV_INFO, "bead")
+        kept = np.array(info["kept"])
+        assert len(kept) == info["nSpine"] < n
+        uv = np.array(info["uv"]).reshape(-1, 2)
+        assert len(uv) == info["nVerts"]
+        assert uv[: len(kept) * 6 : 6, 0] == pytest.approx(arc[kept], rel=1e-5)
+        return len(kept)
+
+    first = check()
+    # Zoom far out: the worker rebuilds a coarser tube.
+    viewer_client.set_camera(position=[4000, -4000, 4000], target=[0, 0, 20])
+    settle(viewer_client)
+    # The LOD dispatch is armed by an orbit/zoom gesture, not by set_camera.
+    viewer_page.evaluate("() => { window.threejsViewer._lodDirty = true; }")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        time.sleep(0.3)  # 2 Hz tube-LOD throttle
+        if viewer_page.evaluate(_TUBE_UV_INFO, "bead")["nSpine"] != first:
+            break
+    else:
+        pytest.fail("LOD worker never rebuilt the tube")
+    assert check() != first
+
+
+@pytest.mark.browser
+def test_parametric_tube_texture_u_wraps_on_long_bead(viewer_client, viewer_page):
+    """A float32 arc length loses texel precision on a long bead, so u is
+    stored wrapped to a whole number of tiles, in two phases whose wrap points
+    never fall in the same segment; the shader samples the continuous one."""
+    from conftest import settle
+
+    # 3 km of bead in 10-unit segments, tile length 25: the period is 2048 tiles.
+    n = 301
+    x = np.arange(n, dtype=np.float64) * 10_000.0
+    spine = np.stack([x, np.zeros(n), np.zeros(n)], axis=1).astype(np.float32)
+    viewer_client.add_parametric_tube(
+        "bead",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+        lod=False,
+    )
+    settle(viewer_client)
+    info = viewer_page.evaluate(
+        """() => {
+            const o = window.threejsViewer._objects.get('bead');
+            const uv = o.geometry.getAttribute('uv').array;
+            const alt = o.geometry.getAttribute('uvAlt').array;
+            const n = o.userData.tubeNumSpinePoints;
+            const a = [], b = [];
+            for (let i = 0; i < n; i++) { a.push(uv[i * 6 * 2]); b.push(alt[i * 6]); }
+            return { a, b };
+        }"""
+    )
+    period = 2048 * 25.0  # already more than four times the longest segment
+    a, b = np.array(info["a"]), np.array(info["b"])
+    assert np.abs(a).max() <= period / 2 and 0 <= b.min() and b.max() < period
+    # Both phases are the arc length up to whole periods (so whole tiles).
+    for wrapped in (a, b):
+        turns = (x - wrapped) / period
+        assert turns == pytest.approx(np.round(turns), abs=1e-6)
+    # No segment has both phases wrapping.
+    assert not ((np.abs(np.diff(a)) > 10_001) & (np.abs(np.diff(b)) > 10_001)).any()
+
+
+@pytest.mark.browser
+def test_parametric_tube_texture_fetch_aborts_on_delete(viewer_client, viewer_page):
+    """Deleting a tube while its image is still loading aborts the shared
+    texture fetch: no pending fetch is left, no cache entry survives, and
+    nothing is reported as an error."""
+    import time
+
+    from conftest import settle
+
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    hits = []
+    # Never answers, like a stalled sidecar.
+    viewer_page.route("**/texture_*", lambda route: hits.append(route.request.url))
+
+    spine = _bent_spine()
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "slow",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+    )
+    deadline = time.time() + 10
+    while not hits and time.time() < deadline:
+        viewer_page.wait_for_timeout(50)
+    assert hits, "texture request never started"
+    assert viewer_page.evaluate("window.threejsViewer._tubeTextures.size") == 1
+
+    viewer_client.delete("slow")
+    settle(viewer_client)
+    assert viewer_page.evaluate("window.threejsViewer._tubeTextures.size") == 0
+    assert not [m for m in messages if m[0] in ("error", "warning")], messages
+
+
+@pytest.mark.browser
+def test_parametric_tube_texture_color_defaults_to_white_in_viewer(
+    viewer_client, viewer_page, monkeypatch
+):
+    """A textured tube whose message omits `color` (a direct handleMessage
+    embedder) is white so the map is not tinted."""
+    from conftest import settle
+
+    send = viewer_client._send
+
+    def send_without_color(msg, *a, **k):
+        if msg.get("type") == "add_parametric_tube_binary":
+            msg.pop("color", None)
+        return send(msg, *a, **k)
+
+    monkeypatch.setattr(viewer_client, "_send", send_without_color)
+    spine = _bent_spine()
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "bare",
+        spine,
+        np.full(n, 4.0, dtype=np.float32),
+        np.full(n, 2.0, dtype=np.float32),
+        texture=_png_bytes(),
+    )
+    settle(viewer_client)
+    info = viewer_page.evaluate(_TUBE_UV_INFO, "bare")
+    assert info["hasMap"] and info["color"] == 0xFFFFFF
