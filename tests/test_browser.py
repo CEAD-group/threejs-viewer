@@ -6191,6 +6191,71 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_follow_path_survives_mesh_add_that_lands_after_it(viewer_client, viewer_page):
+    """A mesh and its follow path are sent back to back and their blobs fetch
+    concurrently; when the path lands first, the mesh add's replace-step
+    delete used to drop the track and the tool never moved (issue #257).
+    Forcing the path-first order: the track must survive the add, pin the
+    new mesh's matrixAutoUpdate off, and pose it from the path. An explicit
+    delete still drops the track."""
+    path = dict(
+        times=[0.0, 2.0],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+    viewer_client.set_follow_path("fp_late", **path)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("fp_late", positions, indices, scale=[2.0, 2.0, 2.0])
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    ), "the mesh add dropped the follow path that landed before it"
+    # Pinned and posed at the current (t=0) time right after registration.
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('fp_late').matrixAutoUpdate"
+        )
+        is False
+    )
+
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=2, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time=1.0)
+    _wait_for_animation_loaded(viewer_page)
+    frames(viewer_page)
+    state = viewer_page.evaluate(
+        "() => {"
+        " const e = window.threejsViewer._objects.get('fp_late').matrix.elements;"
+        " return {pos: [e[12], e[13], e[14]], xlen: Math.hypot(e[0], e[1], e[2])};"
+        "}"
+    )
+    assert state["pos"] == pytest.approx([2.0, 0.0, 0.0], abs=1e-5)
+    # The header scale, applied after registration, is composed into the pose.
+    assert state["xlen"] == pytest.approx(2.0, abs=1e-5)
+
+    # A re-add under the same id keeps the track too.
+    viewer_client.add_mesh("fp_late", positions, indices)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+    viewer_client.delete("fp_late")
+    settle(viewer_client)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+
+@pytest.mark.browser
 def test_gizmo_report_carries_effective_mode(viewer_client, viewer_page):
     """Every gizmo report carries the *effective* mode of the drag, read off
     the live control — so an Alt momentary rotate override is observable by

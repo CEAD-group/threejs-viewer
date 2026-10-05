@@ -15234,6 +15234,10 @@ class ThreeJSViewer {
         this._shadowDirty = true;
         this._menus?.applyEyes();
         this._shading.refreshObject(obj);
+        // A track that landed before this object (or survived its re-add)
+        // must pin matrixAutoUpdate off and pose the new object now, not
+        // only on the next animation tick.
+        if (this._followPaths.has(id)) this._applyFollowPaths();
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -15283,6 +15287,10 @@ class ThreeJSViewer {
         // A billboard composes on the pose the producer set, so record it
         // here rather than reading back what the billboard itself wrote.
         captureBillboardBase(obj);
+        // The binary adds apply the header transform after registration; a
+        // followed object has matrixAutoUpdate off, so recompose with the new
+        // scale instead of leaving the stale matrix until the next tick.
+        if (obj.userData.id && this._followPaths.has(obj.userData.id)) this._applyFollowPaths();
         // A moved object can leave the cached scene sphere; the perspective
         // near fit ((dist - radius) * 0.5, see updateNearFar) assumes the
         // sphere is honest, so a stale sphere can front-clip a fast mover for
@@ -15406,7 +15414,7 @@ class ThreeJSViewer {
         obj.userData.id = id;
         this._applyTransform(obj, objData.transform);
         this._applyInitialVisibility(id, obj, objData.visible);
-        this._deleteObject(id, deleteOpts);
+        this._deleteObject(id, { ...deleteOpts, keepFollowPath: true });
         // After the delete, which drops the previous object's mixer for this id.
         if (newMixer) { this._mixers.set(id, newMixer); this._mixerGeneration++; }
         this._addToParentOrScene(obj, parentId);
@@ -16171,11 +16179,15 @@ class ThreeJSViewer {
 
     /**
      * @param {string} id
-     * @param {{ preserveInflight?: boolean }} [opts]
+     * @param {{ preserveInflight?: boolean, keepFollowPath?: boolean }} [opts]
      *   Pass `preserveInflight: true` from inside a binary loader's IIFE
      *   when it pre-clears a prior object with the same id — otherwise the
      *   loader would reject its own in-flight deferred and break queued
-     *   read-side ops for the load that just installed it.
+     *   read-side ops for the load that just installed it. `keepFollowPath`
+     *   marks the delete as the replace step of an add (implied by
+     *   `preserveInflight`): the id's follow-path track survives, because a
+     *   `set_follow_path` whose blob landed before the add's blob belongs to
+     *   the object being added (issue #257). An explicit delete drops it.
      */
     _deleteObject(id, opts) {
         // Invalidate any in-flight async add/fetch for this id so a late
@@ -16202,9 +16214,12 @@ class ThreeJSViewer {
         // path calls _applyInitialVisibility (which reads the baseline) before
         // _deleteObject, so the race fix is unaffected.
         this._baselineVisibility.delete(id);
-        // Same for follow-path tracks: a deleted id must not keep its path
-        // (a later re-add with the same id would silently snap to it).
-        this._followPaths.delete(id);
+        // Same for follow-path tracks: an explicitly deleted id must not keep
+        // its path. A re-add keeps it (same id = same logical object), since the
+        // track may have landed before the add's own blob (issue #257).
+        if (!opts || !(opts.preserveInflight || opts.keepFollowPath)) {
+            this._followPaths.delete(id);
+        }
         this._billboards.delete(id);
         this._billboardOrderDirty = true;
         const obj = this._objects.get(id);
