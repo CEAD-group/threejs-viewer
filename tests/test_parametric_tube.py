@@ -1220,60 +1220,56 @@ def test_parametric_tube_color_update_survives_two_draw_range_writes_per_frame(
     # Playback must advance the clock so the frontier is mid-pair and morphing.
     time.sleep(0.5)
 
-    # Instrument the colour attribute before the update so the probe sees the
-    # ranges as the renderer would, then recolour while playing.
-    viewer_page.evaluate(
-        """(id) => {
-            const obj = window.threejsViewer._objects.get(id);
-            window.__264 = { partialAtRender: 0, fullAtRender: 0 };
-            const orig = obj.onBeforeRender;
-            obj.onBeforeRender = (...args) => {
-                const col = obj.geometry.getAttribute('color');
-                if (obj.userData._colorFullUploadNeeded) {
-                    if (col.updateRanges.length > 0) window.__264.partialAtRender++;
-                    else window.__264.fullAtRender++;
-                }
-                orig(...args);
-            };
-        }""",
-        "tube_264",
-    )
-    viewer_client.update_parametric_tube_colors(
-        "tube_264", np.full(n, 0x0000FF, dtype=np.uint32)
-    )
-    settle(viewer_client)
-
-    # Two draw-range writes in one task, the way an embedder's per-tick write
-    # follows the animation's own, then inspect the attribute before any render.
-    state = viewer_page.evaluate(
-        """(id) => {
-            const v = window.threejsViewer;
-            const obj = v._objects.get(id);
-            const col = obj.geometry.getAttribute('color');
-            const t = v.getAnimationState().time / v.getAnimationState().duration;
-            v._setDrawRange(id, Math.min(0.95, t + 0.013));
-            v._setDrawRange(id, Math.min(0.96, t + 0.017));
-            return {
-                pending: !!obj.userData._colorFullUploadNeeded,
-                ranges: col.updateRanges.length,
-            };
-        }""",
-        "tube_264",
-    )
-    if state["pending"]:
-        assert state["ranges"] == 0, (
-            f"second draw-range write re-added {state['ranges']} partial colour "
-            "ranges while a full upload was pending"
+    # Pause the render loop so nothing can perform the full upload before the
+    # two draw-range writes land. settle() polls query_scene, which needs no
+    # render, so the colour fetch still completes while paused.
+    viewer_page.evaluate("() => window.threejsViewer.pause()")
+    try:
+        viewer_client.update_parametric_tube_colors(
+            "tube_264", np.full(n, 0x0000FF, dtype=np.uint32)
         )
+        settle(viewer_client)
 
+        # Two draw-range writes in one task, the way an embedder's per-tick
+        # write follows the animation's own, then inspect the attribute as the
+        # renderer would see it.
+        state = viewer_page.evaluate(
+            """(id) => {
+                const v = window.threejsViewer;
+                const obj = v._objects.get(id);
+                const col = obj.geometry.getAttribute('color');
+                const pendingBefore = !!obj.userData._colorFullUploadNeeded;
+                const st = v.getAnimationState();
+                const t = st.time / st.duration;
+                v._setDrawRange(id, Math.min(0.95, t + 0.013));
+                v._setDrawRange(id, Math.min(0.96, t + 0.017));
+                return {
+                    pendingBefore,
+                    pending: !!obj.userData._colorFullUploadNeeded,
+                    ranges: col.updateRanges.length,
+                    version: col.version,
+                };
+            }""",
+            "tube_264",
+        )
+    finally:
+        viewer_page.evaluate("() => window.threejsViewer.resume()")
+
+    assert state["pendingBefore"], "colour update did not request a full upload"
+    assert state["pending"], (
+        "_colorFullUploadNeeded was consumed by a draw-range write before any render"
+    )
+    assert state["ranges"] == 0, (
+        f"draw-range writes added {state['ranges']} partial colour ranges while a "
+        "full upload was pending"
+    )
+
+    # A render performs the full upload and clears the flag.
     frames(viewer_page, 3)
-    probe = viewer_page.evaluate("() => window.__264")
-    assert probe["partialAtRender"] == 0, probe
-    assert probe["fullAtRender"] >= 1, probe
     assert not viewer_page.evaluate(
         "(id) => !!window.threejsViewer._objects.get(id).userData._colorFullUploadNeeded",
         "tube_264",
-    )
+    ), "_colorFullUploadNeeded was not cleared by a render"
 
 
 # 100-spine-point bead extracted from the ribweaver dump tube_8f5bba97.
