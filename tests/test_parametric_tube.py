@@ -2194,6 +2194,7 @@ def test_parametric_tube_texture_u_wraps_on_long_bead(viewer_client, viewer_page
     assert not ((np.abs(np.diff(a)) > 10_001) & (np.abs(np.diff(b)) > 10_001)).any()
 
 
+@pytest.mark.browser
 def test_parametric_tube_texture_fetch_aborts_on_delete(viewer_client, viewer_page):
     """Deleting a tube while its image is still loading aborts the shared
     texture fetch: no pending fetch is left, no cache entry survives, and
@@ -2229,6 +2230,7 @@ def test_parametric_tube_texture_fetch_aborts_on_delete(viewer_client, viewer_pa
     assert not [m for m in messages if m[0] in ("error", "warning")], messages
 
 
+@pytest.mark.browser
 def test_parametric_tube_texture_color_defaults_to_white_in_viewer(
     viewer_client, viewer_page, monkeypatch
 ):
