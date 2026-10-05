@@ -3,7 +3,6 @@
 import base64
 import json
 import math
-import socket
 import struct
 import time
 
@@ -3217,12 +3216,6 @@ def test_anim_lift_tracks_toolbar_reflow_on_resize(viewer_client, viewer_page):
 # --- Lighting panel: URL → renderer wiring + precedence vs localStorage ---
 
 
-def _free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
 def _start_client(**kwargs):
     """Start a ViewerClient + its HTTP sidecar without waiting for a browser.
 
@@ -3230,8 +3223,7 @@ def _start_client(**kwargs):
     accepts arbitrary ``ViewerClient`` kwargs — the fixture doesn't, and the
     lighting tests need to drive the constructor.
     """
-    port = _free_port()
-    client = ViewerClient(port=port, open_browser=False, **kwargs)
+    client = ViewerClient(port=0, open_browser=False, **kwargs)
     client._start_servers(http_port=0)
     return client
 
