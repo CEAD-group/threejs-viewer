@@ -3045,17 +3045,38 @@ class ViewerClient:
     def update_parametric_tube_colors(
         self,
         id: str,
-        colors: np.ndarray,
+        colors: Optional[np.ndarray],
+        base_color: Optional[int] = None,
     ) -> None:
         """Swap the per-ring colors on an existing parametric_tube without
         rebuilding its geometry. Typical use: interactive color-mode switching
         in a toolpath preview (layer → feed rate → curvature → ...).
 
+        ``colors=None`` resets the tube to a plain material colour with no
+        blob transfer: the vertex colours are dropped and the material is set
+        to ``base_color`` (default: the add path's colour, ``0x7AB8CC``, or
+        white for a tube wearing a colour map, since the map is multiplied by
+        the material colour). A colour update still in flight when the reset
+        arrives is discarded. With LOD, later rebuilds stay uncoloured.
+
         Args:
             id: Target parametric_tube id.
             colors: (N,) uint32 packed 0x00RRGGBB, one value per spine point.
-                Length must match the tube's spine length.
+                Length must match the tube's spine length. ``None`` resets.
+            base_color: Hex colour applied on a reset. Ignored when ``colors``
+                is given.
         """
+        if colors is None:
+            header: dict = {
+                "type": "update_parametric_tube_colors",
+                "id": id,
+                "numSpinePoints": 0,
+                "blob_url": None,
+            }
+            if base_color is not None:
+                header["baseColor"] = int(base_color)
+            self._send(header)
+            return
         color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
         header = {
             "type": "update_parametric_tube_colors",
