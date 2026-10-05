@@ -1197,8 +1197,11 @@ class ViewerClient:
         except Exception:
             pass
         finally:
-            self._ws = None
-            self._connected_event.clear()
+            # disconnect() may already have handed _ws to a newer connection;
+            # only the handler that still owns this socket clears the state.
+            if self._ws is websocket:
+                self._ws = None
+                self._connected_event.clear()
 
     def _handle_hello(self, websocket, data):
         """Handle version handshake from viewer."""
@@ -1264,6 +1267,9 @@ class ViewerClient:
         # close it: the viewer then sees onclose and starts reconnecting.
         ws = self._ws
         self._ws = None
+        # Cleared here, not in the handler's finally, so a connect() right
+        # after disconnect() waits for a new browser connection.
+        self._connected_event.clear()
         if ws is not None:
             try:
                 ws.close()

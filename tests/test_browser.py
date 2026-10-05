@@ -11385,3 +11385,43 @@ def test_send_is_false_without_autoconnect(viewer_page):
         }"""
     )
     assert result == [False, False, 0]
+
+
+@pytest.mark.browser
+def test_destroy_during_reachability_probe_does_not_reconnect(viewer_page):
+    """Issue #253 review: destroy() while connect()'s reachability probe is in
+    flight must not open a socket, send hello, or fire onConnectionChange."""
+    result = viewer_page.evaluate(
+        """async () => {
+            const first = window.threejsViewer;
+            const realFetch = window.fetch;
+            let release;
+            // Hold the probe open so destroy() can land inside its await.
+            window.fetch = () => new Promise((resolve) => { release = resolve; });
+            const el = document.createElement('div');
+            el.style.cssText = 'width:200px;height:150px';
+            document.body.appendChild(el);
+            let v;
+            try {
+                v = new first.constructor(el, { ...first._options, autoConnect: true });
+                const calls = [];
+                v.onConnectionChange((c) => calls.push(c));
+                await new Promise((r) => setTimeout(r, 50));
+                const probing = typeof release === 'function';
+                v.destroy();
+                release(new Response(null, { status: 200 }));
+                await new Promise((r) => setTimeout(r, 300));
+                return { probing, ws: v._ws === null, connected: v.isConnected(),
+                         sent: v.send({ type: 'assets_loaded' }), calls };
+            } finally {
+                window.fetch = realFetch;
+            }
+        }"""
+    )
+    assert result == {
+        "probing": True,
+        "ws": True,
+        "connected": False,
+        "sent": False,
+        "calls": [],
+    }

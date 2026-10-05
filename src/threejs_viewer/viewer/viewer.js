@@ -15716,6 +15716,9 @@ export class ThreeJSViewer {
                 this._reconnectTimeout = setTimeout(doConnect, 500);
                 return;
             }
+            // destroy() may have run during the probe await; a destroyed
+            // viewer must not open a socket, send hello, or fire hooks.
+            if (this._destroyed) return;
 
             this._ws = new WebSocket(this._wsUrl);
 
