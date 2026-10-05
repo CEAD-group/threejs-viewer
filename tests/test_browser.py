@@ -11275,3 +11275,261 @@ def test_animation_controls_ribweaver_look_and_keys(viewer_client, viewer_page):
         "() => window.threejsViewer.el.querySelector('.tjsv-timeline-thumb').style.left"
     )
     assert left.endswith("%") and float(left[:-1]) > 0, left
+
+
+# ---- issue #255: canvas / raycast / gizmo-state embedder API -------------
+
+_RAYCAST_VS_PICK = """() => {
+  const v = window.threejsViewer;
+  const rect = v.getCanvas().getBoundingClientRect();
+  v._camera.updateMatrixWorld(true);
+  // Aim slightly off the box centre so a wrong camera would show up as a
+  // different hit point rather than the same front-face centre.
+  const nd = v._camera.position.clone().set(0.2, -0.1, 0.5).project(v._camera);
+  const cx = rect.left + (nd.x * 0.5 + 0.5) * rect.width;
+  const cy = rect.top + (-nd.y * 0.5 + 0.5) * rect.height;
+  const pick = v.pick(cx, cy);
+  const rc = v.raycasterAt(cx, cy);
+  const hits = rc.intersectObject(v.getObject('box'), true);
+  return {
+    isOrtho: !!v._camera.isOrthographicCamera,
+    pick: pick && [pick.point.x, pick.point.y, pick.point.z],
+    ray: hits.length ? [hits[0].point.x, hits[0].point.y, hits[0].point.z] : null,
+    canvasIsDom: v.getCanvas() === v._renderer.domElement,
+    origin: rc.ray.origin.toArray(),
+  };
+}"""
+
+
+@pytest.mark.browser
+def test_raycaster_at_matches_pick_under_both_projections(viewer_client, viewer_page):
+    """raycasterAt() returns the ray pick() uses: intersecting the box with it
+    lands on the same point pick() reports, under the perspective and the
+    orthographic camera; getCanvas() is the render canvas and a sizeless
+    canvas yields null (issue #255)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [0, 0, 9], target: [0, 0, 0], up: [0, 1, 0]})"
+    )
+    frames(viewer_page, 2)
+
+    persp = viewer_page.evaluate(_RAYCAST_VS_PICK)
+    assert persp["isOrtho"] is False
+    assert persp["canvasIsDom"] is True
+    assert persp["pick"] is not None and persp["ray"] is not None
+    assert persp["pick"] == pytest.approx(persp["ray"], abs=1e-9)
+    assert persp["pick"][2] == pytest.approx(0.5, abs=1e-3)
+    # A perspective ray starts at the camera eye.
+    assert persp["origin"] == pytest.approx([0, 0, 9], abs=1e-6)
+
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    _wait_for(viewer_page, "() => window.threejsViewer._camera.isOrthographicCamera")
+    frames(viewer_page, 2)
+    ortho = viewer_page.evaluate(_RAYCAST_VS_PICK)
+    assert ortho["isOrtho"] is True
+    assert ortho["pick"] is not None and ortho["ray"] is not None
+    assert ortho["pick"] == pytest.approx(ortho["ray"], abs=1e-9)
+    # An orthographic ray is parallel to the view axis, so it starts over the
+    # aimed point, not at the eye.
+    assert ortho["origin"][0] == pytest.approx(0.2, abs=1e-3)
+    assert ortho["origin"][1] == pytest.approx(-0.1, abs=1e-3)
+
+    # A viewer whose container has no size has nothing to aim through.
+    assert (
+        viewer_page.evaluate(
+            "() => {"
+            " const live = window.threejsViewer;"
+            " const div = document.createElement('div');"
+            " div.style.cssText = 'width:0;height:0;position:absolute;left:-2000px;top:0';"
+            " document.body.appendChild(div);"
+            " const v = new live.constructor(div, { htmlTemplate: live._options.htmlTemplate,"
+            "   cubemapData: live._options.cubemapData, autoConnect: false });"
+            " const r = v.raycasterAt(10, 10); v.destroy(); return r; }"
+        )
+        is None
+    )
+
+
+@pytest.mark.browser
+def test_get_render_stats_reports_scene_pass(viewer_client, viewer_page):
+    """getRenderStats() counts the scene pass of the last frame: a box adds
+    its 12 triangles and one call; the gizmo overlay pass does not replace
+    the numbers (issue #255)."""
+    frames(viewer_page, 2)
+    before = viewer_page.evaluate("() => window.threejsViewer.getRenderStats()")
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    after = viewer_page.evaluate("() => window.threejsViewer.getRenderStats()")
+    assert set(after) == {"triangles", "calls"}
+    assert after["triangles"] - before["triangles"] == 12
+    assert after["calls"] - before["calls"] == 1
+
+    # With a gizmo attached, the overlay pass renders last; the stats must
+    # still describe the scene (the gizmo handles are hundreds of triangles).
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    frames(viewer_page, 2)
+    with_gizmo = viewer_page.evaluate("() => window.threejsViewer.getRenderStats()")
+    assert with_gizmo == after
+
+
+@pytest.mark.browser
+def test_is_gizmo_handle_active_during_hover_and_drag(viewer_client, viewer_page):
+    """isGizmoHandleActive() is false at rest, true while a move-gizmo handle
+    is hovered and while it is dragged (getMoveGizmo().dragging follows), and
+    true while an axis-control handle is hovered (issue #255)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    frames(viewer_page, 2)
+    active = "() => window.threejsViewer.isGizmoHandleActive()"
+    assert viewer_page.evaluate(active) is False
+
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    frames(viewer_page, 2)
+    _wait_for(viewer_page, active)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getMoveGizmo().dragging")
+        is False
+    )
+
+    viewer_page.mouse.down()
+    viewer_page.mouse.move(proj["x"] + 20, proj["y"])
+    frames(viewer_page, 2)
+    mid = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return { active: v.isGizmoHandleActive(), dragging: v.getMoveGizmo().dragging }; }"
+    )
+    assert mid == {"active": True, "dragging": True}
+    viewer_page.mouse.up()
+    # Move clear of the handles so the hover state also clears.
+    viewer_page.mouse.move(5, 5)
+    frames(viewer_page, 2)
+    _wait_for(viewer_page, f"() => !({active})()")
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getMoveGizmo().dragging")
+        is False
+    )
+
+    # An axis-control handle counts too (AxisControlManager.busy()).
+    viewer_client.disable_move_gizmo()
+    viewer_client.add_axis_control(
+        "ax", target_id="box", axis="x", kind="linear", value=0.0, min=-2.0, max=2.0
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('ax')"
+    )
+    frames(viewer_page, 2)
+    assert viewer_page.evaluate(active) is False
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "ax")
+    assert p is not None
+    viewer_page.mouse.move(p["x"], p["y"])
+    frames(viewer_page, 2)
+    _wait_for(viewer_page, active)
+
+
+@pytest.mark.browser
+def test_get_move_gizmo_follows_attach_click_select_and_disable(
+    viewer_client, viewer_page
+):
+    """getMoveGizmo() reports null object/id while detached, the target after
+    attachMoveGizmo() (id null for an untracked object) and after click-select,
+    the live mode, and detaches on disableMoveGizmo() (issue #255)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    state = (
+        "() => { const s = window.threejsViewer.getMoveGizmo();"
+        " return { id: s.id, has: !!s.object3D, mode: s.mode, space: s.space,"
+        " dragging: s.dragging }; }"
+    )
+    assert viewer_page.evaluate(state) == {
+        "id": None,
+        "has": False,
+        "mode": "translate",
+        "space": "world",
+        "dragging": False,
+    }
+
+    # attachMoveGizmo on an untracked Object3D: object3D set, id null.
+    attached = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const Object3D = Object.getPrototypeOf(Object.getPrototypeOf(v._scene)).constructor;"
+        " const obj = new Object3D(); v._scene.add(obj); v.attachMoveGizmo(obj);"
+        " const s = v.getMoveGizmo(); return { id: s.id, same: s.object3D === obj }; }"
+    )
+    assert attached == {"id": None, "same": True}
+
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getMoveGizmo().mode")
+        == "rotate"
+    )
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('translate')")
+
+    viewer_page.evaluate("() => window.threejsViewer.disableMoveGizmo()")
+    detached = viewer_page.evaluate(state)
+    assert detached["id"] is None and detached["has"] is False
+
+    # Click-select attaches to the tracked box and reports its id.
+    viewer_client.enable_move_gizmo()
+    _wait_for(viewer_page, "() => window.threejsViewer._transformGizmo.enabled")
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"] - 15, proj["y"] + 15)
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    sel = viewer_page.evaluate(state)
+    assert sel["has"] is True and sel["dragging"] is False
+
+    viewer_client.disable_move_gizmo()
+    _wait_for(
+        viewer_page, "() => window.threejsViewer.getMoveGizmo().object3D === null"
+    )
+    assert viewer_page.evaluate(state)["id"] is None
+
+
+@pytest.mark.browser
+def test_set_gizmo_space_holds_across_attaches(viewer_client, viewer_page):
+    """setGizmoSpace('local') orients the interactive gizmo to its target and
+    survives detach, disable and a fresh attach until set back to 'world'; an
+    unknown space is refused with a warning (issue #255)."""
+    viewer_client.add_box("box", rotation=[0.0, 0.0, 0.7])
+    viewer_client.add_box("other", position=[3.0, 0.0, 0.0])
+    settle(viewer_client)
+    space = "() => window.threejsViewer.getMoveGizmo().space"
+    ctrl_space = "() => window.threejsViewer._transformGizmo.control.space"
+
+    # Set before any attach, then attach: the attach must not reset it.
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('local')")
+    assert viewer_page.evaluate(space) == "local"
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    assert viewer_page.evaluate(space) == "local"
+    assert viewer_page.evaluate(ctrl_space) == "local"
+
+    # Detach via disable, re-attach to another object: still local.
+    viewer_client.disable_move_gizmo()
+    _wait_for(
+        viewer_page, "() => window.threejsViewer.getMoveGizmo().object3D === null"
+    )
+    viewer_client.enable_move_gizmo("other")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'other'")
+    assert viewer_page.evaluate(space) == "local"
+
+    # Back to world, and an invalid value is ignored with a console warning.
+    warnings = []
+    viewer_page.on(
+        "console", lambda m: warnings.append(m.text) if m.type == "warning" else None
+    )
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('world')")
+    assert viewer_page.evaluate(space) == "world"
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('screen')")
+    assert viewer_page.evaluate(space) == "world"
+    assert _wait_until(lambda: any("setGizmoSpace" in w for w in warnings)), warnings
