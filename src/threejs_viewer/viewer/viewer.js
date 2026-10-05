@@ -11864,6 +11864,7 @@ export class ThreeJSViewer {
         this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
+        this._timelineThumbEl = q('.tjsv-timeline-thumb');
         this._currentTimeEl = q('.tjsv-current-time');
         this._totalTimeEl = q('.tjsv-total-time');
         this._currentFrameEl = q('.tjsv-current-frame');
@@ -14829,10 +14830,12 @@ export class ThreeJSViewer {
         if (!this._animation) return;
         const { index: frameIndex } = this._getFrameAtTime(this._animationTime);
         const progress = this._animation.duration > 0 ? (this._animationTime / this._animation.duration) * 100 : 0;
-        this._timelineProgressEl.style.width = `${Number.isFinite(progress) ? progress : 0}%`;
+        const pct = Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
+        this._timelineProgressEl.style.width = `${pct}%`;
+        this._timelineThumbEl.style.left = `${pct}%`;
         this._currentTimeEl.textContent = this._formatTime(this._animationTime);
         this._currentFrameEl.textContent = frameIndex + 1;
-        this._btnPlay.textContent = this._animationPlaying ? '\u23F8' : '\u25B6';
+        this._btnPlay.classList.toggle('playing', !!this._animationPlaying);
     }
 
     /** @param {number} delta */

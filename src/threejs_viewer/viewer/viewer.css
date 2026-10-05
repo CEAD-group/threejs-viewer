@@ -18,6 +18,7 @@
     --tjsv-panel-2: #2a2a2a;
     --tjsv-panel-3: #333;
     --tjsv-border: #3a3a3a;
+    --tjsv-border-strong: #4a4a4a;
     --tjsv-text: #e0e0e0;
     --tjsv-text-dim: #999;
     --tjsv-text-faint: #666;
@@ -323,39 +324,74 @@
     display: flex;
     gap: 4px;
 }
-.threejs-viewer .transport-buttons button {
-    background: #444;
-    border: none;
-    color: white;
-    width: 32px;
-    height: 32px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 14px;
+.threejs-viewer .transport-buttons button,
+.threejs-viewer .speed-control button,
+.threejs-viewer .loop-toggle {
+    /* ribweaver's .step-btn */
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    line-height: 1;
+    font-size: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
+    color: var(--tjsv-text-faint);
+    background: var(--tjsv-panel-2);
+    border: 1px solid var(--tjsv-border);
+    border-radius: 3px;
+    cursor: pointer;
+    user-select: none;
 }
-.threejs-viewer .transport-buttons button:hover { background: #555; }
-.threejs-viewer .transport-buttons button:active { background: #333; }
-.threejs-viewer .transport-buttons button.active { background: #0066cc; }
+.threejs-viewer .transport-buttons button:hover,
+.threejs-viewer .speed-control button:hover,
+.threejs-viewer .loop-toggle:hover { background: var(--tjsv-panel-3); color: var(--tjsv-text); }
+.threejs-viewer .transport-buttons button:active,
+.threejs-viewer .transport-buttons button.active,
+.threejs-viewer .speed-control button:active,
+.threejs-viewer .loop-toggle:active,
+.threejs-viewer .loop-toggle.active {
+    background: var(--tjsv-primary);
+    color: #fff;
+    border-color: var(--tjsv-primary);
+}
+.threejs-viewer .transport-buttons button svg { display: block; width: 12px; height: 12px; }
+.threejs-viewer .tjsv-btn-play .tjsv-icon-pause,
+.threejs-viewer .tjsv-btn-play.playing .tjsv-icon-play { display: none; }
+.threejs-viewer .tjsv-btn-play.playing .tjsv-icon-pause { display: block; }
 .threejs-viewer .tjsv-timeline-container {
     flex: 1;
     position: relative;
-    height: 24px;
-    background: #333;
-    border-radius: 4px;
+    height: 16px;
     cursor: pointer;
 }
+.threejs-viewer .tjsv-timeline-container::before,
 .threejs-viewer .tjsv-timeline-progress {
     position: absolute;
     left: 0;
-    top: 0;
-    height: 100%;
-    background: #0066cc;
-    border-radius: 4px 0 0 4px;
+    top: 50%;
+    height: 4px;
+    margin-top: -2px;
+    border-radius: 2px;
     pointer-events: none;
 }
+.threejs-viewer .tjsv-timeline-container::before { content: ''; right: 0; background: var(--tjsv-border-strong); }
+.threejs-viewer .tjsv-timeline-progress {
+    background: color-mix(in srgb, var(--tjsv-primary) 50%, var(--tjsv-border-strong));
+}
+.threejs-viewer .tjsv-timeline-thumb {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 11px;
+    height: 11px;
+    margin: -5.5px 0 0 -5.5px;
+    border-radius: 50%;
+    background: var(--tjsv-text-dim);
+    pointer-events: none;
+}
+.threejs-viewer .tjsv-timeline-container:hover .tjsv-timeline-thumb { background: var(--tjsv-text); }
 .threejs-viewer .tjsv-timeline-markers {
     position: absolute;
     left: 0;
@@ -409,37 +445,13 @@
     align-items: center;
     gap: 6px;
 }
-.threejs-viewer .speed-control button {
-    background: #444;
-    border: none;
-    color: white;
-    width: 28px;
-    height: 28px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.threejs-viewer .speed-control button:hover { background: #555; }
 .threejs-viewer .speed-control span {
     font-family: monospace;
     font-size: 12px;
     min-width: 50px;
     text-align: center;
 }
-.threejs-viewer .loop-toggle {
-    background: #444;
-    border: none;
-    color: white;
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-}
-.threejs-viewer .loop-toggle:hover { background: #555; }
-.threejs-viewer .loop-toggle.active { background: #0066cc; }
+.threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: 11px; }
 .threejs-viewer .frame-display {
     font-family: monospace;
     font-size: 11px;
@@ -523,7 +535,6 @@
 }
 .threejs-viewer .clip-slider-row input[type="range"] {
     flex: 1;
-    accent-color: #0066cc;
 }
 .threejs-viewer .clip-slider-row .clip-value {
     font-family: monospace;
@@ -639,7 +650,6 @@
 }
 .threejs-viewer .lighting-slider-row input[type="range"] {
     flex: 1;
-    accent-color: #0066cc;
 }
 .threejs-viewer .lighting-slider-row .lighting-value {
     font-family: monospace;
@@ -872,3 +882,38 @@
     white-space: nowrap;
     z-index: 10;
 }
+
+/* Range sliders, ribweaver's base.css look (4 px track, 11 px round thumb). */
+.threejs-viewer input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 16px;
+    background: transparent;
+    cursor: pointer;
+}
+.threejs-viewer input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--tjsv-border-strong);
+}
+.threejs-viewer input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 11px;
+    height: 11px;
+    margin-top: -3.5px;
+    border-radius: 50%;
+    background: var(--tjsv-text-dim);
+    border: none;
+}
+.threejs-viewer input[type="range"]:hover::-webkit-slider-thumb { background: var(--tjsv-text); }
+.threejs-viewer input[type="range"]:focus { outline: none; }
+.threejs-viewer input[type="range"]:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 2px; }
+.threejs-viewer input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--tjsv-border-strong); }
+.threejs-viewer input[type="range"]::-moz-range-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--tjsv-primary) 50%, var(--tjsv-border-strong));
+}
+.threejs-viewer input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: none; border-radius: 50%; background: var(--tjsv-text-dim); }
+.threejs-viewer input[type="range"]:hover::-moz-range-thumb { background: var(--tjsv-text); }

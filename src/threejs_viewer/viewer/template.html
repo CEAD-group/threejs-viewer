@@ -126,25 +126,29 @@
 <div class="tjsv-animation-controls">
     <div class="timeline-row">
         <div class="transport-buttons">
-            <button class="tjsv-btn-start" title="Jump to start (Home)">&#x23EE;</button>
-            <button class="tjsv-btn-prev-frame" title="Previous frame (&larr)">&#x25C1;</button>
-            <button class="tjsv-btn-play" title="Play/Pause (Space)">&#x25B6;</button>
-            <button class="tjsv-btn-next-frame" title="Next frame (&rarr)">&#x25B7;</button>
-            <button class="tjsv-btn-end" title="Jump to end (End)">&#x23ED;</button>
+            <button class="tjsv-btn-start" title="Jump to start (Home)" aria-label="Jump to start"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="12 19 5 12 12 5"/><polyline points="19 5 12 12 19 19"/></svg></button>
+            <button class="tjsv-btn-prev-frame" title="Previous frame (&larr;)" aria-label="Previous frame"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15.5 19 8.5 12 15.5 5"/></svg></button>
+            <button class="tjsv-btn-play" title="Play/Pause (Space)" aria-label="Play/Pause">
+                <svg class="tjsv-icon-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="8 5 19 12 8 19"/></svg>
+                <svg class="tjsv-icon-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8.5" y1="5" x2="8.5" y2="19"/><line x1="15.5" y1="5" x2="15.5" y2="19"/></svg>
+            </button>
+            <button class="tjsv-btn-next-frame" title="Next frame (&rarr;)" aria-label="Next frame"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="8.5 5 15.5 12 8.5 19"/></svg></button>
+            <button class="tjsv-btn-end" title="Jump to end (End)" aria-label="Jump to end"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="12 5 19 12 12 19"/><polyline points="5 19 12 12 5 5"/></svg></button>
         </div>
         <div class="tjsv-timeline-container">
             <div class="tjsv-timeline-progress"></div>
+            <div class="tjsv-timeline-thumb"></div>
             <div class="tjsv-timeline-markers"></div>
         </div>
         <div class="time-display">
             <span class="tjsv-current-time">0.00</span>s / <span class="tjsv-total-time">0.00</span>s
         </div>
         <div class="speed-control">
-            <button class="tjsv-btn-slower" title="Slower (&darr)">&minus;</button>
+            <button class="tjsv-btn-slower" title="Slower (&darr;)" aria-label="Slower">&minus;</button>
             <span class="tjsv-speed-display">1x</span>
-            <button class="tjsv-btn-faster" title="Faster (&uarr)">+</button>
+            <button class="tjsv-btn-faster" title="Faster (&uarr;)" aria-label="Faster">+</button>
         </div>
-        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">&#x27F3; Loop</button>
+        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">Loop</button>
         <div class="frame-display">Frame <span class="tjsv-current-frame">0</span>/<span class="tjsv-total-frames">0</span></div>
     </div>
     <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
