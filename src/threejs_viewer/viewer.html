@@ -12559,6 +12559,33 @@ class TransformGizmoController {
         this._restyleGizmo(this._primary);
     }
 
+    /** Orient the interactive gizmo's handles to the world axes or the target's
+     * own rotation. Held on the control, which attach/detach never touch, so it
+     * lasts across attaches until changed.
+     * @param {string} space  'world' | 'local' */
+    setSpace(space) {
+        if (space !== 'world' && space !== 'local') {
+            console.warn(`setGizmoSpace: unknown space '${space}' (expected 'world' or 'local')`);
+            return;
+        }
+        this._primary.control.setSpace(space);
+    }
+
+    /** Snapshot of the interactive gizmo. `mode` is the live control mode, so
+     * it reads 'rotate' while the platform-specific rotate modifier (Alt, Shift
+     * on Windows; see `gizmoModifierKeys()`) overrides a translate base mode.
+     * @returns {{id:string|null, object3D:THREE.Object3D|null, mode:string, space:string, dragging:boolean}} */
+    getState() {
+        const g = this._primary;
+        return {
+            id: g.object ? g.id : null,
+            object3D: g.object,
+            mode: g.control.getMode(),
+            space: g.control.space,
+            dragging: !!g.control.dragging,
+        };
+    }
+
     /** Switch a gizmo's live control mode and show that mode's axis mask.
      * Every mode change goes through here, or a per-mode mask would leak.
      * @param {Gizmo} g @param {string} mode */
@@ -13949,6 +13976,11 @@ class ThreeJSViewer {
         );
         this._renderer.toneMappingExposure = this._lightingDefaults.exposure;
         this._renderer.localClippingEnabled = true;
+        // Counts are reset per frame in _animate so the scene pass is read as
+        // one number even when the EDL composer renders it in several passes.
+        this._renderer.info.autoReset = false;
+        /** @type {{triangles:number, calls:number}} */
+        this._renderStats = { triangles: 0, calls: 0 };
         this.el.appendChild(this._renderer.domElement);
 
         // Environment cubemap. Intensity is set up front (not when the async
@@ -14232,7 +14264,7 @@ class ThreeJSViewer {
         this._objectClickRaycaster.params.Line.threshold = 0.05;
         this._objectClickRaycaster.params.Points.threshold = 0.05;
         this._renderer.domElement.addEventListener('dblclick', (e) => {
-            if (!this._dblclickFrame || this._gizmoHandleHovered()) return;
+            if (!this._dblclickFrame || this.isGizmoHandleActive()) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
             if (hit) this.frameObject(hit.object); else this.resetView();
         });
@@ -14249,7 +14281,7 @@ class ThreeJSViewer {
         // or pen press is dropped so a later pointerup cannot turn it into a click.
         this._objectClickDown = null;
         this._onObjectClickDown = (e) => {
-            this._objectClickDown = this._gizmoHandleHovered()
+            this._objectClickDown = this.isGizmoHandleActive()
                 ? null
                 : { x: e.clientX, y: e.clientY, button: e.button, pointerId: e.pointerId };
         };
@@ -14263,7 +14295,7 @@ class ThreeJSViewer {
             const wsOpen = !!this._ws && this._ws.readyState === WebSocket.OPEN;
             if (!this._objectClickHooks.length && !(this._objectClickEnabled && wsOpen)) return;
             if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_DRAG_MAX_PX) return;
-            if (this._gizmoHandleHovered() || this._gizmoHitTest(e).hit) return;
+            if (this.isGizmoHandleActive() || this._gizmoHitTest(e).hit) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
             const modifiers = { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey };
             if (this._objectClickEnabled && wsOpen) {
@@ -19871,6 +19903,7 @@ class ThreeJSViewer {
             });
         }
         this._renderer.autoClear = true;
+        this._renderer.info.reset();
         if (this._depthCue.edlActive) {
             // Eye-dome lighting routes the scene through an EffectComposer
             // (RenderPass → EDL → OutputPass) that paints the full screen.
@@ -19878,6 +19911,9 @@ class ThreeJSViewer {
         } else {
             this._renderer.render(this._scene, this._camera);
         }
+        // Snapshot before the overlay passes so getRenderStats() describes the scene.
+        this._renderStats.triangles = this._renderer.info.render.triangles;
+        this._renderStats.calls = this._renderer.info.render.calls;
         this._renderer.autoClear = false;
         // Move gizmos: own pass over a cleared depth buffer, so handles occlude
         // each other correctly but always draw over the scene.
@@ -20583,6 +20619,55 @@ class ThreeJSViewer {
     }
 
     /**
+     * The render canvas, for an embedder's own pointer listeners (issue #255).
+     * Prefer this over reaching into `_renderer.domElement`.
+     * @returns {HTMLCanvasElement}
+     */
+    getCanvas() { return this._renderer.domElement; }
+
+    /**
+     * A new `THREE.Raycaster` aimed from the active camera through a viewport
+     * pixel (`event.clientX/clientY` coordinates), under perspective and
+     * orthographic cameras alike. This is the ray `pick()` and the object-click
+     * hit test use, exposed for embedders that need every hit along a ray or
+     * their own intersect targets. Returns null while the canvas has no size.
+     * @param {number} clientX @param {number} clientY
+     * @returns {THREE.Raycaster|null}
+     */
+    raycasterAt(clientX, clientY) {
+        const raycaster = new THREE.Raycaster();
+        return this._aimRaycaster(raycaster, clientX, clientY) ? raycaster : null;
+    }
+
+    /**
+     * Aim an existing raycaster through a viewport pixel. The one place the
+     * client-to-NDC mapping lives, so `raycasterAt`, `pick` and
+     * `_hitTrackedObject` cannot drift apart.
+     * @param {THREE.Raycaster} raycaster @param {number} clientX @param {number} clientY
+     * @returns {boolean} false when the canvas has no size (nothing was aimed)
+     */
+    _aimRaycaster(raycaster, clientX, clientY) {
+        const rect = this._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return false;
+        _pickNdc.set(
+            ((clientX - rect.left) / rect.width) * 2 - 1,
+            -((clientY - rect.top) / rect.height) * 2 + 1);
+        raycaster.setFromCamera(_pickNdc, this._camera);
+        return true;
+    }
+
+    /**
+     * Draw counts of the last rendered scene pass, `{triangles, calls}`, for a
+     * perf readout (issue #255). Snapshotted in `_animate` right after the scene
+     * render (the EDL composer's passes included), before the gizmo, dimension
+     * and view-gimbal overlay passes, which would otherwise be what
+     * `renderer.info.render` reports since each `render()` call resets it.
+     * Keeps the last values while the viewer is paused or hidden.
+     * @returns {{triangles:number, calls:number}}
+     */
+    getRenderStats() { return { ...this._renderStats }; }
+
+    /**
      * Pick a world point on the displayed content (meshes + point clouds)
      * from a screen position — e.g. to seat an embedder-owned selection box.
      * `clientX/clientY` are viewport (event.clientX-style) coordinates.
@@ -20599,13 +20684,8 @@ class ThreeJSViewer {
      *   `object3D` is included for embedders that need the exact node.
      */
     pick(clientX, clientY, opts = {}) {
-        const rect = this._renderer.domElement.getBoundingClientRect();
-        if (!rect.width || !rect.height) return null;
-        _pickNdc.set(
-            ((clientX - rect.left) / rect.width) * 2 - 1,
-            -((clientY - rect.top) / rect.height) * 2 + 1);
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(_pickNdc, this._camera);
+        const raycaster = this.raycasterAt(clientX, clientY);
+        if (!raycaster) return null;
         raycaster.params.Points.threshold = opts.pointsThreshold ?? 1;
         /** @type {THREE.Object3D[]} */
         const roots = [];
@@ -21030,11 +21110,13 @@ class ThreeJSViewer {
     setObjectClickEnabled(enabled) { this._objectClickEnabled = !!enabled; }
 
     /**
-     * True while any move/rotate gizmo or axis-control handle is hovered or dragged, so a
-     * press or release there is the gizmo's gesture rather than a click.
+     * True while any move/rotate gizmo (interactive or pinned) or axis-control
+     * handle is hovered or dragged, so a press or release there is the gizmo's
+     * gesture rather than a click. Public for embedders that run their own
+     * pointer gestures on the canvas (issue #255).
      * @returns {boolean}
      */
-    _gizmoHandleHovered() {
+    isGizmoHandleActive() {
         if (this._axisControls && this._axisControls.busy()) return true;
         const tg = this._transformGizmo;
         if (!tg || !tg.enabled) return false;
@@ -21056,13 +21138,7 @@ class ThreeJSViewer {
      * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
      */
     _hitTrackedObject(clientX, clientY) {
-        const rect = this._renderer.domElement.getBoundingClientRect();
-        if (!rect.width || !rect.height) return null;
-        const ndc = new THREE.Vector2(
-            ((clientX - rect.left) / rect.width) * 2 - 1,
-            -((clientY - rect.top) / rect.height) * 2 + 1,
-        );
-        this._objectClickRaycaster.setFromCamera(ndc, this._camera);
+        if (!this._aimRaycaster(this._objectClickRaycaster, clientX, clientY)) return null;
         /** @type {THREE.Object3D[]} */
         const candidates = [];
         /** @type {Map<THREE.Object3D, string>} */
@@ -21497,6 +21573,24 @@ class ThreeJSViewer {
      * @returns {{translate:{x:boolean,y:boolean,z:boolean}, rotate:{x:boolean,y:boolean,z:boolean}}}
      */
     getGizmoAxes() { return this._transformGizmo.getAxes(); }
+
+    /**
+     * The interactive move gizmo's state (issue #255): `object3D` and `id` are
+     * null while detached, `mode` is the live control mode (`'rotate'` while the
+     * platform-specific rotate modifier is held, see `gizmoModifierKeys()`),
+     * `space` is `'world'` or `'local'`, and `dragging` is
+     * true during a handle drag. Pinned `addGizmo` gizmos are not included.
+     * @returns {{id:string|null, object3D:THREE.Object3D|null, mode:string, space:string, dragging:boolean}}
+     */
+    getMoveGizmo() { return this._transformGizmo.getState(); }
+
+    /**
+     * Orient the interactive move gizmo's handles to the world axes (`'world'`,
+     * the default) or to the target's own rotation (`'local'`), like `addGizmo`'s
+     * `space` option. Holds across attaches until changed.
+     * @param {'world'|'local'} space
+     */
+    setGizmoSpace(space) { this._transformGizmo.setSpace(space); }
 
     /**
      * Register a hook fired as the gizmo moves/rotates its target. Payload:
