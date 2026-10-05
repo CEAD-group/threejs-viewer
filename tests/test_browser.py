@@ -6773,6 +6773,351 @@ def test_embedder_overlays(viewer_client, viewer_page):
     )
 
 
+# Overlay fixture for the parented-overlay tests (issue #254): a small box
+# mesh at a parent-local offset, with a dispose listener on its geometry so
+# a test can prove the viewer never disposed it.
+_PARENTED_OVERLAY_SETUP = """(args) => {
+  const v = window.threejsViewer;
+  const geo = new window.tjsv.THREE.BoxGeometry(args.size, args.size, args.size);
+  const mat = new window.tjsv.THREE.MeshBasicMaterial({color: 0x00ff00});
+  const ov = new window.tjsv.THREE.Mesh(geo, mat);
+  ov.position.set(args.x, args.y, args.z);
+  window.__disposed = false;
+  geo.addEventListener('dispose', () => { window.__disposed = true; });
+  mat.addEventListener('dispose', () => { window.__disposed = true; });
+  window.__ov = ov;
+  const id = v.addOverlay(ov, {id: args.id, parentId: args.parentId,
+                               includeInBounds: !!args.includeInBounds});
+  const parent = v.getObject(args.parentId);
+  return {id, mountedOnParent: !!parent && ov.parent === parent,
+          waiting: ov.parent === null};
+}"""
+
+_PARENTED_OVERLAY_WORLD = """() => {
+  const v = window.threejsViewer;
+  const ov = window.__ov;
+  ov.updateWorldMatrix(true, false);
+  const p = new window.tjsv.THREE.Vector3().setFromMatrixPosition(ov.matrixWorld);
+  let shown = true;
+  for (let n = ov; n; n = n.parent) { if (n.visible === false) shown = false; }
+  return {x: p.x, y: p.y, z: p.z, shown,
+          parentIsTracked: ov.parent === v.getObject('link'),
+          local: [ov.position.x, ov.position.y, ov.position.z],
+          disposed: window.__disposed};
+}"""
+
+_PROJECT_WORLD = """(pt) => {
+  const v = window.threejsViewer;
+  const w = v._renderer.domElement.clientWidth, h = v._renderer.domElement.clientHeight;
+  const ndc = new window.tjsv.THREE.Vector3(pt[0], pt[1], pt[2]).project(v._camera);
+  return { x: (ndc.x*0.5+0.5)*w, y: (-ndc.y*0.5+0.5)*h };
+}"""
+
+
+@pytest.mark.browser
+def test_parented_overlay_follows_parent_and_survives_readd(viewer_client, viewer_page):
+    """addOverlay(parentId=) (issue #254): the overlay rides the tracked parent
+    through batch_update, animation frames and set_visible; a delete, a
+    same-id re-add (plain and preserveInflight), and a scene clear never
+    dispose it and remount it with its local transform kept; removeOverlay
+    works mounted and waiting."""
+    page = viewer_page
+    assert page.evaluate("() => typeof window.tjsv.THREE !== 'undefined'")
+    viewer_client.add_box("link")
+    _wait_for(page, "() => window.threejsViewer._objects.has('link')")
+
+    setup = page.evaluate(
+        _PARENTED_OVERLAY_SETUP,
+        {"id": "triad", "parentId": "link", "size": 0.2, "x": 0, "y": 0, "z": 2},
+    )
+    assert setup["id"] == "triad"
+    assert setup["mountedOnParent"] is True
+
+    # Follows the parent through a streaming update.
+    viewer_client.batch_update({"link": {"position": [5.0, 0.0, 0.0]}})
+    settle(viewer_client)
+    w = page.evaluate(_PARENTED_OVERLAY_WORLD)
+    assert (w["x"], w["y"], w["z"]) == pytest.approx((5.0, 0.0, 2.0), abs=1e-6)
+
+    # Follows the parent through an animation frame (matrixAutoUpdate off).
+    n = 11
+    times = np.arange(n, dtype=np.float64) * 0.1
+    transforms = np.zeros((n, 1, 16), dtype=np.float32)
+    transforms[:, 0, [0, 5, 10, 15]] = 1.0
+    transforms[:, 0, 12] = np.linspace(0.0, 10.0, n)
+    anim = Animation(loop=False)
+    anim.set_frame_times(times)
+    anim.set_transform_data(["link"], transforms)
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(page)
+    page.evaluate("() => window.threejsViewer._seekToTime(1.0)")
+    frames(page, 2)
+    w = page.evaluate(_PARENTED_OVERLAY_WORLD)
+    assert (w["x"], w["y"], w["z"]) == pytest.approx((10.0, 0.0, 2.0), abs=1e-4)
+    viewer_client.unload_animation()
+    settle(viewer_client)
+
+    # Hides with the parent.
+    viewer_client.set_visible("link", False)
+    settle(viewer_client)
+    assert page.evaluate(_PARENTED_OVERLAY_WORLD)["shown"] is False
+    viewer_client.set_visible("link", True)
+    settle(viewer_client)
+    assert page.evaluate(_PARENTED_OVERLAY_WORLD)["shown"] is True
+
+    # Delete: detached, parked, not disposed.
+    viewer_client.delete("link")
+    settle(viewer_client)
+    parked = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return {parent: window.__ov.parent, disposed: window.__disposed,"
+        "  waiting: v._pendingOverlayMounts.get('link')?.has('triad') === true,"
+        "  still: v._overlays.get('triad') === window.__ov}; }"
+    )
+    assert parked == {"parent": None, "disposed": False, "waiting": True, "still": True}
+
+    # Re-add under the same id: remounted, local transform kept.
+    viewer_client.add_box("link", position=[1.0, 1.0, 1.0])
+    _wait_for(
+        page, "() => window.__ov.parent === window.threejsViewer.getObject('link')"
+    )
+    w = page.evaluate(_PARENTED_OVERLAY_WORLD)
+    assert w["local"] == pytest.approx([0.0, 0.0, 2.0])
+    assert (w["x"], w["y"], w["z"]) == pytest.approx((1.0, 1.0, 3.0), abs=1e-6)
+    assert w["disposed"] is False
+
+    # Same-id replace through a binary loader (preserveInflight delete path).
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("link", positions, indices)
+    settle(viewer_client)
+    w = page.evaluate(_PARENTED_OVERLAY_WORLD)
+    assert w["parentIsTracked"] is True
+    assert w["disposed"] is False
+    assert (
+        page.evaluate("() => window.threejsViewer.getObject('link').userData.isMesh")
+        is True
+    )
+
+    # Scene clear: parked again, never disposed; a later add remounts.
+    viewer_client.clear()
+    settle(viewer_client)
+    assert page.evaluate(
+        "() => window.__ov.parent === null && window.__disposed === false"
+        " && window.threejsViewer._pendingOverlayMounts.get('link').has('triad')"
+    )
+    viewer_client.add_box("link")
+    _wait_for(
+        page, "() => window.__ov.parent === window.threejsViewer.getObject('link')"
+    )
+
+    # removeOverlay while mounted.
+    assert page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return v.removeOverlay('triad') === true && window.__ov.parent === null"
+        "  && window.__disposed === false && v.removeOverlay('triad') === false; }"
+    )
+
+    # removeOverlay while waiting: the later parent must not pick it up.
+    page.evaluate(
+        _PARENTED_OVERLAY_SETUP,
+        {"id": "waiter", "parentId": "ghost", "size": 0.2, "x": 0, "y": 0, "z": 0},
+    )
+    assert page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const waiting = v._pendingOverlayMounts.get('ghost').has('waiter');"
+        " const removed = v.removeOverlay(window.__ov);"
+        " return waiting && removed && !v._pendingOverlayMounts.has('ghost'); }"
+    )
+    viewer_client.add_box("ghost")
+    _wait_for(page, "() => window.threejsViewer._objects.has('ghost')")
+    assert page.evaluate("() => window.__ov.parent === null")
+
+
+@pytest.mark.browser
+def test_parented_overlay_excluded_from_hits_and_framing(viewer_client, viewer_page):
+    """A parented overlay is skipped by pick(), object click and the shared
+    dblclick hit test, by framing and scene bounds unless includeInBounds,
+    and by set_color on the parent (issue #254)."""
+    page = viewer_page
+    viewer_client.add_box("link")
+    _wait_for(page, "() => window.threejsViewer._objects.has('link')")
+    page.evaluate(_GIZMO_TOPDOWN)
+    frames(page, 2)
+    # Overlay beside the parent, so a hit on it cannot be a hit on the parent.
+    page.evaluate(
+        _PARENTED_OVERLAY_SETUP,
+        {"id": "triad", "parentId": "link", "size": 1.0, "x": 3, "y": 0, "z": 0},
+    )
+    frames(page, 2)
+    on_overlay = page.evaluate(_PROJECT_WORLD, [3, 0, 0])
+    on_parent = page.evaluate(_PROJECT_WORLD, [0, 0, 0])
+
+    hits = page.evaluate(
+        "(p) => { const v = window.threejsViewer;"
+        " const h = v._hitTrackedObject(p.ov.x, p.ov.y);"
+        " const k = v._hitTrackedObject(p.par.x, p.par.y);"
+        " return {overlayHit: h, overlayPick: v.pick(p.ov.x, p.ov.y),"
+        "  parentHit: k && k.id, parentPick: v.pick(p.par.x, p.par.y)?.objectId}; }",
+        {"ov": on_overlay, "par": on_parent},
+    )
+    assert hits["overlayHit"] is None
+    assert hits["overlayPick"] is None
+    assert hits["parentHit"] == "link"
+    assert hits["parentPick"] == "link"
+
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(page, "() => window.threejsViewer._objectClickEnabled === true")
+    page.mouse.click(on_overlay["x"], on_overlay["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] is None
+    page.mouse.click(on_parent["x"], on_parent["y"])
+    assert _wait_until(lambda: len(clicks) >= 2)
+    assert clicks[-1]["id"] == "link"
+
+    # set_color on the parent leaves the overlay's material alone.
+    viewer_client.set_color("link", 0xFF0000)
+    settle(viewer_client)
+    assert page.evaluate("() => window.__ov.material.color.getHex()") == 0x00FF00
+
+    # So do colour animations, binary channel and JSON frames alike.
+    read_colors = (
+        "() => { const v = window.threejsViewer;"
+        " return {parent: v.getObject('link').material.color.getHex(),"
+        "  overlay: window.__ov.material.color.getHex()}; }"
+    )
+    anim = Animation(loop=False)
+    anim.set_frame_times(np.array([0.0, 1.0]))
+    anim.add_channel(
+        "colors",
+        ["link"],
+        np.array([[0x0000FF], [0x0000FF]], dtype=np.uint32),
+        "uint32",
+    )
+    viewer_client.load_animation(anim, autoplay=False)
+    _wait_for_animation_loaded(page)
+    page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    frames(page, 2)
+    assert page.evaluate(read_colors) == {"parent": 0x0000FF, "overlay": 0x00FF00}
+    json_anim = Animation(
+        frames=[
+            Frame(time=0.0, transforms={}, colors={"link": 0xFFFF00}),
+            Frame(time=2.0, transforms={}, colors={"link": 0xFFFF00}),
+        ],
+        loop=False,
+    )
+    viewer_client.load_animation(json_anim, autoplay=False)
+    _wait_for_animation_duration(page, 2.0)
+    page.evaluate("() => window.threejsViewer._seekToTime(0.5)")
+    frames(page, 2)
+    assert page.evaluate(read_colors) == {"parent": 0xFFFF00, "overlay": 0x00FF00}
+    viewer_client.unload_animation()
+    settle(viewer_client)
+
+    # Framing and scene bounds: excluded by default, included on request.
+    bounds = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " window.__ov.position.set(1000, 0, 0);"
+        " v._sceneBoundsDirty = true; v._updateSceneBounds();"
+        " return {frameMaxX: v._collectFrameableBounds().max.x,"
+        "  sphereR: v._sceneSphere.radius}; }"
+    )
+    assert bounds["frameMaxX"] < 100, bounds
+    assert bounds["sphereR"] < 100, bounds
+    bounds = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.addOverlay(window.__ov, {id: 'triad', parentId: 'link', includeInBounds: true});"
+        " v._updateSceneBounds();"
+        " return {frameMaxX: v._collectFrameableBounds().max.x,"
+        "  sphereR: v._sceneSphere.radius,"
+        "  mounted: window.__ov.parent === v.getObject('link')}; }"
+    )
+    assert bounds["mounted"] is True
+    assert bounds["frameMaxX"] > 999, bounds
+    assert bounds["sphereR"] > 400, bounds
+
+
+@pytest.mark.browser
+def test_parented_overlay_gets_active_clipping_planes(viewer_client, viewer_page):
+    """An overlay mounted while the section clip is on gets the active planes,
+    both when its parent already exists and when it is mounted later by the
+    parent's registration; disabling the clip clears them (issue #254)."""
+    page = viewer_page
+    viewer_client.add_box("link")
+    _wait_for(page, "() => window.threejsViewer._objects.has('link')")
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    assert page.evaluate("() => window.threejsViewer._clipEnabled") is True
+
+    page.evaluate(
+        _PARENTED_OVERLAY_SETUP,
+        {"id": "triad", "parentId": "link", "size": 0.2, "x": 0, "y": 0, "z": 1},
+    )
+    planes = page.evaluate(
+        "() => { const v = window.threejsViewer; const m = window.__ov.material;"
+        " return {n: m.clippingPlanes.length, active: v._activeClippingPlanes().length,"
+        "  same: m.clippingPlanes === v._activeClippingPlanes()}; }"
+    )
+    assert planes["active"] > 0
+    assert planes["n"] == planes["active"]
+    assert planes["same"] is True
+
+    # Waiting overlay, mounted by the late parent while the clip is on.
+    page.evaluate(
+        _PARENTED_OVERLAY_SETUP,
+        {"id": "late", "parentId": "late_link", "size": 0.2, "x": 0, "y": 0, "z": 1},
+    )
+    assert (
+        page.evaluate("() => (window.__ov.material.clippingPlanes || []).length") == 0
+    )
+    viewer_client.add_box("late_link")
+    _wait_for(
+        page, "() => window.__ov.parent === window.threejsViewer.getObject('late_link')"
+    )
+    assert page.evaluate(
+        "() => window.__ov.material.clippingPlanes"
+        " === window.threejsViewer._activeClippingPlanes()"
+    )
+
+    viewer_client.disable_clipping_plane()
+    settle(viewer_client)
+    assert page.evaluate("() => window.__ov.material.clippingPlanes.length") == 0
+
+    # Unmounted while clipping was on, remounted after it was turned off: the
+    # mount must clear the stale planes, since _updateClipMaterials only
+    # reaches mounted objects.
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    stale = page.evaluate(
+        "() => { const v = window.threejsViewer; const m = window.__ov.material;"
+        " const had = m.clippingPlanes.length > 0 && m.side === window.tjsv.THREE.DoubleSide;"
+        " v.removeOverlay('late'); return had; }"
+    )
+    assert stale is True
+    viewer_client.disable_clipping_plane()
+    settle(viewer_client)
+    assert page.evaluate(
+        "() => { const v = window.threejsViewer; const m = window.__ov.material;"
+        " v.addOverlay(window.__ov, {id: 'late', parentId: 'late_link'});"
+        " return m.clippingPlanes.length === 0 && m.side === window.tjsv.THREE.FrontSide"
+        "  && window.__ov.parent === v.getObject('late_link'); }"
+    )
+    # Same through the waiting path: parked by a delete, remounted by a re-add.
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    assert page.evaluate("() => window.__ov.material.clippingPlanes.length > 0")
+    viewer_client.delete("late_link")
+    settle(viewer_client)
+    viewer_client.disable_clipping_plane()
+    settle(viewer_client)
+    viewer_client.add_box("late_link")
+    _wait_for(
+        page, "() => window.__ov.parent === window.threejsViewer.getObject('late_link')"
+    )
+    assert page.evaluate("() => window.__ov.material.clippingPlanes.length") == 0
+
+
 @pytest.mark.browser
 def test_toolbar_hidden_by_default_and_client_toggle(viewer_client, viewer_page):
     """The top-left menu button is hidden on a bare open; the Python client
