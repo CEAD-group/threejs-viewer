@@ -55,6 +55,24 @@ if _has_playwright:
         """
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+        # Attach before navigation: module/CDN failures can prevent the viewer
+        # (and therefore the WebSocket) from ever being constructed.
+        diagnostics = []
+        page.on("pageerror", lambda error: diagnostics.append(f"pageerror: {error}"))
+        page.on(
+            "requestfailed",
+            lambda request: diagnostics.append(
+                f"requestfailed: {request.url}: {request.failure}"
+            ),
+        )
+        page.on(
+            "console",
+            lambda message: (
+                diagnostics.append(f"console: {message.text}")
+                if message.type == "error"
+                else None
+            ),
+        )
         viewer_path = viewer_client.viewer_path.resolve()
         url = f"{viewer_path.as_uri()}?ws_port={viewer_client.port}"
         try:
@@ -71,10 +89,27 @@ if _has_playwright:
         # Nothing is waiting on this number except a genuinely hung browser,
         # so trade a slower hard failure for not flaking.
         budget = 120
-        connected = viewer_client._connected_event.wait(timeout=budget)
+        # Pump Playwright while waiting so browser errors are delivered rather
+        # than left queued behind a blocking threading.Event.wait().
+        deadline = time.monotonic() + budget
+        while (
+            not viewer_client._connected_event.is_set() and time.monotonic() < deadline
+        ):
+            page.wait_for_timeout(50)
+        connected = viewer_client._connected_event.is_set()
+        state = None
+        if not connected:
+            state = page.evaluate(
+                """() => ({
+                    ready: document.readyState,
+                    viewerCreated: !!window.threejsViewer,
+                    socketState: window.threejsViewer?._ws?.readyState,
+                    socketUrl: window.threejsViewer?._wsUrl,
+                })"""
+            )
         assert connected, (
             f"Browser did not connect to the WebSocket server within {budget}s "
-            f"(url={url})"
+            f"(url={url}, state={state}, errors={diagnostics[-20:]})"
         )
 
         yield page

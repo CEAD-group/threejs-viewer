@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.0.65
+
+### Embedder socket API (#271, issue #253)
+
+- **`viewer.send(message)`, `viewer.isConnected()` and `viewer.onConnectionChange(cb)`.** `send` JSON-encodes a message and sends it when the socket is open, returning whether it was sent; every internal sender (query replies, gizmo and axis-control reports, picks, object clicks, menu actions, `assets_loaded`) goes through it. `onConnectionChange` fires `true` at the end of each `onopen`, after the scene and animation generations are bumped and `hello` is sent, so a `handleMessage()` call from the callback is not discarded as stale; `false` fires on each close of a socket that had opened. Nothing fires after `destroy()`, and a `destroy()` during the reachability probe no longer opens a socket.
+- Python `disconnect()` closes the live connection and clears its connected state synchronously, so `disconnect(); connect()` waits for a new browser instead of returning on the old connection, and the browser sees the close at once.
+
+### Overlays mounted under a tracked object (#269, issue #254)
+
+- **`viewer.addOverlay(object3D, {id, parentId, includeInBounds})`.** With `parentId` the overlay is a child of that tracked object and follows its transform and visibility. A missing parent leaves it waiting; `_registerObject` mounts it when the parent lands. Deleting, clearing or re-adding the parent detaches the overlay before disposal and remounts it on the next object under that id, with its local transform kept. Parented overlays are skipped by `pick()`, object click, double-click framing, `set_color`, `set_opacity`, highlight, the colour animation channels and the `M`/`N` swaps, stay out of framing unless `includeInBounds`, and receive the current clipping state on every mount.
+
+### Canvas, pixel-raycast and move-gizmo state API (#270, issue #255)
+
+- **`getCanvas()`, `raycasterAt(clientX, clientY)`, `getRenderStats()`, `isGizmoHandleActive()`, `getMoveGizmo()` and `setGizmoSpace(space)`.** `raycasterAt` shares its pixel-to-ray mapping with `pick()` and the object-click hit test under both cameras. `getRenderStats()` reports the scene pass only (triangles and draw calls), not the overlay passes. `getMoveGizmo()` returns `{id, object3D, mode, space, dragging}` for the interactive gizmo; `mode` is the live mode, so it reads `rotate` while the platform's rotate modifier is held. `setGizmoSpace` holds across attaches. `isGizmoHandleActive()` replaces the private `_gizmoHandleHovered()`.
+
+### Follow path survives a same-id re-add (#268, issue #257)
+
+- A mesh or model whose follow path landed first no longer loses it: the replace step of an add keeps the id's track and leaves a still-running follow-path fetch alone in either completion order, and the new object is pinned and posed as soon as it registers. An explicit `delete` or `clear` still drops the track and cancels its fetch.
+
+### Parametric tube colour reset (#265, issue #256)
+
+- **`update_parametric_tube_colors(id, None, base_color=None)`** (wire: `blob_url: null`) returns a tube from per-point colours to its plain material colour synchronously, with no fetch: the `color` attribute is removed, `vertexColors` goes off and `material.color` is set to `base_color` (default `0x7ab8cc`, white for a textured tube). An active frontier morph is left in place. With LOD the cached ring colours are cleared on both threads, so later rebuilds stay plain. Every colour message supersedes the previous colour fetch, so a stale fetch never repaints.
+
+### Tube colour swap under same-frame draw-range writes (#266, issue #264)
+
+- A full colour upload requested while an animation plays is no longer downgraded to a partial upload by a second `setDrawRange` in the same frame. The pending-full-upload flag now suppresses partial update ranges and is cleared from the mesh's `onBeforeRender`, after the renderer has uploaded the attribute, so the already-drawn part of the bead recolours too.
+
+### `ViewerClient(port=0)` and a stable browser test fixture (#267, #272, issue #263)
+
+- `port=0` lets the OS pick one free port for the WebSocket and the sidecar on every address of `host`; a collision on a secondary address (the `::1` flake in CI) re-picks up to `PORT_PICK_ATTEMPTS` times and `self.port` reports the chosen port. The test fixtures use it instead of probing a port on IPv4 only.
+- The viewer's `connect()` runs one retry loop per instance, allows the reachability probe 2 s, and closes and retries a WebSocket that stays in CONNECTING for 5 s after a successful probe. The browser test fixture reports page errors, failed requests and the socket state when a connection does not arrive in time.
+
 ## 0.0.64
 
 ### Bead textures on parametric tubes (#252)

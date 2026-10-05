@@ -7752,12 +7752,12 @@ def test_playback_advances_by_wall_clock_and_caps_stalls(viewer_client, viewer_p
         "() => new Promise(resolve => {"
         " const v = window.threejsViewer;"
         " const before = v._animationTime;"
+        " const off = v.onAnimationTime(state => {"
+        "   off(); resolve(state.time - before); });"
         " v._lastAnimationUpdate = performance.now() - 5000;"
-        " requestAnimationFrame(() => requestAnimationFrame("
-        "   () => resolve(v._animationTime - before)));"
         "})"
     )
-    assert jump < 30, (
+    assert jump == pytest.approx(25), (
         f"stalled frame advanced the playhead by {jump}s (uncapped would be ~500s)"
     )
 
@@ -11055,7 +11055,28 @@ def test_render_loop_skips_while_container_hidden(viewer_client, viewer_page):
     assert hidden["frame"] == before["frame"], "rendered while hidden"
     assert hidden["time"] == before["time"], "playback clock ran while hidden"
 
-    viewer_page.evaluate("() => { window.threejsViewer.container.style.display = ''; }")
+    # Capture the first resumed tick in the browser, before CDP round trips
+    # and additional rendered frames can inflate the measured advance.
+    resumed = viewer_page.evaluate(
+        """() => new Promise(resolve => {
+            const v = window.threejsViewer;
+            const original = v._resetFrameClocks;
+            const before = v.getAnimationState().time;
+            let resetTime = null;
+            v._resetFrameClocks = function () {
+                original.call(this);
+                resetTime = this._lastAnimationUpdate;
+            };
+            const off = v.onAnimationTime(state => {
+                off();
+                v._resetFrameClocks = original;
+                resolve({reset: resetTime !== null,
+                         jump: state.time - before,
+                         elapsed: (v._lastAnimationUpdate - resetTime) / 1000});
+            });
+            v.container.style.display = '';
+        })"""
+    )
     viewer_page.wait_for_function(
         "() => window.threejsViewer._containerHidden === false", timeout=2000
     )
@@ -11063,7 +11084,8 @@ def test_render_loop_skips_while_container_hidden(viewer_client, viewer_page):
     shown = viewer_page.evaluate(_RENDER_STATE_JS)
     assert shown["frame"] > hidden["frame"], "rendering did not resume"
     assert shown["playing"] is True
-    assert 0 < shown["time"] - hidden["time"] < 0.2, (hidden, shown)
+    assert resumed["reset"], "showing the container did not reset its playback clock"
+    assert resumed["jump"] == pytest.approx(min(resumed["elapsed"], 0.25)), resumed
 
 
 @pytest.mark.browser
