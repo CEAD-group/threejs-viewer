@@ -647,10 +647,7 @@ def _ipv6_loopback_available() -> bool:
 @pytest.fixture()
 def bound_client():
     """A client with its servers bound on OS-chosen ports, no browser."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        ws_port = s.getsockname()[1]
-    client = ViewerClient(port=ws_port, open_browser=False)
+    client = ViewerClient(port=0, open_browser=False)
     client._start_servers(http_port=0)
     try:
         yield client
@@ -752,6 +749,108 @@ def test_listen_sockets_raises_when_ipv6_port_is_taken():
     assert {s.family for s in socks} == {socket.AF_INET, socket.AF_INET6}
     for s in socks:
         s.close()
+
+
+class _FakeListener:
+    """Stand-in for a bound socket: records the address, nothing else."""
+
+    def __init__(self, address, port):
+        self.address = (address, port)
+        self.closed = False
+
+    def getsockname(self):
+        return self.address
+
+    def close(self):
+        self.closed = True
+
+
+def _patch_create_server(monkeypatch, fail_second_bind_times):
+    """Replace socket.create_server with a fake whose second bind per attempt
+    raises EADDRINUSE ``fail_second_bind_times`` times; returns the fakes."""
+    import errno
+
+    from threejs_viewer import client as client_mod
+
+    created = []
+    state = {"next_port": 40000, "failures_left": fail_second_bind_times}
+
+    def fake_create_server(address, family):
+        host, port = address
+        if host == "::1" and state["failures_left"] > 0:
+            state["failures_left"] -= 1
+            raise OSError(errno.EADDRINUSE, "Address already in use")
+        if port == 0:
+            state["next_port"] += 1
+            port = state["next_port"]
+        sock = _FakeListener(host, port)
+        created.append(sock)
+        return sock
+
+    monkeypatch.setattr(client_mod.socket, "create_server", fake_create_server)
+    monkeypatch.setattr(
+        client_mod.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 0, 0, 0)),
+        ],
+    )
+    return created
+
+
+def test_listen_sockets_port0_repicks_when_second_address_is_taken(monkeypatch):
+    """The OS only guarantees the port-0 pick free on the first address; a
+    collision on the second one closes what was bound and picks again."""
+    from threejs_viewer.client import _listen_sockets
+
+    created = _patch_create_server(monkeypatch, fail_second_bind_times=1)
+    socks = _listen_sockets("localhost", 0)
+    assert [s.address[0] for s in socks] == ["127.0.0.1", "::1"]
+    assert len({s.address[1] for s in socks}) == 1
+    # The first pick's IPv4 socket was closed before the retry.
+    assert len(created) == 3
+    assert created[0].closed and created[0].address[1] != socks[0].address[1]
+    assert not created[1].closed and not created[2].closed
+
+
+def test_listen_sockets_port0_gives_up_after_attempt_bound(monkeypatch):
+    from threejs_viewer.client import PORT_PICK_ATTEMPTS, _listen_sockets
+
+    created = _patch_create_server(monkeypatch, fail_second_bind_times=10**6)
+    with pytest.raises(OSError):
+        _listen_sockets("localhost", 0)
+    assert len(created) == PORT_PICK_ATTEMPTS
+    assert all(s.closed for s in created)
+
+
+def test_listen_sockets_explicit_port_does_not_retry(monkeypatch):
+    """A caller-chosen port is a contract; a collision raises at once."""
+    import errno
+
+    from threejs_viewer.client import _listen_sockets
+
+    created = _patch_create_server(monkeypatch, fail_second_bind_times=1)
+    with pytest.raises(OSError) as info:
+        _listen_sockets("localhost", 45678)
+    assert info.value.errno == errno.EADDRINUSE
+    assert len(created) == 1 and created[0].closed
+
+
+def test_start_servers_port0_binds_ws_port_and_advertises_it():
+    """ViewerClient(port=0) lets the OS pick the WebSocket port on every
+    address at once, instead of probing IPv4 first and binding that number."""
+    client = ViewerClient(port=0, open_browser=False)
+    try:
+        client._start_servers()
+        assert client.port > 0
+        assert client._http_port > 0
+        assert f"ws_port={client.port}" in client.viewer_url
+        assert {srv.socket.getsockname()[1] for srv in client._ws_servers} == {
+            client.port
+        }
+    finally:
+        client.disconnect()
 
 
 def test_add_menu_validates_and_records_for_reconnect():
