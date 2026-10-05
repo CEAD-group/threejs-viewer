@@ -120,10 +120,7 @@ tp = Toolpath.from_points(
 )
 
 # Bead (parametric tube — chamfered hex cross-section, built client-side)
-# tp.colorize("viridis")
-tp.colors = [
-    [0.01, 0.01, 0.01],
-] * len(tp)
+tp.colorize("viridis")
 # Bead texture.  The maker works in millimetres and this scene's bead is
 # 0.12 x 0.03 units, so build the maps for a bead 100x that size (12 x 3 mm,
 # one tile per 36 mm) and repeat them every 0.36 units.  The colour map is a
