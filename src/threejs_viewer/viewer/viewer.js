@@ -12018,6 +12018,8 @@ export class ThreeJSViewer {
         this._assetsComplete = false;
         this._ws = null;
         this._reconnectTimeout = null;
+        this._handshakeTimeout = null;
+        this._connectStarted = false;
         this._animationFrameId = null;
 
         // Animation state
@@ -15864,6 +15866,9 @@ export class ThreeJSViewer {
     // ========== WebSocket ==========
 
     connect() {
+        // One retry loop per viewer, even if an embedder calls connect again.
+        if (this._destroyed || this._connectStarted) return;
+        this._connectStarted = true;
         // Derive the probe URL from the WS URL by swapping only the scheme
         // (ws→http / wss→https). Path and query are preserved, so the probe
         // targets the same endpoint as the eventual WebSocket upgrade.
@@ -15885,19 +15890,29 @@ export class ThreeJSViewer {
             // must ensure that host (or its proxy) returns *something* on GET
             // for the same path/query as `wsUrl`, not just for `/`.
             try {
-                await fetch(probeUrl, { mode: 'no-cors', signal: AbortSignal.timeout(400) });
+                await fetch(probeUrl, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(2000) });
             } catch {
                 // Server not reachable — retry later without creating a WebSocket
-                this._reconnectTimeout = setTimeout(doConnect, 500);
+                if (!this._destroyed) this._reconnectTimeout = setTimeout(doConnect, 500);
                 return;
             }
             // destroy() may have run during the probe await; a destroyed
             // viewer must not open a socket, send hello, or fire hooks.
             if (this._destroyed) return;
 
-            this._ws = new WebSocket(this._wsUrl);
+            const ws = this._ws = new WebSocket(this._wsUrl);
+            // A TCP connection can accept the probe yet stall its upgrade.
+            // Don't wait for the browser's (potentially minute-long) timeout.
+            this._handshakeTimeout = setTimeout(() => {
+                if (this._destroyed || this._ws !== ws || ws.readyState !== WebSocket.CONNECTING) return;
+                ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+                ws.close();
+                this._ws = null;
+                this._reconnectTimeout = setTimeout(doConnect, 500);
+            }, 5000);
 
             this._ws.onopen = () => {
+                clearTimeout(this._handshakeTimeout);
                 this._statusDot.className = 'tjsv-status-dot connected';
                 this._statusDot.title = 'Connected';
                 this._statusText.textContent = 'Connected';
@@ -15916,6 +15931,7 @@ export class ThreeJSViewer {
             };
 
             this._ws.onclose = () => {
+                clearTimeout(this._handshakeTimeout);
                 this._statusDot.className = 'tjsv-status-dot disconnected';
                 this._statusDot.title = 'Waiting for Python...';
                 this._statusText.textContent = 'Waiting...';
@@ -20293,6 +20309,7 @@ export class ThreeJSViewer {
             this._lodWorker = null;
         }
         clearTimeout(this._reconnectTimeout);
+        clearTimeout(this._handshakeTimeout);
         cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
         this._animLiftObserver.disconnect();
