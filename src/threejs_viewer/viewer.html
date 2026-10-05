@@ -29,6 +29,7 @@
             --tjsv-panel-2: #2a2a2a;
             --tjsv-panel-3: #333;
             --tjsv-border: #3a3a3a;
+            --tjsv-border-strong: #4a4a4a;
             --tjsv-text: #e0e0e0;
             --tjsv-text-dim: #999;
             --tjsv-text-faint: #666;
@@ -334,39 +335,74 @@
             display: flex;
             gap: 4px;
         }
-        .threejs-viewer .transport-buttons button {
-            background: #444;
-            border: none;
-            color: white;
-            width: 32px;
-            height: 32px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
+        .threejs-viewer .transport-buttons button,
+        .threejs-viewer .speed-control button,
+        .threejs-viewer .loop-toggle {
+            /* ribweaver's .step-btn */
+            flex: 0 0 auto;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            line-height: 1;
+            font-size: 10px;
             display: flex;
             align-items: center;
             justify-content: center;
+            color: var(--tjsv-text-faint);
+            background: var(--tjsv-panel-2);
+            border: 1px solid var(--tjsv-border);
+            border-radius: 3px;
+            cursor: pointer;
+            user-select: none;
         }
-        .threejs-viewer .transport-buttons button:hover { background: #555; }
-        .threejs-viewer .transport-buttons button:active { background: #333; }
-        .threejs-viewer .transport-buttons button.active { background: #0066cc; }
+        .threejs-viewer .transport-buttons button:hover,
+        .threejs-viewer .speed-control button:hover,
+        .threejs-viewer .loop-toggle:hover { background: var(--tjsv-panel-3); color: var(--tjsv-text); }
+        .threejs-viewer .transport-buttons button:active,
+        .threejs-viewer .transport-buttons button.active,
+        .threejs-viewer .speed-control button:active,
+        .threejs-viewer .loop-toggle:active,
+        .threejs-viewer .loop-toggle.active {
+            background: var(--tjsv-primary);
+            color: #fff;
+            border-color: var(--tjsv-primary);
+        }
+        .threejs-viewer .transport-buttons button svg { display: block; width: 12px; height: 12px; }
+        .threejs-viewer .tjsv-btn-play .tjsv-icon-pause,
+        .threejs-viewer .tjsv-btn-play.playing .tjsv-icon-play { display: none; }
+        .threejs-viewer .tjsv-btn-play.playing .tjsv-icon-pause { display: block; }
         .threejs-viewer .tjsv-timeline-container {
             flex: 1;
             position: relative;
-            height: 24px;
-            background: #333;
-            border-radius: 4px;
+            height: 16px;
             cursor: pointer;
         }
+        .threejs-viewer .tjsv-timeline-container::before,
         .threejs-viewer .tjsv-timeline-progress {
             position: absolute;
             left: 0;
-            top: 0;
-            height: 100%;
-            background: #0066cc;
-            border-radius: 4px 0 0 4px;
+            top: 50%;
+            height: 4px;
+            margin-top: -2px;
+            border-radius: 2px;
             pointer-events: none;
         }
+        .threejs-viewer .tjsv-timeline-container::before { content: ''; right: 0; background: var(--tjsv-border-strong); }
+        .threejs-viewer .tjsv-timeline-progress {
+            background: color-mix(in srgb, var(--tjsv-primary) 50%, var(--tjsv-border-strong));
+        }
+        .threejs-viewer .tjsv-timeline-thumb {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            width: 11px;
+            height: 11px;
+            margin: -5.5px 0 0 -5.5px;
+            border-radius: 50%;
+            background: var(--tjsv-text-dim);
+            pointer-events: none;
+        }
+        .threejs-viewer .tjsv-timeline-container:hover .tjsv-timeline-thumb { background: var(--tjsv-text); }
         .threejs-viewer .tjsv-timeline-markers {
             position: absolute;
             left: 0;
@@ -420,37 +456,13 @@
             align-items: center;
             gap: 6px;
         }
-        .threejs-viewer .speed-control button {
-            background: #444;
-            border: none;
-            color: white;
-            width: 28px;
-            height: 28px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .threejs-viewer .speed-control button:hover { background: #555; }
         .threejs-viewer .speed-control span {
             font-family: monospace;
             font-size: 12px;
             min-width: 50px;
             text-align: center;
         }
-        .threejs-viewer .loop-toggle {
-            background: #444;
-            border: none;
-            color: white;
-            padding: 4px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-        }
-        .threejs-viewer .loop-toggle:hover { background: #555; }
-        .threejs-viewer .loop-toggle.active { background: #0066cc; }
+        .threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: 11px; }
         .threejs-viewer .frame-display {
             font-family: monospace;
             font-size: 11px;
@@ -534,7 +546,6 @@
         }
         .threejs-viewer .clip-slider-row input[type="range"] {
             flex: 1;
-            accent-color: #0066cc;
         }
         .threejs-viewer .clip-slider-row .clip-value {
             font-family: monospace;
@@ -650,7 +661,6 @@
         }
         .threejs-viewer .lighting-slider-row input[type="range"] {
             flex: 1;
-            accent-color: #0066cc;
         }
         .threejs-viewer .lighting-slider-row .lighting-value {
             font-family: monospace;
@@ -883,6 +893,41 @@
             white-space: nowrap;
             z-index: 10;
         }
+
+        /* Range sliders, ribweaver's base.css look (4 px track, 11 px round thumb). */
+        .threejs-viewer input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            height: 16px;
+            background: transparent;
+            cursor: pointer;
+        }
+        .threejs-viewer input[type="range"]::-webkit-slider-runnable-track {
+            height: 4px;
+            border-radius: 2px;
+            background: var(--tjsv-border-strong);
+        }
+        .threejs-viewer input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 11px;
+            height: 11px;
+            margin-top: -3.5px;
+            border-radius: 50%;
+            background: var(--tjsv-text-dim);
+            border: none;
+        }
+        .threejs-viewer input[type="range"]:hover::-webkit-slider-thumb { background: var(--tjsv-text); }
+        .threejs-viewer input[type="range"]:focus { outline: none; }
+        .threejs-viewer input[type="range"]:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 2px; }
+        .threejs-viewer input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--tjsv-border-strong); }
+        .threejs-viewer input[type="range"]::-moz-range-progress {
+            height: 4px;
+            border-radius: 2px;
+            background: color-mix(in srgb, var(--tjsv-primary) 50%, var(--tjsv-border-strong));
+        }
+        .threejs-viewer input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: none; border-radius: 50%; background: var(--tjsv-text-dim); }
+        .threejs-viewer input[type="range"]:hover::-moz-range-thumb { background: var(--tjsv-text); }
     </style>
     <script type="importmap">
     {
@@ -1033,25 +1078,29 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
 <div class="tjsv-animation-controls">
     <div class="timeline-row">
         <div class="transport-buttons">
-            <button class="tjsv-btn-start" title="Jump to start (Home)">&#x23EE;</button>
-            <button class="tjsv-btn-prev-frame" title="Previous frame (&larr)">&#x25C1;</button>
-            <button class="tjsv-btn-play" title="Play/Pause (Space)">&#x25B6;</button>
-            <button class="tjsv-btn-next-frame" title="Next frame (&rarr)">&#x25B7;</button>
-            <button class="tjsv-btn-end" title="Jump to end (End)">&#x23ED;</button>
+            <button class="tjsv-btn-start" title="Jump to start (Home)" aria-label="Jump to start"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="12 19 5 12 12 5"/><polyline points="19 5 12 12 19 19"/></svg></button>
+            <button class="tjsv-btn-prev-frame" title="Previous frame (&larr;)" aria-label="Previous frame"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15.5 19 8.5 12 15.5 5"/></svg></button>
+            <button class="tjsv-btn-play" title="Play/Pause (Space)" aria-label="Play/Pause">
+                <svg class="tjsv-icon-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="8 5 19 12 8 19"/></svg>
+                <svg class="tjsv-icon-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8.5" y1="5" x2="8.5" y2="19"/><line x1="15.5" y1="5" x2="15.5" y2="19"/></svg>
+            </button>
+            <button class="tjsv-btn-next-frame" title="Next frame (&rarr;)" aria-label="Next frame"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="8.5 5 15.5 12 8.5 19"/></svg></button>
+            <button class="tjsv-btn-end" title="Jump to end (End)" aria-label="Jump to end"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="12 5 19 12 12 19"/><polyline points="5 19 12 12 5 5"/></svg></button>
         </div>
         <div class="tjsv-timeline-container">
             <div class="tjsv-timeline-progress"></div>
+            <div class="tjsv-timeline-thumb"></div>
             <div class="tjsv-timeline-markers"></div>
         </div>
         <div class="time-display">
             <span class="tjsv-current-time">0.00</span>s / <span class="tjsv-total-time">0.00</span>s
         </div>
         <div class="speed-control">
-            <button class="tjsv-btn-slower" title="Slower (&darr)">&minus;</button>
+            <button class="tjsv-btn-slower" title="Slower (&darr;)" aria-label="Slower">&minus;</button>
             <span class="tjsv-speed-display">1x</span>
-            <button class="tjsv-btn-faster" title="Faster (&uarr)">+</button>
+            <button class="tjsv-btn-faster" title="Faster (&uarr;)" aria-label="Faster">+</button>
         </div>
-        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">&#x27F3; Loop</button>
+        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">Loop</button>
         <div class="frame-display">Frame <span class="tjsv-current-frame">0</span>/<span class="tjsv-total-frames">0</span></div>
     </div>
     <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
@@ -13811,6 +13860,7 @@ class ThreeJSViewer {
         this._viewProjBtn = q('.tjsv-view-proj');
         this._timelineProgressEl = q('.tjsv-timeline-progress');
         this._timelineMarkersEl = q('.tjsv-timeline-markers');
+        this._timelineThumbEl = q('.tjsv-timeline-thumb');
         this._currentTimeEl = q('.tjsv-current-time');
         this._totalTimeEl = q('.tjsv-total-time');
         this._currentFrameEl = q('.tjsv-current-frame');
@@ -16836,10 +16886,12 @@ class ThreeJSViewer {
         if (!this._animation) return;
         const { index: frameIndex } = this._getFrameAtTime(this._animationTime);
         const progress = this._animation.duration > 0 ? (this._animationTime / this._animation.duration) * 100 : 0;
-        this._timelineProgressEl.style.width = `${Number.isFinite(progress) ? progress : 0}%`;
+        const pct = Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
+        this._timelineProgressEl.style.width = `${pct}%`;
+        this._timelineThumbEl.style.left = `${pct}%`;
         this._currentTimeEl.textContent = this._formatTime(this._animationTime);
         this._currentFrameEl.textContent = frameIndex + 1;
-        this._btnPlay.textContent = this._animationPlaying ? '\u23F8' : '\u25B6';
+        this._btnPlay.classList.toggle('playing', !!this._animationPlaying);
     }
 
     /** @param {number} delta */

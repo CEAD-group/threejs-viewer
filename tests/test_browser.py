@@ -11203,3 +11203,75 @@ def test_annotation_colours_ignore_tone_mapping_and_exposure(
     for kind, result in colours.items():
         assert result["drawn"] > 0, (kind, result)
         assert result["changed"] == 0, (kind, result)
+
+
+@pytest.mark.browser
+def test_animation_controls_ribweaver_look_and_keys(viewer_client, viewer_page):
+    """The animation toolbar wears ribweaver's step-button and range look
+    (20 px buttons with an svg icon, 4 px track, 11 px thumb) and the keyboard
+    shortcuts still drive playback after the markup change."""
+    viewer_client.add_box("spinner")
+    viewer_client.load_animation(_spin_animation("spinner"), autoplay=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    r = viewer_page.evaluate(
+        """() => {
+            const el = window.threejsViewer.el;
+            const box = (sel) => {
+                const b = el.querySelector(sel).getBoundingClientRect();
+                return [b.width, b.height];
+            };
+            const btns = ['start', 'prev-frame', 'play', 'next-frame', 'end'].map(
+                (n) => {
+                    const b = el.querySelector('.tjsv-btn-' + n);
+                    const vis = [...b.querySelectorAll('svg')].some(
+                        (s) => getComputedStyle(s).display !== 'none');
+                    return [n, box('.tjsv-btn-' + n), vis];
+                });
+            const cs = getComputedStyle(el.querySelector('.tjsv-timeline-container'), '::before');
+            return {
+                btns,
+                slower: box('.tjsv-btn-slower'),
+                faster: box('.tjsv-btn-faster'),
+                track: parseFloat(cs.height),
+                progress: box('.tjsv-timeline-progress')[1],
+                thumb: box('.tjsv-timeline-thumb'),
+                container: box('.tjsv-timeline-container')[1],
+            };
+        }"""
+    )
+    for name, (w, h), has_icon in r["btns"]:
+        assert (round(w), round(h)) == (20, 20), (name, r)
+        assert has_icon, (name, r)
+    assert [round(v) for v in r["slower"]] == [20, 20], r
+    assert [round(v) for v in r["faster"]] == [20, 20], r
+    assert r["track"] == 4 and round(r["progress"]) == 4, r
+    assert [round(v) for v in r["thumb"]] == [11, 11], r
+    assert r["container"] >= 16, r
+
+    # Keyboard still drives playback.
+    def playing():
+        return viewer_page.evaluate(
+            "() => window.threejsViewer.getAnimationState().playing"
+        )
+
+    _press_viewer_key(viewer_page, " ", "Space")
+    frames(viewer_page, 2)
+    assert playing()
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer.el.querySelector('.tjsv-btn-play').classList.contains('playing')"
+    )
+    _press_viewer_key(viewer_page, " ", "Space")
+    frames(viewer_page, 2)
+    assert not playing()
+    _press_viewer_key(viewer_page, "Home", "Home")
+    frames(viewer_page, 2)
+    assert _get_animation_time(viewer_page) == 0
+    _press_viewer_key(viewer_page, "ArrowRight", "ArrowRight")
+    frames(viewer_page, 2)
+    assert _get_animation_time(viewer_page) > 0
+    # The thumb tracks the playhead.
+    left = viewer_page.evaluate(
+        "() => window.threejsViewer.el.querySelector('.tjsv-timeline-thumb').style.left"
+    )
+    assert left.endswith("%") and float(left[:-1]) > 0, left
