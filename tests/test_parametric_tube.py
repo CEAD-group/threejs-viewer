@@ -438,6 +438,39 @@ def test_add_parametric_tube_lod_accepts_numpy_scalars():
 # --- Browser integration tests ---
 
 
+def test_update_parametric_tube_colors_none_sends_reset():
+    """colors=None is a synchronous reset: a plain JSON message with a null
+    blob_url and no blob transfer; base_color rides along as baseColor."""
+    from threejs_viewer import ViewerClient
+
+    c = ViewerClient(port=0, open_browser=False)
+    c._sent = []
+    c._send = lambda h: c._sent.append(h)
+    c._binary_messages = []
+    c._send_binary = lambda h, p: c._binary_messages.append((h, p))
+
+    c.update_parametric_tube_colors("bead", None, base_color=0x7AB8CC)
+    c.update_parametric_tube_colors("bead", None)
+    assert c._binary_messages == []
+    with_base, without_base = c._sent
+    assert with_base == {
+        "type": "update_parametric_tube_colors",
+        "id": "bead",
+        "numSpinePoints": 0,
+        "blob_url": None,
+        "baseColor": 0x7AB8CC,
+    }
+    assert "baseColor" not in without_base
+    assert without_base["blob_url"] is None
+
+    # The colour path is unchanged: header plus blob through _send_binary.
+    c.update_parametric_tube_colors("bead", np.full(3, 0xFF0000, dtype=np.uint32))
+    assert len(c._sent) == 2
+    ((header, payload),) = c._binary_messages
+    assert header["numSpinePoints"] == 3
+    assert len(payload) == 12
+
+
 def _straight_spine(n=20, length=2.0):
     """Horizontal spine along +X so the derived frame has width=+Y, height=+Z."""
     x = np.linspace(0.0, length, n, dtype=np.float32)
@@ -814,6 +847,251 @@ def test_parametric_tube_color_swap(viewer_client, viewer_page):
     assert after["posHash"] == before["posHash"]  # positions untouched
     assert after["r0"] < 0.01
     assert abs(after["b0"] - 1.0) < 1e-3
+
+
+_TUBE_COLOR_STATE = """(id) => {
+    const o = window.threejsViewer._objects.get(id);
+    const col = o.geometry.getAttribute('color');
+    const mat = Array.isArray(o.material) ? o.material[0] : o.material;
+    const lod = o.userData.tubeLOD;
+    return {
+        hasColorAttr: !!col,
+        r0: col ? col.array[0] : null, b0: col ? col.array[2] : null,
+        vertexColors: mat.vertexColors,
+        colorHex: mat.color.getHex(),
+        tubeHasColors: o.userData.tubeHasColors,
+        ringColors: !!(o.userData.tubeMorphData && o.userData.tubeMorphData.ringColors),
+        lodRingColors: lod ? !!lod.originalRingColors : null,
+        geomUuid: o.geometry.uuid,
+        nSpine: o.userData.tubeNumSpinePoints,
+    };
+}"""
+
+
+def _console_errors(messages):
+    return [(t, text) for t, text in messages if t in ("error", "warning")]
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_reset_reverts_to_base_color(viewer_client, viewer_page):
+    """update_parametric_tube_colors(colors=None) drops the vertex colours
+    synchronously, with no fetch and no console error, and a later colour
+    update colours the tube again (issue #256)."""
+    from conftest import settle
+
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+
+    n = 8
+    spine = _straight_spine(n=n, length=1.0)
+    widths = np.full(n, 0.2, dtype=np.float32)
+    heights = np.full(n, 0.1, dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "reset_tube",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        colors=np.full(n, 0xFF0000, dtype=np.uint32),
+    )
+    settle(viewer_client)
+    before = viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_tube")
+    assert before["hasColorAttr"] and before["vertexColors"] and before["tubeHasColors"]
+
+    viewer_client.update_parametric_tube_colors("reset_tube", None, base_color=0x112233)
+    settle(viewer_client)
+    after = viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_tube")
+    assert after["hasColorAttr"] is False
+    assert after["vertexColors"] is False
+    assert after["colorHex"] == 0x112233
+    assert after["tubeHasColors"] is False
+    assert after["ringColors"] is False
+
+    # Without base_color the add path's default colour comes back.
+    viewer_client.update_parametric_tube_colors("reset_tube", None)
+    settle(viewer_client)
+    assert viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_tube")["colorHex"] == 0x7AB8CC
+
+    # A later colour update colours the tube again.
+    viewer_client.update_parametric_tube_colors(
+        "reset_tube", np.full(n, 0x0000FF, dtype=np.uint32)
+    )
+    settle(viewer_client)
+    again = viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_tube")
+    assert again["hasColorAttr"] and again["vertexColors"] and again["tubeHasColors"]
+    assert again["r0"] < 0.01 and abs(again["b0"] - 1.0) < 1e-3
+    assert again["colorHex"] == 0xFFFFFF
+    assert _console_errors(messages) == []
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_reset_during_draw_range(viewer_client, viewer_page):
+    """A colour-only reset at a fractional draw range leaves the active
+    frontier morph alone: positions, draw range and the relocated end cap are
+    byte-identical before and after, and the morph keeps running colourless
+    once the draw range moves on."""
+    from conftest import frames, settle
+
+    probe = """(id) => {
+        const o = window.threejsViewer._objects.get(id);
+        const g = o.geometry;
+        return {
+            pos: Array.from(g.getAttribute('position').array),
+            idx: Array.from(g.index.array),
+            drawCount: g.drawRange.count,
+            savedRingIndex: o.userData.tubeMorphData.savedRingIndex,
+        };
+    }"""
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    n = 10
+    spine = _straight_spine(n=n, length=1.0)
+    viewer_client.add_parametric_tube(
+        "reset_morph",
+        spine=spine,
+        widths=np.full(n, 0.2, dtype=np.float32),
+        heights=np.full(n, 0.1, dtype=np.float32),
+        colors=np.full(n, 0x00FF00, dtype=np.uint32),
+    )
+    viewer_client.set_draw_range("reset_morph", 0.37)
+    settle(viewer_client)
+    frames(viewer_page)
+    before = viewer_page.evaluate(probe, "reset_morph")
+    assert before["savedRingIndex"] is not None, "no frontier morph active"
+
+    # No set_draw_range after the reset: the geometry must not move on its own.
+    viewer_client.update_parametric_tube_colors("reset_morph", None)
+    settle(viewer_client)
+    frames(viewer_page)
+    after = viewer_page.evaluate(probe, "reset_morph")
+    assert after == before
+    state = viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_morph")
+    assert state["hasColorAttr"] is False and state["vertexColors"] is False
+    assert state["colorHex"] == 0x7AB8CC
+
+    # Advancing the frontier afterwards restores the old ring without colours.
+    viewer_client.set_draw_range("reset_morph", 0.61)
+    settle(viewer_client)
+    frames(viewer_page)
+    later = viewer_page.evaluate(probe, "reset_morph")
+    assert later["drawCount"] > before["drawCount"]
+    assert (
+        viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_morph")["hasColorAttr"] is False
+    )
+    assert _console_errors(messages) == []
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_reset_survives_lod_rebuild(viewer_client, viewer_page):
+    """With LOD forced on, a rebuild after a reset comes back uncoloured: the
+    worker's cached ring colours are cleared along with the main thread's."""
+    from conftest import settle
+
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    n = 400
+    x = np.linspace(0.0, 40.0, n, dtype=np.float32)
+    y = (0.5 * np.sin(np.linspace(0.0, 60.0, n))).astype(np.float32)
+    spine = np.column_stack([x, y, np.zeros(n, dtype=np.float32)])
+    viewer_client.add_parametric_tube(
+        "lod_reset",
+        spine=spine,
+        widths=np.full(n, 0.4, dtype=np.float32),
+        heights=np.full(n, 0.2, dtype=np.float32),
+        colors=np.full(n, 0xFF0000, dtype=np.uint32),
+        lod={"threshold": 0},
+    )
+    settle(viewer_client)
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        ready = viewer_page.evaluate(
+            "(id) => { const o = window.threejsViewer._objects.get(id);"
+            " return !!(o && o.userData.tubeLOD && o.userData.tubeLOD.keptIndices); }",
+            "lod_reset",
+        )
+        if ready:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("LOD never engaged")
+    first = viewer_page.evaluate(_TUBE_COLOR_STATE, "lod_reset")
+    assert first["hasColorAttr"] and first["lodRingColors"]
+
+    viewer_client.update_parametric_tube_colors("lod_reset", None, base_color=0x445566)
+    settle(viewer_client)
+    reset = viewer_page.evaluate(_TUBE_COLOR_STATE, "lod_reset")
+    assert reset["hasColorAttr"] is False and reset["lodRingColors"] is False
+
+    # Zoom far out so the worker rebuilds a coarser tube. The LOD dispatch is
+    # armed by an orbit/zoom gesture, not by set_camera.
+    viewer_client.set_camera(position=[2000, -2000, 2000], target=[20, 0, 0])
+    settle(viewer_client)
+    viewer_page.evaluate("() => { window.threejsViewer._lodDirty = true; }")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        time.sleep(0.3)  # 2 Hz tube-LOD throttle
+        rebuilt = viewer_page.evaluate(_TUBE_COLOR_STATE, "lod_reset")
+        if rebuilt["geomUuid"] != reset["geomUuid"]:
+            break
+    else:
+        pytest.fail("LOD worker never rebuilt the tube")
+    assert rebuilt["nSpine"] != first["nSpine"]
+    assert rebuilt["hasColorAttr"] is False
+    assert rebuilt["vertexColors"] is False
+    assert rebuilt["colorHex"] == 0x445566
+    assert rebuilt["ringColors"] is False
+    assert _console_errors(messages) == []
+
+
+@pytest.mark.browser
+def test_parametric_tube_color_reset_discards_in_flight_fetch(
+    viewer_client, viewer_page
+):
+    """A colour fetch still in flight when the reset arrives must not repaint
+    the tube afterwards. The blob fetch is delayed in the page so the reset
+    is guaranteed to land first."""
+    from conftest import settle
+
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    n = 8
+    spine = _straight_spine(n=n, length=1.0)
+    viewer_client.add_parametric_tube(
+        "inflight",
+        spine=spine,
+        widths=np.full(n, 0.2, dtype=np.float32),
+        heights=np.full(n, 0.1, dtype=np.float32),
+        colors=np.full(n, 0xFF0000, dtype=np.uint32),
+    )
+    settle(viewer_client)
+    # Hold every blob fetch for 600 ms before issuing it.
+    viewer_page.evaluate(
+        """() => {
+            const orig = window.fetch.bind(window);
+            window.__origFetch = orig;
+            window.fetch = (url, opts) => new Promise((resolve, reject) => {
+                setTimeout(() => orig(url, opts).then(resolve, reject), 600);
+            });
+        }"""
+    )
+    try:
+        viewer_client.update_parametric_tube_colors(
+            "inflight", np.full(n, 0x0000FF, dtype=np.uint32)
+        )
+        viewer_client.update_parametric_tube_colors(
+            "inflight", None, base_color=0x010203
+        )
+        # settle waits for the delayed fetch to drain either way.
+        settle(viewer_client)
+        state = viewer_page.evaluate(_TUBE_COLOR_STATE, "inflight")
+    finally:
+        viewer_page.evaluate("() => { window.fetch = window.__origFetch; }")
+    assert state["hasColorAttr"] is False
+    assert state["vertexColors"] is False
+    assert state["colorHex"] == 0x010203
+    assert state["tubeHasColors"] is False
+    assert _console_errors(messages) == []
+    # The superseded fetch is reported with the quiet line, not an error.
+    assert any("Discarding superseded" in text for _, text in messages), messages
 
 
 @pytest.mark.browser
