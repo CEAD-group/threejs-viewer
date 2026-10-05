@@ -212,6 +212,59 @@ function refreshRefs(refs, ids, map) {
 const _lodNodeWorld = new THREE.Vector3();
 const _lodScaleVec = new THREE.Vector3();
 const _lodBoundsBox = new THREE.Box3();
+const _nodeBoundsBox = new THREE.Box3();
+
+/**
+ * True when `node` is an embedder overlay (addOverlay) or sits inside one.
+ * A parented overlay rides under a tracked object, so traversals that edit
+ * or hit-test the tracked object (set_color, applyOpacity, set_highlight,
+ * the M/N swaps, pick, object click, framing) use this to leave it alone.
+ * @param {any} node
+ * @returns {boolean}
+ */
+function isUnderOverlay(node) {
+    for (let n = node; n; n = n.parent) {
+        if (n.userData && n.userData.__overlay) return true;
+    }
+    return false;
+}
+
+/**
+ * Union one node's own bounds into `box` (no recursion), as
+ * Box3.expandByObject does per node: an object-level `boundingBox`
+ * (instanced/batched meshes, sprites) wins over the geometry's.
+ * `node.matrixWorld` must be current.
+ * @param {THREE.Box3} box @param {any} node
+ */
+function expandBoxByNode(box, node) {
+    if (node.boundingBox !== undefined) {
+        if (node.boundingBox === null) node.computeBoundingBox();
+        if (!node.boundingBox) return;
+        _nodeBoundsBox.copy(node.boundingBox);
+    } else if (node.geometry) {
+        if (node.geometry.boundingBox === null) node.geometry.computeBoundingBox();
+        if (!node.geometry.boundingBox) return;
+        _nodeBoundsBox.copy(node.geometry.boundingBox);
+    } else {
+        return;
+    }
+    box.union(_nodeBoundsBox.applyMatrix4(node.matrixWorld));
+}
+
+/**
+ * Box3.expandByObject for a tracked object, skipping the embedder overlays
+ * mounted under it unless they opted in with `includeInBounds` (a frame
+ * triad on a robot link must not stretch the link's framing). World
+ * matrices must be current (`root.updateWorldMatrix(true, true)`).
+ * @param {THREE.Box3} box @param {any} root
+ */
+function expandBoxSkippingOverlays(box, root) {
+    const meta = root.userData && root.userData.__overlay;
+    if (meta && !meta.includeInBounds) return;
+    expandBoxByNode(box, root);
+    const kids = root.children;
+    for (let i = 0; i < kids.length; i++) expandBoxSkippingOverlays(box, kids[i]);
+}
 
 // Scratch objects for matrix decompose/lerp. Module-scope to avoid per-frame alloc.
 const _lerpPosA = new THREE.Vector3();
@@ -1619,6 +1672,8 @@ function applyOpacity(obj, opacity) {
         // Same for a primitive's `outline`: an accent that follows the fill's
         // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
+        // Embedder overlays mounted under this object keep their own look.
+        if (isUnderOverlay(child)) return;
         for (const mat of ownMaterials(child)) {
             const wasTransparent = mat.transparent;
             mat.transparent = opacity < 1;
@@ -1837,6 +1892,8 @@ function applyHighlight(obj, enabled, opts = {}) {
         // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
             || child.userData.__highlightOutline) return;
+        // An embedder overlay riding the object is not part of the selection.
+        if (isUnderOverlay(child)) return;
         const style = resolveHighlightStyle(child, wantStyle);
         const existing = child.userData.__highlightEdge;
         if (enabled) {
@@ -5922,7 +5979,7 @@ class CameraController {
                 continue;
             }
             obj.updateWorldMatrix(true, true);
-            box.expandByObject(obj);
+            expandBoxSkippingOverlays(box, obj);
             // A LOD point cloud knows its full extent from the hierarchy
             // even while the group has no (or few) streamed node children —
             // without this, near/far and framing see an empty box until
@@ -5938,6 +5995,9 @@ class CameraController {
             for (const obj of v._overlays.values()) {
                 const meta = obj.userData.__overlay;
                 if (!meta || !meta.includeInBounds) continue;
+                // A parented overlay waiting for its parent is unmounted
+                // and has no world pose to measure.
+                if (!obj.parent) continue;
                 obj.updateWorldMatrix(true, true);
                 box.expandByObject(obj);
             }
@@ -7029,7 +7089,8 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165): a material swap
         // would turn the outline into a solid shell. Same for primitive outlines.
         return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
-            || ud.__highlightOutline || ud.__primitiveOutline);
+            || ud.__highlightOutline || ud.__primitiveOutline)
+            && !isUnderOverlay(obj);
     }
 
     applyShading() {
@@ -11988,6 +12049,11 @@ export class ThreeJSViewer {
         /** @type {Map<string, THREE.Object3D>} */
         this._overlays = new Map();
         this._overlayAutoId = 0;
+        // Parented overlays (issue #254) whose parentId has no tracked object
+        // yet, or whose parent was deleted: parentId -> Set of overlay ids.
+        // _registerObject mounts them when an object lands under that id.
+        /** @type {Map<string, Set<string>>} */
+        this._pendingOverlayMounts = new Map();
 
         // Embedder animation-clock hooks (onAnimationTime): fired on every
         // applied frame (playback tick, seek, step) and on play/pause flips.
@@ -13581,6 +13647,7 @@ export class ThreeJSViewer {
             this._objGeneration++;
             this._sceneBoundsDirty = true;
         }
+        this._mountWaitingOverlays(id, obj);
     }
 
     /** @param {any} obj @param {any} transform */
@@ -14538,6 +14605,9 @@ export class ThreeJSViewer {
         this._billboardOrderDirty = true;
         const obj = this._objects.get(id);
         if (obj) {
+            // Embedder overlays under this subtree are not ours to dispose:
+            // park them until an object is registered under their parent id.
+            this._detachOverlaysUnder(obj);
             // Prune a stale deferred-re-parent entry: if this object was
             // waiting for a parent that never arrived, a later unrelated
             // object reusing this id must not get yanked under it. (Deleting
@@ -15857,6 +15927,8 @@ export class ThreeJSViewer {
                         // Composes with set_highlight: the outline child keeps
                         // its own selection colour.
                         if (!child.material || child.userData.__highlightOutline) return;
+                        // Embedder overlays under the object keep their own colour.
+                        if (isUnderOverlay(child)) return;
                         for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(data.color); }
                     });
                     if (data.opacity != null) applyOpacity(colorObj, data.opacity);
@@ -18692,7 +18764,9 @@ export class ThreeJSViewer {
                 !this._isClipHelper(child) &&
                 !this._isPivotMarkerDescendant(child)) {
                 child.updateWorldMatrix(true, false);
-                bbox.expandByObject(child);
+                // Per node, not recursive: `visit` descends itself and
+                // applies the overlay/grid skips to each child.
+                expandBoxByNode(bbox, child);
             }
             // LOD point clouds: frame the full advertised extent (root
             // octree cube), not just whatever nodes happen to be streamed
@@ -18855,6 +18929,9 @@ export class ThreeJSViewer {
         for (const hit of hits) {
             const ho = /** @type {any} */ (hit.object);
             if (!(ho.isMesh || ho.isPoints)) continue;
+            // A parented overlay sits inside a tracked root; the embedder
+            // owns its hit-testing (issue #254).
+            if (isUnderOverlay(ho)) continue;
             let visible = true;
             for (let n = ho; n; n = n.parent) {
                 if (n.visible === false) { visible = false; break; }
@@ -19310,12 +19387,17 @@ export class ThreeJSViewer {
         }
         if (!candidates.length) return null;
         const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
-        if (!hits.length) return null;
-        // Walk up to the top-level object the user added (a value of _objects).
-        let target = hits[0].object;
-        while (target && !ids.has(target)) target = target.parent;
-        if (!target) return null;
-        return { object: target, id: /** @type {string} */ (ids.get(target)), point: hits[0].point };
+        for (const hit of hits) {
+            // Parented overlays (issue #254) are inside the candidates but
+            // belong to the embedder; a hit on one must not report its parent.
+            if (isUnderOverlay(hit.object)) continue;
+            // Walk up to the top-level object the user added (a value of _objects).
+            let target = hit.object;
+            while (target && !ids.has(target)) target = target.parent;
+            if (!target) return null;
+            return { object: target, id: /** @type {string} */ (ids.get(target)), point: hit.point };
+        }
+        return null;
     }
 
     /**
@@ -19389,15 +19471,29 @@ export class ThreeJSViewer {
     getObject(id) { return this._objects.get(id); }
 
     /**
-     * Mount an embedder-owned Object3D in the scene — live, embedder-computed
-     * content the message protocol doesn't cover (an animated cutter, a
-     * draggable selection box, transient highlights). Semantics: excluded
-     * from framing and scene bounds unless `includeInBounds: true`; never
-     * touched by scene `clear` or the animation system; ownership (and
-     * disposal) stays with the embedder. Re-using an id replaces that
-     * overlay (the old object is removed, not disposed).
+     * Mount an embedder-owned Object3D in the scene, for live,
+     * embedder-computed content the message protocol does not cover (an
+     * animated cutter, a draggable selection box, transient highlights).
+     * Semantics: excluded from framing and scene bounds unless
+     * `includeInBounds: true`; never touched by scene `clear` or the
+     * animation system; ownership (and disposal) stays with the embedder.
+     * Re-using an id replaces that overlay (the old object is removed, not
+     * disposed).
+     *
+     * `parentId` (issue #254) mounts the overlay as a child of that tracked
+     * object instead of the scene root, so it follows the parent's transform
+     * and visibility (a frame triad on a robot link). The overlay's own
+     * transform is parent-local. With no object registered under `parentId`
+     * yet, the overlay waits unmounted and is mounted by `_registerObject`
+     * when one lands; when the parent is deleted or re-added, the viewer
+     * detaches the overlay before disposing the parent's subtree and
+     * remounts it, local transform kept, on the next object registered
+     * under that id. Parented overlays are skipped by `pick()`, object
+     * clicks, double-click framing, `set_color`/`set_opacity`/`set_highlight`
+     * on the parent and the M/N debug cycles, and they receive the active
+     * clipping planes when mounted while the section clip is on.
      * @param {THREE.Object3D} object3D
-     * @param {{id?: string, includeInBounds?: boolean}} [opts]
+     * @param {{id?: string, parentId?: string|null, includeInBounds?: boolean}} [opts]
      * @returns {string|null} the overlay id (auto-generated if not given)
      */
     addOverlay(object3D, opts = {}) {
@@ -19408,22 +19504,23 @@ export class ThreeJSViewer {
         const id = opts.id != null ? String(opts.id) : `__overlay_${++this._overlayAutoId}`;
         const prior = this._overlays.get(id);
         if (prior) {
-            this._scene.remove(prior);
+            this._unmountOverlay(prior);
             // Stale metadata on a replaced object would let a later
             // removeOverlay(oldObject) resolve the id and remove the NEW
             // overlay registered under it.
             delete prior.userData.__overlay;
         }
-        object3D.userData.__overlay = { id, includeInBounds: !!opts.includeInBounds };
-        this._scene.add(object3D);
+        const parentId = opts.parentId != null ? String(opts.parentId) : null;
+        object3D.userData.__overlay = { id, parentId, includeInBounds: !!opts.includeInBounds };
         this._overlays.set(id, object3D);
-        this._sceneBoundsDirty = true;
+        this._mountOverlay(object3D);
         return id;
     }
 
     /**
-     * Unmount an overlay by id or by the Object3D itself. Does NOT dispose
-     * geometry/materials — the embedder owns them.
+     * Unmount an overlay by id or by the Object3D itself, whether it is
+     * mounted or still waiting for its parent. Does NOT dispose
+     * geometry/materials; the embedder owns them.
      * @param {string|THREE.Object3D} idOrObject
      * @returns {boolean} true if an overlay was removed
      */
@@ -19440,11 +19537,113 @@ export class ThreeJSViewer {
         }
         const obj = id != null ? this._overlays.get(id) : undefined;
         if (!obj) return false;
-        this._scene.remove(obj);
+        this._unmountOverlay(obj);
         this._overlays.delete(/** @type {string} */(id));
         delete obj.userData.__overlay;
-        this._sceneBoundsDirty = true;
         return true;
+    }
+
+    /**
+     * Put an overlay where its metadata says: the scene root, its tracked
+     * parent, or the waiting set when the parent is not registered yet.
+     * Materials get the active clipping planes, since `_updateClipMaterials`
+     * only runs on a clip toggle and would otherwise miss a late mount.
+     * @param {THREE.Object3D} obj
+     */
+    _mountOverlay(obj) {
+        const meta = obj.userData.__overlay;
+        if (!meta) return;
+        let host = null;
+        if (meta.parentId == null) {
+            host = this._scene;
+        } else {
+            host = this._objects.get(meta.parentId) || null;
+            if (!host) {
+                let waiting = this._pendingOverlayMounts.get(meta.parentId);
+                if (!waiting) {
+                    waiting = new Set();
+                    this._pendingOverlayMounts.set(meta.parentId, waiting);
+                }
+                waiting.add(meta.id);
+            }
+        }
+        if (host) {
+            host.add(obj); // plain add: the overlay's transform is parent-local
+            if (this._clipEnabled) this._applyClipToObject(obj);
+        }
+        this._objGeneration++;
+        this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
+    }
+
+    /**
+     * Take an overlay out of the scene graph and out of the waiting set,
+     * without disposing anything. Its local transform is left untouched.
+     * @param {THREE.Object3D} obj
+     */
+    _unmountOverlay(obj) {
+        const meta = obj.userData.__overlay;
+        if (meta && meta.parentId != null) {
+            const waiting = this._pendingOverlayMounts.get(meta.parentId);
+            if (waiting) {
+                waiting.delete(meta.id);
+                if (waiting.size === 0) this._pendingOverlayMounts.delete(meta.parentId);
+            }
+        }
+        if (obj.parent) obj.parent.remove(obj);
+        this._objGeneration++;
+        this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
+    }
+
+    /**
+     * Mount the overlays waiting for `id`, called from `_registerObject`.
+     * @param {string} id @param {THREE.Object3D} obj
+     */
+    _mountWaitingOverlays(id, obj) {
+        const waiting = this._pendingOverlayMounts.get(id);
+        if (!waiting) return;
+        this._pendingOverlayMounts.delete(id);
+        for (const overlayId of waiting) {
+            const overlay = this._overlays.get(overlayId);
+            const meta = overlay && overlay.userData.__overlay;
+            // The overlay may have been removed or re-added under another
+            // parent while waiting; only claim it if it still points at us.
+            if (!meta || meta.parentId !== id) continue;
+            obj.add(overlay);
+            if (this._clipEnabled) this._applyClipToObject(overlay);
+        }
+        this._objGeneration++;
+        this._sceneBoundsDirty = true;
+        this._shadowDirty = true;
+    }
+
+    /**
+     * Detach every registered overlay inside `root` before the subtree is
+     * disposed, and park each in the waiting set of its parent id so a
+     * re-add of that id remounts it (issue #254). Only the overlay root
+     * leaves the tree, so its local transform and children are preserved.
+     * @param {THREE.Object3D} root
+     */
+    _detachOverlaysUnder(root) {
+        /** @type {THREE.Object3D[]} */
+        const found = [];
+        root.traverse(/** @param {any} child */ (child) => {
+            const meta = child.userData && child.userData.__overlay;
+            if (meta && this._overlays.get(meta.id) === child) found.push(child);
+        });
+        for (const overlay of found) {
+            const meta = overlay.userData.__overlay;
+            if (overlay.parent) overlay.parent.remove(overlay);
+            if (meta.parentId == null) continue; // a root overlay nested by the embedder
+            let waiting = this._pendingOverlayMounts.get(meta.parentId);
+            if (!waiting) {
+                waiting = new Set();
+                this._pendingOverlayMounts.set(meta.parentId, waiting);
+            }
+            waiting.add(meta.id);
+        }
+        if (found.length) this._sceneBoundsDirty = true;
     }
 
     /**
