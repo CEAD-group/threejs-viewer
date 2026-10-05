@@ -5252,6 +5252,24 @@ class ParametricTube {
     /** @param {any} mesh */
     constructor(mesh) {
         this._mesh = mesh;
+        // The renderer uploads attributes while building its render list,
+        // before onBeforeRender, so the pending full colour upload has
+        // happened by the time this runs (issue #264).
+        mesh.onBeforeRender = () => { mesh.userData._colorFullUploadNeeded = false; };
+    }
+
+    /**
+     * Flag a colour-attribute slice for upload. While a full upload is
+     * pending (`_colorFullUploadNeeded`, set by `update_parametric_tube_colors`),
+     * no range is added: with ranges present the renderer uploads only those
+     * and leaves the rest of the GPU copy stale (issue #264).
+     * @param {THREE.BufferAttribute} colAttr
+     * @param {number} start
+     * @param {number} count
+     */
+    _markColorDirty(colAttr, start, count) {
+        if (!this._mesh.userData._colorFullUploadNeeded) colAttr.addUpdateRange(start, count);
+        colAttr.needsUpdate = true;
     }
 
     // Apply pre-built geometry from LOD worker.
@@ -5365,8 +5383,7 @@ class ParametricTube {
             const colAttr = obj.geometry.getAttribute('color');
             if (colAttr) {
                 colAttr.array.set(md.savedRingColors, ringBase);
-                colAttr.addUpdateRange(ringBase, rangeCount);
-                colAttr.needsUpdate = true;
+                this._markColorDirty(colAttr, ringBase, rangeCount);
             }
         }
         if (md.savedRingUVs) {
@@ -5546,8 +5563,7 @@ class ParametricTube {
                 const cg = gA * (1 - frac) + gB * frac;
                 const cb = bA * (1 - frac) + bB * frac;
                 fillRGBBlock(cols, ringBase, nCs, cr, cg, cb);
-                colAttr.addUpdateRange(ringBase, rangeCount);
-                colAttr.needsUpdate = true;
+                this._markColorDirty(colAttr, ringBase, rangeCount);
             }
         }
 
@@ -5638,8 +5654,7 @@ class ParametricTube {
                 const cr = cols[colSrcBase], cg = cols[colSrcBase + 1], cb = cols[colSrcBase + 2];
                 const capVerts = nCapRings * nCs;
                 fillRGBBlock(cols, ecBase * 3, capVerts, cr, cg, cb);
-                colAttr.addUpdateRange(capRangeStart, capRangeCount);
-                colAttr.needsUpdate = true;
+                this._markColorDirty(colAttr, capRangeStart, capRangeCount);
             }
         }
     }
@@ -5799,20 +5814,6 @@ class ParametricTube {
         this.updateMorphedNormals(visiblePairs);
         this.relocateEndCap(visiblePairs);
         obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
-
-        // After a full color rewrite (_colorFullUploadNeeded), the morph path
-        // may have added partial addUpdateRange calls on the color attribute.
-        // With pending ranges, Three.js only uploads those ranges — not the
-        // full buffer. Clear them so needsUpdate triggers a complete upload
-        // on the next render.
-        if (ud._colorFullUploadNeeded) {
-            const colAttr = obj.geometry.getAttribute('color');
-            if (colAttr) {
-                colAttr.clearUpdateRanges();
-                colAttr.needsUpdate = true;
-            }
-            ud._colorFullUploadNeeded = false;
-        }
     }
 }
 
@@ -5836,6 +5837,41 @@ function applyWorkerGeometry(mesh, msg) {
 function restoreFrontierRing(obj) {
     const t = obj.userData.parametricTube;
     if (t) t.restoreFrontierRing();
+}
+
+/**
+ * Return a parametric tube from per-ring vertex colours to its plain material
+ * colour, synchronously (issue #256). `baseColor` defaults to the add path's
+ * colour: white under a colour map (the map is multiplied by `material.color`,
+ * so any other value would tint the texture), `0x7ab8cc` otherwise. With LOD,
+ * the cached ring colours are cleared on both threads so later rebuilds come
+ * back uncoloured.
+ * @param {any} obj
+ * @param {number | null | undefined} baseColor
+ * @param {Worker | null | undefined} lodWorker
+ * @param {string} tubeId
+ */
+function resetParametricTubeColors(obj, baseColor, lodWorker, tubeId) {
+    const ud = obj.userData;
+    const md = ud.tubeMorphData;
+    // Drop the morph's colour state before the attribute goes, so a later
+    // restoreFrontierRing skips colours; the active morph itself is left as is.
+    if (md) { md.ringColors = null; md.savedRingColors = null; }
+    if (obj.geometry.getAttribute('color')) obj.geometry.deleteAttribute('color');
+    const mat = ud.tubeBaseMaterial || (Array.isArray(obj.material) ? obj.material[0] : obj.material);
+    mat.vertexColors = false;
+    const fallback = mat.map ? 0xffffff : 0x7ab8cc;
+    mat.color.setHex(baseColor != null ? baseColor : fallback);
+    mat.needsUpdate = true;
+    ud.tubeHasColors = false;
+    ud._colorFullUploadNeeded = false;
+    if (md) { md.ringColors = null; md.savedRingColors = null; }
+    const lod = ud.tubeLOD;
+    if (lod) {
+        lod.originalRingColors = null;
+        lod.colorVersion = (lod.colorVersion || 0) + 1;
+        if (lodWorker) lodWorker.postMessage({ type: 'updateColors', tubeId, ringColors: null });
+    }
 }
 
 /**
@@ -11905,6 +11941,8 @@ export class ThreeJSViewer {
         // id-less animation blob — a Symbol can never equal a real id.
         /** @type {Map<string|symbol, Set<AbortController>>} */
         this._loadAborts = new Map();
+        // Fetch controllers an add's replace step must not cancel (issue #257).
+        this._replaceSafeFetches = new WeakSet();
         // Deferred re-parenting (issue #138): children added with a parent=
         // id that isn't registered yet (parent model load in flight, or
         // messages out of order) land at the scene root and record the
@@ -12423,7 +12461,13 @@ export class ThreeJSViewer {
             // Re-sync colors: the worker may have used stale colors if a
             // color update arrived while it was busy rebuilding geometry.
             const lod = obj.userData.tubeLOD;
-            if (lod.colorVersion > 0 && lod.originalRingColors) {
+            if (lod.colorVersion > 0 && !lod.originalRingColors) {
+                // A reset arrived while the worker was building with the old
+                // colours; drop the stale attribute so the rebuild stays plain.
+                if (obj.geometry.getAttribute('color')) obj.geometry.deleteAttribute('color');
+                const md = obj.userData.tubeMorphData;
+                if (md) { md.ringColors = null; md.savedRingColors = null; }
+            } else if (lod.colorVersion > 0 && lod.originalRingColors) {
                 const nRed = lod.keptIndices.length;
                 const nCs = obj.userData.tubeNCs;
                 const rc = lod.originalRingColors;
@@ -13595,6 +13639,10 @@ export class ThreeJSViewer {
         this._shadowDirty = true;
         this._menus?.applyEyes();
         this._shading.refreshObject(obj);
+        // A track that landed before this object (or survived its re-add)
+        // must pin matrixAutoUpdate off and pose the new object now, not
+        // only on the next animation tick.
+        if (this._followPaths.has(id)) this._applyFollowPaths();
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -13644,6 +13692,10 @@ export class ThreeJSViewer {
         // A billboard composes on the pose the producer set, so record it
         // here rather than reading back what the billboard itself wrote.
         captureBillboardBase(obj);
+        // The binary adds apply the header transform after registration; a
+        // followed object has matrixAutoUpdate off, so recompose with the new
+        // scale instead of leaving the stale matrix until the next tick.
+        if (obj.userData.id && this._followPaths.has(obj.userData.id)) this._applyFollowPaths();
         // A moved object can leave the cached scene sphere; the perspective
         // near fit ((dist - radius) * 0.5, see updateNearFar) assumes the
         // sphere is honest, so a stale sphere can front-clip a fast mover for
@@ -13767,7 +13819,7 @@ export class ThreeJSViewer {
         obj.userData.id = id;
         this._applyTransform(obj, objData.transform);
         this._applyInitialVisibility(id, obj, objData.visible);
-        this._deleteObject(id, deleteOpts);
+        this._deleteObject(id, { ...deleteOpts, keepFollowPath: true });
         // After the delete, which drops the previous object's mixer for this id.
         if (newMixer) { this._mixers.set(id, newMixer); this._mixerGeneration++; }
         this._addToParentOrScene(obj, parentId);
@@ -14384,13 +14436,17 @@ export class ThreeJSViewer {
      * it is dead weight — and its blob may already have been dropped by the
      * producer, which is exactly the 404 this cancels. Read-side fetches
      * (colour updates, follow paths) register without superseding so they
-     * can't cancel a concurrent add for the same id.
+     * can't cancel a concurrent add for the same id. `keepOnReplace` marks a
+     * fetch that belongs to the object an add is about to install (a follow
+     * path), so a superseding or replace-step abort skips it; an explicit
+     * delete still cancels it (issue #257).
      * @param {string|symbol} id  the animation blob uses a Symbol key
-     * @param {{ supersede?: boolean }} [opts]
+     * @param {{ supersede?: boolean, keepOnReplace?: boolean }} [opts]
      */
     _trackFetch(id, opts) {
         if (opts && opts.supersede) this._abortFetches(id);
         const controller = new AbortController();
+        if (opts && opts.keepOnReplace) this._replaceSafeFetches.add(controller);
         let set = this._loadAborts.get(id);
         if (!set) { set = new Set(); this._loadAborts.set(id, set); }
         set.add(controller);
@@ -14408,13 +14464,19 @@ export class ThreeJSViewer {
     /**
      * Cancel every in-flight blob fetch for `id`. Called on delete/clear and
      * on a re-push, so the request is gone before the producer's blob is.
+     * Without `all`, fetches registered `keepOnReplace` are left running.
      * @param {string|symbol} id
+     * @param {{ all?: boolean }} [opts]
      */
-    _abortFetches(id) {
+    _abortFetches(id, opts) {
         const set = this._loadAborts.get(id);
         if (!set) return;
-        this._loadAborts.delete(id);
-        for (const controller of set) controller.abort();
+        for (const controller of set) {
+            if (!(opts && opts.all) && this._replaceSafeFetches.has(controller)) continue;
+            controller.abort();
+            set.delete(controller);
+        }
+        if (set.size === 0) this._loadAborts.delete(id);
     }
 
     /**
@@ -14532,11 +14594,16 @@ export class ThreeJSViewer {
 
     /**
      * @param {string} id
-     * @param {{ preserveInflight?: boolean }} [opts]
+     * @param {{ preserveInflight?: boolean, keepFollowPath?: boolean }} [opts]
      *   Pass `preserveInflight: true` from inside a binary loader's IIFE
      *   when it pre-clears a prior object with the same id — otherwise the
      *   loader would reject its own in-flight deferred and break queued
-     *   read-side ops for the load that just installed it.
+     *   read-side ops for the load that just installed it. `keepFollowPath`
+     *   marks the delete as the replace step of an add (implied by
+     *   `preserveInflight`): the id's follow-path track, installed or still
+     *   fetching, survives, because a `set_follow_path` sent alongside the
+     *   add belongs to the object being added (issue #257). An explicit
+     *   delete drops the track and aborts its fetch.
      */
     _deleteObject(id, opts) {
         // Invalidate any in-flight async add/fetch for this id so a late
@@ -14550,8 +14617,9 @@ export class ThreeJSViewer {
         if (!opts || !opts.preserveInflight) {
             // Cancel the fetch itself, not just its bookkeeping: the producer
             // typically drops the blob as it sends the delete, so letting the
-            // request run just buys a 404 (issue #157).
-            this._abortFetches(id);
+            // request run just buys a 404 (issue #157). A replace-step delete
+            // leaves the id's follow-path fetch running (issue #257).
+            this._abortFetches(id, { all: !(opts && opts.keepFollowPath) });
             const pendingLoad = this._inflightLoads.get(id);
             if (pendingLoad) {
                 pendingLoad.reject(new Error('deleted'));
@@ -14563,9 +14631,12 @@ export class ThreeJSViewer {
         // path calls _applyInitialVisibility (which reads the baseline) before
         // _deleteObject, so the race fix is unaffected.
         this._baselineVisibility.delete(id);
-        // Same for follow-path tracks: a deleted id must not keep its path
-        // (a later re-add with the same id would silently snap to it).
-        this._followPaths.delete(id);
+        // Same for follow-path tracks: an explicitly deleted id must not keep
+        // its path. A re-add keeps it (same id = same logical object), since the
+        // track may have landed before the add's own blob (issue #257).
+        if (!opts || !(opts.preserveInflight || opts.keepFollowPath)) {
+            this._followPaths.delete(id);
+        }
         this._billboards.delete(id);
         this._billboardOrderDirty = true;
         const obj = this._objects.get(id);
@@ -17367,10 +17438,25 @@ export class ThreeJSViewer {
                         console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
                         return;
                     }
+                    // Every colour message, fetch or reset, supersedes the one
+                    // before it: bump the token and abort the earlier request.
+                    const colorToken = (target.userData.tubeColorToken || 0) + 1;
+                    target.userData.tubeColorToken = colorToken;
+                    if (target.userData.__tubeColorFetch) {
+                        target.userData.__tubeColorFetch.abort();
+                        target.userData.__tubeColorFetch = null;
+                    }
+                    if (data.blob_url == null) {
+                        // Reset to the plain material colour (issue #256).
+                        resetParametricTubeColors(target, data.baseColor, this._lodWorker, data.id);
+                        this._shadowDirty = true;
+                        return;
+                    }
                     this._onFetchStart();
                     const capturedScene = this._sceneGeneration;
                     const loadToken = this._loadTokenOf(data.id);
                     const abortCtl = this._trackFetch(data.id);
+                    target.userData.__tubeColorFetch = abortCtl;
                     (async () => {
                         let fetched = false;
                         try {
@@ -17385,6 +17471,12 @@ export class ThreeJSViewer {
                             const obj = this._objects.get(data.id);
                             if (!obj || !obj.userData.isParametricTube) {
                                 console.warn(`update_parametric_tube_colors: '${data.id}' is not a parametric_tube`);
+                                return;
+                            }
+                            // A reset or newer colour message landed while the
+                            // bytes were in flight; its result must not repaint.
+                            if (obj.userData.tubeColorToken !== colorToken) {
+                                console.log(`Discarding superseded parametric tube color fetch for '${data.id}'`);
                                 return;
                             }
                             const lod = obj.userData.tubeLOD;
@@ -17525,6 +17617,10 @@ export class ThreeJSViewer {
                                 { id: data.id, token: fetched ? undefined : loadToken,
                                   scene: capturedScene, fetchStage: !fetched });
                         } finally {
+                            const obj = this._objects.get(data.id);
+                            if (obj && obj.userData.__tubeColorFetch === abortCtl) {
+                                obj.userData.__tubeColorFetch = null;
+                            }
                             this._untrackFetch(data.id, abortCtl);
                             this._onFetchEnd();
                         }
@@ -17638,7 +17734,7 @@ export class ThreeJSViewer {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
                 const loadToken = this._loadTokenOf(data.id);
-                const abortCtl = this._trackFetch(data.id);
+                const abortCtl = this._trackFetch(data.id, { keepOnReplace: true });
                 (async () => {
                     let fetched = false;
                     try {

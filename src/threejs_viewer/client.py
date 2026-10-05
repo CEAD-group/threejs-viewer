@@ -554,6 +554,11 @@ _IPV6_UNAVAILABLE_ERRNOS = frozenset(
 )
 
 
+# Fresh port-0 picks `_listen_sockets` makes before giving up when the port
+# the OS handed out on the first address is taken on another one.
+PORT_PICK_ATTEMPTS = 10
+
+
 def _url_host(host: str) -> str:
     """``host`` as it goes into a URL: IPv6 literals need brackets."""
     return f"[{host}]" if ":" in host and not host.startswith("[") else host
@@ -571,8 +576,10 @@ def _listen_sockets(host: str, port: int) -> List[socket.socket]:
     families never overlap on a wildcard host. An IPv6 address is skipped
     only when the error says IPv6 is unavailable (``_IPV6_UNAVAILABLE_ERRNOS``);
     a port in use or a permission error raises like it always did. ``port=0``
-    picks a free port on the first socket and reuses it for the rest,
-    retrying when that port happens to be taken on another family.
+    picks a free port on the first socket and reuses it for the rest; when
+    that port is taken on another address every socket bound so far is
+    closed and a fresh port is picked, up to ``PORT_PICK_ATTEMPTS`` times
+    (issue #263). An explicit port never retries.
     """
     infos = socket.getaddrinfo(
         host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
@@ -582,7 +589,8 @@ def _listen_sockets(host: str, port: int) -> List[socket.socket]:
         if (family, sockaddr[:2]) not in addresses:
             addresses.append((family, sockaddr[:2]))
     log = logging.getLogger(__name__)
-    for _attempt in range(8):
+    attempts = PORT_PICK_ATTEMPTS if port == 0 else 1
+    for _attempt in range(attempts):
         socks: List[socket.socket] = []
         retry = False
         error: Optional[OSError] = None
@@ -591,7 +599,15 @@ def _listen_sockets(host: str, port: int) -> List[socket.socket]:
             try:
                 socks.append(socket.create_server((address, bound_port), family=family))
             except OSError as exc:
+                # The OS only guaranteed the picked port free on the first
+                # address; a collision elsewhere means pick again.
                 if socks and port == 0 and exc.errno == errno.EADDRINUSE:
+                    log.debug(
+                        "Port %s free on %s but in use on %s, picking another",
+                        bound_port,
+                        socks[0].getsockname()[0],
+                        address,
+                    )
                     retry = True
                     break
                 if family == socket.AF_INET6 and exc.errno in _IPV6_UNAVAILABLE_ERRNOS:
@@ -648,7 +664,12 @@ class ViewerClient:
                 advertised verbatim in blob URLs and, when it is not
                 ``"localhost"``, passed to the viewer as the ``ws_host`` query
                 param so the WebSocket and the sidecar share one hostname.
-            port: WebSocket port (HTTP blob sidecar listens on ``port + 1``).
+            port: WebSocket port; the HTTP blob sidecar listens on ``port + 1``.
+                ``0`` lets the OS pick a free port on every address ``host``
+                resolves to, for the sidecar too: ``connect()`` then replaces
+                ``self.port`` with the picked port, which ``viewer_url`` and
+                the blob URLs advertise, and a later ``connect()`` after
+                ``disconnect()`` rebinds that same port.
             open_browser: Open the viewer in the system browser on ``connect()``.
             tone_mapping_exposure: Override the renderer's ``toneMappingExposure``
                 (default ``1.0``). Must be finite; ``NaN``/``Inf`` raise
@@ -981,6 +1002,9 @@ class ViewerClient:
         Both listen on every address ``host`` resolves to (issue #187). The
         sidecar port defaults to ``port + 1``; tests pass ``0`` to let the OS
         pick a free one, and blob URLs embed whatever was actually bound.
+        ``port=0`` on the client itself does the same for the WebSocket
+        server: ``self.port`` is set to the bound port, so the viewer URL
+        advertises it (issue #263).
         """
         ws_logger = logging.getLogger("websockets.server")
         ws_logger.setLevel(logging.CRITICAL)
@@ -988,9 +1012,9 @@ class ViewerClient:
         # error path so a failure halfway through leaks no listener.
         pending: List[socket.socket] = []
         try:
-            pending = _listen_sockets(
-                self.host, self.port + 1 if http_port is None else http_port
-            )
+            if http_port is None:
+                http_port = self.port + 1 if self.port else 0
+            pending = _listen_sockets(self.host, http_port)
             self._http_port = pending[0].getsockname()[1]
             while pending:
                 server = _BlobServer(pending[0], self._blob_store)
@@ -1005,6 +1029,7 @@ class ViewerClient:
                 self._http_servers.append(server)
                 pending.pop(0)
             pending = _listen_sockets(self.host, self.port)
+            self.port = pending[0].getsockname()[1]
             while pending:
                 server = sync_serve(
                     self._handle_connection,
@@ -3045,17 +3070,38 @@ class ViewerClient:
     def update_parametric_tube_colors(
         self,
         id: str,
-        colors: np.ndarray,
+        colors: Optional[np.ndarray],
+        base_color: Optional[int] = None,
     ) -> None:
         """Swap the per-ring colors on an existing parametric_tube without
         rebuilding its geometry. Typical use: interactive color-mode switching
         in a toolpath preview (layer → feed rate → curvature → ...).
 
+        ``colors=None`` resets the tube to a plain material colour with no
+        blob transfer: the vertex colours are dropped and the material is set
+        to ``base_color`` (default: the add path's colour, ``0x7AB8CC``, or
+        white for a tube wearing a colour map, since the map is multiplied by
+        the material colour). A colour update still in flight when the reset
+        arrives is discarded. With LOD, later rebuilds stay uncoloured.
+
         Args:
             id: Target parametric_tube id.
             colors: (N,) uint32 packed 0x00RRGGBB, one value per spine point.
-                Length must match the tube's spine length.
+                Length must match the tube's spine length. ``None`` resets.
+            base_color: Hex colour applied on a reset. Ignored when ``colors``
+                is given.
         """
+        if colors is None:
+            header: dict = {
+                "type": "update_parametric_tube_colors",
+                "id": id,
+                "numSpinePoints": 0,
+                "blob_url": None,
+            }
+            if base_color is not None:
+                header["baseColor"] = int(base_color)
+            self._send(header)
+            return
         color_arr = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
         header = {
             "type": "update_parametric_tube_colors",
