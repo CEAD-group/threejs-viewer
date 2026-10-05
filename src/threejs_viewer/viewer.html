@@ -12536,7 +12536,8 @@ class TransformGizmoController {
     }
 
     /** Snapshot of the interactive gizmo. `mode` is the live control mode, so
-     * it reads 'rotate' during a held-Alt override of a translate base mode.
+     * it reads 'rotate' while the platform-specific rotate modifier (Alt, Shift
+     * on Windows; see `gizmoModifierKeys()`) overrides a translate base mode.
      * @returns {{id:string|null, object3D:THREE.Object3D|null, mode:string, space:string, dragging:boolean}} */
     getState() {
         const g = this._primary;
@@ -21479,8 +21480,9 @@ class ThreeJSViewer {
 
     /**
      * The interactive move gizmo's state (issue #255): `object3D` and `id` are
-     * null while detached, `mode` is the live control mode (`'rotate'` during a
-     * held-Alt override), `space` is `'world'` or `'local'`, and `dragging` is
+     * null while detached, `mode` is the live control mode (`'rotate'` while the
+     * platform-specific rotate modifier is held, see `gizmoModifierKeys()`),
+     * `space` is `'world'` or `'local'`, and `dragging` is
      * true during a handle drag. Pinned `addGizmo` gizmos are not included.
      * @returns {{id:string|null, object3D:THREE.Object3D|null, mode:string, space:string, dragging:boolean}}
      */
