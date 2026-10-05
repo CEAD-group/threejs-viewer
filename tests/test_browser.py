@@ -11,6 +11,7 @@ import pytest
 
 from conftest import frames, settle
 from threejs_viewer import Animation, Frame, ViewerClient
+from threejs_viewer.client import _url_host
 
 
 @pytest.mark.browser
@@ -6180,6 +6181,184 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
     viewer_client.clear()
     time.sleep(0.2)
     assert viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 0
+
+
+@pytest.mark.browser
+def test_follow_path_survives_mesh_add_that_lands_after_it(viewer_client, viewer_page):
+    """A mesh and its follow path are sent back to back and their blobs fetch
+    concurrently; when the path lands first, the mesh add's replace-step
+    delete used to drop the track and the tool never moved (issue #257).
+    Forcing the path-first order: the track must survive the add, pin the
+    new mesh's matrixAutoUpdate off, and pose it from the path. An explicit
+    delete still drops the track."""
+    path = dict(
+        times=[0.0, 2.0],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+    viewer_client.set_follow_path("fp_late", **path)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("fp_late", positions, indices, scale=[2.0, 2.0, 2.0])
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    ), "the mesh add dropped the follow path that landed before it"
+    # Pinned and posed at the current (t=0) time right after registration.
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('fp_late').matrixAutoUpdate"
+        )
+        is False
+    )
+
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=2, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time=1.0)
+    _wait_for_animation_loaded(viewer_page)
+    frames(viewer_page)
+    state = viewer_page.evaluate(
+        "() => {"
+        " const e = window.threejsViewer._objects.get('fp_late').matrix.elements;"
+        " return {pos: [e[12], e[13], e[14]], xlen: Math.hypot(e[0], e[1], e[2])};"
+        "}"
+    )
+    assert state["pos"] == pytest.approx([2.0, 0.0, 0.0], abs=1e-5)
+    # The header scale, applied after registration, is composed into the pose.
+    assert state["xlen"] == pytest.approx(2.0, abs=1e-5)
+
+    # A re-add under the same id keeps the track too.
+    viewer_client.add_mesh("fp_late", positions, indices)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+    viewer_client.delete("fp_late")
+    settle(viewer_client)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+
+def _hold_follow_path_blobs(viewer_client, viewer_page):
+    """Route the follow-path blob fetches through a Playwright hold so a test
+    can decide when the path lands relative to the object's own load. The
+    patched _send_binary gives the blob a recognisable key; the route stores
+    the held request, and release() lets it through."""
+    held = []
+    viewer_page.route("**/blob_heldfp_*", lambda route: held.append(route))
+
+    real_send_binary = viewer_client._send_binary
+
+    def send_binary(header, payload):
+        if header.get("type") != "set_follow_path":
+            return real_send_binary(header, payload)
+        key = f"/blob_heldfp_{len(held)}_{header.get('id', '')}"
+        viewer_client._blob_store[key] = payload
+        header["blob_url"] = (
+            f"http://{_url_host(viewer_client.host)}:{viewer_client._http_port}{key}"
+        )
+        viewer_client._send(header)
+        return key
+
+    viewer_client._send_binary = send_binary
+
+    def wait_held(n, timeout_s=5.0):
+        deadline = time.time() + timeout_s
+        while len(held) < n and time.time() < deadline:
+            viewer_page.wait_for_timeout(20)
+        assert len(held) >= n, f"follow-path fetch {n} never reached the route"
+
+    def release(i):
+        try:
+            held[i].continue_()
+        except Exception:
+            pass  # the viewer may already have aborted this request
+
+    return wait_held, release
+
+
+@pytest.mark.browser
+def test_follow_path_fetch_survives_add_landing_first(viewer_client, viewer_page):
+    """The other order of issue #257: the object's load finishes while the
+    follow-path blob is still in flight. The add's replace-step delete (URL
+    model through _addObject) and a binary add's superseding _trackFetch must
+    leave the follow-path fetch running so the track installs when it lands;
+    an explicit delete still aborts it."""
+    wait_held, release = _hold_follow_path_blobs(viewer_client, viewer_page)
+    path = dict(
+        times=[0.0, 2.0],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+
+    # URL model (add_object path) lands while the path fetch is held.
+    viewer_client._blob_store["/held_model.glb"] = _two_triangle_glb()
+    glb_url = f"http://{_url_host(viewer_client.host)}:{viewer_client._http_port}/held_model.glb"
+    viewer_client.set_follow_path("fp_model", **path)
+    wait_held(1)
+    viewer_client.add_model("fp_model", glb_url, format="glb")
+    for _ in range(100):
+        if viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_model')"):
+            break
+        viewer_page.wait_for_timeout(50)
+    assert viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_model')")
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_model')"
+    )
+    release(0)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_model')"
+    ), "the model add aborted the in-flight follow-path fetch"
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('fp_model').matrixAutoUpdate"
+        )
+        is False
+    )
+
+    # Binary mesh add (supersede: true in _trackFetch) with the path held.
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.set_follow_path("fp_mesh", **path)
+    wait_held(2)
+    viewer_client.add_mesh("fp_mesh", positions, indices)
+    for _ in range(100):
+        if viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_mesh')"):
+            break
+        viewer_page.wait_for_timeout(50)
+    assert viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_mesh')")
+    release(1)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_mesh')"
+    ), "the mesh add aborted the in-flight follow-path fetch"
+
+    # An explicit delete while the path is in flight aborts the fetch.
+    viewer_client.add_box("fp_gone")
+    settle(viewer_client)
+    viewer_client.set_follow_path("fp_gone", **path)
+    wait_held(3)
+    viewer_client.delete("fp_gone")
+    settle(viewer_client)
+    aborted = viewer_page.evaluate(
+        "() => !window.threejsViewer._loadAborts.has('fp_gone')"
+    )
+    assert aborted, "delete left the follow-path fetch registered"
+    release(2)
+    settle(viewer_client)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_gone')"
+    )
 
 
 @pytest.mark.browser

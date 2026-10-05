@@ -13585,6 +13585,8 @@ class ThreeJSViewer {
         // id-less animation blob — a Symbol can never equal a real id.
         /** @type {Map<string|symbol, Set<AbortController>>} */
         this._loadAborts = new Map();
+        // Fetch controllers an add's replace step must not cancel (issue #257).
+        this._replaceSafeFetches = new WeakSet();
         // Deferred re-parenting (issue #138): children added with a parent=
         // id that isn't registered yet (parent model load in flight, or
         // messages out of order) land at the scene root and record the
@@ -15276,6 +15278,10 @@ class ThreeJSViewer {
         this._shadowDirty = true;
         this._menus?.applyEyes();
         this._shading.refreshObject(obj);
+        // A track that landed before this object (or survived its re-add)
+        // must pin matrixAutoUpdate off and pose the new object now, not
+        // only on the next animation tick.
+        if (this._followPaths.has(id)) this._applyFollowPaths();
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -15325,6 +15331,10 @@ class ThreeJSViewer {
         // A billboard composes on the pose the producer set, so record it
         // here rather than reading back what the billboard itself wrote.
         captureBillboardBase(obj);
+        // The binary adds apply the header transform after registration; a
+        // followed object has matrixAutoUpdate off, so recompose with the new
+        // scale instead of leaving the stale matrix until the next tick.
+        if (obj.userData.id && this._followPaths.has(obj.userData.id)) this._applyFollowPaths();
         // A moved object can leave the cached scene sphere; the perspective
         // near fit ((dist - radius) * 0.5, see updateNearFar) assumes the
         // sphere is honest, so a stale sphere can front-clip a fast mover for
@@ -15448,7 +15458,7 @@ class ThreeJSViewer {
         obj.userData.id = id;
         this._applyTransform(obj, objData.transform);
         this._applyInitialVisibility(id, obj, objData.visible);
-        this._deleteObject(id, deleteOpts);
+        this._deleteObject(id, { ...deleteOpts, keepFollowPath: true });
         // After the delete, which drops the previous object's mixer for this id.
         if (newMixer) { this._mixers.set(id, newMixer); this._mixerGeneration++; }
         this._addToParentOrScene(obj, parentId);
@@ -16065,13 +16075,17 @@ class ThreeJSViewer {
      * it is dead weight — and its blob may already have been dropped by the
      * producer, which is exactly the 404 this cancels. Read-side fetches
      * (colour updates, follow paths) register without superseding so they
-     * can't cancel a concurrent add for the same id.
+     * can't cancel a concurrent add for the same id. `keepOnReplace` marks a
+     * fetch that belongs to the object an add is about to install (a follow
+     * path), so a superseding or replace-step abort skips it; an explicit
+     * delete still cancels it (issue #257).
      * @param {string|symbol} id  the animation blob uses a Symbol key
-     * @param {{ supersede?: boolean }} [opts]
+     * @param {{ supersede?: boolean, keepOnReplace?: boolean }} [opts]
      */
     _trackFetch(id, opts) {
         if (opts && opts.supersede) this._abortFetches(id);
         const controller = new AbortController();
+        if (opts && opts.keepOnReplace) this._replaceSafeFetches.add(controller);
         let set = this._loadAborts.get(id);
         if (!set) { set = new Set(); this._loadAborts.set(id, set); }
         set.add(controller);
@@ -16089,13 +16103,19 @@ class ThreeJSViewer {
     /**
      * Cancel every in-flight blob fetch for `id`. Called on delete/clear and
      * on a re-push, so the request is gone before the producer's blob is.
+     * Without `all`, fetches registered `keepOnReplace` are left running.
      * @param {string|symbol} id
+     * @param {{ all?: boolean }} [opts]
      */
-    _abortFetches(id) {
+    _abortFetches(id, opts) {
         const set = this._loadAborts.get(id);
         if (!set) return;
-        this._loadAborts.delete(id);
-        for (const controller of set) controller.abort();
+        for (const controller of set) {
+            if (!(opts && opts.all) && this._replaceSafeFetches.has(controller)) continue;
+            controller.abort();
+            set.delete(controller);
+        }
+        if (set.size === 0) this._loadAborts.delete(id);
     }
 
     /**
@@ -16213,11 +16233,16 @@ class ThreeJSViewer {
 
     /**
      * @param {string} id
-     * @param {{ preserveInflight?: boolean }} [opts]
+     * @param {{ preserveInflight?: boolean, keepFollowPath?: boolean }} [opts]
      *   Pass `preserveInflight: true` from inside a binary loader's IIFE
      *   when it pre-clears a prior object with the same id — otherwise the
      *   loader would reject its own in-flight deferred and break queued
-     *   read-side ops for the load that just installed it.
+     *   read-side ops for the load that just installed it. `keepFollowPath`
+     *   marks the delete as the replace step of an add (implied by
+     *   `preserveInflight`): the id's follow-path track, installed or still
+     *   fetching, survives, because a `set_follow_path` sent alongside the
+     *   add belongs to the object being added (issue #257). An explicit
+     *   delete drops the track and aborts its fetch.
      */
     _deleteObject(id, opts) {
         // Invalidate any in-flight async add/fetch for this id so a late
@@ -16231,8 +16256,9 @@ class ThreeJSViewer {
         if (!opts || !opts.preserveInflight) {
             // Cancel the fetch itself, not just its bookkeeping: the producer
             // typically drops the blob as it sends the delete, so letting the
-            // request run just buys a 404 (issue #157).
-            this._abortFetches(id);
+            // request run just buys a 404 (issue #157). A replace-step delete
+            // leaves the id's follow-path fetch running (issue #257).
+            this._abortFetches(id, { all: !(opts && opts.keepFollowPath) });
             const pendingLoad = this._inflightLoads.get(id);
             if (pendingLoad) {
                 pendingLoad.reject(new Error('deleted'));
@@ -16244,9 +16270,12 @@ class ThreeJSViewer {
         // path calls _applyInitialVisibility (which reads the baseline) before
         // _deleteObject, so the race fix is unaffected.
         this._baselineVisibility.delete(id);
-        // Same for follow-path tracks: a deleted id must not keep its path
-        // (a later re-add with the same id would silently snap to it).
-        this._followPaths.delete(id);
+        // Same for follow-path tracks: an explicitly deleted id must not keep
+        // its path. A re-add keeps it (same id = same logical object), since the
+        // track may have landed before the add's own blob (issue #257).
+        if (!opts || !(opts.preserveInflight || opts.keepFollowPath)) {
+            this._followPaths.delete(id);
+        }
         this._billboards.delete(id);
         this._billboardOrderDirty = true;
         const obj = this._objects.get(id);
@@ -19344,7 +19373,7 @@ class ThreeJSViewer {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
                 const loadToken = this._loadTokenOf(data.id);
-                const abortCtl = this._trackFetch(data.id);
+                const abortCtl = this._trackFetch(data.id, { keepOnReplace: true });
                 (async () => {
                     let fetched = false;
                     try {
