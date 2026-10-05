@@ -3,7 +3,6 @@
 import base64
 import json
 import math
-import socket
 import struct
 import time
 
@@ -12,6 +11,7 @@ import pytest
 
 from conftest import frames, settle
 from threejs_viewer import Animation, Frame, ViewerClient
+from threejs_viewer.client import _url_host
 
 
 @pytest.mark.browser
@@ -3216,12 +3216,6 @@ def test_anim_lift_tracks_toolbar_reflow_on_resize(viewer_client, viewer_page):
 # --- Lighting panel: URL → renderer wiring + precedence vs localStorage ---
 
 
-def _free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
 def _start_client(**kwargs):
     """Start a ViewerClient + its HTTP sidecar without waiting for a browser.
 
@@ -3229,8 +3223,7 @@ def _start_client(**kwargs):
     accepts arbitrary ``ViewerClient`` kwargs — the fixture doesn't, and the
     lighting tests need to drive the constructor.
     """
-    port = _free_port()
-    client = ViewerClient(port=port, open_browser=False, **kwargs)
+    client = ViewerClient(port=0, open_browser=False, **kwargs)
     client._start_servers(http_port=0)
     return client
 
@@ -6188,6 +6181,184 @@ def test_follow_path_cleaned_up_on_delete_and_clear(viewer_client, viewer_page):
     viewer_client.clear()
     time.sleep(0.2)
     assert viewer_page.evaluate("() => window.threejsViewer._followPaths.size") == 0
+
+
+@pytest.mark.browser
+def test_follow_path_survives_mesh_add_that_lands_after_it(viewer_client, viewer_page):
+    """A mesh and its follow path are sent back to back and their blobs fetch
+    concurrently; when the path lands first, the mesh add's replace-step
+    delete used to drop the track and the tool never moved (issue #257).
+    Forcing the path-first order: the track must survive the add, pin the
+    new mesh's matrixAutoUpdate off, and pose it from the path. An explicit
+    delete still drops the track."""
+    path = dict(
+        times=[0.0, 2.0],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+    viewer_client.set_follow_path("fp_late", **path)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.add_mesh("fp_late", positions, indices, scale=[2.0, 2.0, 2.0])
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    ), "the mesh add dropped the follow path that landed before it"
+    # Pinned and posed at the current (t=0) time right after registration.
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('fp_late').matrixAutoUpdate"
+        )
+        is False
+    )
+
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=2, transforms={})],
+        loop=False,
+    )
+    viewer_client.load_animation(anim, autoplay=False, initial_time=1.0)
+    _wait_for_animation_loaded(viewer_page)
+    frames(viewer_page)
+    state = viewer_page.evaluate(
+        "() => {"
+        " const e = window.threejsViewer._objects.get('fp_late').matrix.elements;"
+        " return {pos: [e[12], e[13], e[14]], xlen: Math.hypot(e[0], e[1], e[2])};"
+        "}"
+    )
+    assert state["pos"] == pytest.approx([2.0, 0.0, 0.0], abs=1e-5)
+    # The header scale, applied after registration, is composed into the pose.
+    assert state["xlen"] == pytest.approx(2.0, abs=1e-5)
+
+    # A re-add under the same id keeps the track too.
+    viewer_client.add_mesh("fp_late", positions, indices)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+    viewer_client.delete("fp_late")
+    settle(viewer_client)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_late')"
+    )
+
+
+def _hold_follow_path_blobs(viewer_client, viewer_page):
+    """Route the follow-path blob fetches through a Playwright hold so a test
+    can decide when the path lands relative to the object's own load. The
+    patched _send_binary gives the blob a recognisable key; the route stores
+    the held request, and release() lets it through."""
+    held = []
+    viewer_page.route("**/blob_heldfp_*", lambda route: held.append(route))
+
+    real_send_binary = viewer_client._send_binary
+
+    def send_binary(header, payload):
+        if header.get("type") != "set_follow_path":
+            return real_send_binary(header, payload)
+        key = f"/blob_heldfp_{len(held)}_{header.get('id', '')}"
+        viewer_client._blob_store[key] = payload
+        header["blob_url"] = (
+            f"http://{_url_host(viewer_client.host)}:{viewer_client._http_port}{key}"
+        )
+        viewer_client._send(header)
+        return key
+
+    viewer_client._send_binary = send_binary
+
+    def wait_held(n, timeout_s=5.0):
+        deadline = time.time() + timeout_s
+        while len(held) < n and time.time() < deadline:
+            viewer_page.wait_for_timeout(20)
+        assert len(held) >= n, f"follow-path fetch {n} never reached the route"
+
+    def release(i):
+        try:
+            held[i].continue_()
+        except Exception:
+            pass  # the viewer may already have aborted this request
+
+    return wait_held, release
+
+
+@pytest.mark.browser
+def test_follow_path_fetch_survives_add_landing_first(viewer_client, viewer_page):
+    """The other order of issue #257: the object's load finishes while the
+    follow-path blob is still in flight. The add's replace-step delete (URL
+    model through _addObject) and a binary add's superseding _trackFetch must
+    leave the follow-path fetch running so the track installs when it lands;
+    an explicit delete still aborts it."""
+    wait_held, release = _hold_follow_path_blobs(viewer_client, viewer_page)
+    path = dict(
+        times=[0.0, 2.0],
+        positions=[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        axes=[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+    )
+
+    # URL model (add_object path) lands while the path fetch is held.
+    viewer_client._blob_store["/held_model.glb"] = _two_triangle_glb()
+    glb_url = f"http://{_url_host(viewer_client.host)}:{viewer_client._http_port}/held_model.glb"
+    viewer_client.set_follow_path("fp_model", **path)
+    wait_held(1)
+    viewer_client.add_model("fp_model", glb_url, format="glb")
+    for _ in range(100):
+        if viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_model')"):
+            break
+        viewer_page.wait_for_timeout(50)
+    assert viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_model')")
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_model')"
+    )
+    release(0)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_model')"
+    ), "the model add aborted the in-flight follow-path fetch"
+    assert (
+        viewer_page.evaluate(
+            "() => window.threejsViewer._objects.get('fp_model').matrixAutoUpdate"
+        )
+        is False
+    )
+
+    # Binary mesh add (supersede: true in _trackFetch) with the path held.
+    positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    indices = np.array([[0, 1, 2]], dtype=np.uint32)
+    viewer_client.set_follow_path("fp_mesh", **path)
+    wait_held(2)
+    viewer_client.add_mesh("fp_mesh", positions, indices)
+    for _ in range(100):
+        if viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_mesh')"):
+            break
+        viewer_page.wait_for_timeout(50)
+    assert viewer_page.evaluate("() => window.threejsViewer._objects.has('fp_mesh')")
+    release(1)
+    settle(viewer_client)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_mesh')"
+    ), "the mesh add aborted the in-flight follow-path fetch"
+
+    # An explicit delete while the path is in flight aborts the fetch.
+    viewer_client.add_box("fp_gone")
+    settle(viewer_client)
+    viewer_client.set_follow_path("fp_gone", **path)
+    wait_held(3)
+    viewer_client.delete("fp_gone")
+    settle(viewer_client)
+    aborted = viewer_page.evaluate(
+        "() => !window.threejsViewer._loadAborts.has('fp_gone')"
+    )
+    assert aborted, "delete left the follow-path fetch registered"
+    release(2)
+    settle(viewer_client)
+    assert not viewer_page.evaluate(
+        "() => window.threejsViewer._followPaths.has('fp_gone')"
+    )
 
 
 @pytest.mark.browser
@@ -11425,3 +11596,261 @@ def test_destroy_during_reachability_probe_does_not_reconnect(viewer_page):
         "sent": False,
         "calls": [],
     }
+
+
+# ---- issue #255: canvas / raycast / gizmo-state embedder API -------------
+
+_RAYCAST_VS_PICK = """() => {
+  const v = window.threejsViewer;
+  const rect = v.getCanvas().getBoundingClientRect();
+  v._camera.updateMatrixWorld(true);
+  // Aim slightly off the box centre so a wrong camera would show up as a
+  // different hit point rather than the same front-face centre.
+  const nd = v._camera.position.clone().set(0.2, -0.1, 0.5).project(v._camera);
+  const cx = rect.left + (nd.x * 0.5 + 0.5) * rect.width;
+  const cy = rect.top + (-nd.y * 0.5 + 0.5) * rect.height;
+  const pick = v.pick(cx, cy);
+  const rc = v.raycasterAt(cx, cy);
+  const hits = rc.intersectObject(v.getObject('box'), true);
+  return {
+    isOrtho: !!v._camera.isOrthographicCamera,
+    pick: pick && [pick.point.x, pick.point.y, pick.point.z],
+    ray: hits.length ? [hits[0].point.x, hits[0].point.y, hits[0].point.z] : null,
+    canvasIsDom: v.getCanvas() === v._renderer.domElement,
+    origin: rc.ray.origin.toArray(),
+  };
+}"""
+
+
+@pytest.mark.browser
+def test_raycaster_at_matches_pick_under_both_projections(viewer_client, viewer_page):
+    """raycasterAt() returns the ray pick() uses: intersecting the box with it
+    lands on the same point pick() reports, under the perspective and the
+    orthographic camera; getCanvas() is the render canvas and a sizeless
+    canvas yields null (issue #255)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [0, 0, 9], target: [0, 0, 0], up: [0, 1, 0]})"
+    )
+    frames(viewer_page, 2)
+
+    persp = viewer_page.evaluate(_RAYCAST_VS_PICK)
+    assert persp["isOrtho"] is False
+    assert persp["canvasIsDom"] is True
+    assert persp["pick"] is not None and persp["ray"] is not None
+    assert persp["pick"] == pytest.approx(persp["ray"], abs=1e-9)
+    assert persp["pick"][2] == pytest.approx(0.5, abs=1e-3)
+    # A perspective ray starts at the camera eye.
+    assert persp["origin"] == pytest.approx([0, 0, 9], abs=1e-6)
+
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    _wait_for(viewer_page, "() => window.threejsViewer._camera.isOrthographicCamera")
+    frames(viewer_page, 2)
+    ortho = viewer_page.evaluate(_RAYCAST_VS_PICK)
+    assert ortho["isOrtho"] is True
+    assert ortho["pick"] is not None and ortho["ray"] is not None
+    assert ortho["pick"] == pytest.approx(ortho["ray"], abs=1e-9)
+    # An orthographic ray is parallel to the view axis, so it starts over the
+    # aimed point, not at the eye.
+    assert ortho["origin"][0] == pytest.approx(0.2, abs=1e-3)
+    assert ortho["origin"][1] == pytest.approx(-0.1, abs=1e-3)
+
+    # A viewer whose container has no size has nothing to aim through.
+    assert (
+        viewer_page.evaluate(
+            "() => {"
+            " const live = window.threejsViewer;"
+            " const div = document.createElement('div');"
+            " div.style.cssText = 'width:0;height:0;position:absolute;left:-2000px;top:0';"
+            " document.body.appendChild(div);"
+            " const v = new live.constructor(div, { htmlTemplate: live._options.htmlTemplate,"
+            "   cubemapData: live._options.cubemapData, autoConnect: false });"
+            " const r = v.raycasterAt(10, 10); v.destroy(); return r; }"
+        )
+        is None
+    )
+
+
+@pytest.mark.browser
+def test_get_render_stats_reports_scene_pass(viewer_client, viewer_page):
+    """getRenderStats() counts the scene pass of the last frame: a box adds
+    its 12 triangles and one call; the gizmo overlay pass does not replace
+    the numbers (issue #255)."""
+    frames(viewer_page, 2)
+    before = viewer_page.evaluate("() => window.threejsViewer.getRenderStats()")
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    after = viewer_page.evaluate("() => window.threejsViewer.getRenderStats()")
+    assert set(after) == {"triangles", "calls"}
+    assert after["triangles"] - before["triangles"] == 12
+    assert after["calls"] - before["calls"] == 1
+
+    # With a gizmo attached, the overlay pass renders last; the stats must
+    # still describe the scene (the gizmo handles are hundreds of triangles).
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    frames(viewer_page, 2)
+    with_gizmo = viewer_page.evaluate("() => window.threejsViewer.getRenderStats()")
+    assert with_gizmo == after
+
+
+@pytest.mark.browser
+def test_is_gizmo_handle_active_during_hover_and_drag(viewer_client, viewer_page):
+    """isGizmoHandleActive() is false at rest, true while a move-gizmo handle
+    is hovered and while it is dragged (getMoveGizmo().dragging follows), and
+    true while an axis-control handle is hovered (issue #255)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    frames(viewer_page, 2)
+    active = "() => window.threejsViewer.isGizmoHandleActive()"
+    assert viewer_page.evaluate(active) is False
+
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.move(proj["x"], proj["y"])
+    frames(viewer_page, 2)
+    _wait_for(viewer_page, active)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getMoveGizmo().dragging")
+        is False
+    )
+
+    viewer_page.mouse.down()
+    viewer_page.mouse.move(proj["x"] + 20, proj["y"])
+    frames(viewer_page, 2)
+    mid = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return { active: v.isGizmoHandleActive(), dragging: v.getMoveGizmo().dragging }; }"
+    )
+    assert mid == {"active": True, "dragging": True}
+    viewer_page.mouse.up()
+    # Move clear of the handles so the hover state also clears.
+    viewer_page.mouse.move(5, 5)
+    frames(viewer_page, 2)
+    _wait_for(viewer_page, f"() => !({active})()")
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getMoveGizmo().dragging")
+        is False
+    )
+
+    # An axis-control handle counts too (AxisControlManager.busy()).
+    viewer_client.disable_move_gizmo()
+    viewer_client.add_axis_control(
+        "ax", target_id="box", axis="x", kind="linear", value=0.0, min=-2.0, max=2.0
+    )
+    _wait_for(
+        viewer_page, "() => window.threejsViewer._axisControls.controls.has('ax')"
+    )
+    frames(viewer_page, 2)
+    assert viewer_page.evaluate(active) is False
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "ax")
+    assert p is not None
+    viewer_page.mouse.move(p["x"], p["y"])
+    frames(viewer_page, 2)
+    _wait_for(viewer_page, active)
+
+
+@pytest.mark.browser
+def test_get_move_gizmo_follows_attach_click_select_and_disable(
+    viewer_client, viewer_page
+):
+    """getMoveGizmo() reports null object/id while detached, the target after
+    attachMoveGizmo() (id null for an untracked object) and after click-select,
+    the live mode, and detaches on disableMoveGizmo() (issue #255)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    state = (
+        "() => { const s = window.threejsViewer.getMoveGizmo();"
+        " return { id: s.id, has: !!s.object3D, mode: s.mode, space: s.space,"
+        " dragging: s.dragging }; }"
+    )
+    assert viewer_page.evaluate(state) == {
+        "id": None,
+        "has": False,
+        "mode": "translate",
+        "space": "world",
+        "dragging": False,
+    }
+
+    # attachMoveGizmo on an untracked Object3D: object3D set, id null.
+    attached = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const Object3D = Object.getPrototypeOf(Object.getPrototypeOf(v._scene)).constructor;"
+        " const obj = new Object3D(); v._scene.add(obj); v.attachMoveGizmo(obj);"
+        " const s = v.getMoveGizmo(); return { id: s.id, same: s.object3D === obj }; }"
+    )
+    assert attached == {"id": None, "same": True}
+
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('rotate')")
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getMoveGizmo().mode")
+        == "rotate"
+    )
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoMode('translate')")
+
+    viewer_page.evaluate("() => window.threejsViewer.disableMoveGizmo()")
+    detached = viewer_page.evaluate(state)
+    assert detached["id"] is None and detached["has"] is False
+
+    # Click-select attaches to the tracked box and reports its id.
+    viewer_client.enable_move_gizmo()
+    _wait_for(viewer_page, "() => window.threejsViewer._transformGizmo.enabled")
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"] - 15, proj["y"] + 15)
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    sel = viewer_page.evaluate(state)
+    assert sel["has"] is True and sel["dragging"] is False
+
+    viewer_client.disable_move_gizmo()
+    _wait_for(
+        viewer_page, "() => window.threejsViewer.getMoveGizmo().object3D === null"
+    )
+    assert viewer_page.evaluate(state)["id"] is None
+
+
+@pytest.mark.browser
+def test_set_gizmo_space_holds_across_attaches(viewer_client, viewer_page):
+    """setGizmoSpace('local') orients the interactive gizmo to its target and
+    survives detach, disable and a fresh attach until set back to 'world'; an
+    unknown space is refused with a warning (issue #255)."""
+    viewer_client.add_box("box", rotation=[0.0, 0.0, 0.7])
+    viewer_client.add_box("other", position=[3.0, 0.0, 0.0])
+    settle(viewer_client)
+    space = "() => window.threejsViewer.getMoveGizmo().space"
+    ctrl_space = "() => window.threejsViewer._transformGizmo.control.space"
+
+    # Set before any attach, then attach: the attach must not reset it.
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('local')")
+    assert viewer_page.evaluate(space) == "local"
+    viewer_client.enable_move_gizmo("box")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'box'")
+    assert viewer_page.evaluate(space) == "local"
+    assert viewer_page.evaluate(ctrl_space) == "local"
+
+    # Detach via disable, re-attach to another object: still local.
+    viewer_client.disable_move_gizmo()
+    _wait_for(
+        viewer_page, "() => window.threejsViewer.getMoveGizmo().object3D === null"
+    )
+    viewer_client.enable_move_gizmo("other")
+    _wait_for(viewer_page, "() => window.threejsViewer.getMoveGizmo().id === 'other'")
+    assert viewer_page.evaluate(space) == "local"
+
+    # Back to world, and an invalid value is ignored with a console warning.
+    warnings = []
+    viewer_page.on(
+        "console", lambda m: warnings.append(m.text) if m.type == "warning" else None
+    )
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('world')")
+    assert viewer_page.evaluate(space) == "world"
+    viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('screen')")
+    assert viewer_page.evaluate(space) == "world"
+    assert _wait_until(lambda: any("setGizmoSpace" in w for w in warnings)), warnings
