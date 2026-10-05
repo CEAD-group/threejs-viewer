@@ -11275,3 +11275,113 @@ def test_animation_controls_ribweaver_look_and_keys(viewer_client, viewer_page):
         "() => window.threejsViewer.el.querySelector('.tjsv-timeline-thumb').style.left"
     )
     assert left.endswith("%") and float(left[:-1]) > 0, left
+
+
+@pytest.mark.browser
+def test_socket_send_and_connection_hooks_across_restart(viewer_client, viewer_page):
+    """Issue #253: ``send()``, ``isConnected()`` and ``onConnectionChange()``.
+
+    The hook records ``[connected, isConnected(), send() result]`` per call so
+    the three agree at the moment of delivery. ``true`` must fire after the
+    generation bumps in ``onopen``: the callback dispatches a binary add through
+    ``handleMessage()`` and that mesh has to land in the scene instead of being
+    discarded as stale. The server restart (``disconnect()`` then a new client
+    on the same port) is a genuine wall-clock wait, so it is a bounded poll.
+    """
+    viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            // A valid add_mesh_binary payload for one triangle: f32 xyz * 3,
+            // then u32 indices * 3, served from an in-page object URL.
+            const buf = new ArrayBuffer(3 * 3 * 4 + 3 * 4);
+            new Float32Array(buf, 0, 9).set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+            new Uint32Array(buf, 36, 3).set([0, 1, 2]);
+            const url = URL.createObjectURL(new Blob([buf]));
+            window.__connLog = [];
+            window.__connUnsub = v.onConnectionChange((connected) => {
+                const sent = v.send({ type: 'assets_loaded' });
+                window.__connLog.push([connected, v.isConnected(), sent]);
+                if (connected) {
+                    v.handleMessage({
+                        type: 'add_mesh_binary', id: 'conn_mesh', blob_url: url,
+                        numVertices: 3, numIndices: 3,
+                    });
+                }
+            });
+        }"""
+    )
+    # Already connected via the fixture: send() delivers, and the Python side
+    # actually receives it (assets_loaded sets an event the client exposes).
+    viewer_client._assets_loaded_event.clear()
+    assert viewer_page.evaluate(
+        "() => [window.threejsViewer.isConnected(),"
+        " window.threejsViewer.send({ type: 'assets_loaded' })]"
+    ) == [True, True]
+    assert viewer_client._assets_loaded_event.wait(timeout=5.0)
+    # Registering does not replay the current state.
+    assert viewer_page.evaluate("() => window.__connLog") == []
+
+    # Server goes away: exactly one false, delivered with the socket closed.
+    port = viewer_client.port
+    viewer_client.disconnect()
+    viewer_page.wait_for_function("() => window.__connLog.length === 1", timeout=10_000)
+    assert viewer_page.evaluate("() => window.__connLog") == [[False, False, False]]
+    assert viewer_page.evaluate(
+        "() => [window.threejsViewer.isConnected(),"
+        " window.threejsViewer.send({ type: 'assets_loaded' })]"
+    ) == [False, False]
+
+    # Server comes back on the same port: true fires again, the send from
+    # inside the callback goes out, and the add dispatched there survives.
+    client2 = ViewerClient(port=port, open_browser=False)
+    client2._start_servers(http_port=0)
+    try:
+        assert client2._connected_event.wait(timeout=30.0), "browser did not reconnect"
+        viewer_page.wait_for_function(
+            "() => window.__connLog.length === 2", timeout=10_000
+        )
+        assert viewer_page.evaluate("() => window.__connLog") == [
+            [False, False, False],
+            [True, True, True],
+        ]
+        settle(client2)
+        assert "conn_mesh" in client2.query_scene()["objects"], (
+            "binary add dispatched from onConnectionChange(true) was discarded"
+        )
+
+        # Unsubscribe stops delivery; destroy() fires nothing and reports
+        # disconnected afterwards.
+        viewer_page.evaluate("() => window.__connUnsub()")
+        viewer_page.evaluate(
+            "() => { const v = window.threejsViewer;"
+            " window.__afterUnsub = v.onConnectionChange(() => window.__connLog.push('x'));"
+            " v.destroy(); }"
+        )
+        viewer_page.wait_for_timeout(300)
+        assert viewer_page.evaluate("() => window.__connLog.length") == 2
+        assert viewer_page.evaluate(
+            "() => [window.threejsViewer.isConnected(),"
+            " window.threejsViewer.send({ type: 'assets_loaded' })]"
+        ) == [False, False]
+    finally:
+        client2.disconnect()
+
+
+@pytest.mark.browser
+def test_send_is_false_without_autoconnect(viewer_page):
+    """Issue #253: under ``autoConnect: false`` nothing is ever sent."""
+    result = viewer_page.evaluate(
+        """() => {
+            const first = window.threejsViewer;
+            const el = document.createElement('div');
+            el.style.cssText = 'width:200px;height:150px';
+            document.body.appendChild(el);
+            const v = new first.constructor(el, { ...first._options, autoConnect: false });
+            const calls = [];
+            v.onConnectionChange((c) => calls.push(c));
+            const out = [v.isConnected(), v.send({ type: 'assets_loaded' }), calls.length];
+            v.destroy();
+            return out;
+        }"""
+    )
+    assert result == [False, False, 0]

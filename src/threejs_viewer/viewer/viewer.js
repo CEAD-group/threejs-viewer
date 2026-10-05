@@ -10038,9 +10038,7 @@ class PolylinePickController {
 
     /** @param {{id:string,kind:string,fraction:number,point:THREE.Vector3,localPoint:THREE.Vector3,segment:number,t:number}} pick */
     _send(pick) {
-        const ws = this.v._ws;
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        ws.send(JSON.stringify({
+        this.v.send({
             type: 'polyline_pick',
             id: pick.id,
             kind: pick.kind,
@@ -10049,7 +10047,7 @@ class PolylinePickController {
             localPoint: [pick.localPoint.x, pick.localPoint.y, pick.localPoint.z],
             segment: pick.segment,
             t: pick.t,
-        }));
+        });
     }
 
     /**
@@ -11007,10 +11005,7 @@ class TransformGizmoController {
             mode: g.control.getMode(),
             phase: flush ? 'end' : 'move',
         };
-        const ws = this.v._ws;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'transform_gizmo', ...payload }));
-        }
+        this.v.send({ type: 'transform_gizmo', ...payload });
         for (const cb of this._reportHooks.slice()) {
             try { cb(payload); } catch (err) { console.error('move gizmo hook error', err); }
         }
@@ -11725,10 +11720,7 @@ class AxisControlManager {
         if (!flush && now - this._lastReport < 1000 / AXIS_CONTROL_REPORT_HZ) return;
         this._lastReport = now;
         const payload = { id: c.id, value: c.value, phase: flush ? 'end' : 'move' };
-        const ws = this.v._ws;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'axis_control_change', ...payload }));
-        }
+        this.v.send({ type: 'axis_control_change', ...payload });
         for (const cb of this._reportHooks.slice()) {
             try { cb(payload); } catch (err) { console.error('axis control change hook error', err); }
         }
@@ -12003,6 +11995,10 @@ export class ThreeJSViewer {
         // claimed the type.
         /** @type {Array<(data: any) => void>} */
         this._unknownMessageHooks = [];
+        // Socket connection state for isConnected()/onConnectionChange (issue #253).
+        this._connected = false;
+        /** @type {Array<(connected: boolean) => void>} */
+        this._connectionHooks = [];
         // Object click (issue #178): JS hooks plus the WS-send switch set by
         // Python's enable_object_click(). The pointerup handler raycasts only
         // when one of them wants the result, so an idle viewer pays nothing.
@@ -12545,20 +12541,20 @@ export class ThreeJSViewer {
             this._objectClickDown = null;
             if (this._destroyed) return;
             if (e.pointerId !== down.pointerId || e.button !== down.button) return;
-            const wsOpen = !!this._ws && this._ws.readyState === WebSocket.OPEN;
+            const wsOpen = this.isConnected();
             if (!this._objectClickHooks.length && !(this._objectClickEnabled && wsOpen)) return;
             if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_DRAG_MAX_PX) return;
             if (this._gizmoHandleHovered() || this._gizmoHitTest(e).hit) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
             const modifiers = { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey };
             if (this._objectClickEnabled && wsOpen) {
-                this._ws.send(JSON.stringify({
+                this.send({
                     type: 'object_clicked',
                     id: hit ? hit.id : null,
                     point: hit ? [hit.point.x, hit.point.y, hit.point.z] : null,
                     button: e.button,
                     modifiers,
-                }));
+                });
             }
             if (this._objectClickHooks.length) {
                 const payload = {
@@ -15344,9 +15340,7 @@ export class ThreeJSViewer {
         // overlay wants to know — a repeat carries the same true answer, and
         // hiding an already-hidden overlay costs nothing. onAssetsLoaded's
         // JSDoc says so ("may fire again if further assets arrive").
-        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-            this._ws.send(JSON.stringify({ type: 'assets_loaded' }));
-        }
+        this.send({ type: 'assets_loaded' });
         this._fireAssetsLoaded();
     }
 
@@ -15736,7 +15730,11 @@ export class ThreeJSViewer {
                 this._sceneGeneration++;
                 this._animGeneration++;
                 this._assetsComplete = false;
-                this._ws.send(JSON.stringify({ type: 'hello', viewer_version: VIEWER_VERSION }));
+                this._connected = true;
+                this.send({ type: 'hello', viewer_version: VIEWER_VERSION });
+                // Fired last, after the generation bumps and the hello, so a
+                // handleMessage() from the callback is not discarded as stale.
+                this._fireConnectionChange(true);
             };
 
             this._ws.onclose = () => {
@@ -15744,6 +15742,12 @@ export class ThreeJSViewer {
                 this._statusDot.title = 'Waiting for Python...';
                 this._statusText.textContent = 'Waiting...';
                 this._reconnectTimeout = setTimeout(doConnect, 500);
+                // A socket that never opened (failed handshake) closes too; only
+                // an open-to-closed transition is a change worth reporting.
+                if (this._connected) {
+                    this._connected = false;
+                    this._fireConnectionChange(false);
+                }
             };
 
             this._ws.onerror = () => {};
@@ -15779,10 +15783,66 @@ export class ThreeJSViewer {
         // straight out of handleMessage() — per-invocation, no shared state,
         // so overlapping (awaited) message handlers can't cross wires. The
         // send below is a no-op without a socket.
-        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-            this._ws.send(JSON.stringify(payload));
-        }
+        this.send(payload);
         return payload;
+    }
+
+    // ========== Embedder socket API (issue #253) ==========
+
+    /**
+     * JSON-encode `message` and send it on the viewer's WebSocket if that
+     * socket is OPEN. This is the one place the viewer checks `readyState`:
+     * `_reply()`, the gizmo and axis-control reports, polyline picks, object
+     * clicks, menu actions and the `assets_loaded` notification all route
+     * through it, and an embedder uses it to answer its own message types
+     * (received via `onUnknownMessage`) on the same socket, instead of
+     * reaching for the private `_ws`. Nothing is sent before the first open,
+     * after a close, after `destroy()`, or under `autoConnect: false`.
+     * @param {any} message plain object, serialised with `JSON.stringify`.
+     * @returns {boolean} whether the message was handed to the socket.
+     */
+    send(message) {
+        const ws = this._ws;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+        ws.send(JSON.stringify(message));
+        return true;
+    }
+
+    /**
+     * Whether the viewer socket is currently open. Agrees with the last value
+     * delivered to `onConnectionChange` callbacks: it flips to true at the end
+     * of each `onopen` and to false on the following `onclose`.
+     * @returns {boolean}
+     */
+    isConnected() {
+        return this._connected;
+    }
+
+    /**
+     * Observe socket connection state. `cb(true)` runs at the end of each
+     * `onopen`, after `_sceneGeneration`/`_animGeneration` are bumped and the
+     * `hello` has gone out, so a binary add dispatched through
+     * `handleMessage()` from inside the callback is not discarded as stale;
+     * `cb(false)` runs on each close of a socket that had opened. `true` fires
+     * again on every reconnect. Nothing fires after `destroy()`. Registering
+     * does not replay the current state; read `isConnected()` for that.
+     * @param {(connected: boolean) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onConnectionChange(cb) {
+        this._connectionHooks.push(cb);
+        return () => {
+            const i = this._connectionHooks.indexOf(cb);
+            if (i >= 0) this._connectionHooks.splice(i, 1);
+        };
+    }
+
+    /** @param {boolean} connected */
+    _fireConnectionChange(connected) {
+        if (this._destroyed) return;
+        for (const cb of this._connectionHooks.slice()) {
+            try { cb(connected); } catch (err) { console.error('onConnectionChange hook error', err); }
+        }
     }
 
     /**
@@ -19830,6 +19890,9 @@ export class ThreeJSViewer {
             this._ws.close();
             this._ws = null;
         }
+        // onclose was detached above, so no callback fires for this close.
+        this._connected = false;
+        this._connectionHooks.length = 0;
         if (this._lodWorker) {
             this._lodWorker.terminate();
             this._lodWorker = null;

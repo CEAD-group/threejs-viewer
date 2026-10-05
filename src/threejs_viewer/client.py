@@ -1260,7 +1260,15 @@ class ViewerClient:
         for server in self._ws_servers:
             server.shutdown()
         self._ws_servers = []
+        # shutdown() stops accepting but leaves the open connection alive, so
+        # close it: the viewer then sees onclose and starts reconnecting.
+        ws = self._ws
         self._ws = None
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self.connect()
