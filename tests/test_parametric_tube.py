@@ -925,11 +925,22 @@ def test_parametric_tube_color_reset_reverts_to_base_color(viewer_client, viewer
 
 @pytest.mark.browser
 def test_parametric_tube_color_reset_during_draw_range(viewer_client, viewer_page):
-    """A reset while a frontier morph is active restores the ring first, so
-    the morph's saved colours are not written into a missing attribute and
-    the morph keeps running colourless afterwards."""
+    """A colour-only reset at a fractional draw range leaves the active
+    frontier morph alone: positions, draw range and the relocated end cap are
+    byte-identical before and after, and the morph keeps running colourless
+    once the draw range moves on."""
     from conftest import frames, settle
 
+    probe = """(id) => {
+        const o = window.threejsViewer._objects.get(id);
+        const g = o.geometry;
+        return {
+            pos: Array.from(g.getAttribute('position').array),
+            idx: Array.from(g.index.array),
+            drawCount: g.drawRange.count,
+            savedRingIndex: o.userData.tubeMorphData.savedRingIndex,
+        };
+    }"""
     messages = []
     viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
     n = 10
@@ -944,13 +955,28 @@ def test_parametric_tube_color_reset_during_draw_range(viewer_client, viewer_pag
     viewer_client.set_draw_range("reset_morph", 0.37)
     settle(viewer_client)
     frames(viewer_page)
+    before = viewer_page.evaluate(probe, "reset_morph")
+    assert before["savedRingIndex"] is not None, "no frontier morph active"
+
+    # No set_draw_range after the reset: the geometry must not move on its own.
     viewer_client.update_parametric_tube_colors("reset_morph", None)
-    viewer_client.set_draw_range("reset_morph", 0.61)
     settle(viewer_client)
     frames(viewer_page)
+    after = viewer_page.evaluate(probe, "reset_morph")
+    assert after == before
     state = viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_morph")
     assert state["hasColorAttr"] is False and state["vertexColors"] is False
     assert state["colorHex"] == 0x7AB8CC
+
+    # Advancing the frontier afterwards restores the old ring without colours.
+    viewer_client.set_draw_range("reset_morph", 0.61)
+    settle(viewer_client)
+    frames(viewer_page)
+    later = viewer_page.evaluate(probe, "reset_morph")
+    assert later["drawCount"] > before["drawCount"]
+    assert (
+        viewer_page.evaluate(_TUBE_COLOR_STATE, "reset_morph")["hasColorAttr"] is False
+    )
     assert _console_errors(messages) == []
 
 

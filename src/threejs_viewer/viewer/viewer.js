@@ -5853,9 +5853,9 @@ function restoreFrontierRing(obj) {
 function resetParametricTubeColors(obj, baseColor, lodWorker, tubeId) {
     const ud = obj.userData;
     const md = ud.tubeMorphData;
-    // Restore the frontier ring first: its saved colours would otherwise be
-    // written back into an attribute that no longer exists.
-    if (md) restoreFrontierRing(obj);
+    // Drop the morph's colour state before the attribute goes, so a later
+    // restoreFrontierRing skips colours; the active morph itself is left as is.
+    if (md) { md.ringColors = null; md.savedRingColors = null; }
     if (obj.geometry.getAttribute('color')) obj.geometry.deleteAttribute('color');
     const mat = ud.tubeBaseMaterial || (Array.isArray(obj.material) ? obj.material[0] : obj.material);
     mat.vertexColors = false;
