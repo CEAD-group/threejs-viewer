@@ -74,7 +74,9 @@ if _has_playwright:
             ),
         )
         viewer_path = viewer_client.viewer_path.resolve()
-        url = f"{viewer_path.as_uri()}?ws_port={viewer_client.port}"
+        # A local server answers at once, so keep #272's short handshake cutoff
+        # here instead of the 65 s default meant for Firefox behind a proxy.
+        url = f"{viewer_path.as_uri()}?ws_port={viewer_client.port}&handshake_timeout_ms=5000"
         try:
             page.goto(url, timeout=90_000)
         except PlaywrightTimeoutError:
