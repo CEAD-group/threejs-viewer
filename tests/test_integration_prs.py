@@ -164,7 +164,8 @@ _CONNECT_HARNESS = """(options) => {
                       _ws: null, _handshakeTimeout: null, _reconnectTimeout: null,
                       _statusDot: {className: '', title: ''}, _statusText: {textContent: ''},
                       _connected: false, _connectionHooks: [], _sceneGeneration: 0,
-                      _animGeneration: 0, _options: options});
+                      _animGeneration: 0, _options: options, _stableOpenTimeout: null,
+                      _onVisibilityChange: null, _unknownMessageHooks: [() => {}]});
     const real = {fetch: window.fetch, WebSocket: window.WebSocket,
                   setTimeout: window.setTimeout, clearTimeout: window.clearTimeout};
     const h = {v, timers: new Map(), sockets: [], next: 1, probe: () => new Response()};
@@ -185,7 +186,11 @@ _CONNECT_HARNESS = """(options) => {
         const {at, ...rest} = e;
         return typeof at === 'number' && at > 0 ? rest : {badAt: at};
     };
-    h.restore = () => { v._destroyed = true; Object.assign(window, real); };
+    h.restore = () => {
+        v._destroyed = true;
+        Object.assign(window, real);
+        document.removeEventListener('visibilitychange', v._onVisibilityChange);
+    };
     window.__connectHarness = h;
     return true;
 }"""
@@ -193,8 +198,9 @@ _CONNECT_HARNESS = """(options) => {
 
 @pytest.mark.browser
 def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
-    """Failed attempts back off 0.5, 1, 2, 4, 8, 10, 10 s; an open resets the
-    count, so a server restart is retried after 500 ms again (issue #273)."""
+    """Failed attempts back off 0.5, 1, 2, 4, 8, 10, 10 s; the first message on
+    an open socket resets the count, so a server restart is retried after 500 ms
+    again. Hooks and lastConnectError() hand out copies (issue #273)."""
     viewer_page.evaluate(_CONNECT_HARNESS, None)
     result = viewer_page.evaluate(
         """async () => {
@@ -212,12 +218,17 @@ def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
                 await h.fire(v._reconnectTimeout);
                 const ws = h.sockets[0];
                 const hooks = [];
-                v.onConnectionChange((connected, error) => hooks.push(
-                    [connected, error && {phase: error.phase, code: error.code}]));
+                v.onConnectionChange((connected, error) => {
+                    hooks.push([connected, error && {phase: error.phase, code: error.code}]);
+                    if (error) error.code = 0;
+                });
                 ws.readyState = 1; ws.onopen();
                 const afterOpen = {failures: v._reconnectFailures, error: v.lastConnectError()};
+                ws.onmessage({data: '{"type": "app_ping"}'});
+                const afterMessage = v._reconnectFailures;
                 ws.readyState = 3; ws.onclose({code: 1006, reason: ''});
-                return {delays, probeError, afterOpen, hooks,
+                v.lastConnectError().phase = 'changed by caller';
+                return {delays, probeError, afterOpen, afterMessage, hooks,
                         afterClose: {delay: h.timers.get(v._reconnectTimeout).ms, error: h.error()}};
             } finally { h.restore(); }
         }"""
@@ -230,7 +241,8 @@ def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
             "attempt": 7,
             "retryInMs": 10000,
         },
-        "afterOpen": {"failures": 0, "error": None},
+        "afterOpen": {"failures": 7, "error": None},
+        "afterMessage": 0,
         "hooks": [[True, None], [False, {"phase": "closed", "code": 1006}]],
         "afterClose": {
             "delay": 500,
@@ -242,6 +254,74 @@ def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
                 "retryInMs": 500,
             },
         },
+    }
+
+
+@pytest.mark.browser
+def test_accept_then_close_keeps_backing_off(viewer_page):
+    """A server that accepts and closes at once does not reset the backoff;
+    a socket open for STABLE_OPEN_MS does (issue #273)."""
+    viewer_page.evaluate(_CONNECT_HARNESS, None)
+    result = viewer_page.evaluate(
+        """async () => {
+            const h = window.__connectHarness, v = h.v;
+            try {
+                v.connect(); await h.tick();
+                const delays = [];
+                for (let i = 0; i < 4; i++) {
+                    const ws = h.sockets[i];
+                    ws.readyState = 1; ws.onopen();
+                    ws.readyState = 3; ws.onclose({code: 1000, reason: ''});
+                    delays.push(h.timers.get(v._reconnectTimeout).ms);
+                    await h.fire(v._reconnectTimeout);
+                }
+                const ws = h.sockets[4];
+                ws.readyState = 1; ws.onopen();
+                const stableMs = await h.fire(v._stableOpenTimeout);
+                return {delays, stableMs, failures: v._reconnectFailures};
+            } finally { h.restore(); }
+        }"""
+    )
+    assert result == {
+        "delays": [500, 1000, 2000, 4000],
+        "stableMs": 5000,
+        "failures": 0,
+    }
+
+
+@pytest.mark.browser
+def test_tab_shown_again_retries_at_once(viewer_page):
+    """A visibilitychange to visible while disconnected cancels the pending
+    retry and connects now; hidden, or with no retry pending, it does nothing
+    (issue #273)."""
+    viewer_page.evaluate(_CONNECT_HARNESS, None)
+    result = viewer_page.evaluate(
+        """async () => {
+            const h = window.__connectHarness, v = h.v;
+            let state = 'hidden', probes = 0;
+            Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => state});
+            const show = async (s) => {
+                state = s; document.dispatchEvent(new Event('visibilitychange')); await h.tick();
+            };
+            try {
+                h.probe = () => { probes++; throw new TypeError('offline'); };
+                v.connect(); await h.tick();
+                const pending = v._reconnectTimeout;
+                await show('hidden');
+                const hidden = {probes, same: v._reconnectTimeout === pending};
+                await show('visible');
+                const visible = {probes, oldGone: !h.timers.has(pending),
+                                 next: h.timers.get(v._reconnectTimeout).ms};
+                return {hidden, visible};
+            } finally {
+                delete document.visibilityState;
+                h.restore();
+            }
+        }"""
+    )
+    assert result == {
+        "hidden": {"probes": 1, "same": True},
+        "visible": {"probes": 2, "oldGone": True, "next": 1000},
     }
 
 
