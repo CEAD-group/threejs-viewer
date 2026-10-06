@@ -211,10 +211,13 @@ def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
                 h.probe = () => new Response();
                 await h.fire(v._reconnectTimeout);
                 const ws = h.sockets[0];
+                const hooks = [];
+                v.onConnectionChange((connected, error) => hooks.push(
+                    [connected, error && {phase: error.phase, code: error.code}]));
                 ws.readyState = 1; ws.onopen();
                 const afterOpen = {failures: v._reconnectFailures, error: v.lastConnectError()};
                 ws.readyState = 3; ws.onclose({code: 1006, reason: ''});
-                return {delays, probeError, afterOpen,
+                return {delays, probeError, afterOpen, hooks,
                         afterClose: {delay: h.timers.get(v._reconnectTimeout).ms, error: h.error()}};
             } finally { h.restore(); }
         }"""
@@ -228,6 +231,7 @@ def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
             "retryInMs": 10000,
         },
         "afterOpen": {"failures": 0, "error": None},
+        "hooks": [[True, None], [False, {"phase": "closed", "code": 1006}]],
         "afterClose": {
             "delay": 500,
             "error": {

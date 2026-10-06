@@ -13858,7 +13858,7 @@ class ThreeJSViewer {
         this._unknownMessageHooks = [];
         // Socket connection state for isConnected()/onConnectionChange (issue #253).
         this._connected = false;
-        /** @type {Array<(connected: boolean) => void>} */
+        /** @type {Array<(connected: boolean, error: ConnectError|null) => void>} */
         this._connectionHooks = [];
         // Object click (issue #178): JS hooks plus the WS-send switch set by
         // Python's enable_object_click(). The pointerup handler raycasts only
@@ -17787,7 +17787,9 @@ class ThreeJSViewer {
      * `cb(false)` runs on each close of a socket that had opened. `true` fires
      * again on every reconnect. Nothing fires after `destroy()`. Registering
      * does not replay the current state; read `isConnected()` for that.
-     * @param {(connected: boolean) => void} cb
+     * The second argument is `lastConnectError()` on `false` (the close that
+     * ended the connection) and `null` on `true` (issue #273).
+     * @param {(connected: boolean, error: ConnectError|null) => void} cb
      * @returns {() => void} unsubscribe
      */
     onConnectionChange(cb) {
@@ -17801,8 +17803,9 @@ class ThreeJSViewer {
     /** @param {boolean} connected */
     _fireConnectionChange(connected) {
         if (this._destroyed) return;
+        const error = connected ? null : this.lastConnectError();
         for (const cb of this._connectionHooks.slice()) {
-            try { cb(connected); } catch (err) { console.error('onConnectionChange hook error', err); }
+            try { cb(connected, error); } catch (err) { console.error('onConnectionChange hook error', err); }
         }
     }
 

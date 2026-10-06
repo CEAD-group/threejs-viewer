@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Handshake cutoff option and reconnect backoff (#274, issue #273)
+
+- **`handshakeTimeoutMs`** (default 65000, raised to 5000 when lower, `Infinity` for no cutoff) replaces the fixed 5 s CONNECTING cutoff from #272, which closed sockets Firefox holds back on purpose for up to 60 s after failed handshakes (`network.websocket.delay-failed-reconnects`). The standalone viewer.html reads `handshake_timeout_ms`.
+- Failed attempts are retried after 500 ms, doubling to 10 s, and an open resets the delay. **`viewer.lastConnectError()`** reports the phase, the close code and the probe's HTTP status (readable for a same-origin `wsUrl`), and `onConnectionChange` passes it as a second argument on `false`.
+
 ## 0.0.65
 
 ### Embedder socket API (#271, issue #253)
