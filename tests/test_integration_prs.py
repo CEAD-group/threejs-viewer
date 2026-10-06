@@ -148,11 +148,163 @@ def test_stalled_socket_upgrade_retries_without_duplicate_loops(viewer_page):
     )
     assert result == {
         "initial": {"probes": 1, "sockets": 1},
-        "timeout": 5000,
+        "timeout": 65000,
         "closed": True,
         "retry": 500,
         "probes": 2,
         "sockets": 2,
+    }
+
+
+# A bare viewer instance with fake fetch, WebSocket and timers, for driving the
+# connect() retry loop step by step. `probe` decides each probe's outcome.
+_CONNECT_HARNESS = """(options) => {
+    const v = Object.create(window.threejsViewer.constructor.prototype);
+    Object.assign(v, {_destroyed: false, _wsUrl: 'ws://localhost:1', _connectStarted: false,
+                      _ws: null, _handshakeTimeout: null, _reconnectTimeout: null,
+                      _statusDot: {className: '', title: ''}, _statusText: {textContent: ''},
+                      _connected: false, _connectionHooks: [], _sceneGeneration: 0,
+                      _animGeneration: 0, _options: options});
+    const real = {fetch: window.fetch, WebSocket: window.WebSocket,
+                  setTimeout: window.setTimeout, clearTimeout: window.clearTimeout};
+    const h = {v, timers: new Map(), sockets: [], next: 1, probe: () => new Response()};
+    window.fetch = async () => h.probe();
+    window.WebSocket = class {
+        static CONNECTING = 0; static OPEN = 1;
+        constructor() { this.readyState = 0; h.sockets.push(this); }
+        send() {}
+        close() { this.readyState = 3; }
+    };
+    window.setTimeout = (fn, ms) => { const id = h.next++; h.timers.set(id, {fn, ms}); return id; };
+    window.clearTimeout = (id) => h.timers.delete(id);
+    h.tick = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
+    h.fire = async (id) => { const t = h.timers.get(id); h.timers.delete(id); t.fn(); await h.tick(); return t.ms; };
+    h.error = () => {
+        const e = v.lastConnectError();
+        if (!e) return e;
+        const {at, ...rest} = e;
+        return typeof at === 'number' && at > 0 ? rest : {badAt: at};
+    };
+    h.restore = () => { v._destroyed = true; Object.assign(window, real); };
+    window.__connectHarness = h;
+    return true;
+}"""
+
+
+@pytest.mark.browser
+def test_reconnect_backoff_doubles_to_cap_and_resets_on_open(viewer_page):
+    """Failed attempts back off 0.5, 1, 2, 4, 8, 10, 10 s; an open resets the
+    count, so a server restart is retried after 500 ms again (issue #273)."""
+    viewer_page.evaluate(_CONNECT_HARNESS, None)
+    result = viewer_page.evaluate(
+        """async () => {
+            const h = window.__connectHarness, v = h.v;
+            try {
+                h.probe = () => { throw new TypeError('offline'); };
+                v.connect(); await h.tick();
+                const delays = [h.timers.get(v._reconnectTimeout).ms];
+                for (let i = 0; i < 6; i++) {
+                    await h.fire(v._reconnectTimeout);
+                    delays.push(h.timers.get(v._reconnectTimeout).ms);
+                }
+                const probeError = h.error();
+                h.probe = () => new Response();
+                await h.fire(v._reconnectTimeout);
+                const ws = h.sockets[0];
+                ws.readyState = 1; ws.onopen();
+                const afterOpen = {failures: v._reconnectFailures, error: v.lastConnectError()};
+                ws.readyState = 3; ws.onclose({code: 1006, reason: ''});
+                return {delays, probeError, afterOpen,
+                        afterClose: {delay: h.timers.get(v._reconnectTimeout).ms, error: h.error()}};
+            } finally { h.restore(); }
+        }"""
+    )
+    assert result == {
+        "delays": [500, 1000, 2000, 4000, 8000, 10000, 10000],
+        "probeError": {
+            "phase": "probe",
+            "message": "offline",
+            "attempt": 7,
+            "retryInMs": 10000,
+        },
+        "afterOpen": {"failures": 0, "error": None},
+        "afterClose": {
+            "delay": 500,
+            "error": {
+                "phase": "closed",
+                "code": 1006,
+                "reason": "",
+                "attempt": 1,
+                "retryInMs": 500,
+            },
+        },
+    }
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        (None, 65000),
+        (1000, 5000),
+        (20000, 20000),
+        ("7000", 7000),
+        ("not a number", 65000),
+        ("Infinity", None),
+    ],
+)
+def test_handshake_timeout_option_is_bounded(viewer_page, option, expected):
+    """`handshakeTimeoutMs` defaults to 65 s, is raised to 5 s when lower, and
+    `Infinity` arms no cutoff at all (issue #273)."""
+    options = None if option is None else {"handshakeTimeoutMs": option}
+    viewer_page.evaluate(_CONNECT_HARNESS, options)
+    result = viewer_page.evaluate(
+        """async () => {
+            const h = window.__connectHarness, v = h.v;
+            try {
+                v.connect(); await h.tick();
+                return {sockets: h.sockets.length,
+                        timeout: v._handshakeTimeout ? h.timers.get(v._handshakeTimeout).ms : null};
+            } finally { h.restore(); }
+        }"""
+    )
+    assert result == {"sockets": 1, "timeout": expected}
+
+
+@pytest.mark.browser
+def test_last_connect_error_reports_probe_status_close_code_and_timeout(viewer_page):
+    """A rejected upgrade is reported with its close code and the status of
+    the probe sent to the same URL; a stalled one as a timeout (issue #273)."""
+    viewer_page.evaluate(_CONNECT_HARNESS, None)
+    result = viewer_page.evaluate(
+        """async () => {
+            const h = window.__connectHarness, v = h.v;
+            try {
+                h.probe = () => new Response(null, {status: 503});
+                const before = v.lastConnectError();
+                v.connect(); await h.tick();
+                h.sockets[0].readyState = 3;
+                h.sockets[0].onclose({code: 1006, reason: ''});
+                const rejected = h.error();
+                await h.fire(v._reconnectTimeout);
+                await h.fire(v._handshakeTimeout);
+                return {before, rejected, stalled: h.error(),
+                        stalledClosed: h.sockets[1].readyState === 3};
+            } finally { h.restore(); }
+        }"""
+    )
+    assert result == {
+        "before": None,
+        "rejected": {
+            "phase": "handshake",
+            "code": 1006,
+            "reason": "",
+            "status": 503,
+            "attempt": 1,
+            "retryInMs": 500,
+        },
+        "stalled": {"phase": "timeout", "status": 503, "attempt": 2, "retryInMs": 1000},
+        "stalledClosed": True,
     }
 
 

@@ -234,7 +234,9 @@ window.threejsViewer = new ThreeJSViewer(container, {{
     htmlTemplate: HTML_TEMPLATE,
     cubemapData: CUBEMAPS['{DEFAULT_CUBEMAP}'].faces,
     cubemaps: CUBEMAPS,
-    dracoDecoder: DRACO_DECODER_DATA
+    dracoDecoder: DRACO_DECODER_DATA,
+    // Tests keep a short cutoff with ?handshake_timeout_ms=5000 (issue #273).
+    handshakeTimeoutMs: new URLSearchParams(location.search).get('handshake_timeout_ms') ?? undefined
 }});
     </script>
 </body>

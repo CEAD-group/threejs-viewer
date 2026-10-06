@@ -128,6 +128,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {string} [wsUrl]                             Full WebSocket URL override. When omitted, falls back to `ws://${host}:${port}` where host comes from the `ws_host` query param (default `localhost`) and port from the `ws_port` query param, `wsPort`, or 5666
  * @property {number} [wsPort]                            WebSocket port used when `wsUrl` is not provided (default 5666)
  * @property {boolean} [autoConnect]                      Auto-connect on construction (default true)
+ * @property {number} [handshakeTimeoutMs]                Close and retry a WebSocket still CONNECTING after this many ms (default 65000, raised to 5000 when lower, `Infinity` = no cutoff; issue #273). Keep it above 60000 for Firefox, which holds a socket in CONNECTING for up to 60 s after failed handshakes. The standalone viewer.html also reads the `handshake_timeout_ms` URL query param.
  * @property {Object<string, string>} [cubemapData]       Map of face name (px/nx/py/ny/pz/nz) -> gzip+base64 Radiance HDR (omit to load static/cubemaps/paul-lobe-haus/*.hdr next to the module)
  * @property {Object<string, {format: string, faces: Object<string, string>}>} [cubemaps]  Named cubemap sets (format hdr/png/jpg, faces gzip+base64) offered in the Lighting panel's picker; URL `cubemap` / localStorage pick one
  * @property {boolean} [environmentBackground]           Show the environment cubemap as the scene background (default false; URL `env_background` wins)
@@ -147,6 +148,23 @@ const CLIP_AXIS_NORMALS = {
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  * @property {false | {maxEntries?: number, maxBytes?: number}} [modelCache] Session cache of parsed models keyed by URL (issue #221). Default 64 entries / 256 MB; `false` disables it. `clearModelCache()` empties it.
  * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
+ */
+
+/**
+ * Why the last connection attempt failed (`lastConnectError()`, issue #273).
+ * Browsers hide the HTTP status of a rejected WebSocket upgrade, so `status`
+ * is the status of the reachability probe sent to the same URL just before,
+ * present only when the browser exposes it (a same-origin `wsUrl`).
+ *
+ * @typedef {Object} ConnectError
+ * @property {'probe'|'timeout'|'handshake'|'closed'} phase  probe request failed / socket still CONNECTING at `handshakeTimeoutMs` / socket closed before opening / an open socket closed
+ * @property {number} at                                   `Date.now()` of the failure
+ * @property {number} attempt                              consecutive failures so far, including this one
+ * @property {number} retryInMs                            delay before the next attempt
+ * @property {number} [status]                             HTTP status of this attempt's probe, when readable
+ * @property {number} [code]                               CloseEvent code (`handshake`, `closed`)
+ * @property {string} [reason]                             CloseEvent reason (`handshake`, `closed`)
+ * @property {string} [message]                            probe error (`probe`)
  */
 
 /**
@@ -1123,6 +1141,38 @@ function supersededFetchGraceMs() {
         : undefined;
     return typeof override === 'number' && override >= 0
         ? override : SUPERSEDED_FETCH_GRACE_MS;
+}
+
+// Above Firefox's 60 s ceiling for delaying a WebSocket after failed handshakes
+// (`network.websocket.delay-failed-reconnects`): a shorter cutoff closes sockets
+// Firefox is deliberately holding back (issue #273).
+const HANDSHAKE_TIMEOUT_DEFAULT_MS = 65000;
+const HANDSHAKE_TIMEOUT_MIN_MS = 5000;
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 10000;
+
+/**
+ * The `handshakeTimeoutMs` option as used: raised to 5000 when lower, `Infinity`
+ * for no cutoff (the browser's own open timeout applies), the default otherwise.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function resolveHandshakeTimeoutMs(value) {
+    const ms = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+    if (ms === Infinity) return Infinity;
+    if (typeof ms !== 'number' || !Number.isFinite(ms)) return HANDSHAKE_TIMEOUT_DEFAULT_MS;
+    // setTimeout fires at once for delays beyond 2^31 - 1 ms.
+    return Math.min(Math.max(ms, HANDSHAKE_TIMEOUT_MIN_MS), 2 ** 31 - 1);
+}
+
+/**
+ * Delay before the next connection attempt after `failures` consecutive failed
+ * ones: 500 ms, doubling, capped at 10 s.
+ * @param {number} failures
+ * @returns {number}
+ */
+function reconnectDelayMs(failures) {
+    return Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.max(0, failures - 1));
 }
 
 // Default lighting values. Panel ranges: exposure 0.0–3.0, env intensity 0.0–4.0, ambient 0.0–3.0.
@@ -11874,7 +11924,9 @@ export class ThreeJSViewer {
      * Python library satisfies this for free as part of the WS upgrade
      * handshake. If your WS host sits behind a proxy that drops non-upgrade
      * HTTP on that path, make it answer *something*, or the browser will
-     * never attempt the WebSocket.
+     * never attempt the WebSocket. Failed attempts are retried after 500 ms,
+     * doubling to 10 s, reset by an open; `lastConnectError()` says why the
+     * last one failed (issue #273).
      */
     constructor(container, options = /** @type {ThreeJSViewerOptions} */ ({})) {
         if (!container) throw new Error('ThreeJSViewer: container element is required');
@@ -12020,6 +12072,10 @@ export class ThreeJSViewer {
         this._reconnectTimeout = null;
         this._handshakeTimeout = null;
         this._connectStarted = false;
+        // Consecutive failed connection attempts, reset by an open (issue #273).
+        this._reconnectFailures = 0;
+        /** @type {ConnectError|null} */
+        this._lastConnectError = null;
         this._animationFrameId = null;
 
         // Animation state
@@ -15873,9 +15929,26 @@ export class ThreeJSViewer {
         // (ws→http / wss→https). Path and query are preserved, so the probe
         // targets the same endpoint as the eventual WebSocket upgrade.
         const probeUrl = this._wsUrl.replace(/^ws/, 'http');
+        const handshakeMs = resolveHandshakeTimeoutMs(this._options?.handshakeTimeoutMs);
+        /** @type {number|undefined} this attempt's probe status, when the browser exposes it */
+        let probeStatus;
+
+        // Every failed attempt lands here: record why and back off (issue #273).
+        const retry = (/** @type {Partial<ConnectError>} */ failure) => {
+            if (this._destroyed) return;
+            const attempt = (this._reconnectFailures ?? 0) + 1;
+            const retryInMs = reconnectDelayMs(attempt);
+            this._reconnectFailures = attempt;
+            this._lastConnectError = /** @type {ConnectError} */ (
+                { ...failure, at: Date.now(), attempt, retryInMs });
+            this._reconnectTimeout = setTimeout(doConnect, retryInMs);
+        };
+        const withProbeStatus = (/** @type {Partial<ConnectError>} */ failure) =>
+            probeStatus === undefined ? failure : { ...failure, status: probeStatus };
 
         const doConnect = async () => {
             if (this._destroyed) return;
+            probeStatus = undefined;
 
             // Probe HTTP on the same URL (minus scheme) as the pending
             // WebSocket: a failed `new WebSocket()` always logs `WebSocket
@@ -15890,10 +15963,13 @@ export class ThreeJSViewer {
             // must ensure that host (or its proxy) returns *something* on GET
             // for the same path/query as `wsUrl`, not just for `/`.
             try {
-                await fetch(probeUrl, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(2000) });
-            } catch {
+                const resp = await fetch(probeUrl, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(2000) });
+                // A cross-origin no-cors response is opaque (status 0); a same-origin one is readable.
+                if (resp.type !== 'opaque' && resp.status) probeStatus = resp.status;
+            } catch (err) {
                 // Server not reachable — retry later without creating a WebSocket
-                if (!this._destroyed) this._reconnectTimeout = setTimeout(doConnect, 500);
+                const e = /** @type {any} */ (err);
+                retry({ phase: 'probe', message: e?.name === 'TimeoutError' ? 'probe timed out' : String(e?.message ?? e) });
                 return;
             }
             // destroy() may have run during the probe await; a destroyed
@@ -15901,18 +15977,25 @@ export class ThreeJSViewer {
             if (this._destroyed) return;
 
             const ws = this._ws = new WebSocket(this._wsUrl);
-            // A TCP connection can accept the probe yet stall its upgrade.
-            // Don't wait for the browser's (potentially minute-long) timeout.
-            this._handshakeTimeout = setTimeout(() => {
-                if (this._destroyed || this._ws !== ws || ws.readyState !== WebSocket.CONNECTING) return;
-                ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
-                ws.close();
-                this._ws = null;
-                this._reconnectTimeout = setTimeout(doConnect, 500);
-            }, 5000);
+            let opened = false;
+            // A TCP connection can accept the probe yet stall its upgrade, but
+            // Firefox also holds a socket in CONNECTING on purpose for up to
+            // 60 s after failed handshakes, so the cutoff must stay above that.
+            if (Number.isFinite(handshakeMs)) {
+                this._handshakeTimeout = setTimeout(() => {
+                    if (this._destroyed || this._ws !== ws || ws.readyState !== WebSocket.CONNECTING) return;
+                    ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+                    ws.close();
+                    this._ws = null;
+                    retry(withProbeStatus({ phase: 'timeout' }));
+                }, handshakeMs);
+            }
 
-            this._ws.onopen = () => {
+            ws.onopen = () => {
                 clearTimeout(this._handshakeTimeout);
+                opened = true;
+                this._reconnectFailures = 0;
+                this._lastConnectError = null;
                 this._statusDot.className = 'tjsv-status-dot connected';
                 this._statusDot.title = 'Connected';
                 this._statusText.textContent = 'Connected';
@@ -15930,12 +16013,14 @@ export class ThreeJSViewer {
                 this._fireConnectionChange(true);
             };
 
-            this._ws.onclose = () => {
+            ws.onclose = (/** @type {CloseEvent} */ event) => {
                 clearTimeout(this._handshakeTimeout);
                 this._statusDot.className = 'tjsv-status-dot disconnected';
                 this._statusDot.title = 'Waiting for Python...';
                 this._statusText.textContent = 'Waiting...';
-                this._reconnectTimeout = setTimeout(doConnect, 500);
+                const close = { code: event?.code, reason: event?.reason ?? '' };
+                // Failures count from 0 after an open, so a server restart is retried after 500 ms.
+                retry(opened ? { phase: 'closed', ...close } : withProbeStatus({ phase: 'handshake', ...close }));
                 // A socket that never opened (failed handshake) closes too; only
                 // an open-to-closed transition is a change worth reporting.
                 if (this._connected) {
@@ -15944,9 +16029,9 @@ export class ThreeJSViewer {
                 }
             };
 
-            this._ws.onerror = () => {};
+            ws.onerror = () => {};
 
-            this._ws.onmessage = /** @param {MessageEvent<string>} event */ (event) => {
+            ws.onmessage = /** @param {MessageEvent<string>} event */ (event) => {
                 const tParse = performance.now();
                 const data = JSON.parse(event.data);
                 const parseMs = performance.now() - tParse;
@@ -16010,6 +16095,17 @@ export class ThreeJSViewer {
      */
     isConnected() {
         return this._connected;
+    }
+
+    /**
+     * Why the viewer socket is not connected: the last failed attempt since
+     * the last open, or `null` while open and before any failure (issue #273).
+     * Lets an embedder show a proxy's 502/503 or a closed socket's code
+     * instead of an unexplained "Waiting...". See `ConnectError`.
+     * @returns {ConnectError|null}
+     */
+    lastConnectError() {
+        return this._lastConnectError ?? null;
     }
 
     /**
