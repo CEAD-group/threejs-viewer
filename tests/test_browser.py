@@ -11639,6 +11639,39 @@ def test_point_and_polyline_tools(viewer_page):
 
 
 @pytest.mark.browser
+def test_annotation_tool_surface_pick(viewer_client, viewer_page):
+    """With `pick` a tool point lands on the surface under the cursor and
+    carries its hit; off a surface it falls onto the fixed plane, and
+    `describe` supplies the text beside the cursor."""
+    viewer_client.add_box("box", 1, 1, 1)
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_page.evaluate(
+        "() => { window.__ann = []; const v = window.threejsViewer;"
+        " window.__pickTool = () => v.startPointTool({ pick: true,"
+        " planeOrigin: [0, 0, -1], planeNormal: [0, 0, 1],"
+        " describe: (i) => `${i.hit ? i.hit.objectId : 'plane'} ${i.point[2].toFixed(1)}`,"
+        " onCreate: s => window.__ann.push("
+        "{ position: s.position, id: s.hit && s.hit.objectId }) }); }"
+    )
+    hint = "() => document.querySelector('.tjsv-dim-hint').textContent"
+    for world, want_id, want_hint in (
+        ([0.2, 0.2, 0.5], "box", "box 0.5"),
+        ([3, 2, -1], None, "plane -1.0"),
+    ):
+        viewer_page.evaluate("() => window.__pickTool()")
+        p = viewer_page.evaluate(_DIM_PROJECT, world)
+        viewer_page.mouse.move(p["x"], p["y"])
+        frames(viewer_page)
+        assert viewer_page.evaluate(hint) == want_hint
+        viewer_page.mouse.down()
+        viewer_page.mouse.up()
+        got = viewer_page.evaluate("() => window.__ann.pop()")
+        assert got["id"] == want_id
+        assert got["position"] == pytest.approx(world, abs=0.02)
+
+
+@pytest.mark.browser
 def test_replacing_annotations_disposes_labels_and_preserves_literal_text(
     viewer_client, viewer_page
 ):

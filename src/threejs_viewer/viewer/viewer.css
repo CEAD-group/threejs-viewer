@@ -24,6 +24,16 @@
     --tjsv-text-faint: #666;
     --tjsv-primary: #0066cc;
     --tjsv-primary-hi: #0077e6;
+    --tjsv-on-primary: #fff;
+    /* Per-control tokens, for an embedder whose buttons and inputs differ. */
+    --tjsv-button-bg: var(--tjsv-panel-2);
+    --tjsv-button-border: var(--tjsv-border);
+    --tjsv-button-text: var(--tjsv-text);
+    --tjsv-button-hover: var(--tjsv-panel-3);
+    --tjsv-input-bg: var(--tjsv-panel-2);
+    --tjsv-input-border: var(--tjsv-border);
+    --tjsv-input-text: var(--tjsv-text);
+    --tjsv-input-focus: var(--tjsv-primary);
     --tjsv-radius: 4px;
     --tjsv-font-size: 12px;
 }
@@ -78,7 +88,7 @@
 .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); }
 /* The viewer's own tab: the status dot alone, no label */
 .threejs-viewer .tjsv-rail-panel > .tjsv-btn-menu { padding: 8px 5px; }
-.threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+.threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: var(--tjsv-on-primary); }
 .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
 .threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
 .threejs-viewer .tjsv-menu-btn-label { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.06em; }
@@ -228,19 +238,19 @@
     padding: 4px 8px;
     font: inherit;
     font-size: 12px;
-    color: var(--tjsv-text);
-    background: var(--tjsv-panel-2);
-    border: 1px solid var(--tjsv-border);
+    color: var(--tjsv-button-text);
+    background: var(--tjsv-button-bg);
+    border: 1px solid var(--tjsv-button-border);
     border-radius: 3px;
     cursor: pointer;
     transition: background 0.1s, border-color 0.1s;
     white-space: nowrap;
 }
-.threejs-viewer .tjsv-menu-action:hover:not(:disabled) { background: var(--tjsv-panel-3); }
+.threejs-viewer .tjsv-menu-action:hover:not(:disabled) { background: var(--tjsv-button-hover); }
 .threejs-viewer .tjsv-menu-action:disabled { opacity: 0.4; cursor: not-allowed; }
-.threejs-viewer .tjsv-menu-action.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+.threejs-viewer .tjsv-menu-action.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: var(--tjsv-on-primary); }
 .threejs-viewer .tjsv-menu-action.active kbd,
-.threejs-viewer .tjsv-menu-action.active .tjsv-menu-state { color: #fff; opacity: 0.8; }
+.threejs-viewer .tjsv-menu-action.active .tjsv-menu-state { color: var(--tjsv-on-primary); opacity: 0.8; }
 .threejs-viewer .tjsv-menu-action[hidden] { display: none; }
 .threejs-viewer .tjsv-menu-action .tjsv-menu-label { flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; }
 .threejs-viewer .tjsv-menu-action:focus { outline: none; }
@@ -259,22 +269,22 @@
 .threejs-viewer .tjsv-menu-row.disabled { color: var(--tjsv-text-faint); }
 .threejs-viewer .tjsv-menu-row[hidden] { display: none; }
 .threejs-viewer .tjsv-menu-select {
-    background: var(--tjsv-panel-2);
-    border: 1px solid var(--tjsv-border);
+    background: var(--tjsv-input-bg);
+    border: 1px solid var(--tjsv-input-border);
     border-radius: 3px;
-    color: var(--tjsv-text);
+    color: var(--tjsv-input-text);
     font: inherit;
     font-size: 11px;
     padding: 2px 4px;
     min-width: 0;
     flex: 1;
 }
-.threejs-viewer .tjsv-menu-select:focus { outline: none; border-color: var(--tjsv-primary); }
+.threejs-viewer .tjsv-menu-select:focus { outline: none; border-color: var(--tjsv-input-focus); }
 .threejs-viewer .tjsv-segmented { display: flex; flex: 1; gap: 0; min-width: 0; }
 .threejs-viewer .tjsv-seg-btn {
     flex: 1;
-    background: var(--tjsv-panel-2);
-    border: 1px solid var(--tjsv-border);
+    background: var(--tjsv-button-bg);
+    border: 1px solid var(--tjsv-button-border);
     color: var(--tjsv-text-dim);
     padding: 2px 6px;
     font: inherit;
@@ -285,8 +295,8 @@
 .threejs-viewer .tjsv-seg-btn + .tjsv-seg-btn { border-left: none; }
 .threejs-viewer .tjsv-seg-btn:first-child { border-radius: 3px 0 0 3px; }
 .threejs-viewer .tjsv-seg-btn:last-child { border-radius: 0 3px 3px 0; }
-.threejs-viewer .tjsv-seg-btn:hover:not(:disabled) { color: var(--tjsv-text); }
-.threejs-viewer .tjsv-seg-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: #fff; }
+.threejs-viewer .tjsv-seg-btn:hover:not(:disabled) { color: var(--tjsv-button-text); }
+.threejs-viewer .tjsv-seg-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: var(--tjsv-on-primary); }
 
 /* Animation Controls */
 .threejs-viewer .tjsv-animation-controls {
@@ -871,15 +881,18 @@
 
 .threejs-viewer .tjsv-dim-hint {
     position: absolute;
-    background: rgba(30, 30, 30, 0.85);
-    color: #eee;
+    background: var(--tjsv-button-bg);
+    color: var(--tjsv-button-text);
+    border: 1px solid var(--tjsv-button-border);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     font-size: 12px;
-    padding: 3px 7px;
-    border-radius: 5px;
+    font-variant-numeric: tabular-nums;
+    padding: 4px 9px;
+    border-radius: 6px;
     pointer-events: none;
     user-select: none;
-    white-space: nowrap;
+    white-space: pre;
     z-index: 10;
 }
 
