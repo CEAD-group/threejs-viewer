@@ -2,7 +2,19 @@
 
 ## Unreleased
 
-### Handshake cutoff option and reconnect backoff (#274, issue #273)
+## 0.0.68
+
+### Annotation surface picking and cursor descriptions (#276)
+
+- `startDimensionTool`, `startPointTool` and `startPolylineTool` accept `pick: true` to use the viewer's surface picker, or a custom picker. Created points carry `hit`; dimensions and polylines carry `hits`, with `null` for off-surface points.
+- `planeNormal` fixes the fallback plane through `planeOrigin`; edge-on views fall back to a camera-facing plane. Off-surface axis snapping stays in the fixed plane. Surface-picked dimension labels use a plane through the measured points' midpoint.
+- `describe({point, hit, state})` supplies the cursor-card text, including dimension label placement. Surface-picking pointer moves are coalesced to one update per frame, and the card follows a scrolled viewer element.
+- New `--tjsv-button-*`, `--tjsv-input-*` and `--tjsv-on-primary` tokens let embedders theme controls separately.
+- Vendored static assets retain their original bytes on Windows, preventing Git line-ending conversion from corrupting HDR cubemaps or changing generated assets.
+
+## 0.0.66–0.0.67
+
+### Handshake cutoff option and reconnect backoff (#274, #275, issue #273)
 
 - **`handshakeTimeoutMs`** (default 65000, raised to 5000 when lower, `Infinity` for no cutoff) replaces the fixed 5 s CONNECTING cutoff from #272, which closed sockets Firefox holds back on purpose for up to 60 s after failed handshakes (`network.websocket.delay-failed-reconnects`). The standalone viewer.html reads `handshake_timeout_ms`.
 - Failed attempts are retried after 500 ms, doubling to 10 s. The delay resets once an open socket gets its first message or stays open 5 s, so a server that accepts and closes at once keeps backing off, and a tab shown again retries at once. **`viewer.lastConnectError()`** reports the phase, the close code and the probe's HTTP status (readable for a same-origin `wsUrl`), and `onConnectionChange` passes it as a second argument on `false`.
