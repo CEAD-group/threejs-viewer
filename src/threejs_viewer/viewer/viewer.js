@@ -9542,10 +9542,17 @@ class DimensionController {
     /** The cursor snapped onto the nearest axis line through p1 on screen, or null.
      * @param {THREE.Vector3} p1 @param {number} cx @param {number} cy */
     _snapToAxis(p1, cx, cy) {
+        const t = this._tool;
+        const normal = t.planeNormal;
+        // A surface vertex can sit outside the fallback plane. No axis line
+        // through it lies in that plane; keep the plane intersection instead.
+        if (normal && Math.abs(normal.dot(new THREE.Vector3().subVectors(p1, t.planeOrigin)))
+            > 1e-6 * Math.max(1, p1.distanceTo(t.planeOrigin))) return null;
         const s0 = this._toScreen(p1);
         const k = 100 * this._worldPerPixel(p1);
         let best = null, bestPx = DIM_SNAP_PX;
         for (const axis of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
+            if (normal && Math.abs(normal.dot(axis)) > 1e-6) continue;
             const s1 = this._toScreen(p1.clone().addScaledVector(axis, k));
             const dx = s1.x - s0.x, dy = s1.y - s0.y, len = Math.hypot(dx, dy);
             if (len < 20) continue;   // axis runs (nearly) along the view direction
@@ -9619,7 +9626,7 @@ class DimensionController {
         const { px, len } = this._diagonalPx(t.p1, t.p2, cx, cy);
         t.direction = autoDimensionDirection(t.p1, t.p2, c, px <= Math.max(DIM_DIAGONAL_PX, 0.1 * len));
         const rec = this._previewDimension(t.p1, t.p2, c, t.direction);
-        this._showHint(`${this._formatValue(rec.geom.value, rec)} · ${t.direction} · click to place`);
+        this._showHint(this._describe() || `${this._formatValue(rec.geom.value, rec)} · ${t.direction} · click to place`);
     }
 
     /** @param {string} kind @param {any} input */

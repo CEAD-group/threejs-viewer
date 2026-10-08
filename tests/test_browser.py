@@ -11672,6 +11672,61 @@ def test_annotation_tool_surface_pick(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize("kind", ["dimension", "polyline"])
+def test_annotation_surface_then_fixed_plane(viewer_client, viewer_page, kind):
+    """Off-surface axis snapping must not retain the previous surface depth."""
+    viewer_client.add_box("box", 1, 1, 1)
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_page.evaluate(
+        "kind => { const v = window.threejsViewer; window.__ann = null;"
+        " const start = kind === 'dimension' ? 'startDimensionTool' : 'startPolylineTool';"
+        " v[start]({pick: true, planeOrigin: [0, 0, -1], planeNormal: [0, 0, 1],"
+        " describe: i => `custom ${i.state}`, onCreate: s => window.__ann ="
+        " {...s, hits: s.hits.map(h => h && {objectId: h.objectId})}}); }",
+        kind,
+    )
+    _dim_click(viewer_page, [0, 0, 0.5])
+    _dim_click(viewer_page, [2, 0, -1])
+    if kind == "dimension":
+        p = viewer_page.evaluate(_DIM_PROJECT, [1, 1, -0.25])
+        viewer_page.mouse.move(p["x"], p["y"])
+        frames(viewer_page)
+        assert viewer_page.locator(".tjsv-dim-hint").text_content() == "custom place"
+        viewer_page.mouse.click(p["x"], p["y"])
+    else:
+        viewer_page.keyboard.press("Enter")
+    spec = viewer_page.evaluate("() => window.__ann")
+    points = [spec["p1"], spec["p2"]] if kind == "dimension" else spec["points"]
+    assert points[0] == pytest.approx([0, 0, 0.5], abs=0.02)
+    assert points[1] == pytest.approx([2, 0, -1], abs=0.02)
+    assert spec["hits"][0]["objectId"] == "box"
+    assert spec["hits"][1] is None
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("kind", ["dimension", "polyline"])
+def test_annotation_axis_snap_stays_in_oblique_plane(viewer_page, kind):
+    """A world axis outside a fixed plane must not override its intersection."""
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    viewer_page.evaluate(
+        "kind => { const v = window.threejsViewer; window.__ann = null;"
+        " const start = kind === 'dimension' ? 'startDimensionTool' : 'startPolylineTool';"
+        " v[start]({planeNormal: [1, 0, 1], onCreate: s => window.__ann = s}); }",
+        kind,
+    )
+    _dim_click(viewer_page, [0, 0, 0])
+    _dim_click(viewer_page, [2, 0, -2])
+    if kind == "dimension":
+        _dim_click(viewer_page, [1, 1, -1])
+    else:
+        viewer_page.keyboard.press("Enter")
+    spec = viewer_page.evaluate("() => window.__ann")
+    p2 = spec["p2"] if kind == "dimension" else spec["points"][1]
+    assert p2 == pytest.approx([2, 0, -2], abs=0.02)
+
+
+@pytest.mark.browser
 def test_replacing_annotations_disposes_labels_and_preserves_literal_text(
     viewer_client, viewer_page
 ):
