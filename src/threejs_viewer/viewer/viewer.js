@@ -8723,6 +8723,14 @@ class DepthCueController {
 // (snapping onto axis lines through the previous one); clicking the last
 // vertex again (a double-click) or Enter finishes, clicking the first closes
 // it, Backspace drops the last vertex.
+//
+// Tool options change where a click lands. `pick` (true for the viewer's own
+// `pick`, or a function `(clientX, clientY) => {point, ...}|null`) puts a point
+// on the surface under the cursor; the returned object comes back as that
+// point's `hit` in the result. Off a surface the point falls onto the plane
+// through `planeOrigin`, which `planeNormal` fixes in the world instead of
+// facing the camera, and axis snapping applies only there. `describe({point,
+// hit, state})` replaces the hint beside the cursor with its own text.
 const DIM_AXES = /** @type {const} */ (['X', 'Y', 'Z']);
 const DIM_DIRECTIONS = new Set(['X', 'Y', 'Z', 'XY', 'XZ', 'YZ', 'XYZ']);
 const DIM_DISPLAY_MODES = new Set(['all', 'in_view', 'none']);
@@ -8741,6 +8749,7 @@ const ANN_POINT_RING_PX = 2;       // background-colour ring around a point mark
 const ANN_POINT_PX = 11;           // point marker diameter, halo included
 const DIM_IN_VIEW_TOL_DEG = 10;
 const DIM_SNAP_PX = 10;
+const DIM_PLANE_MIN_COS = 0.02;    // a fixed tool plane seen flatter than this counts as edge-on
 const DIM_DIAGONAL_PX = 24;
 const DIM_PREVIEW_ID = '__dimension_preview__';
 const ANN_TOOL_HINTS = {
@@ -9342,6 +9351,8 @@ class DimensionController {
 
     /**
      * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any,
+     *   planeNormal?: any, pick?: boolean|((clientX:number, clientY:number) => any),
+     *   describe?: (info:{point:number[], hit:any, state:string}) => string|null|undefined,
      *   color?: any, reply?: boolean}} [opts]
      * @param {'dimension'|'point'|'polyline'} [kind]
      */
@@ -9351,15 +9362,21 @@ class DimensionController {
         const tool = {
             kind, state: kind === 'dimension' ? 'p1' : kind, opts,
             planeOrigin: toDimVec(opts.planeOrigin) || new THREE.Vector3(),
+            planeNormal: /** @type {THREE.Vector3|null} */ (null),
             color: new THREE.Color(opts.color ?? DIM_DEFAULT_COLOR),
             p1: /** @type {THREE.Vector3|null} */ (null), p2: /** @type {THREE.Vector3|null} */ (null),
             verts: /** @type {THREE.Vector3[]} */ ([]),
-            cursor: /** @type {THREE.Vector3|null} */ (null), direction: 'X',
+            // What `opts.pick` returned for p1, p2 and each vertex: null off a surface.
+            hit1: /** @type {any} */ (null), hit2: /** @type {any} */ (null), hits: /** @type {any[]} */ ([]),
+            cursor: /** @type {THREE.Vector3|null} */ (null), cursorHit: /** @type {any} */ (null), direction: 'X',
+            moveX: 0, moveY: 0, raf: 0,
             press: /** @type {{x:number, y:number, id:number, setP2:boolean}|null} */ (null), dragged: false,
             hint: document.createElement('div'),
             lastX: 0, lastY: 0,
             /** @type {() => void} */ detach: () => {},
         };
+        const normal = toDimVec(opts.planeNormal);
+        if (normal && normal.lengthSq() > 0) tool.planeNormal = normal.normalize();
         tool.hint.className = 'tjsv-dim-hint';
         this.v.el.appendChild(tool.hint);
         const down = (/** @type {PointerEvent} */ e) => this._toolDown(e);
@@ -9383,6 +9400,7 @@ class DimensionController {
             window.removeEventListener('pointerup', up, true);
             window.removeEventListener('keydown', key, true);
             setTimeout(() => dom.removeEventListener('dblclick', swallowDbl, true), 600);
+            cancelAnimationFrame(tool.raf);
             tool.hint.remove();
             dom.style.cursor = '';
         };
@@ -9436,13 +9454,76 @@ class DimensionController {
         return this._raycaster.ray;
     }
 
-    /** Cursor on the camera-facing plane through planeOrigin. @param {number} cx @param {number} cy */
-    _pickPlane(cx, cy) {
+    /** Cursor on the plane through `origin`: the `fixed` normal's, or the
+     * camera-facing one when there is none or the ray misses it.
+     * @param {number} cx @param {number} cy @param {THREE.Vector3} [origin] @param {THREE.Vector3|null} [fixed] */
+    _pickPlane(cx, cy, origin = this._tool.planeOrigin, fixed = this._tool.planeNormal) {
         const ray = this._ray(cx, cy);
-        const normal = new THREE.Vector3();
-        this.v._camera.getWorldDirection(normal);
-        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, this._tool.planeOrigin);
-        return ray.intersectPlane(plane, new THREE.Vector3());
+        const plane = new THREE.Plane();
+        const out = new THREE.Vector3();
+        if (fixed && Math.abs(fixed.dot(ray.direction)) > DIM_PLANE_MIN_COS
+            && ray.intersectPlane(plane.setFromNormalAndCoplanarPoint(fixed, origin), out)) return out;
+        const facing = this.v._camera.getWorldDirection(new THREE.Vector3());
+        return ray.intersectPlane(plane.setFromNormalAndCoplanarPoint(facing, origin), out);
+    }
+
+    /** The point a click at the cursor would take: on the surface under it when
+     * the tool picks surfaces (`hit` is then what the pick returned), else on
+     * the tool plane. @param {number} cx @param {number} cy
+     * @returns {{point:THREE.Vector3, hit:any}|null} */
+    _pickPoint(cx, cy) {
+        const pick = this._tool.opts.pick;
+        if (pick) {
+            let hit = null;
+            try { hit = typeof pick === 'function' ? pick(cx, cy) : this.v.pick(cx, cy); } catch (err) { console.error('annotation tool pick error', err); }
+            const point = hit && toDimVec(hit.point);
+            if (point) return { point, hit };
+        }
+        const point = this._pickPlane(cx, cy);
+        return point ? { point, hit: null } : null;
+    }
+
+    /** Set the tool's cursor (and its hit) from the pointer. Off a surface it
+     * snaps onto an axis line through `snapFrom`.
+     * @param {number} cx @param {number} cy @param {THREE.Vector3|null} [snapFrom] */
+    _cursorAt(cx, cy, snapFrom = null) {
+        const t = this._tool;
+        const c = this._pickPoint(cx, cy);
+        const snap = snapFrom && !(c && c.hit) ? this._snapToAxis(snapFrom, cx, cy) : null;
+        t.cursor = snap || (c && c.point) || null;
+        t.cursorHit = !snap && c ? c.hit : null;
+        return t.cursor;
+    }
+
+    /** Cursor on the plane a dimension's label is placed on. A surface-picking
+     * tool's points leave the tool plane, so the plane goes through their
+     * midpoint: the fixed one when both points lie in it, else camera-facing.
+     * @param {number} cx @param {number} cy */
+    _pickLabelPlane(cx, cy) {
+        const t = this._tool;
+        if (!t.opts.pick) return this._pickPlane(cx, cy);
+        const n = t.planeNormal;
+        const span = _dimV1.subVectors(t.p2, t.p1);
+        const flat = !!n && Math.abs(n.dot(span)) <= 1e-4 * Math.max(1, span.length());
+        return this._pickPlane(cx, cy, new THREE.Vector3().addVectors(t.p1, t.p2).multiplyScalar(0.5), flat ? n : null);
+    }
+
+    /** The embedder's text for the point under the cursor, or ''. */
+    _describe() {
+        const t = this._tool;
+        if (!t.cursor || typeof t.opts.describe !== 'function') return '';
+        try {
+            return String(t.opts.describe({ point: t.cursor.toArray(), hit: t.cursorHit, state: t.state }) || '');
+        } catch (err) {
+            console.error('annotation tool describe error', err);
+            return '';
+        }
+    }
+
+    /** `spec` plus the picked hits under `key`, for a tool that picks surfaces.
+     * @param {any} spec @param {string} key @param {any} hits */
+    _withHits(spec, key, hits) {
+        return this._tool.opts.pick ? { ...spec, [key]: hits } : spec;
     }
 
     /** World point -> client pixels. @param {THREE.Vector3} p */
@@ -9461,10 +9542,17 @@ class DimensionController {
     /** The cursor snapped onto the nearest axis line through p1 on screen, or null.
      * @param {THREE.Vector3} p1 @param {number} cx @param {number} cy */
     _snapToAxis(p1, cx, cy) {
+        const t = this._tool;
+        const normal = t.planeNormal;
+        // A surface vertex can sit outside the fallback plane. No axis line
+        // through it lies in that plane; keep the plane intersection instead.
+        if (normal && Math.abs(normal.dot(new THREE.Vector3().subVectors(p1, t.planeOrigin)))
+            > 1e-6 * Math.max(1, p1.distanceTo(t.planeOrigin))) return null;
         const s0 = this._toScreen(p1);
         const k = 100 * this._worldPerPixel(p1);
         let best = null, bestPx = DIM_SNAP_PX;
         for (const axis of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
+            if (normal && Math.abs(normal.dot(axis)) > 1e-6) continue;
             const s1 = this._toScreen(p1.clone().addScaledVector(axis, k));
             const dx = s1.x - s0.x, dy = s1.y - s0.y, len = Math.hypot(dx, dy);
             if (len < 20) continue;   // axis runs (nearly) along the view direction
@@ -9496,43 +9584,49 @@ class DimensionController {
         const t = this._tool;
         if (!t) return;
         const rect = this.v.el.getBoundingClientRect();
-        t.lastX = cx - rect.left;
-        t.lastY = cy - rect.top;
+        // The hint is placed in the viewer element, which a focused menu can scroll.
+        t.lastX = cx - rect.left + this.v.el.scrollLeft;
+        t.lastY = cy - rect.top + this.v.el.scrollTop;
+        t.moveX = cx;
+        t.moveY = cy;
         if (t.state === 'point') {
-            t.cursor = this._pickPlane(cx, cy);
+            this._cursorAt(cx, cy);
             if (t.cursor) this._preview('point', { position: t.cursor, color: t.color, label: null });
-            this._showHint(ANN_TOOL_HINTS.point);
+            this._showHint(this._describe() || ANN_TOOL_HINTS.point);
             return;
         }
         if (t.state === 'polyline') {
-            const last = t.verts[t.verts.length - 1];
-            t.cursor = (last && this._snapToAxis(last, cx, cy)) || this._pickPlane(cx, cy);
+            this._cursorAt(cx, cy, t.verts[t.verts.length - 1] || null);
             const pts = t.cursor ? [...t.verts, t.cursor] : t.verts;
             if (pts.length >= 2) this._preview('polyline', { points: pts, closed: false, color: t.color });
             else this.remove(DIM_PREVIEW_ID);
-            this._showHint(ANN_TOOL_HINTS.polyline);
+            this._showHint(this._describe() || ANN_TOOL_HINTS.polyline);
             return;
         }
-        if (t.state === 'p1') { this._showHint('Click the first point · Esc to cancel'); return; }
+        if (t.state === 'p1') {
+            this._cursorAt(cx, cy);
+            this._showHint(this._describe() || 'Click the first point · Esc to cancel');
+            return;
+        }
         if (t.state === 'p2') {
-            const c = this._snapToAxis(t.p1, cx, cy) || this._pickPlane(cx, cy);
+            const c = this._cursorAt(cx, cy, t.p1);
             if (!c) return;
-            t.cursor = c;
             const diff = dimensionDiffAxes(t.p1, c);
             if (!diff) { this.remove(DIM_PREVIEW_ID); this._showHint('Click the second point'); return; }
             const mid = new THREE.Vector3().addVectors(t.p1, c).multiplyScalar(0.5);
             this._previewDimension(t.p1, c, mid, diff);
-            this._showHint(`Click the second point · ${diff}`);
+            this._showHint(this._describe() || `Click the second point · ${diff}`);
             return;
         }
         // state 'place': the cursor is the draw origin.
-        const c = this._pickPlane(cx, cy);
+        const c = this._pickLabelPlane(cx, cy);
         if (!c) return;
         t.cursor = c;
+        t.cursorHit = null;
         const { px, len } = this._diagonalPx(t.p1, t.p2, cx, cy);
         t.direction = autoDimensionDirection(t.p1, t.p2, c, px <= Math.max(DIM_DIAGONAL_PX, 0.1 * len));
         const rec = this._previewDimension(t.p1, t.p2, c, t.direction);
-        this._showHint(`${this._formatValue(rec.geom.value, rec)} · ${t.direction} · click to place`);
+        this._showHint(this._describe() || `${this._formatValue(rec.geom.value, rec)} · ${t.direction} · click to place`);
     }
 
     /** @param {string} kind @param {any} input */
@@ -9552,7 +9646,7 @@ class DimensionController {
     _finishPolyline(closed) {
         const t = this._tool;
         if (!t || t.verts.length < (closed ? 3 : 2)) return;
-        this._commit({ points: t.verts.map((/** @type {THREE.Vector3} */ p) => p.toArray()), closed });
+        this._commit(this._withHits({ points: t.verts.map((/** @type {THREE.Vector3} */ p) => p.toArray()), closed }, 'hits', t.hits));
     }
 
     /** @param {PointerEvent} e */
@@ -9564,19 +9658,23 @@ class DimensionController {
         t.press = { x: e.clientX, y: e.clientY, id: e.pointerId, setP2: t.state === 'p2' };
         t.dragged = false;
         if (t.state === 'point') {
-            const p = this._pickPlane(e.clientX, e.clientY);
-            if (p) this._commit({ position: p.toArray() });
+            const p = this._cursorAt(e.clientX, e.clientY);
+            if (p) this._commit(this._withHits({ position: p.toArray() }, 'hit', t.cursorHit));
         } else if (t.state === 'polyline') {
             t.press = null;
             const n = t.verts.length;
             if (n >= 3 && this._screenPx(t.verts[0], e.clientX, e.clientY) <= DIM_SNAP_PX) { this._finishPolyline(true); return; }
             if (n >= 2 && this._screenPx(t.verts[n - 1], e.clientX, e.clientY) <= DIM_SNAP_PX) { this._finishPolyline(false); return; }
             this._toolUpdate(e.clientX, e.clientY);
-            if (t.cursor && !(n && this._screenPx(t.verts[n - 1], e.clientX, e.clientY) <= CLICK_DRAG_MAX_PX)) t.verts.push(t.cursor.clone());
+            if (t.cursor && !(n && this._screenPx(t.verts[n - 1], e.clientX, e.clientY) <= CLICK_DRAG_MAX_PX)) {
+                t.verts.push(t.cursor.clone());
+                t.hits.push(t.cursorHit);
+            }
         } else if (t.state === 'p1') {
-            const p = this._pickPlane(e.clientX, e.clientY);
+            const p = this._cursorAt(e.clientX, e.clientY);
             if (!p) return;
-            t.p1 = p;
+            t.p1 = p.clone();
+            t.hit1 = t.cursorHit;
             t.state = 'p2';
             t.press = null;   // the release of this press is not a placement
             this._toolUpdate(e.clientX, e.clientY);
@@ -9584,6 +9682,7 @@ class DimensionController {
             this._toolUpdate(e.clientX, e.clientY);
             if (!t.cursor || !dimensionDiffAxes(t.p1, t.cursor)) { t.press = null; return; }
             t.p2 = t.cursor.clone();
+            t.hit2 = t.cursorHit;
             t.state = 'place';
             this._toolUpdate(e.clientX, e.clientY);
         }
@@ -9594,7 +9693,16 @@ class DimensionController {
         const t = this._tool;
         if (!t) return;
         if (t.press && Math.hypot(e.clientX - t.press.x, e.clientY - t.press.y) > CLICK_DRAG_MAX_PX) t.dragged = true;
-        this._toolUpdate(e.clientX, e.clientY);
+        if (!t.opts.pick) { this._toolUpdate(e.clientX, e.clientY); return; }
+        // A surface pick raycasts the scene: at most one per frame.
+        t.moveX = e.clientX;
+        t.moveY = e.clientY;
+        if (!t.raf) {
+            t.raf = requestAnimationFrame(() => {
+                t.raf = 0;
+                if (this._tool === t) this._toolUpdate(t.moveX, t.moveY);
+            });
+        }
     }
 
     /** @param {KeyboardEvent} e */
@@ -9611,7 +9719,8 @@ class DimensionController {
         } else if (e.key === 'Backspace') {
             e.preventDefault(); e.stopPropagation();
             t.verts.pop();
-            this._toolUpdate(t.lastX + this.v.el.getBoundingClientRect().left, t.lastY + this.v.el.getBoundingClientRect().top);
+            t.hits.pop();
+            this._toolUpdate(t.moveX, t.moveY);
         }
     }
 
@@ -9627,10 +9736,10 @@ class DimensionController {
         if (press.setP2 && !t.dragged) return;
         this._toolUpdate(e.clientX, e.clientY);
         if (!t.cursor) return;
-        const spec = {
+        const spec = this._withHits({
             p1: t.p1.toArray(), p2: t.p2.toArray(), drawOrigin: t.cursor.toArray(),
             direction: t.direction, value: dimensionGeometry(t.p1, t.p2, t.cursor, t.direction).value,
-        };
+        }, 'hits', [t.hit1, t.hit2]);
         this._commit(spec);
         if (t.opts.reply) {
             this.v._reply({ type: 'dimension_created', p1: spec.p1, p2: spec.p2, draw_origin: spec.drawOrigin,
@@ -20216,15 +20325,25 @@ export class ThreeJSViewer {
      * origin). The tool owns the left button until it ends; Esc cancels. The
      * created spec (`{p1, p2, drawOrigin, direction, value}`) goes to `onCreate`;
      * the tool does not add it, so the embedder decides where it is stored.
-     * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any, color?: any}} [opts]
+     *
+     * `pick` puts the measured points on the surface under the cursor instead:
+     * `true` uses `viewer.pick`, a function `(clientX, clientY) => {point, ...}|null`
+     * is the embedder's own. What it returned per point comes back as `hits`
+     * (`[p1, p2]`; null off a surface). Off a surface a point lands on the
+     * plane through `planeOrigin`, which a world-space `planeNormal` fixes
+     * instead of facing the camera. `describe({point, hit, state})` returns the
+     * text shown beside the cursor in place of the hint.
+     * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any, planeNormal?: any,
+     *   pick?: boolean|((clientX:number, clientY:number) => any),
+     *   describe?: (info:{point:number[], hit:any, state:string}) => string|null|undefined, color?: any}} [opts]
      */
     startDimensionTool(opts) { this._dimensions.startTool(opts || {}, 'dimension'); }
 
     /**
      * Start the point tool: one click on the camera-facing plane through
-     * `planeOrigin` creates `{position}`. Same options and ownership as
-     * startDimensionTool.
-     * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any, color?: any}} [opts]
+     * `planeOrigin` creates `{position}`, plus `hit` with `pick`. Same options
+     * and ownership as startDimensionTool.
+     * @param {Parameters<ThreeJSViewer['startDimensionTool']>[0]} [opts]
      */
     startPointTool(opts) { this._dimensions.startTool(opts || {}, 'point'); }
 
@@ -20232,8 +20351,8 @@ export class ThreeJSViewer {
      * Start the polyline tool: click each vertex (snapping onto axis lines
      * through the previous one). Clicking the last vertex again or Enter
      * finishes, clicking the first closes, Backspace drops the last vertex,
-     * Esc cancels. Creates `{points, closed}`.
-     * @param {{onCreate?: (spec:any) => void, onCancel?: () => void, planeOrigin?: any, color?: any}} [opts]
+     * Esc cancels. Creates `{points, closed}`, plus `hits` with `pick`.
+     * @param {Parameters<ThreeJSViewer['startDimensionTool']>[0]} [opts]
      */
     startPolylineTool(opts) { this._dimensions.startTool(opts || {}, 'polyline'); }
 

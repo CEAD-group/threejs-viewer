@@ -1,0 +1,2 @@
+# Vendored assets are inlined into viewer.html byte for byte: no line-ending conversion.
+src/threejs_viewer/viewer/static/** -text
