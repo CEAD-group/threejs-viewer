@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Tube strand collapse preserves local bead height and skips folds confined within a bead half-width of their entry, preventing knife-edge fins at narrow S-jogs (#277).
+- Tube triangles retain outward winding after hairpin frame flips, including LOD meshes, caps, and the animated draw frontier, preventing inverted lighting on downstream layers (#278).
+
 ## 0.0.68
 
 ### Annotation surface picking and cursor descriptions (#276)
