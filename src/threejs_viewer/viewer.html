@@ -5257,11 +5257,9 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // Phase 1 collects fold targets across all strands; phase 2 groups co-
     // located fold targets (across different strands at the same corner)
     // and averages their mids to a single apex; phase 3 snaps. Delaying the
-    // snap to phase 3 lets us collapse the inside-bend half of the cross-
-    // section to one 3D point: per-strand mids at a sharp corner stack
-    // vertically by ≈H/2 across the cross-section's height and would
-    // otherwise render as a visible "cube + spokes" cluster on wide beads
-    // instead of a single-point V-crease. Typical worst-case count is
+    // snap to phase 3 gives the inside-bend strands a common lateral apex;
+    // phase 3 preserves each vertex's local height so the bead cannot taper
+    // to a zero-height fin (#277). Typical worst-case count is
     // (nCs / 2) per spine corner × a few corners — JS array is fine.
     /** @type {Array<{strand:number, i:number, j:number, mx:number, my:number, mz:number}>} */
     const foldTargets = [];
@@ -5570,7 +5568,8 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     }
 
     // Phase 3: snap each cluster's strands across its merged ring range
-    // to the cluster's averaged apex. The 2-strand wedge guard rejects
+    // laterally toward the cluster's averaged apex, retaining local height.
+    // The 2-strand wedge guard rejects
     // orphan single-strand clusters whose adjacent cluster (if any) was
     // already absorbed during the range-merge step — leaving the strand
     // at its natural mitered position (a small self-intersection fold
@@ -5593,6 +5592,26 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     for (const c of merged) {
         if (c.peakTurn < MIN_FOLD_PEAK_TURN) continue;
         if (c.strands.size < 2) continue;
+        // A sub-bead jog never escapes its entry footprint. Its offset
+        // strands can cross on opposite turns, but collapsing them creates
+        // a fin instead of removing an inside-corner fold (#277).
+        let escapesFootprint = false;
+        // iLo names the segment entering the fold; its start may be far
+        // away on a long straight. The first affected ring is iLo + 1.
+        const entryRing = c.iLo + 1;
+        // Fold targets need j - i >= TUBE_STRAND_COLLAPSE_MIN_GAP, so this range is never empty.
+        const entry = entryRing * 3;
+        for (let r = entryRing + 1; r <= c.jHi; r++) {
+            const dx = spine[r * 3] - spine[entry];
+            const dy = spine[r * 3 + 1] - spine[entry + 1];
+            const dz = spine[r * 3 + 2] - spine[entry + 2];
+            const halfWidth = 0.5 * Math.min(widths[entryRing], widths[r]);
+            if (dx * dx + dy * dy + dz * dz > halfWidth * halfWidth) {
+                escapesFootprint = true;
+                break;
+            }
+        }
+        if (!escapesFootprint) continue;
         const ux = c.sx / c.count;
         const uy = c.sy / c.count;
         const uz = c.sz / c.count;
@@ -5619,14 +5638,56 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
                 const ip = r * ringStride + strand * 3;
                 const cap = snapFactor * Math.max(widths[r], heights[r]);
                 const capSq = cap * cap;
-                const dx = ux - positions[ip];
-                const dy = uy - positions[ip + 1];
-                const dz = uz - positions[ip + 2];
+                // Project the snap displacement onto the plane normal to
+                // this ring's up axis. Preserve height, anchoring and tilted
+                // frames rather than assuming world Z is the height axis.
+                const vx = localFrames[r * 6 + 3];
+                const vy = localFrames[r * 6 + 4];
+                const vz = localFrames[r * 6 + 5];
+                let dx = ux - positions[ip];
+                let dy = uy - positions[ip + 1];
+                let dz = uz - positions[ip + 2];
+                const v2 = vx * vx + vy * vy + vz * vz;
+                const dh = v2 > 1e-24 ? (dx * vx + dy * vy + dz * vz) / v2 : 0;
+                dx -= dh * vx; dy -= dh * vy; dz -= dh * vz;
                 if (dx * dx + dy * dy + dz * dz > capSq) continue;
-                positions[ip] = ux;
-                positions[ip + 1] = uy;
-                positions[ip + 2] = uz;
+                positions[ip] += dx;
+                positions[ip + 1] += dy;
+                positions[ip + 2] += dz;
             }
+        }
+    }
+}
+
+// A reflected hairpin frame preserves strand continuity but reverses winding.
+// Orient each triangle against the analytic outward normals, including the
+// mixed-parity transition and cap fans. Zero-area faces need no correction.
+// Shared with the LOD worker; also used on the animated frontier only.
+/**
+ * @param {Uint16Array|Uint32Array} indices
+ * @param {Float32Array} positions
+ * @param {Float32Array} normals
+ * @param {number} start
+ * @param {number} count
+ */
+function orientTubeTriangles(indices, positions, normals, start, count) {
+    for (let k = start; k < start + count; k += 3) {
+        const a = indices[k] * 3, b = indices[k + 1] * 3, c = indices[k + 2] * 3;
+        const abx = positions[b] - positions[a];
+        const aby = positions[b + 1] - positions[a + 1];
+        const abz = positions[b + 2] - positions[a + 2];
+        const acx = positions[c] - positions[a];
+        const acy = positions[c + 1] - positions[a + 1];
+        const acz = positions[c + 2] - positions[a + 2];
+        const nx = normals[a] + normals[b] + normals[c];
+        const ny = normals[a + 1] + normals[b + 1] + normals[c + 1];
+        const nz = normals[a + 2] + normals[b + 2] + normals[c + 2];
+        if ((aby * acz - abz * acy) * nx +
+            (abz * acx - abx * acz) * ny +
+            (abx * acy - aby * acx) * nz < 0) {
+            const v = indices[k + 1];
+            indices[k + 1] = indices[k + 2];
+            indices[k + 2] = v;
         }
     }
 }
@@ -5843,6 +5904,8 @@ ${strandSegSegMidpoint.toString()}
 ${polylineSegSegMidpoint.toString()}
 
 ${collapseTubeStrandFolds.toString()}
+
+${orientTubeTriangles.toString()}
 
 ${tubeSectionTexV.toString()}
 
@@ -6104,6 +6167,8 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMa
         }
     }
 
+    orientTubeTriangles(indices, positions, normals, 0, indices.length);
+    endCapPattern.set(indices.subarray(endCapOff, endCapOff + capIndicesPerCap));
     return { positions, normals, colors, indices, localFrames, miters, tangents, capAngles, endCapPattern,
              ringPairs, indicesPerRingPair, capIndicesPerCap, endCapBase,
              nSpine, totalVerts, is32bit: totalVerts > 65535 };
@@ -6882,6 +6947,8 @@ function buildParametricTubeGeometry(
         }
     }
     geometry.setAttribute('normal', new THREE.BufferAttribute(normalArr, 3));
+    orientTubeTriangles(indices, positions, normalArr, 0, indices.length);
+    endCapPattern.set(indices.subarray(endCapOffset, endCapOffset + capIndicesPerCap));
 
     return {
         geometry, ringPairs, indicesPerRingPair, nCs,
@@ -7157,7 +7224,8 @@ class ParametricTube {
     // past a ring or when draw_range reaches an exact ring boundary.
     restoreFrontierRing() {
         const obj = this._mesh;
-        const md = obj.userData.tubeMorphData;
+        const ud = obj.userData;
+        const md = ud.tubeMorphData;
         if (!md || md.savedRingIndex == null) return;
         const nCs = obj.userData.tubeNCs;
         const ringBase = md.savedRingIndex * nCs * 3;
@@ -7194,6 +7262,13 @@ class ParametricTube {
                 altAttr.addUpdateRange(md.savedRingIndex * nCs, nCs);
                 altAttr.needsUpdate = true;
             }
+        }
+        if (md.savedPairIndices) {
+            const indexAttr = obj.geometry.getIndex();
+            const offset = ud.tubeCapIndicesPerCap + (md.savedRingIndex - 1) * ud.tubeIndicesPerRingPair;
+            indexAttr.array.set(md.savedPairIndices, offset);
+            indexAttr.addUpdateRange(offset, ud.tubeIndicesPerRingPair);
+            indexAttr.needsUpdate = true;
         }
         md.savedRingIndex = null;
         md.morphedState = null;
@@ -7251,6 +7326,9 @@ class ParametricTube {
                     md.savedRingUVAlt.set(altSrc.array.subarray(iB * nCs, (iB + 1) * nCs));
                 }
             }
+            const pairOffset = ud.tubeCapIndicesPerCap + iA * ud.tubeIndicesPerRingPair;
+            if (!md.savedPairIndices) md.savedPairIndices = new Uint32Array(ud.tubeIndicesPerRingPair);
+            md.savedPairIndices.set(obj.geometry.getIndex().array.subarray(pairOffset, pairOffset + ud.tubeIndicesPerRingPair));
             md.savedRingIndex = iB;
         }
 
@@ -7568,6 +7646,8 @@ class ParametricTube {
                 idx[offset + i] = v;
             }
         }
+        orientTubeTriangles(idx, obj.geometry.getAttribute('position').array,
+            obj.geometry.getAttribute('normal').array, offset, capPer);
         indexAttr.addUpdateRange(offset, capPer);
         indexAttr.needsUpdate = true;
     }
@@ -7604,9 +7684,20 @@ class ParametricTube {
             return;
         }
 
+        // Restore relocated indices before saving or rewriting a frontier
+        // pair: the old cap may occupy exactly that pair's index slot.
+        this.restoreRelocatedEndCap();
         const visiblePairs = this.morphFrontierRing(fracRingPairs);
         this.updateEndCap(visiblePairs);
         this.updateMorphedNormals(visiblePairs);
+        if (ud.tubeMorphData.morphedState && visiblePairs > 0) {
+            const indexAttr = obj.geometry.getIndex();
+            const offset = capPer + (visiblePairs - 1) * perPair;
+            orientTubeTriangles(indexAttr.array, obj.geometry.getAttribute('position').array,
+                obj.geometry.getAttribute('normal').array, offset, perPair);
+            indexAttr.addUpdateRange(offset, perPair);
+            indexAttr.needsUpdate = true;
+        }
         this.relocateEndCap(visiblePairs);
         obj.geometry.setDrawRange(0, capPer + visiblePairs * perPair + capPer);
     }
@@ -10523,7 +10614,7 @@ function dimensionGeometry(p1, p2, d, direction) {
         m = direction.clone().multiplyScalar(delta.dot(direction));
         fallback = direction;
     } else {
-        const axes = direction || 'XYZ';
+        const axes = typeof direction === 'string' ? direction || 'XYZ' : 'XYZ';
         m = new THREE.Vector3(
             axes.includes('X') ? delta.x : 0,
             axes.includes('Y') ? delta.y : 0,

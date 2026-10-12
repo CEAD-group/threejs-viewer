@@ -153,6 +153,13 @@ approaches (spine identity / spline resample / linear densify, crossed with
 - **zigzag** (dense, decimated, jittered ±120° turns, +40% Hann-windowed
   bead bump): `strand_collapse` at 0.5 cuts intersecting-line pixels to
   **76%** of the OFF baseline at **IoU 0.998**, same triangle count.
+  (PR #279, 2026-10-12: the snap now keeps each vertex's height, so the
+  inside crease is a vertical edge rather than a point and more wireframe
+  edges cross; zigzag darkPx is 93% of off (8577 vs 9253) at IoU 0.9977,
+  against 81% (7521 vs 9327) on the commit before. The footprint gate
+  added in the same PR does not touch this scene: a build with the gate
+  disabled scores the same 8577. sharpV, hairpin and mixed were already
+  identical to off before the PR. The gate still passes 4/4.)
   `sc0.5 == sc1.0` everywhere on this scene → **shipping 0.5 is already at
   its plateau** for this quality measure (raising it further buys nothing
   here, consistent with §3.2's per-vertex-displacement numbers showing 0.5
