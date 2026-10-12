@@ -37,12 +37,24 @@ All captures use the actual viewer. Left is the original strip with strand colla
 | Spatial zigzag | 312 | 366 | [Screenshot](media/local_joins/spatial_zigzag_comparison.png) |
 | 10,001-station spiral vase | 120,192 | 120,192 | [Screenshot](media/local_joins/spiral_vase_comparison.png) |
 | Rising corner | 264 | 288 | [Screenshot](media/local_joins/rising_corner_comparison.png) |
+| Gentle width taper, 8 → 9.2 mm | 264 | 288 | [Screenshot](media/local_joins/width_gentle_comparison.png) |
+| Strong width changes, 4–14 mm | 264 | 264 (fallback) | [Screenshot](media/local_joins/width_abrupt_comparison.png) |
+| Forward, up 10 mm, back | 288 | 304 (partial repair) | [Screenshot](media/local_joins/uturn_step_comparison.png) |
+| Rounded out-of-plane U-turn | 336 | 360 (**visual regression**) | [Screenshot](media/local_joins/uturn_round_comparison.png) |
+| Widening out-of-plane U-turn, 6 → 12 mm | 336 | 336 (fallback) | [Screenshot](media/local_joins/uturn_taper_comparison.png) |
+
+### Variable widths and out-of-plane U-turns
+
+The width examples supply real per-station width arrays to both renderers. Gentle taper permits the corner repair; the strong taper triggers the existing section-change guard. All U-turns go forward along X, rise along Z, and return along negative X with the default +Z up vector. The rounded versions rise 12 mm along a semicircle of radius 6 mm; the stepped version rises 10 mm through a vertical segment.
+
+**Known regression:** the constant-width rounded U-turn receives three accepted patches but develops a pronounced twist/notch near its upper return. Accepted-patch counts measure algorithm decisions, not visual correctness. The stepped U-turn only repairs its lower bend and retains the vertical-frame seam. The widening U-turn retains the original strip because its section changes exceed the guard. These captures deliberately preserve the failures; no renderer behavior was changed when adding the examples. This PR remains a draft, and these U-turns need further frame-continuity work.
+
 
 ![S-jog comparison](media/local_joins/issue_277_comparison.png)
 
 ![Reversal comparison](media/local_joins/issue_278_comparison.png)
 
-Run `python bench/tube_lab/local_joins.py` to regenerate the gallery, metrics, and interactive `out/local_joins/demo.html`. The demo supports case selection, animation/scrubbing, original/repaired geometry, maps, and wire overlay. Serve that directory with a local HTTP server. Three.js still loads from the viewer's normal CDN.
+Run `python bench/tube_lab/local_joins.py --case uturn_round --case width_gentle` to refresh selected captures while retaining the existing gallery, or omit `--case` to regenerate the gallery, metrics, and interactive `out/local_joins/demo.html`. The demo supports case selection, animation/scrubbing, original/repaired geometry, maps, and wire overlay. Serve that directory with a local HTTP server. Three.js still loads from the viewer's normal CDN.
 
 ## Scale check
 

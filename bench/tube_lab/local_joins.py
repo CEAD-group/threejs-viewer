@@ -3,6 +3,7 @@
 Run: .venv/bin/python bench/tube_lab/local_joins.py
 """
 
+import argparse
 import base64
 import json
 import sys
@@ -167,6 +168,92 @@ def scenes():
         up=[0, 0, 1],
     )
 
+    for name, title, widths in [
+        (
+            "width_gentle",
+            "Gentle taper through a corner · 8 → 9.2 mm",
+            np.linspace(8, 9.2, len(corner)),
+        ),
+        (
+            "width_abrupt",
+            "Strong width changes at a corner · 4–14 mm",
+            [4, 5, 7, 12, 14, 10, 6],
+        ),
+    ]:
+        yield dict(
+            name=name,
+            title=title,
+            spine=corner.copy(),
+            w=np.asarray(widths),
+            h=2,
+            lo=0,
+            hi=len(corner) - 1,
+            up=[0, 0, 1],
+        )
+
+    stepped = np.array(
+        [
+            [-30, 0, 0],
+            [-20, 0, 0],
+            [-10, 0, 0],
+            [0, 0, 0],
+            [0, 0, 5],
+            [0, 0, 10],
+            [-10, 0, 10],
+            [-20, 0, 10],
+            [-30, 0, 10],
+        ],
+        dtype=float,
+    )
+    yield dict(
+        name="uturn_step",
+        title="Out-of-plane U-turn · forward, up 10 mm, back",
+        spine=stepped,
+        w=8,
+        h=2,
+        lo=0,
+        hi=len(stepped) - 1,
+        up=[0, 0, 1],
+    )
+    angles = np.linspace(0, np.pi, 7)
+    arc = np.column_stack(
+        [6 * np.sin(angles), np.zeros(len(angles)), 6 * (1 - np.cos(angles))]
+    )
+    rounded = np.vstack(
+        [
+            [[-30, 0, 0], [-20, 0, 0], [-10, 0, 0]],
+            arc,
+            [[-10, 0, 12], [-20, 0, 12], [-30, 0, 12]],
+        ]
+    )
+    yield dict(
+        name="uturn_round",
+        title="Out-of-plane U-turn · rounded rise of 12 mm",
+        spine=rounded,
+        w=8,
+        h=2,
+        lo=0,
+        hi=len(rounded) - 1,
+        up=[0, 0, 1],
+    )
+    yield dict(
+        name="uturn_taper",
+        title="Out-of-plane U-turn · widening from 6 to 12 mm",
+        spine=rounded.copy(),
+        w=np.linspace(6, 12, len(rounded)),
+        h=2,
+        lo=0,
+        hi=len(rounded) - 1,
+        up=[0, 0, 1],
+    )
+
+
+def section_values(scene, key):
+    """Allow either a constant section dimension or one value per station."""
+    return np.broadcast_to(
+        np.asarray(scene[key], dtype=float), (len(scene["spine"]),)
+    ).copy()
+
 
 def demo(maps):
     client = ViewerClient(port=0, open_browser=False)
@@ -179,8 +266,8 @@ def demo(maps):
             client.add_parametric_tube(
                 s["name"] + "_" + surface,
                 s["spine"],
-                np.full(len(s["spine"]), s["w"]),
-                np.full(len(s["spine"]), s["h"]),
+                section_values(s, "w"),
+                section_values(s, "h"),
                 surface=surface,
                 up_vector=s["up"],
                 lod=False,
@@ -230,7 +317,8 @@ function style(){if(!selected)return;selected.material=$('maps').checked?selecte
 $('case').onchange=choose;$('original').onchange=choose;$('maps').onchange=style;$('wire').onchange=style;
 $('progress').oninput=()=>{t=Number($('progress').value)*10;$('play').checked=false;};
 function tick(now){if($('play').checked)t=(t+(now-last)/1000)%12;last=now;const f=Math.min(1,t/10);$('progress').value=f;selected.userData.parametricTube.setDrawRange(f);v._shadowDirty=true;requestAnimationFrame(tick);}
-$('case').value='planar_corner';choose();window.demoReady=true;requestAnimationFrame(tick);
+const requestedLabCase=new URLSearchParams(location.search).get('case');
+$('case').value=[...$('case').options].some(o=>o.value===requestedLabCase)?requestedLabCase:'planar_corner';choose();window.demoReady=true;requestAnimationFrame(tick);
 """.replace("MESSAGES", json.dumps(embed(messages)))
     html = html.replace(
         "    </script>\n</body>", script + "\n    </script>\n</body>"
@@ -238,10 +326,14 @@ $('case').value='planar_corner';choose();window.demoReady=true;requestAnimationF
     (OUT / "demo.html").write_text(html)
 
 
-def run():
+def run(selected=None):
     OUT.mkdir(parents=True, exist_ok=True)
     maps = texture_set(color="#698d9e", smoothness=0.6, fibers=True)
-    results = {}
+    results = (
+        json.loads((OUT / "metrics.json").read_text())
+        if selected and (OUT / "metrics.json").exists()
+        else {}
+    )
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         client = ViewerClient(port=0, open_browser=False)
@@ -253,15 +345,16 @@ def run():
         page.wait_for_function("() => !!window.threejsViewer")
         assert client._connected_event.wait(10)
         for s in scenes():
+            if selected and s["name"] not in selected:
+                continue
             name = s["name"]
             spine = s["spine"]
-            n = len(spine)
             for mode in ["rings", "local_join"]:
                 client.add_parametric_tube(
                     name + mode,
                     spine,
-                    [s["w"]] * n,
-                    [s["h"]] * n,
+                    section_values(s, "w"),
+                    section_values(s, "h"),
                     up_vector=s["up"],
                     lod=False,
                     surface=mode,
@@ -284,7 +377,7 @@ def run():
             print(name, json.dumps(stats), flush=True)
             roi = spine[s["lo"] : s["hi"] + 1]
             centre = roi.mean(axis=0)
-            extent = float(np.ptp(roi, axis=0).max() + s["w"] * 3)
+            extent = float(np.ptp(roi, axis=0).max() + float(np.max(s["w"])) * 3)
             page.evaluate(
                 """([t,d])=>{const v=window.threejsViewer;v._camera.position.set(t[0]+d*.75,t[1]-d,t[2]+d*.9);
              v._camera.up.set(0,0,1);v._controls.target.set(...t);v._camera.lookAt(v._controls.target);v._controls.update();
@@ -348,4 +441,11 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--case",
+        action="append",
+        choices=[s["name"] for s in scenes()],
+        help="Capture selected cases; retain existing gallery results",
+    )
+    run(parser.parse_args().case)
