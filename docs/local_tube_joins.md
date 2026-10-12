@@ -14,13 +14,15 @@ The isolated-arc tolerance is a chord tolerance. Cluster sample spacing is a geo
 
 ## Playback, storage, and maps
 
-Construction is a single linear scan with bounded work per candidate. Accepted patches are built once. Completed geometry uses a static index buffer and shares the original attribute buffers with the existing frontier renderer. A binary search selects the completed prefix during playback and backward scrubbing. No completed triangles are rebuilt each frame.
+Construction is a single linear scan with bounded work per candidate. Smooth stations are classified without vector allocations. Accepted patches are built once into compact, independent vertex and index buffers, copying only their interface vertices. The original strip buffers are never enlarged or duplicated. A binary search selects the completed patches during playback. Only windows crossed since the previous update are masked with degenerate indices or restored for backward seeks. Nearby index uploads are batched, with a 256 KiB batch cap and at most four times the changed indices uploaded. CPU backups contain only those windows; there are no per-station prefix tables. Playback costs a binary search plus work proportional to crossed patch windows, so a full backward seek costs more than an ordinary frame. No patch triangles are rebuilt each frame.
 
 A patch becomes visible after its entire window is behind the frontier. Until then, that bounded region uses the existing animated strip and cap. This can produce a visible transition: the unresolved region is up to ten segments long, not necessarily completely hidden by the nozzle overlay. New joins are not progressively Boolean-unioned while the head is inside their window.
 
 Outside patches, positions and UVs are unchanged. Within isolated joins, texture distance advances around the outer arc and the inner trim shares one coordinate. Within clusters, distance is interpolated monotonically across the window; this deliberately smooths texture flow through small reversals and may stretch the material. The original dual-wrapped UV representation is retained.
 
-Objects with repairs add a second index buffer and a second mesh for the completed prefix, plus bounded patch vertices. Objects with no repairs use the original geometry directly and allocate no additional GPU geometry. LOD and strand collapse are disabled for this opt-in mode. Explicit orientations and per-station colors are currently unsupported; uniform color and all three texture maps work. Runtime per-station color updates are rejected.
+Objects with repairs add one patch mesh. Objects with no repairs allocate no additional GPU geometry. Because masked strip indices are still submitted as degenerate triangles, a second budget limits **all patch triangles** to `max(192, ceil(original_triangles * 0.15))`, bounding additional submitted indices as well as visible triangle growth. The table below reports nondegenerate surface triangles, not GPU submissions.
+
+LOD is supported: repairs are rebuilt on each active reduced spine, with breaks and original-index playback timing preserved. Old patch buffers and wire-overlay materials are disposed on replacement. Worker responses continue checking the remaining tubes after the camera stops; a two-tube regression verifies actual zoom-out/zoom-in rebuilds and transferred break masks in Chromium and Firefox. Patch construction runs on the main thread after the worker supplies the reduced strip, so a dense repair-heavy rebuild can still pause interaction. Strand collapse remains disabled. Explicit orientations and per-station colors are unsupported; uniform color and all three texture maps work. Runtime per-station color updates are rejected.
 
 ## Captured results
 
@@ -47,7 +49,7 @@ All captures use the actual viewer. Left is the original strip with strand colla
 
 The width examples supply real per-station width arrays to both renderers. Gentle taper permits the corner repair; the strong taper triggers the existing section-change guard. All U-turns go forward along X, rise along Z, and return along negative X with the default +Z up vector. The rounded versions rise 12 mm along a semicircle of radius 6 mm; the stepped version rises 10 mm through a vertical segment.
 
-The rounded U-turn previously accepted three patches and introduced a pronounced twist near its upper return. Recomputing the patch frame from `up × tangent` gave the opposite orientation to the original transported frame. A new interface-frame guard rejects that patch; its upper-return triangles now remain exactly original. Two other patches remain (336 → 352 triangles). This removes the large added twist, but does **not** solve all bend seams or make the U-turn a clean swept surface. The stepped U-turn still retains its vertical-frame seam, and the widening U-turn falls back. The PR remains a draft.
+The rounded U-turn previously accepted three patches and introduced a pronounced twist near its upper return. Recomputing the patch frame from `up × tangent` gave the opposite orientation to the original transported frame. A new interface-frame guard rejects that patch; its upper-return triangles now remain exactly original. Two other patches remain (336 → 352 triangles). This removes the large added twist, but does **not** solve all bend seams or make the U-turn a clean swept surface. The stepped U-turn still retains its vertical-frame seam, and the widening U-turn falls back. These fallbacks remain part of the opt-in renderer’s documented contract.
 
 
 ### Reused earlier examples and synchronized overview
@@ -88,12 +90,38 @@ The historical examples expose remaining limits: the smoothness gate leaves the 
 
 Run `python bench/tube_lab/local_joins.py --case uturn_round --case width_gentle` to refresh selected captures while retaining the existing gallery, or omit `--case` to regenerate the gallery, metrics, and interactive `out/local_joins/demo.html`. The demo supports case selection, animation/scrubbing, original/repaired geometry, maps, and wire overlay. Serve that directory with a local HTTP server. Three.js still loads from the viewer's normal CDN.
 
-## Scale check
+## Scale checks
 
-`python bench/tube_lab/local_join_scale.py` compares original and local rendering on spirals with 1,001, 10,001, and 100,001 stations, with and without maps. Raw results are in `bench/tube_lab/local_join_scale_results.json`.
+`python bench/tube_lab/local_join_scale.py` compares original and local rendering at 1,001, 10,001, and 100,001 stations, with and without maps. Raw results are in `bench/tube_lab/local_join_scale_results.json`.
 
-At 100,001 stations (1,200,192 triangles), both renderers used 28,804,752 geometry-buffer bytes without maps and 36,005,976 with maps. Local detection added roughly 12–21 ms once in this run and added no triangles. CPU draw-range updates were roughly 0.004–0.006 ms for both renderers at that size. These timings exclude GPU rendering, texture memory, upload time, and initial tube construction; they are not a frame-rate claim or a worst-case bound. A repair-heavy path also pays for the additional static index buffer and patch vertices.
+At 100,001 stations (1,200,192 triangles), both renderers use 28,804,752 geometry-buffer bytes without maps and 36,005,976 with maps. The current scan took 4–13 ms once in this run. These CPU microbenchmarks exclude GPU rendering, texture memory, upload time, and initial tube construction.
 
-Browser tests cover geometric seam closure, projected top-surface overlap in both reproductions, a slightly rising cluster, arbitrary plane orientation, an elbow, playback/backward seeks, all three maps, unchanged outside-patch attributes, stable completed buffers, smooth-spiral triangle count, and total triangle budget.
+The repaired 100,007-station mapped case adds 48 surface triangles in two patches. Geometry buffers grow from 36,008,136 to **36,011,880 bytes: 3,744 bytes extra**, plus 576 bytes of CPU index backups. The previous implementation added approximately 14.4 MB of geometry buffers and eight CPU bytes per station. Patch storage now depends on repair count, not untouched path length. Local construction took about 11 ms and average CPU draw-range updates about 0.010 ms in this run.
 
-The repair-bearing stress case prepends a few corners to the large spiral: 100,007 stations, two accepted repairs, and only 48 extra triangles. It also exposes the current storage tradeoff: with maps, geometry buffers grew from 36,008,136 to 50,412,888 bytes (about 14.4 MB extra), mainly the second index buffer. Join construction took about 46–53 ms and draw-range updates about 0.010–0.012 ms in that run. Compact prefix tables add eight CPU bytes per original pair on repaired objects. The algorithm bounds triangle growth and per-frame work; it does not eliminate additional storage for repaired objects.
+`python bench/tube_lab/local_join_large.py` measures one-million-station mapped paths with GPU timer queries: smooth, two-repair, dense-repair, dense-repair with LOD, and repeated #277 jog clusters. It runs three alternating-order trials, one tube/context at a time, at 1280 × 800 and device pixel ratio 1, with shadows off. Each trial records 60 animated frames, sweeping 20–95% completion after warmup. These are animated medians, not timings at 100% completion. The camera, near/far planes and LOD are fixed explicitly. It checks visible draw submissions, WebGL errors, disjoint queries and context loss. Geometry-buffer bytes exclude textures, CPU spine/LOD data and transient allocations; saved patch indices are reported separately. GPU times are rendering measurements, not total application frame times or guarantees for other hardware.
+
+Browser tests cover seam closure, projected top-surface overlap in both reproductions, slight nonplanarity, arbitrary plane orientation, an elbow, playback/backward seeks, all three maps, unchanged outside-patch attributes, stable completed buffers, smooth-spiral triangle count, patch budgets, constant-size sparse storage, LOD zoom out/in, break remapping, and disposal of old patch buffers and wire materials.
+
+Measurements on Apple M1 Pro / ANGLE Metal, Chromium 145.0.7632.6. Values below are medians of three trial medians; MB are decimal geometry-buffer bytes. Raw trials, percentiles and CPU timings are in [`local_join_large_results.json`](../bench/tube_lab/local_join_large_results.json).
+
+| Million-station input | Repairs | Geometry MB, original → local | Animated GPU ms, original → local | Local build ms |
+|---|---:|---:|---:|---:|
+| Smooth spiral | 0 | 360.006 → 360.006 | 11.42 → 11.48 | 21 |
+| Two repairs | 2 | 360.008 → 360.012 | 11.21 → 11.09 | 35 |
+| Dense isolated joins | 20,000 | 360.006 → 394.566 | 11.84 → 11.60 | 592 |
+| Dense joins + LOD | 2,342 | 19.681 → 23.480 | 3.32 → 3.31 | 107 |
+| Repeated #277 clusters | 18,750 | 360.006 → 418.056 | 9.23 → 10.47 | 1225 |
+
+Trial variation exceeds several small differences between surfaces. The large gain comes from retaining LOD: the dense local-join case reduces to 54,654 stations, with geometry buffers falling from 394.6 to 23.5 MB and animated GPU time from 11.60 to 3.31 ms at this camera. CPU patch construction remains synchronous: the full-resolution cluster stress case takes about 1.2 seconds once; the dense LOD case takes about 107 ms. These are startup/rebuild costs, not per-frame remeshing. The cluster case has no net new surface triangles but submits up to 1.8 million additional patch triangles; its masked original slots still consume indices.
+
+All 1,800 measured animation frames completed without WebGL errors, context loss, disjoint timer queries or query timeouts.
+
+Large backward/forward jumps are measured separately with `--seeks --samples 6 --case dense_full --case cluster_full`, using 0/50/99/0.1/100% jumps. Raw final results are in `bench/tube_lab/local_join_seek_results.json`; the recorded pre-batching baseline is in `bench/tube_lab/local_join_seek_unbatched_results.json`. Across three trials, the worst combined CPU range-update and render-submission cost fell from 11.3 to 7.8 ms for dense isolated repairs and from 17.3 to 11.5 ms for clusters. GPU time is recorded separately and must not be added to CPU time as if the two never overlap. Large seeks remain proportional to the crossed repair windows.
+
+## Validation
+
+- Full local suite: 895 tests passed before the final allocation and upload refinements.
+- Tube/build/geometry regressions after allocation changes: 102 passed; final local-join regressions after upload batching: 16 passed. Chromium and Firefox local-join suites also passed (31 combined), plus LOD break preservation in both browsers.
+- All 325 index/attribute buffers across the 24-case gallery matched byte-for-byte before and after the allocation/budget refinements.
+- All 48 overview objects checked at 0/50/100/20% progress, with map/wire switches, enlargement and grid restoration. Screenshots include solid, wire and mapped comparisons.
+- TypeScript, tracked-file Ruff checks, generated build and diff checks passed. The PR CI runs the complete final non-browser and browser suites.

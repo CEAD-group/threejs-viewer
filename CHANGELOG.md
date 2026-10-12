@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Bounded local tube joins (#282)
+
+- Opt-in `surface="local_join"` repairs eligible corners and short nearly planar clusters with rounded outer joins and trimmed inner offsets. Unsupported geometry retains the original strip; default rendering is unchanged.
+- Supports existing material maps, animated playback, backward seeks, and LOD. Compact patch buffers and a submitted-triangle budget bound repair overhead on large toolpaths.
+- LOD worker responses continue the update queue after the camera stops, so every tube in a scene can reach the requested detail level.
+- Includes 24 animated before/after examples, historical reproduction paths, screenshots, and reproducible million-station CPU/GPU benchmarks.
+
 ## 0.0.69
 
 ### Tube S-jog fins and hairpin winding (#279, issues #277, #278)

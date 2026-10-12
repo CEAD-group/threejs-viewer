@@ -43,11 +43,12 @@ def test_local_join_validation():
 def snapshot(page):
     return page.evaluate("""() => {
         const o=window.threejsViewer._objects.get('t'), f=o.userData.localJoinCompleted;
-        const g=f?.geometry || o.geometry, b=o.geometry, visible=f ? g.index.array.slice(g.drawRange.start,g.drawRange.start+g.drawRange.count) : [];
+        const g=f?.geometry, b=o.geometry, offset=b.attributes.position.count;
+        const visible=g ? Array.from(g.index.array.slice(g.drawRange.start,g.drawRange.start+g.drawRange.count),i=>i+offset) : [];
         const frontier=b.index.array.slice(b.drawRange.start,b.drawRange.start+b.drawRange.count);
-        return {p:Array.from(g.attributes.position.array), i:[...visible,...frontier],
+        return {p:[...b.attributes.position.array,...(g?.attributes.position.array||[])], i:[...visible,...frontier],
             stats:o.userData.localJoinStats, committed:o.userData.localJoinCommittedPairs,
-            uv:Array.from(g.attributes.uv.array), shared:g.attributes.position===b.attributes.position};
+            uv:[...b.attributes.uv.array,...(g?.attributes.uv.array||[])], shared:g?.attributes.position===b.attributes.position};
     }""")
 
 
@@ -95,7 +96,7 @@ def test_local_join_closed_and_scrubbing(viewer_client, viewer_page, kind):
     s = snapshot(viewer_page)
     assert s["stats"]["accepted"] >= 1
     assert s["stats"]["maxPatchTriangles"] <= 96
-    assert s["shared"]
+    assert not s["shared"]
     assert np.isfinite(s["uv"]).all()
     positions = np.array(s["p"]).reshape(-1, 3)
     triangles = np.array(s["i"]).reshape(-1, 3)
@@ -114,6 +115,14 @@ def test_local_join_closed_and_scrubbing(viewer_client, viewer_page, kind):
         )
         s = snapshot(viewer_page)
         assert np.isfinite(s["p"]).all()
+        if value in (0.7, 0.99):
+            pp = np.round(np.asarray(s["p"]).reshape(-1, 3), 4)
+            tt = np.asarray(s["i"]).reshape(-1, 3)
+            vv = pp[tt]
+            aa = np.linalg.norm(
+                np.cross(vv[:, 1] - vv[:, 0], vv[:, 2] - vv[:, 0]), axis=1
+            )
+            _assert_closed(pp, tt[aa > 1e-6])
         if value == 0:
             assert s["i"] == []
         if value == 1:
@@ -348,7 +357,13 @@ def test_out_of_plane_return_keeps_incompatible_frame_unpatched(
         ]
     )
     viewer_client.add_parametric_tube(
-        "t", p, np.full(len(p), 8), np.full(len(p), 2), surface="local_join"
+        "reference", p, np.full(len(p), 8), np.full(len(p), 2), lod=False
+    )
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._objects.has('reference')"
+    )
+    viewer_client.add_parametric_tube(
+        "t", p, np.full(len(p), 8), np.full(len(p), 2), surface="local_join", lod=False
     )
     viewer_page.wait_for_function(
         "() => !!window.threejsViewer._objects.get('t')?.userData.localJoinStats"
@@ -356,12 +371,133 @@ def test_out_of_plane_return_keeps_incompatible_frame_unpatched(
     result = viewer_page.evaluate("""() => {
         const o=window.threejsViewer._objects.get('t'), u=o.userData;
         const cap=u.tubeCapIndicesPerCap, pair=u.tubeIndicesPerRingPair;
-        const original=Array.from(o.geometry.index.array.slice(cap+7*pair,cap+12*pair));
-        const repaired=Array.from(u.localJoinCompleted.geometry.index.array);
-        // Exact original upper-return triangles must survive in the completed
-        // mesh, including winding and section-vertex correspondence.
-        const suffix=repaired.slice(-original.length);
+        const reference=window.threejsViewer._objects.get('reference');
+        const original=Array.from(reference.geometry.index.array.slice(cap+7*pair,cap+12*pair));
+        // The unrepaired upper return stays in the original strip; the child
+        // geometry now contains only actual patch triangles.
+        const suffix=Array.from(o.geometry.index.array.slice(cap+7*pair,cap+12*pair));
         return {stats:u.localJoinStats,original,suffix};
     }""")
     assert result["stats"]["fallback"]["frame reversal"] >= 1
     assert result["suffix"] == result["original"]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("n", [1000, 100000])
+def test_sparse_repairs_store_only_patch_indices(viewer_client, viewer_page, n):
+    lead = np.array([[-30, 0, 0], [-20, 0, 0], [-10, 0, 0], [0, 0, 0]])
+    tail = np.column_stack([np.zeros(n), np.arange(1, n + 1) * 10, np.zeros(n)])
+    p = np.vstack([lead, tail])
+    viewer_client.add_parametric_tube(
+        "t",
+        p,
+        np.full(len(p), 10),
+        np.full(len(p), 2),
+        surface="local_join",
+        lod=False,
+        texture=_png_bytes(),
+    )
+    viewer_page.wait_for_function(
+        "() => !!window.threejsViewer._objects.get('t')?.userData.localJoinCompleted"
+    )
+    result = viewer_page.evaluate("""() => {
+        const o=window.threejsViewer._objects.get('t'), u=o.userData;
+        const g=u.localJoinCompleted.geometry;
+        return {stats:u.localJoinStats, bytes:g.index.array.byteLength,
+            vertices:g.attributes.position.count, baseVertices:o.geometry.attributes.position.count};
+    }""")
+    assert result["stats"]["accepted"] == 1
+    assert result["bytes"] == 48 * 3 * 4
+    assert result["vertices"] <= 48  # independent of the untouched tail length
+    assert result["baseVertices"] > n * 6
+    assert result["stats"]["savedIndexBytes"] <= 2 * 36 * 4
+    assert result["stats"]["patchTriangles"] <= result["stats"]["patchTriangleBudget"]
+
+
+@pytest.mark.browser
+def test_lod_rebuilds_local_patches_preserving_playback_and_maps(
+    viewer_client, viewer_page
+):
+    # Fine helix plus a genuine, well-spaced corner. Worker LOD must replace
+    # patch buffers instead of retaining closures over the previous geometry.
+    t = np.linspace(0, 8 * np.pi, 4000)
+    helix = np.column_stack([40 * np.cos(t), 40 * np.sin(t), t])
+    p = np.vstack([[[0, -30, 0], [0, -20, 0], [40, -20, 0]], helix])
+    viewer_client.add_parametric_tube(
+        "t",
+        p,
+        np.full(len(p), 4),
+        np.full(len(p), 2),
+        surface="local_join",
+        lod={"threshold": 0},
+        texture=_png_bytes(),
+        normal_map=_png_bytes(),
+        roughness_map=_png_bytes(),
+        anchor="top",
+    )
+    viewer_page.wait_for_function(
+        "() => !!window.threejsViewer._objects.get('t')?.userData.tubeLOD"
+    )
+    viewer_page.evaluate("""() => {
+        const v=window.threejsViewer,o=v._objects.get('t');
+        o.userData.parametricTube.setDrawRange(.37);
+        window.oldJoinGeometry=o.geometry;
+        window.oldPatch=o.userData.localJoinCompleted;
+        window.oldPatchDisposed=false;
+        window.oldWireDisposed=false;
+        v._shading.wireframeMode=2;
+        if(oldPatch) {
+            v._shading._applyWireframeTo(oldPatch);
+            oldPatch.userData.wireframeOverlay.material.addEventListener('dispose',()=>window.oldWireDisposed=true);
+        }
+        oldPatch?.geometry.addEventListener('dispose',()=>window.oldPatchDisposed=true);
+        v._camera.position.set(4000,-4000,4000);v._lodDirty=true;
+    }""")
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._objects.get('t').geometry!==window.oldJoinGeometry",
+        timeout=20000,
+    )
+    result = viewer_page.evaluate("""() => {
+        const o=window.threejsViewer._objects.get('t'),u=o.userData,lod=u.tubeLOD;
+        const m=o.material, old=window.oldPatch;
+        const fraction=lod.currentDrawRange;
+        const children=o.children.filter(c=>c.userData.localJoinCompleted);
+        const full=[];
+        for(const f of [1, .005, .7, 0, .37, 1]) {
+            u.parametricTube.setDrawRange(f);
+            const g=o.geometry, c=u.localJoinCompleted?.geometry;
+            const count=g.drawRange.count+(c?.drawRange.count||0);
+            if(f===0 && count!==0)throw Error('nonempty zero');
+            if(f===1)full.push(Array.from(g.index.array));
+        }
+        return {fraction, reduced:lod.keptIndices.length, original:lod.originalCount,
+            maps:!!(m.map&&m.normalMap&&m.roughnessMap), disposed:!old||window.oldPatchDisposed,
+            wireDisposed:!old||window.oldWireDisposed,
+            detached:!old||old.parent===null, children:children.length,
+            stable:full[0].every((x,i)=>x===full[1][i]),
+            patchTriangles:u.localJoinStats.patchTriangles, budget:u.localJoinStats.patchTriangleBudget};
+    }""")
+    assert result["fraction"] == pytest.approx(0.37)
+    assert result["reduced"] < result["original"] / 2
+    assert result["maps"] and result["disposed"] and result["detached"]
+    assert result["wireDisposed"]
+    assert result["children"] <= 1 and result["stable"]
+    assert result["patchTriangles"] <= result["budget"]
+    viewer_page.evaluate("""() => {
+        const v=window.threejsViewer,o=v._objects.get('t');
+        o.userData.parametricTube.setDrawRange(.37);
+        window.farJoinGeometry=o.geometry;
+        v._camera.position.set(50,-50,30);v._lodDirty=true;
+    }""")
+    viewer_page.wait_for_function(
+        "() => window.threejsViewer._objects.get('t').geometry!==window.farJoinGeometry",
+        timeout=20000,
+    )
+    near = viewer_page.evaluate("""() => {
+        const o=window.threejsViewer._objects.get('t'),u=o.userData;
+        return {count:u.tubeNumSpinePoints, fraction:u.tubeLOD.currentDrawRange,
+            children:o.children.filter(c=>c.userData.localJoinCompleted).length};
+    }""")
+    assert near["count"] > result["reduced"]
+    assert near["fraction"] == pytest.approx(0.37)
+    assert near["children"] <= 1

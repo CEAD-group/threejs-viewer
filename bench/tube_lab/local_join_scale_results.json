@@ -8,7 +8,7 @@
     "vertices": 6102,
     "repairs": 0,
     "geometryBytes": 219600,
-    "rangeUpdateCpuMs": 0.007400000005960464,
+    "rangeUpdateCpuMs": 0.009400000005960465,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -21,8 +21,8 @@
     "vertices": 6102,
     "repairs": 0,
     "geometryBytes": 219600,
-    "rangeUpdateCpuMs": 0.005799999982118606,
-    "joinBuildMs": 1.0999999940395355,
+    "rangeUpdateCpuMs": 0.006400000005960464,
+    "joinBuildMs": 0.5999999940395355,
     "addedTriangles": 0
   },
   {
@@ -34,7 +34,7 @@
     "vertices": 6102,
     "repairs": 0,
     "geometryBytes": 292824,
-    "rangeUpdateCpuMs": 0.008600000023841857,
+    "rangeUpdateCpuMs": 0.008200000017881393,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -47,7 +47,7 @@
     "vertices": 6102,
     "repairs": 0,
     "geometryBytes": 292824,
-    "rangeUpdateCpuMs": 0.006799999982118606,
+    "rangeUpdateCpuMs": 0.007200000017881393,
     "joinBuildMs": 0.5,
     "addedTriangles": 0
   },
@@ -60,7 +60,7 @@
     "vertices": 60102,
     "repairs": 0,
     "geometryBytes": 2163600,
-    "rangeUpdateCpuMs": 0.005599999994039535,
+    "rangeUpdateCpuMs": 0.005799999982118606,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -73,8 +73,8 @@
     "vertices": 60102,
     "repairs": 0,
     "geometryBytes": 2163600,
-    "rangeUpdateCpuMs": 0.003800000011920929,
-    "joinBuildMs": 1.5999999940395355,
+    "rangeUpdateCpuMs": 0.004599999994039535,
+    "joinBuildMs": 0.29999999701976776,
     "addedTriangles": 0
   },
   {
@@ -86,7 +86,7 @@
     "vertices": 60102,
     "repairs": 0,
     "geometryBytes": 2884824,
-    "rangeUpdateCpuMs": 0.004799999982118606,
+    "rangeUpdateCpuMs": 0.008599999994039535,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -99,8 +99,8 @@
     "vertices": 60102,
     "repairs": 0,
     "geometryBytes": 2884824,
-    "rangeUpdateCpuMs": 0.004799999982118606,
-    "joinBuildMs": 1.6000000089406967,
+    "rangeUpdateCpuMs": 0.005400000005960464,
+    "joinBuildMs": 0.30000001192092896,
     "addedTriangles": 0
   },
   {
@@ -112,7 +112,7 @@
     "vertices": 600102,
     "repairs": 0,
     "geometryBytes": 28804752,
-    "rangeUpdateCpuMs": 0.006400000005960464,
+    "rangeUpdateCpuMs": 0.006599999994039535,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -125,8 +125,8 @@
     "vertices": 600102,
     "repairs": 0,
     "geometryBytes": 28804752,
-    "rangeUpdateCpuMs": 0.005,
-    "joinBuildMs": 20.400000005960464,
+    "rangeUpdateCpuMs": 0.007199999988079071,
+    "joinBuildMs": 4.100000008940697,
     "addedTriangles": 0
   },
   {
@@ -138,7 +138,7 @@
     "vertices": 600102,
     "repairs": 0,
     "geometryBytes": 36005976,
-    "rangeUpdateCpuMs": 0.005799999982118606,
+    "rangeUpdateCpuMs": 0.005400000005960464,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -152,7 +152,7 @@
     "repairs": 0,
     "geometryBytes": 36005976,
     "rangeUpdateCpuMs": 0.005599999994039535,
-    "joinBuildMs": 12.200000002980232,
+    "joinBuildMs": 12.5,
     "addedTriangles": 0
   },
   {
@@ -164,7 +164,7 @@
     "vertices": 600138,
     "repairs": 0,
     "geometryBytes": 28806480,
-    "rangeUpdateCpuMs": 0.009,
+    "rangeUpdateCpuMs": 0.011,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -174,11 +174,11 @@
     "mapped": false,
     "surface": "local_join",
     "triangles": 1200312,
-    "vertices": 600198,
+    "vertices": 600210,
     "repairs": 2,
-    "geometryBytes": 43210512,
-    "rangeUpdateCpuMs": 0.009600000023841858,
-    "joinBuildMs": 45.79999999701977,
+    "geometryBytes": 28809360,
+    "rangeUpdateCpuMs": 0.009,
+    "joinBuildMs": 10.299999997019768,
     "addedTriangles": 48
   },
   {
@@ -190,7 +190,7 @@
     "vertices": 600138,
     "repairs": 0,
     "geometryBytes": 36008136,
-    "rangeUpdateCpuMs": 0.019599999994039535,
+    "rangeUpdateCpuMs": 0.011200000017881394,
     "joinBuildMs": null,
     "addedTriangles": 0
   },
@@ -200,11 +200,11 @@
     "mapped": true,
     "surface": "local_join",
     "triangles": 1200312,
-    "vertices": 600198,
+    "vertices": 600210,
     "repairs": 2,
-    "geometryBytes": 50412888,
-    "rangeUpdateCpuMs": 0.011599999994039536,
-    "joinBuildMs": 52.5,
+    "geometryBytes": 36011880,
+    "rangeUpdateCpuMs": 0.010400000005960464,
+    "joinBuildMs": 10.599999994039536,
     "addedTriangles": 48
   }
 ]

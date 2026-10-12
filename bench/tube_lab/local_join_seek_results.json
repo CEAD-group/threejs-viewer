@@ -1,0 +1,1037 @@
+[
+  {
+    "case": "dense_full",
+    "trial": 0,
+    "surface": "rings",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 720.5040410044603,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 360005976,
+    "stats": null,
+    "gpuMs": {
+      "median": 11.133499,
+      "p95": 17.903291,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.10000000894069672,
+      "p95": 0.29999999701976776,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.30000001192092896,
+      "p95": 0.4000000059604645,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 11400192,
+    "drawCallsAt95Percent": 2,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 10.290874
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.17825
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 4.801041
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 18.780208
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.185333
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 15.656666
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "dense_full",
+    "trial": 0,
+    "surface": "local_join",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 1253.9710830023978,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 394565976,
+    "stats": {
+      "accepted": 20000,
+      "clusters": 0,
+      "planar": 20000,
+      "spatial": 0,
+      "smooth": 959999,
+      "fallback": {},
+      "originalTriangles": 12000192,
+      "addedTriangles": 360000,
+      "maxPatchTriangles": 42,
+      "buildMs": 560.4000000059605,
+      "maxWindowSegments": 2,
+      "triangleBudget": 1800029,
+      "patchTriangles": 840000,
+      "patchTriangleBudget": 1800029,
+      "patchIndexBytes": 10080000,
+      "savedIndexBytes": 5760000
+    },
+    "gpuMs": {
+      "median": 10.445166,
+      "p95": 10.659,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.7999999970197678,
+      "p95": 1.0999999940395355,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.7000000029802322,
+      "p95": 1.2999999970197678,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 12198192,
+    "drawCallsAt95Percent": 3,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.29999999701976776,
+        "renderCpuMs": 0.4000000059604645,
+        "gpuMs": 11.984166
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 1.7000000029802322,
+        "renderCpuMs": 3.2999999970197678,
+        "gpuMs": 0.3005
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 1.5,
+        "renderCpuMs": 1.699999988079071,
+        "gpuMs": 5.961541
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 1.2999999970197678,
+        "renderCpuMs": 1.7000000029802322,
+        "gpuMs": 12.492125
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 1.699999988079071,
+        "renderCpuMs": 3.5,
+        "gpuMs": 0.303791
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 3,
+        "renderCpuMs": 3.8999999910593033,
+        "gpuMs": 9.174666
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "dense_full",
+    "trial": 1,
+    "surface": "local_join",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 1225.709165999433,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 394565976,
+    "stats": {
+      "accepted": 20000,
+      "clusters": 0,
+      "planar": 20000,
+      "spatial": 0,
+      "smooth": 959999,
+      "fallback": {},
+      "originalTriangles": 12000192,
+      "addedTriangles": 360000,
+      "maxPatchTriangles": 42,
+      "buildMs": 533.2999999970198,
+      "maxWindowSegments": 2,
+      "triangleBudget": 1800029,
+      "patchTriangles": 840000,
+      "patchTriangleBudget": 1800029,
+      "patchIndexBytes": 10080000,
+      "savedIndexBytes": 5760000
+    },
+    "gpuMs": {
+      "median": 12.015625,
+      "p95": 16.229874,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.9000000059604645,
+      "p95": 1.7000000029802322,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.7000000029802322,
+      "p95": 1.5999999940395355,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 12198192,
+    "drawCallsAt95Percent": 3,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.29999999701976776,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 13.829958
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 1.699999988079071,
+        "renderCpuMs": 3.300000011920929,
+        "gpuMs": 0.221666
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 1.5,
+        "renderCpuMs": 1.5999999940395355,
+        "gpuMs": 7.229374
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 1.8999999910593033,
+        "renderCpuMs": 1.6000000089406967,
+        "gpuMs": 14.521958
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 1.7000000029802322,
+        "renderCpuMs": 3.2999999970197678,
+        "gpuMs": 0.26675
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 2.8999999910593033,
+        "renderCpuMs": 3.4000000059604645,
+        "gpuMs": 17.282625
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "dense_full",
+    "trial": 1,
+    "surface": "rings",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 695.7516249967739,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 360005976,
+    "stats": null,
+    "gpuMs": {
+      "median": 9.874499,
+      "p95": 12.401166,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.09999999403953552,
+      "p95": 0.10000000894069672,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.3999999910593033,
+      "p95": 0.4000000059604645,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 11400192,
+    "drawCallsAt95Percent": 2,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 11.498249
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.401249
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.10000000894069672,
+        "gpuMs": 5.93175
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 19.289333
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 0.20000000298023224,
+        "renderCpuMs": 0.09999999403953552,
+        "gpuMs": 0.326958
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 16.019
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "dense_full",
+    "trial": 2,
+    "surface": "rings",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 686.7598339886172,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 360005976,
+    "stats": null,
+    "gpuMs": {
+      "median": 9.022749,
+      "p95": 14.454291,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.10000000894069672,
+      "p95": 0.20000000298023224,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.30000001192092896,
+      "p95": 0.5,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 11400192,
+    "drawCallsAt95Percent": 2,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.10000000894069672,
+        "gpuMs": 12.349249
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 0.242166
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 10.268041
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 14.179583
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.264791
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 11.725833
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "dense_full",
+    "trial": 2,
+    "surface": "local_join",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 1247.6843330077827,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 394565976,
+    "stats": {
+      "accepted": 20000,
+      "clusters": 0,
+      "planar": 20000,
+      "spatial": 0,
+      "smooth": 959999,
+      "fallback": {},
+      "originalTriangles": 12000192,
+      "addedTriangles": 360000,
+      "maxPatchTriangles": 42,
+      "buildMs": 548.2999999970198,
+      "maxWindowSegments": 2,
+      "triangleBudget": 1800029,
+      "patchTriangles": 840000,
+      "patchTriangleBudget": 1800029,
+      "patchIndexBytes": 10080000,
+      "savedIndexBytes": 5760000
+    },
+    "gpuMs": {
+      "median": 9.716749,
+      "p95": 15.058749,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.7000000029802322,
+      "p95": 4.0999999940395355,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.7999999970197678,
+      "p95": 1.7000000029802322,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 12198192,
+    "drawCallsAt95Percent": 3,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.20000000298023224,
+        "renderCpuMs": 0.4000000059604645,
+        "gpuMs": 10.757874
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 3.3999999910593033,
+        "renderCpuMs": 3.4000000059604645,
+        "gpuMs": 0.271375
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 1.5,
+        "renderCpuMs": 1.6000000089406967,
+        "gpuMs": 5.521541
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 1.5,
+        "renderCpuMs": 1.5999999940395355,
+        "gpuMs": 18.904916
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 1.7999999970197678,
+        "renderCpuMs": 3.7000000029802322,
+        "gpuMs": 0.30025
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 2.9000000059604645,
+        "renderCpuMs": 4.899999991059303,
+        "gpuMs": 10.322
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "cluster_full",
+    "trial": 0,
+    "surface": "rings",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 673.9088340109447,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 360005976,
+    "stats": null,
+    "gpuMs": {
+      "median": 8.6955,
+      "p95": 9.312083,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.09999999403953552,
+      "p95": 0.10000000894069672,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.3999999910593033,
+      "p95": 0.4000000059604645,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 11400192,
+    "drawCallsAt95Percent": 2,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 11.685333
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.293499
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 7.837125
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.09999999403953552,
+        "gpuMs": 8.799291
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 0.297749
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 7.186541
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "cluster_full",
+    "trial": 0,
+    "surface": "local_join",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 1863.8005000102567,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 418055976,
+    "stats": {
+      "accepted": 18750,
+      "clusters": 18750,
+      "planar": 18750,
+      "spatial": 0,
+      "smooth": 772917,
+      "fallback": {
+        "short segments": 37498,
+        "total triangle budget": 58334
+      },
+      "originalTriangles": 12000192,
+      "addedTriangles": 0,
+      "maxPatchTriangles": 96,
+      "buildMs": 1184,
+      "maxWindowSegments": 8,
+      "triangleBudget": 1800029,
+      "patchTriangles": 1800000,
+      "patchTriangleBudget": 1800029,
+      "patchIndexBytes": 21600000,
+      "savedIndexBytes": 21600000
+    },
+    "gpuMs": {
+      "median": 9.245166,
+      "p95": 10.475166,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 1.7000000029802322,
+      "p95": 4,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 29.5,
+      "p95": 161,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 13200192,
+    "drawCallsAt95Percent": 3,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 13.104625
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 3.5,
+        "renderCpuMs": 3.699999988079071,
+        "gpuMs": 0.290875
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 6.700000002980232,
+        "renderCpuMs": 3.7000000029802322,
+        "gpuMs": 9.503
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0.7999999970197678,
+        "renderCpuMs": 0.5,
+        "gpuMs": 11.126208
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 3.5,
+        "renderCpuMs": 3.7000000029802322,
+        "gpuMs": 0.294458
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 7.5,
+        "renderCpuMs": 4,
+        "gpuMs": 9.794124
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "cluster_full",
+    "trial": 1,
+    "surface": "local_join",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 1837.990499989246,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 418055976,
+    "stats": {
+      "accepted": 18750,
+      "clusters": 18750,
+      "planar": 18750,
+      "spatial": 0,
+      "smooth": 772917,
+      "fallback": {
+        "short segments": 37498,
+        "total triangle budget": 58334
+      },
+      "originalTriangles": 12000192,
+      "addedTriangles": 0,
+      "maxPatchTriangles": 96,
+      "buildMs": 1165.5,
+      "maxWindowSegments": 8,
+      "triangleBudget": 1800029,
+      "patchTriangles": 1800000,
+      "patchTriangleBudget": 1800029,
+      "patchIndexBytes": 21600000,
+      "savedIndexBytes": 21600000
+    },
+    "gpuMs": {
+      "median": 7.471583,
+      "p95": 9.812916,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 1.9000000059604645,
+      "p95": 2.8999999910593033,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 26.799999997019768,
+      "p95": 154.80000001192093,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 13200192,
+    "drawCallsAt95Percent": 3,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.30000001192092896,
+        "gpuMs": 7.237874
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 3.5,
+        "renderCpuMs": 4,
+        "gpuMs": 0.300833
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 7.0999999940395355,
+        "renderCpuMs": 3.6000000089406967,
+        "gpuMs": 6.753791
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0.9000000059604645,
+        "renderCpuMs": 0.4000000059604645,
+        "gpuMs": 10.3925
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 3.5,
+        "renderCpuMs": 3.9000000059604645,
+        "gpuMs": 0.341999
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 7.4000000059604645,
+        "renderCpuMs": 4,
+        "gpuMs": 9.99775
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "cluster_full",
+    "trial": 1,
+    "surface": "rings",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 665.712917005294,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 360005976,
+    "stats": null,
+    "gpuMs": {
+      "median": 8.89075,
+      "p95": 11.035458,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.09999999403953552,
+      "p95": 0.20000000298023224,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.4000000059604645,
+      "p95": 0.4000000059604645,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 11400192,
+    "drawCallsAt95Percent": 2,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 9.973041
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.233124
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 4.006041
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.30000001192092896,
+        "gpuMs": 10.439458
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 0.314625
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 11.101416
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "cluster_full",
+    "trial": 2,
+    "surface": "rings",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 661.7738750064746,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 360005976,
+    "stats": null,
+    "gpuMs": {
+      "median": 7.921249,
+      "p95": 9.30325,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 0.10000000894069672,
+      "p95": 0.20000000298023224,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 0.29999999701976776,
+      "p95": 0.3999999910593033,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 11400192,
+    "drawCallsAt95Percent": 2,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 10.113708
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 0.202249
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 6.251791
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 0.10000000894069672,
+        "renderCpuMs": 0.19999998807907104,
+        "gpuMs": 7.705999
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 0.194374
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0.09999999403953552,
+        "renderCpuMs": 0.20000000298023224,
+        "gpuMs": 7.879
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  },
+  {
+    "case": "cluster_full",
+    "trial": 2,
+    "surface": "local_join",
+    "stations": 1000001,
+    "mapped": true,
+    "viewport": [
+      1280,
+      800
+    ],
+    "shadows": false,
+    "browserVersion": "145.0.7632.6",
+    "readyMs": 1838.4420830116142,
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "reducedStations": 1000001,
+    "geometryBytes": 418055976,
+    "stats": {
+      "accepted": 18750,
+      "clusters": 18750,
+      "planar": 18750,
+      "spatial": 0,
+      "smooth": 772917,
+      "fallback": {
+        "short segments": 37498,
+        "total triangle budget": 58334
+      },
+      "originalTriangles": 12000192,
+      "addedTriangles": 0,
+      "maxPatchTriangles": 96,
+      "buildMs": 1167.7000000029802,
+      "maxWindowSegments": 8,
+      "triangleBudget": 1800029,
+      "patchTriangles": 1800000,
+      "patchTriangleBudget": 1800029,
+      "patchIndexBytes": 21600000,
+      "savedIndexBytes": 21600000
+    },
+    "gpuMs": {
+      "median": 9.967374,
+      "p95": 13.528958,
+      "samples": 6
+    },
+    "rangeUpdateCpuMs": {
+      "median": 1.800000011920929,
+      "p95": 3.699999988079071,
+      "samples": 6
+    },
+    "renderSubmitCpuMs": {
+      "median": 26.5,
+      "p95": 157.5,
+      "samples": 6
+    },
+    "submittedTrianglesAt95Percent": 13200192,
+    "drawCallsAt95Percent": 3,
+    "seekResults": [
+      {
+        "fraction": 1,
+        "rangeCpuMs": 0,
+        "renderCpuMs": 0.29999999701976776,
+        "gpuMs": 11.958125
+      },
+      {
+        "fraction": 0,
+        "rangeCpuMs": 4.200000002980232,
+        "renderCpuMs": 3.7000000029802322,
+        "gpuMs": 0.291833
+      },
+      {
+        "fraction": 0.5,
+        "rangeCpuMs": 6.899999991059303,
+        "renderCpuMs": 3.7000000029802322,
+        "gpuMs": 5.594333
+      },
+      {
+        "fraction": 0.99,
+        "rangeCpuMs": 1,
+        "renderCpuMs": 0.4000000059604645,
+        "gpuMs": 8.934708
+      },
+      {
+        "fraction": 0.001,
+        "rangeCpuMs": 3.6000000089406967,
+        "renderCpuMs": 3.8999999910593033,
+        "gpuMs": 0.303875
+      },
+      {
+        "fraction": 1,
+        "rangeCpuMs": 7.4000000059604645,
+        "renderCpuMs": 4,
+        "gpuMs": 9.206499
+      }
+    ],
+    "disjointSeen": false,
+    "queryTimeouts": 0,
+    "webglError": 0,
+    "contextLost": false
+  }
+]

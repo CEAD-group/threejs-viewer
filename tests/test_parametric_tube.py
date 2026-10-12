@@ -552,16 +552,18 @@ def _tube_geom_probe(page, obj_id):
             const obj = window.threejsViewer._objects.get(id);
             if (!obj) return null;
             const geom = obj.geometry;
-            const pos = geom.getAttribute('position').array;
-            const idx = geom.getIndex().array;
             let maxEdge = 0;
-            for (let t = 0; t < idx.length; t += 3) {
-                const a = idx[t], b = idx[t + 1], c = idx[t + 2];
-                const tri = [[a, b], [b, c], [c, a]];
-                for (const [i, j] of tri) {
-                    const dx = pos[i*3]-pos[j*3], dy = pos[i*3+1]-pos[j*3+1], dz = pos[i*3+2]-pos[j*3+2];
-                    const d = Math.hypot(dx, dy, dz);
-                    if (d > maxEdge) maxEdge = d;
+            for (const g of [geom, obj.userData.localJoinCompleted?.geometry].filter(Boolean)) {
+                const pos = g.getAttribute('position').array;
+                const idx = g.getIndex().array;
+                for (let t = 0; t < idx.length; t += 3) {
+                    const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+                    const tri = [[a, b], [b, c], [c, a]];
+                    for (const [i, j] of tri) {
+                        const dx = pos[i*3]-pos[j*3], dy = pos[i*3+1]-pos[j*3+1], dz = pos[i*3+2]-pos[j*3+2];
+                        const d = Math.hypot(dx, dy, dz);
+                        if (d > maxEdge) maxEdge = d;
+                    }
                 }
             }
             return {
@@ -622,7 +624,8 @@ def test_parametric_tube_break_before_splits_and_caps(viewer_client, viewer_page
 
 
 @pytest.mark.browser
-def test_parametric_tube_break_before_survives_lod(viewer_client, viewer_page):
+@pytest.mark.parametrize("surface", ["rings", "local_join"])
+def test_parametric_tube_break_before_survives_lod(viewer_client, viewer_page, surface):
     """The break mask is remapped onto the LOD-reduced spine: with LOD forced
     on (threshold=0), the un-broken tube still bridges the gap but the broken
     tube stays split — breaks are not lost to simplification."""
@@ -643,7 +646,12 @@ def test_parametric_tube_break_before_survives_lod(viewer_client, viewer_page):
 
     lod = {"threshold": 0}  # force LOD on this short spine
     viewer_client.add_parametric_tube(
-        "lod_nobreak", spine=spine, widths=widths, heights=heights, lod=lod
+        "lod_nobreak",
+        spine=spine,
+        widths=widths,
+        heights=heights,
+        lod=lod,
+        surface=surface,
     )
     viewer_client.add_parametric_tube(
         "lod_break",
@@ -652,6 +660,7 @@ def test_parametric_tube_break_before_survives_lod(viewer_client, viewer_page):
         heights=heights,
         break_before=mask,
         lod=lod,
+        surface=surface,
     )
     _wait_for_object(viewer_page, "lod_nobreak")
     _wait_for_object(viewer_page, "lod_break")
@@ -667,6 +676,22 @@ def test_parametric_tube_break_before_survives_lod(viewer_client, viewer_page):
     brk = _tube_geom_probe(viewer_page, "lod_break")
     assert ref["maxEdge"] > 3.5, ref  # bridge across the gap under LOD
     assert brk["maxEdge"] < 1.5, brk  # break preserved through remap
+    # Exercise actual worker replacements too: the initial reduction happens
+    # on the main thread, so that alone cannot verify the transferred mask.
+    for distance in [1000, 5]:
+        viewer_page.evaluate(
+            """distance => {
+                const v=window.threejsViewer;
+                window.oldBreakGeometry=v._objects.get('lod_break').geometry;
+                v._camera.position.set(distance,-distance,distance);v._lodDirty=true;
+            }""",
+            distance,
+        )
+        viewer_page.wait_for_function(
+            "() => window.threejsViewer._objects.get('lod_break').geometry!==window.oldBreakGeometry",
+            timeout=20000,
+        )
+        assert _tube_geom_probe(viewer_page, "lod_break")["maxEdge"] < 1.5
 
 
 @pytest.mark.browser

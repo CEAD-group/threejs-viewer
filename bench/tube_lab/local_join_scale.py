@@ -68,9 +68,13 @@ def run():
                           const ms=(performance.now()-started)/500;
                           c.setDrawRange(1);
                           const st=o.userData.localJoinStats,f=o.userData.localJoinCompleted;
-                      return {triangles:st?st.originalTriangles+st.addedTriangles:g.index.count/3,vertices:g.attributes.position.count,
+                          const buffers=new Set();let geometryBytes=0;
+                          for(const geometry of [g,f?.geometry].filter(Boolean))
+                            for(const a of [geometry.index,...Object.values(geometry.attributes)])
+                              if(!buffers.has(a.array.buffer)){buffers.add(a.array.buffer);geometryBytes+=a.array.byteLength;}
+                      return {triangles:st?st.originalTriangles+st.addedTriangles:g.index.count/3,vertices:g.attributes.position.count+(f?.geometry.attributes.position.count??0),
                         repairs:st?.accepted??0,
-                            geometryBytes:g.index.array.byteLength+(f?.geometry.index.array.byteLength??0)+Object.values(g.attributes).reduce((s,a)=>s+a.array.byteLength,0),
+                            geometryBytes,
                             rangeUpdateCpuMs:ms,joinBuildMs:o.userData.localJoinStats?.buildMs??null,
                             addedTriangles:o.userData.localJoinStats?.addedTriangles??0};
                         }""")

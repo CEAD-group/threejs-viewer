@@ -2894,7 +2894,8 @@ class ViewerClient:
                 ``"local_join"`` experimentally repairs eligible corners and
                 short almost-planar clusters. Supports nonplanar paths and all
                 three maps, but requires uniform color and implicit orientations.
-                LOD and strand collapse are disabled in this opt-in mode.
+                LOD is supported; patches rebuild on the active reduced spine.
+                Strand collapse is disabled in this opt-in mode.
                 Unsupported or over-budget patches retain the original strip.
                 Completed patches are static during playback; a bounded window
                 uses the original animated strip until it is fully printed.

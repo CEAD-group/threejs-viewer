@@ -4701,6 +4701,7 @@ self.onmessage = function(e) {
     if (geo.colors) transfer.push(geo.colors.buffer);
     if (redColors) transfer.push(redColors.buffer);
     if (redVOffs) transfer.push(redVOffs.buffer);
+    if (redBreakMask) transfer.push(redBreakMask.buffer);
     if (uncollapsedPositions) transfer.push(uncollapsedPositions.buffer);
     if (uv) transfer.push(uv.buffer, uvAlt.buffer, redArc.buffer);
 
@@ -4715,7 +4716,7 @@ self.onmessage = function(e) {
         nSpine: geo.nSpine, is32bit: geo.is32bit,
         keptIndices: keptRaw.subarray(0, nRed),
         reducedSpine: redSpine, reducedWidths: redWidths, reducedHeights: redHeights,
-        reducedColors: redColors, reducedVOffs: redVOffs,
+        reducedColors: redColors, reducedVOffs: redVOffs, reducedBreakMask: redBreakMask,
         uncollapsedPositions,
         minDist, maxDist, chunksReused, chunksTotal: nChunks,
     }, transfer);
@@ -5457,6 +5458,7 @@ class ParametricTube {
     applyWorkerGeometry(msg) {
         const mesh = this._mesh;
         const lod = mesh.userData.tubeLOD;
+        mesh.userData.localJoinDispose?.();
         const nCs = N_CROSS_SECTION;
 
         const geometry = new THREE.BufferGeometry();
@@ -5533,6 +5535,10 @@ class ParametricTube {
         };
 
         lod.keptIndices = msg.keptIndices;
+        if (ud.localJoinOptions) {
+            installLocalJoins(mesh, { ...ud.localJoinOptions, breaks: msg.reducedBreakMask });
+            if (ud.localJoinCompleted) applyTubeDrawCap(ud.localJoinCompleted, ud.tubeBaseMaterial);
+        }
         this.setDrawRange(lod.currentDrawRange);
     }
 
@@ -5969,6 +5975,12 @@ class ParametricTube {
         indexAttr.needsUpdate = true;
     }
 
+    /** Original-index playback mapped onto the active LOD's ring pairs. */
+    pairProgress(value) {
+        const ud = this._mesh.userData;
+        return ud.tubeLOD?.keptIndices ? remapDrawRangeToReducedPairs(ud.tubeLOD, value) : value * ud.tubeRingPairs;
+    }
+
     /** @param {number} value */
     setDrawRange(value) {
         const obj = this._mesh;
@@ -5980,13 +5992,7 @@ class ParametricTube {
 
         if (ud.tubeLOD) ud.tubeLOD.currentDrawRange = value;
 
-        // LOD active: preserve original point-index pacing.
-        let fracRingPairs;
-        if (ud.tubeLOD && ud.tubeLOD.keptIndices) {
-            fracRingPairs = remapDrawRangeToReducedPairs(ud.tubeLOD, clamped);
-        } else {
-            fracRingPairs = clamped * ringPairs;
-        }
+        const fracRingPairs = this.pairProgress(clamped);
 
         if (!ud.tubeMorphData) {
             const pairs = Math.floor(fracRingPairs);
@@ -12775,6 +12781,10 @@ export class ThreeJSViewer {
                 return;
             }
             this._lodWorkerBusy = false;
+            // Dispatch handles one tube at a time. Keep draining after a
+            // response even if the camera has stopped, including cache hits
+            // and responses for deleted objects; other tubes may still be stale.
+            this._lodDirty = true;
             const obj = this._objects.get(msg.tubeId);
             if (!obj || !obj.userData.tubeLOD) return;
 
@@ -12785,6 +12795,9 @@ export class ThreeJSViewer {
 
             // Worker built geometry — upload to GPU
             applyWorkerGeometry(obj, msg);
+            if (obj.userData.localJoinCompleted && this._shading.wireframeMode) {
+                this._shading._applyWireframeTo(obj.userData.localJoinCompleted);
+            }
             this._shadowDirty = true;
 
             // Re-sync colors: the worker may have used stale colors if a
@@ -17520,7 +17533,7 @@ export class ThreeJSViewer {
                         let buildVOffs = vOffs;
                         let buildBreakMask = breakMask;
                         let buildN = n;
-                        if (data.surface !== 'local_join' && lodCfg.enabled && n >= lodCfg.threshold) {
+                        if (lodCfg.enabled && n >= lodCfg.threshold) {
                             // The break mask is remapped onto the reduced spine
                             // below (a reduced pair breaks if any original break
                             // falls in its span), so breaks survive LOD.
@@ -17718,8 +17731,9 @@ export class ThreeJSViewer {
                         };
                         if (data.surface === 'local_join') {
                             if (orientations || ringColors) throw new Error('local_join requires implicit orientations and uniform color');
-                            installLocalJoins(mesh, { up: upVector || [0, 0, 1], breaks: buildBreakMask,
-                                tolerance: data.surfaceTolerance });
+                            if (tubeLOD) mesh.userData.tubeLOD = tubeLOD;
+                            mesh.userData.localJoinOptions = { up: upVector || [0, 0, 1], tolerance: data.surfaceTolerance };
+                            installLocalJoins(mesh, { ...mesh.userData.localJoinOptions, breaks: buildBreakMask });
                             if (mesh.userData.localJoinCompleted) applyTubeDrawCap(mesh.userData.localJoinCompleted, material);
                         }
                         // Dispose any existing object at this id BEFORE posting
