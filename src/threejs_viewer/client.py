@@ -2786,6 +2786,8 @@ class ViewerClient:
         texture_length: float = 25.0,
         normal_map: Optional[Union[str, Path, bytes]] = None,
         roughness_map: Optional[Union[str, Path, bytes]] = None,
+        surface: str = "rings",
+        surface_tolerance: Optional[float] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -2888,6 +2890,18 @@ class ViewerClient:
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
+            surface: ``"rings"`` (default) uses the original strip.
+                ``"local_join"`` experimentally repairs eligible corners and
+                short almost-planar clusters. Supports nonplanar paths and all
+                three maps, but requires uniform color and implicit orientations.
+                LOD and strand collapse are disabled in this opt-in mode.
+                Unsupported or over-budget patches retain the original strip.
+                Completed patches are static during playback; a bounded window
+                uses the original animated strip until it is fully printed.
+            surface_tolerance: Chord tolerance for isolated round joins, in model
+                units (default local width / 100). Cluster sampling uses this as
+                a heuristic, not a certified surface-error bound. Only used with
+                ``surface="local_join"``. Over-budget repairs fall back.
             pickable: When True (default), this tube participates in
                 polyline/tube picking once picking is enabled (see
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
@@ -2975,6 +2989,29 @@ class ViewerClient:
             widths_arr.tobytes(),
             heights_arr.tobytes(),
         ]
+        if surface not in ("rings", "local_join"):
+            raise ValueError("surface must be 'rings' or 'local_join'")
+        if surface == "local_join":
+            if orientations is not None or colors is not None:
+                raise ValueError(
+                    "local_join requires implicit orientations and uniform color"
+                )
+            if not np.isfinite(spine_arr).all():
+                raise ValueError("local_join spine must be finite")
+            if surface_tolerance is not None and (
+                not np.isfinite(surface_tolerance) or surface_tolerance <= 0
+            ):
+                raise ValueError("surface_tolerance must be finite and positive")
+            up = np.asarray(
+                up_vector if up_vector is not None else [0, 0, 1], dtype=float
+            )
+            if (
+                up.shape != (3,)
+                or not np.isfinite(up).all()
+                or np.linalg.norm(up) < 1e-12
+            ):
+                raise ValueError("local_join up_vector must be finite and nonzero")
+
         has_orientations = orientations is not None
         if has_orientations:
             orient_arr = np.ascontiguousarray(orientations, dtype=np.float32).reshape(
@@ -3027,6 +3064,9 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        if surface == "local_join":
+            header["surface"] = surface
+            header["surfaceTolerance"] = surface_tolerance
         sc_header = _serialize_strand_collapse(strand_collapse)
         if sc_header:
             header["strandCollapse"] = sc_header

@@ -1,6 +1,7 @@
 // @ts-check
 import * as THREE from 'three';
 import { ViewerControls } from './controls.js';
+import { installLocalJoins } from './localJoins.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -17519,7 +17520,7 @@ export class ThreeJSViewer {
                         let buildVOffs = vOffs;
                         let buildBreakMask = breakMask;
                         let buildN = n;
-                        if (lodCfg.enabled && n >= lodCfg.threshold) {
+                        if (data.surface !== 'local_join' && lodCfg.enabled && n >= lodCfg.threshold) {
                             // The break mask is remapped onto the reduced spine
                             // below (a reduced pair breaks if any original break
                             // falls in its span), so breaks survive LOD.
@@ -17608,10 +17609,10 @@ export class ThreeJSViewer {
                         // the worker can extract the snap factor without re-parsing.
                         let strandCollapse = false;
                         let strandCollapseCfg = null;
-                        if (data.strandCollapse === true) {
+                        if (data.surface !== 'local_join' && data.strandCollapse === true) {
                             strandCollapse = true;
                             strandCollapseCfg = true;
-                        } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
+                        } else if (data.surface !== 'local_join' && data.strandCollapse && typeof data.strandCollapse === 'object') {
                             strandCollapse = true;
                             const msf = data.strandCollapse.maxSnapFactor;
                             const lsf = data.strandCollapse.largeSegFactor;
@@ -17715,6 +17716,12 @@ export class ThreeJSViewer {
                             savedRingUVs: null,
                             savedRingUVAlt: null,
                         };
+                        if (data.surface === 'local_join') {
+                            if (orientations || ringColors) throw new Error('local_join requires implicit orientations and uniform color');
+                            installLocalJoins(mesh, { up: upVector || [0, 0, 1], breaks: buildBreakMask,
+                                tolerance: data.surfaceTolerance });
+                            if (mesh.userData.localJoinCompleted) applyTubeDrawCap(mesh.userData.localJoinCompleted, material);
+                        }
                         // Dispose any existing object at this id BEFORE posting
                         // worker messages so the worker's queue order is
                         // dispose(old) → init(new) → collapseOnly(new). Sending
@@ -17955,6 +17962,10 @@ export class ThreeJSViewer {
                             // bytes were in flight; its result must not repaint.
                             if (obj.userData.tubeColorToken !== colorToken) {
                                 console.log(`Discarding superseded parametric tube color fetch for '${data.id}'`);
+                                return;
+                            }
+                            if (obj.userData.localJoinStats) {
+                                console.warn('local_join does not support per-station color updates; use set_color');
                                 return;
                             }
                             const lod = obj.userData.tubeLOD;

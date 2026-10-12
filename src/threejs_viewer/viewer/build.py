@@ -158,6 +158,19 @@ def build():
         flags=re.MULTILINE,
     )
 
+    joins = (VIEWER_DIR / "localJoins.js").read_text(encoding="utf-8")
+    joins = re.sub(r"^import .*?;\n", "", joins, flags=re.MULTILINE)
+    joins = joins.replace(
+        "export function installLocalJoins", "function installLocalJoins"
+    )
+    js_content = re.sub(
+        r"^import \{ installLocalJoins \} from .*?;\n",
+        "",
+        js_content,
+        flags=re.MULTILINE,
+    )
+    js_content = joins + "\n" + js_content
+
     # Remove the 'export' keyword from 'export class ThreeJSViewer'
     js_inlined = re.sub(
         r"^export class ", "class ", js_content, count=1, flags=re.MULTILINE
