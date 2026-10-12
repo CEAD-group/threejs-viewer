@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.0.69
 
-- Tube strand collapse preserves local bead height and skips folds confined within a bead half-width of their entry, preventing knife-edge fins at narrow S-jogs (#277).
-- Tube triangles retain outward winding after hairpin frame flips, including LOD meshes, caps, and the animated draw frontier, preventing inverted lighting on downstream layers (#278).
+### Tube S-jog fins and hairpin winding (#279, issues #277, #278)
+
+- Tube strand collapse keeps each vertex's height along its ring's up axis and skips folds whose spine stays within half a bead width of their entry ring, so a narrow S-jog no longer tapers to a knife-edge fin (#277). Real corners still collapse to a crease, now a vertical edge of bead height instead of a point.
+- Tube triangles keep outward winding after hairpin frame flips, in the main-thread build, the LOD worker, the caps and the animated draw frontier, so `DoubleSide` shading no longer inverts on the layers after a reversal (#278). Browser regressions cover both reported spines, rotated up vectors, retraces, double hairpins, vertical risers and forward and backward draw-range scrubs.
 
 ## 0.0.68
 

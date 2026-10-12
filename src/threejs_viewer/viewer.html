@@ -5599,6 +5599,7 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
         // iLo names the segment entering the fold; its start may be far
         // away on a long straight. The first affected ring is iLo + 1.
         const entryRing = c.iLo + 1;
+        // Fold targets need j - i >= TUBE_STRAND_COLLAPSE_MIN_GAP, so this range is never empty.
         const entry = entryRing * 3;
         for (let r = entryRing + 1; r <= c.jHi; r++) {
             const dx = spine[r * 3] - spine[entry];
