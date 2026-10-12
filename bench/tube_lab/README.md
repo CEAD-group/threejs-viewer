@@ -80,3 +80,13 @@ it needs a curvature-scaled step).
   region into uniformly dense/sparse spans (dense = seg < `dense_factor`
   × median bead width), rounds dense spans with clamped Catmull-Rom at
   `step` spacing, passes sparse spans through byte-for-byte.
+
+## Swept-union renderer
+
+`uv run python bench/tube_lab/planar_union.py` captures #277/#278 with identical
+cameras in both modes and records triangle counts, worker time, main-thread
+meshing time, and prefix latency. It also checks station-density scaling on
+straight paths. Its outputs are `out/planar_union_*`. The original IoU gate
+above is for ring-preserving repairs; it is not a correctness criterion for
+a rounded swept envelope. Independent distance/coverage and topology tests
+are in `tests/test_planar_union.py`.

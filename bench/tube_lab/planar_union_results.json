@@ -1,0 +1,156 @@
+{
+  "277_rings": {
+    "triangles": 540,
+    "workerMs": null,
+    "meshingMs": null
+  },
+  "277_planar_union": {
+    "triangles": 632,
+    "workerMs": 20.8,
+    "meshingMs": 7.2,
+    "prefixes": [
+      {
+        "value": 0.45,
+        "ms": 11.1,
+        "triangles": 416,
+        "workerMs": 5.5,
+        "meshingMs": 2.5
+      },
+      {
+        "value": 0.48,
+        "ms": 59.2,
+        "triangles": 422,
+        "workerMs": 0.8,
+        "meshingMs": 2.4
+      },
+      {
+        "value": 0.52,
+        "ms": 59.2,
+        "triangles": 444,
+        "workerMs": 1.3,
+        "meshingMs": 2.3
+      },
+      {
+        "value": 0.57,
+        "ms": 63.7,
+        "triangles": 464,
+        "workerMs": 0.9,
+        "meshingMs": 2.4
+      },
+      {
+        "value": 0.6,
+        "ms": 64.6,
+        "triangles": 560,
+        "workerMs": 0.9,
+        "meshingMs": 3.4
+      },
+      {
+        "value": 0.8,
+        "ms": 37.1,
+        "triangles": 610,
+        "workerMs": 2,
+        "meshingMs": 3.8
+      },
+      {
+        "value": 1,
+        "ms": 91.1,
+        "triangles": 632,
+        "workerMs": 1.7,
+        "meshingMs": 4.1
+      },
+      {
+        "value": 0.2,
+        "ms": 27,
+        "triangles": 296,
+        "workerMs": 1.2,
+        "meshingMs": 1.2
+      }
+    ]
+  },
+  "278_rings": {
+    "triangles": 540,
+    "workerMs": null,
+    "meshingMs": null
+  },
+  "278_planar_union": {
+    "triangles": 662,
+    "workerMs": 22.4,
+    "meshingMs": 3.5,
+    "prefixes": [
+      {
+        "value": 0.45,
+        "ms": 10.1,
+        "triangles": 422,
+        "workerMs": 6.3,
+        "meshingMs": 2.1
+      },
+      {
+        "value": 0.48,
+        "ms": 40.8,
+        "triangles": 428,
+        "workerMs": 0.7,
+        "meshingMs": 2.4
+      },
+      {
+        "value": 0.52,
+        "ms": 19.4,
+        "triangles": 440,
+        "workerMs": 1.9,
+        "meshingMs": 2.1
+      },
+      {
+        "value": 0.57,
+        "ms": 21.9,
+        "triangles": 476,
+        "workerMs": 1.3,
+        "meshingMs": 2.6
+      },
+      {
+        "value": 0.6,
+        "ms": 23.6,
+        "triangles": 500,
+        "workerMs": 1,
+        "meshingMs": 2.8
+      },
+      {
+        "value": 0.8,
+        "ms": 49.4,
+        "triangles": 578,
+        "workerMs": 2.1,
+        "meshingMs": 2.3
+      },
+      {
+        "value": 1,
+        "ms": 58.5,
+        "triangles": 662,
+        "workerMs": 2.1,
+        "meshingMs": 2.7
+      },
+      {
+        "value": 0.2,
+        "ms": 7.7,
+        "triangles": 302,
+        "workerMs": 1.1,
+        "meshingMs": 1
+      }
+    ]
+  },
+  "straight_2": {
+    "triangles": 224,
+    "workerMs": 2.8,
+    "meshingMs": 0.5,
+    "segments": 1
+  },
+  "straight_1001": {
+    "triangles": 224,
+    "workerMs": 3.4,
+    "meshingMs": 0.5,
+    "segments": 1
+  },
+  "straight_10001": {
+    "triangles": 224,
+    "workerMs": 4.9,
+    "meshingMs": 0.5,
+    "segments": 1
+  }
+}

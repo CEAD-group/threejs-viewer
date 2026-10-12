@@ -304,3 +304,10 @@ threejs-viewer code    # Open in VS Code (use "Show Preview" for docked view)
 ## License
 
 MIT
+
+### Rounded planar beads
+
+Use `add_parametric_tube(..., surface="planar_union")` for an opt-in rounded
+swept union on a constant-height planar path. It removes overlapping internal
+surfaces and supports progressive playback. See the [algorithm, before/after
+images, and current limitations](docs/planar_swept_union.md).

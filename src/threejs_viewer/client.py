@@ -2786,6 +2786,8 @@ class ViewerClient:
         texture_length: float = 25.0,
         normal_map: Optional[Union[str, Path, bytes]] = None,
         roughness_map: Optional[Union[str, Path, bytes]] = None,
+        surface: str = "rings",
+        surface_tolerance: Optional[float] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -2888,6 +2890,22 @@ class ViewerClient:
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
+            surface: ``"rings"`` (default) uses the existing ring mesh.
+                ``"planar_union"`` constructs the union of a rounded bead sweep
+                in a plane perpendicular to ``up_vector``. Requires constant
+                positive height, widths greater than height, uniform color,
+                no texture maps, and no explicit orientations. Overlapping
+                passes inside this object become one surface. Breaks are
+                respected. The existing LOD/collapse/bias options do not apply.
+                Playback rebuilds the visible prefix asynchronously in a worker;
+                it can lag during playback. Backward seeks hide stale material
+                until the requested prefix is ready. Other objects/layers are
+                not boolean-unioned with this object.
+            surface_tolerance: Maximum chord error for rounded planar outlines,
+                in model units (default minimum width / 500). Does not bound
+                the interpolation error of the chamfer between contour levels.
+                Smaller values increase triangle count. Only used by
+                ``surface="planar_union"``.
             pickable: When True (default), this tube participates in
                 polyline/tube picking once picking is enabled (see
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
@@ -2963,6 +2981,59 @@ class ViewerClient:
         if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr < 0):
             raise ValueError("heights must be finite and >= 0 at every spine point")
 
+        if surface not in ("rings", "planar_union"):
+            raise ValueError("surface must be 'rings' or 'planar_union'")
+        if surface == "planar_union":
+            if (
+                orientations is not None
+                or colors is not None
+                or any(m is not None for m in (texture, normal_map, roughness_map))
+            ):
+                raise ValueError(
+                    "planar_union currently requires a uniform color, no textures, "
+                    "and no explicit orientations"
+                )
+            if not np.isfinite(spine_arr).all():
+                raise ValueError("planar_union spine must be finite")
+            up = np.array(
+                up_vector if up_vector is not None else [0, 0, 1],
+                dtype=float,
+                copy=True,
+            )
+            if (
+                up.shape != (3,)
+                or not np.isfinite(up).all()
+                or np.linalg.norm(up) < 1e-12
+            ):
+                raise ValueError(
+                    "planar_union up_vector must be a finite nonzero 3-vector"
+                )
+            up /= np.linalg.norm(up)
+            if heights_arr[0] <= 0 or not np.allclose(
+                heights_arr, heights_arr[0], rtol=1e-6, atol=0
+            ):
+                raise ValueError("planar_union requires a constant positive height")
+            if np.any(widths_arr <= heights_arr):
+                raise ValueError("planar_union requires widths greater than height")
+            plane_error = np.abs((spine_arr.astype(float) - spine_arr[0]) @ up)
+            plane_tolerance = max(
+                1e-5 * float(heights_arr[0]),
+                4 * np.finfo(np.float32).eps * float(np.abs(spine_arr).max()),
+            )
+            if plane_error.max() > plane_tolerance:
+                raise ValueError(
+                    "planar_union spine must lie in a plane perpendicular to up_vector"
+                )
+            if surface_tolerance is None:
+                surface_tolerance = float(widths_arr.min()) / 500
+            if not math.isfinite(surface_tolerance) or surface_tolerance <= 0:
+                raise ValueError("surface_tolerance must be finite and > 0")
+            min_tolerance = float(widths_arr.max()) / 2 * (1 - math.cos(math.pi / 512))
+            if surface_tolerance < min_tolerance:
+                raise ValueError(
+                    "surface_tolerance is too small (maximum 512 circle sides)"
+                )
+
         color_arr_in: Optional[np.ndarray] = None
         if colors is not None:
             color_arr_in = np.ascontiguousarray(colors, dtype=np.uint32).reshape(-1)
@@ -3027,6 +3098,9 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        if surface == "planar_union":
+            header["surface"] = surface
+            header["surfaceTolerance"] = surface_tolerance
         sc_header = _serialize_strand_collapse(strand_collapse)
         if sc_header:
             header["strandCollapse"] = sc_header

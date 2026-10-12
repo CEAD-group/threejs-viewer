@@ -1,6 +1,7 @@
 // @ts-check
 import * as THREE from 'three';
 import { ViewerControls } from './controls.js';
+import { PlanarUnionTube } from './planarUnion.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -15006,6 +15007,7 @@ export class ThreeJSViewer {
             const mixer = this._mixers.get(id);
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse(/** @param {any} child */ (child) => {
+                if (child.userData.isPlanarUnionTube) child.userData.parametricTube.dispose();
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
                 this._modelCache.release(child);
                 if (child.userData.tubeLOD) {
@@ -17464,6 +17466,67 @@ export class ThreeJSViewer {
                         const upVector = data.upVector || null;
                         const heightOffset = data.heightOffset || 0;
 
+                        if (data.surface === 'planar_union') {
+                            if (orientations || ringColors || data.texture ||
+                                !heights.every(h => Math.abs(h - heights[0]) <= heights[0] * 1e-6)) {
+                                throw new Error('planar_union requires constant height, uniform color, and no textures/orientations');
+                            }
+                            const material = new THREE.MeshStandardMaterial({
+                                color: data.color ?? 0x7ab8cc,
+                                metalness: data.metalness ?? 0.1, roughness: data.roughness ?? 0.8,
+                                opacity: data.opacity ?? 1, transparent: (data.opacity ?? 1) < 1,
+                                depthWrite: (data.opacity ?? 1) >= 1,
+                                side: THREE.DoubleSide, clippingPlanes: this._activeClippingPlanes(),
+                            });
+                            const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
+                            mesh.name = data.id;
+                            mesh.userData.id = data.id;
+                            mesh.userData.isParametricTube = true;
+                            mesh.userData.isPlanarUnionTube = true;
+                            mesh.userData.tubeNumSpinePoints = n;
+                            mesh.userData.tubeBaseMaterial = material;
+                            const controller = new PlanarUnionTube(mesh, {
+                                spine, widths, breaks: breakMask, height: heights[0],
+                                heightOffset, up: upVector || [0, 0, 1],
+                                tolerance: data.surfaceTolerance || widths[0] / 500,
+                                onGeometry: () => {
+                                    this._sceneBoundsDirty = true;
+                                    this._shadowDirty = true;
+                                    applyTubeDrawCap(mesh, material);
+                                },
+                            });
+                            mesh.userData.parametricTube = controller;
+                            const cancelUnion = () => controller.dispose();
+                            abortCtl.signal.addEventListener('abort', cancelUnion, { once: true });
+                            try {
+                                await controller.ready;
+                                if (this._sceneGeneration !== capturedScene || !this._isLoadTokenCurrent(data.id, loadToken)) {
+                                    controller.dispose(); mesh.geometry.dispose(); material.dispose();
+                                    deferred.reject(new Error('stale'));
+                                    return;
+                                }
+                            } catch (error) {
+                                controller.dispose(); mesh.geometry.dispose(); material.dispose();
+                                throw error;
+                            } finally {
+                                abortCtl.signal.removeEventListener('abort', cancelUnion);
+                            }
+                            if (data.pickable !== false) {
+                                mesh.userData.isPickableTube = true;
+                                mesh.userData.pickPoints = spine;
+                                mesh.userData.pickWidths = widths;
+                                mesh.userData.pickHeights = heights;
+                                mesh.userData.pickHeightOffset = heightOffset;
+                            } else mesh.userData.pickable = false;
+                            this._applyInitialVisibility(data.id, mesh, data.visible);
+                            this._deleteObject(data.id, { preserveInflight: true });
+                            this._addToParentOrScene(mesh, data.parent);
+                            this._registerObject(data.id, mesh);
+                            if (data.transform) this._applyTransform(mesh, data.transform);
+                            deferred.resolve();
+                            return;
+                        }
+
                         // Per-ring anchor offset along V, captured from the heights
                         // BEFORE the deposition bias scales them. Recomputing it from
                         // the biased heights would cancel the bias exactly on the
@@ -17955,6 +18018,10 @@ export class ThreeJSViewer {
                             // bytes were in flight; its result must not repaint.
                             if (obj.userData.tubeColorToken !== colorToken) {
                                 console.log(`Discarding superseded parametric tube color fetch for '${data.id}'`);
+                                return;
+                            }
+                            if (obj.userData.isPlanarUnionTube) {
+                                console.warn('planar_union does not support per-station color updates; use set_color');
                                 return;
                             }
                             const lod = obj.userData.tubeLOD;

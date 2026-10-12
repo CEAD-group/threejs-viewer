@@ -158,6 +158,22 @@ def build():
         flags=re.MULTILINE,
     )
 
+    # The union worker is vendored and inlined too: file:// viewers must not
+    # fetch a local module or a second CDN dependency at runtime.
+    union_content = (VIEWER_DIR / "planarUnion.js").read_text(encoding="utf-8")
+    union_content = re.sub(r"^import .*?;\n", "", union_content, flags=re.MULTILINE)
+    union_content = union_content.replace(
+        "export class PlanarUnionTube", "class PlanarUnionTube"
+    )
+    clipping_content = (STATIC_DIR / "polygon-clipping/source.js").read_text(
+        encoding="utf-8"
+    )
+    clipping_content = clipping_content.replace("export const ", "const ", 1)
+    js_content = re.sub(
+        r"^import \{ PlanarUnionTube \} from .*?;\n", "", js_content, flags=re.MULTILINE
+    )
+    js_content = clipping_content + "\n" + union_content + "\n" + js_content
+
     # Remove the 'export' keyword from 'export class ThreeJSViewer'
     js_inlined = re.sub(
         r"^export class ", "class ", js_content, count=1, flags=re.MULTILINE

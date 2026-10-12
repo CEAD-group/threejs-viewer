@@ -205,3 +205,15 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `38_bead_texture.py` - Bead texture on a realistic printed part: one continuous 8 x 3 mm bead, 14 layers, low and wide. The outline is a 200 mm square with one round side (two rounded corners, one bulging arc; every turn of the path is filleted by `round_corners`), the wall is a single bead, and a zig-zag rib crosses between two opposite walls inside it, running a short way along each wall it meets (never more than two beads side by side) and ending against the inside of the arc. The round side overhangs, leaning out about 40 degrees at the bed and straightening toward the top. Layers alternate wall-then-rib and rib-then-wall so the bead never breaks. Wears a colour + normal + roughness set from `bead_texture_maker.texture_set` (`anchor="top"`, 25 mm tile) and is printed by a `draw_ranges` animation.
 - `bead_texture_maker.py` - Generates a tiling extruded-thermoplastic texture set for beads (numpy only, hand-written PNG encoder): `<prefix>_color.png`, `_normal.png` (tangent space, OpenGL +Y), `_roughness.png` and a 16-bit `_height.png` for Blender bump/displacement. The surface is built in millimetres from frequency-shaped noise, so every map tiles exactly: die lines along the flow, transverse sharkskin ripple, fine grain, slow waviness and optional chopped fibres. Options: `--color`, `--fibers/--no-fibers` (`--fiber-density`, `--fiber-length`, `--fiber-color`), `--roughness` (level of the roughness map), `--smoothness` (scales the relief), `--bump-strength`, `--length`/`--width`/`--height` (tile length and bead section, which size the image so features are isotropic), `--size`, `--seed`, `-o`; `--show` puts the set on the two sample beads in the viewer.
 - `bead_uv_template.py` - Exports two sample beads (S-bends with a swelling section; sharp corners, a U-turn and a climbing leg with a ramping section) as an OBJ with the viewer's bead UV layout, for painting or previewing a bead texture in Blender. Re-implements the tube build (section, constant-up frames, mitres, arc-length `u`, mirrored `v`) in numpy; ends are open.
+
+### Planar swept-union tubes
+
+`add_parametric_tube(surface="planar_union")` is an opt-in geometry path in
+`viewer/planarUnion.js`, inlined by `build.py`. It uses a vendored polygon
+boolean worker, then triangulates rounded footprint unions; it does not use
+ring LOD/collapse/bias. Constant height, planar spine perpendicular to up,
+widths > height, and uniform color are currently required. The mesh has
+`isParametricTube` plus `isPlanarUnionTube`; its controller implements the
+existing `setDrawRange` dispatch with asynchronous prefix rebuilding. Dispose
+its worker when deleting objects. See `docs/planar_swept_union.md` and
+`tests/test_planar_union.py`.

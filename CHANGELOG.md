@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in `surface="planar_union"` for constant-height planar beads: rounded swept-footprint unions, compact triangulation, and worker-backed prefix playback. Supports variable widths, arbitrary plane orientation, holes, retraces, and breaks. Existing ring rendering remains the default for nonplanar paths and other unsupported inputs. See [design, comparisons, and limits](docs/planar_swept_union.md).
+
 ## 0.0.69
 
 ### Tube S-jog fins and hairpin winding (#279, issues #277, #278)
