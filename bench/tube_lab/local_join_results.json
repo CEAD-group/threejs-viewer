@@ -174,16 +174,18 @@
     "triangleBudget": 96
   },
   "uturn_round": {
-    "accepted": 3,
+    "accepted": 2,
     "clusters": 0,
-    "planar": 3,
+    "planar": 2,
     "spatial": 0,
-    "smooth": 5,
-    "fallback": {},
+    "smooth": 6,
+    "fallback": {
+      "frame reversal": 1
+    },
     "originalTriangles": 336,
-    "addedTriangles": 24,
+    "addedTriangles": 16,
     "maxPatchTriangles": 32,
-    "buildMs": 0.5999999940395355,
+    "buildMs": 0.3999999910593033,
     "maxWindowSegments": 2,
     "triangleBudget": 96
   },
@@ -194,12 +196,88 @@
     "spatial": 0,
     "smooth": 6,
     "fallback": {
-      "section change": 5
+      "section change": 3,
+      "frame reversal": 2
     },
     "originalTriangles": 336,
     "addedTriangles": 0,
     "maxPatchTriangles": 0,
-    "buildMs": 0,
+    "buildMs": 0.09999999403953552,
+    "maxWindowSegments": 2,
+    "triangleBudget": 96
+  },
+  "prior_zigzag": {
+    "accepted": 0,
+    "clusters": 0,
+    "planar": 0,
+    "spatial": 0,
+    "smooth": 60,
+    "fallback": {},
+    "originalTriangles": 924,
+    "addedTriangles": 0,
+    "maxPatchTriangles": 0,
+    "buildMs": 0.10000000894069672,
+    "maxWindowSegments": 2,
+    "triangleBudget": 139
+  },
+  "prior_sharpV": {
+    "accepted": 1,
+    "clusters": 0,
+    "planar": 1,
+    "spatial": 0,
+    "smooth": 0,
+    "fallback": {},
+    "originalTriangles": 216,
+    "addedTriangles": 24,
+    "maxPatchTriangles": 48,
+    "buildMs": 1.5,
+    "maxWindowSegments": 2,
+    "triangleBudget": 96
+  },
+  "prior_hairpin": {
+    "accepted": 2,
+    "clusters": 0,
+    "planar": 2,
+    "spatial": 0,
+    "smooth": 9,
+    "fallback": {
+      "short segments": 1
+    },
+    "originalTriangles": 360,
+    "addedTriangles": 24,
+    "maxPatchTriangles": 36,
+    "buildMs": 0.7999999970197678,
+    "maxWindowSegments": 2,
+    "triangleBudget": 96
+  },
+  "prior_mixed": {
+    "accepted": 1,
+    "clusters": 0,
+    "planar": 1,
+    "spatial": 0,
+    "smooth": 35,
+    "fallback": {},
+    "originalTriangles": 648,
+    "addedTriangles": 24,
+    "maxPatchTriangles": 48,
+    "buildMs": 0.29999999701976776,
+    "maxWindowSegments": 2,
+    "triangleBudget": 98
+  },
+  "prior_union_demo": {
+    "accepted": 3,
+    "clusters": 0,
+    "planar": 3,
+    "spatial": 0,
+    "smooth": 1,
+    "fallback": {
+      "short segments": 3,
+      "reversal": 1
+    },
+    "originalTriangles": 336,
+    "addedTriangles": 60,
+    "maxPatchTriangles": 48,
+    "buildMs": 0.7999999970197678,
     "maxWindowSegments": 2,
     "triangleBudget": 96
   }

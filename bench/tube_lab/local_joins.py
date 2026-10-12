@@ -22,6 +22,50 @@ OUT = Path(__file__).parent / "out/local_joins"
 
 
 def scenes():
+    # Exact generators used by the PR #279/#280 visual benchmark.
+    from zr_metric import SCENES
+
+    for name, build in SCENES:
+        old = build()
+        yield dict(
+            name=f"prior_{name}",
+            title=f"Earlier benchmark · {name}",
+            spine=old["sp"],
+            w=old["w"],
+            h=old["ht"],
+            lo=old["lo"],
+            hi=min(old["hi"], len(old["sp"]) - 1),
+            up=[0, 0, 1],
+        )
+    # PR #281, examples/39_planar_swept_union.py at 05e85ef.
+    loop = np.array(
+        [
+            [0, 0, 0],
+            [20, 0, 0],
+            [21, 1, 0],
+            [20, 2, 0],
+            [22, 3, 0],
+            [40, 3, 0],
+            [39, 3, 0],
+            [40, 3, 0],
+            [50, 3, 0],
+            [50, 30, 0],
+            [20, 30, 0],
+            [20, 10, 0],
+            [50, 10, 0],
+        ],
+        dtype=np.float32,
+    )
+    yield dict(
+        name="prior_union_demo",
+        title="PR #281 · jog, retrace and loop",
+        spine=loop,
+        w=10,
+        h=2,
+        lo=0,
+        hi=len(loop) - 1,
+        up=[0, 0, 1],
+    )
     for issue, w, h, lo, hi in [(277, 11.83, 2, 9, 21), (278, 9.46, 2.5, 10, 20)]:
         spine = np.array(
             json.loads((ROOT / f"tests/data/tube_issue_{issue}.json").read_text())
@@ -298,6 +342,21 @@ def demo(maps):
         "window.threejsViewer = new ThreeJSViewer(container, {",
         "window.threejsViewer = new ThreeJSViewer(container, {\n autoConnect:false,",
     )
+    overview = html.replace(
+        "    </script>\n</body>",
+        (
+            Path(__file__)
+            .with_name("local_joins_overview.js")
+            .read_text()
+            .replace(
+                "/* CASES */",
+                json.dumps([dict(name=s["name"], title=s["title"]) for s in cases]),
+            )
+            .replace("/* MESSAGES */", json.dumps(embed(messages)))
+        )
+        + "\n    </script>\n</body>",
+    )
+    (OUT / "overview.html").write_text(overview)
     panel = (
         '<style>#lab{position:absolute;z-index:100;top:55px;left:15px;background:#18232def;color:#eef;padding:15px;border-radius:8px;font:14px system-ui;width:340px}#lab label{display:block;margin:8px 0}#lab small{display:block;margin-top:10px}#lab input[type=range]{width:100%}</style><aside id="lab"><b>Bounded local joins</b><label>Case <select id="case">'
         + "".join(f'<option value="{s["name"]}">{s["title"]}</option>' for s in cases)
@@ -431,7 +490,7 @@ def run(selected=None):
         browser.close()
     (OUT / "metrics.json").write_text(json.dumps(results, indent=2) + "\n")
     (OUT / "index.html").write_text(
-        '<meta charset="utf-8"><style>body{background:#202328;color:#eef;font:16px system-ui;margin:25px}a{color:#8dd}img{width:100%;max-width:1360px}</style><h1>Local join comparisons</h1><p><a href="demo.html">Open interactive animated demo</a></p><p>Left: original strip, collapse off. Right: bounded local joins. Solid, wire, and all three material maps. Rejected corners retain the original strip.</p>'
+        '<meta charset="utf-8"><style>body{background:#202328;color:#eef;font:16px system-ui;margin:25px}a{color:#8dd}img{width:100%;max-width:1360px}</style><h1>Local join comparisons</h1><p><a href="overview.html">All examples: synchronized animated comparisons</a> · <a href="demo.html">Single-example demo</a></p><p>Left: original strip, collapse off. Right: bounded local joins. Solid, wire, and all three material maps. Rejected corners retain the original strip.</p>'
         + "".join(
             f'<h2>{s["title"]}</h2><a href="{s["name"]}.html"><img src="{s["name"]}_comparison.png"></a>'
             for s in scenes()
@@ -443,9 +502,19 @@ def run(selected=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--demo-only",
+        action="store_true",
+        help="Build both interactive views without recapturing screenshots",
+    )
+    parser.add_argument(
         "--case",
         action="append",
         choices=[s["name"] for s in scenes()],
         help="Capture selected cases; retain existing gallery results",
     )
-    run(parser.parse_args().case)
+    args = parser.parse_args()
+    if args.demo_only:
+        OUT.mkdir(parents=True, exist_ok=True)
+        demo(texture_set(color="#698d9e", smoothness=0.6, fibers=True))
+    else:
+        run(args.case)

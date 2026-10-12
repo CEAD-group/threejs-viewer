@@ -101,6 +101,15 @@ export function installLocalJoins(mesh, options) {
         const U = new THREE.Vector3().crossVectors(up, incoming);
         if (U.lengthSq() < .01) { reject('vertical frame'); continue; }
         U.normalize();
+        // Recomputing a frame from up can flip across vertical while the strip's
+        // transported frame remains continuous. Stitching equal vertex indices
+        // then twists the patch. Retain the strip at incompatible interfaces.
+        const exitU = U.clone().applyAxisAngle(axis, angle);
+        const startFrame = new THREE.Vector3().fromArray(md.localFrames, (i - 1) * 6);
+        const endFrame = new THREE.Vector3().fromArray(md.localFrames, (i + 1) * 6);
+        if (U.dot(startFrame) <= 0 || exitU.dot(endFrame) <= 0) {
+            reject('frame reversal'); continue;
+        }
         const V = new THREE.Vector3().crossVectors(incoming, U);
         // The full path need not be planar. Test only this small neighborhood,
         // with a bead-relative tolerance, and retain its real elevations.

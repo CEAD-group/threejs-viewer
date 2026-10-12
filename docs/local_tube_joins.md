@@ -10,7 +10,7 @@ Use `add_parametric_tube(..., surface="local_join")` to opt in. The default ring
 - Cluster planarity is local and tolerant: residual rise after subtracting the endpoint slope may be up to 10% of bead height plus 0.2% of width. Actual elevations are interpolated back into the mesh. A spiral vase does not need to fit a single plane.
 - Clusters have at most 192 triangles and may add at most 96 over the replaced strip. The whole object has an additional-triangle budget of `max(96, ceil(original_triangles * 0.15))`. Once exhausted, later candidates retain the original strip.
 
-The isolated-arc tolerance is a chord tolerance. Cluster sample spacing is a geometric heuristic, **not a certified Hausdorff-error bound**. Other layers and distant self-intersections are not unioned. The spatial-jog example deliberately retains an unsupported tight bend; adjacent repairs are not allowed to overlap. Large changes of section or near-vertical incoming frames can also fall back.
+The isolated-arc tolerance is a chord tolerance. Cluster sample spacing is a geometric heuristic, **not a certified Hausdorff-error bound**. Other layers and distant self-intersections are not unioned. The spatial-jog example deliberately retains an unsupported tight bend; adjacent repairs are not allowed to overlap. Large changes of section, near-vertical incoming frames, or patch frames pointing opposite to the original interface frames also fall back.
 
 ## Playback, storage, and maps
 
@@ -40,14 +40,33 @@ All captures use the actual viewer. Left is the original strip with strand colla
 | Gentle width taper, 8 → 9.2 mm | 264 | 288 | [Screenshot](media/local_joins/width_gentle_comparison.png) |
 | Strong width changes, 4–14 mm | 264 | 264 (fallback) | [Screenshot](media/local_joins/width_abrupt_comparison.png) |
 | Forward, up 10 mm, back | 288 | 304 (partial repair) | [Screenshot](media/local_joins/uturn_step_comparison.png) |
-| Rounded out-of-plane U-turn | 336 | 360 (**visual regression**) | [Screenshot](media/local_joins/uturn_round_comparison.png) |
+| Rounded out-of-plane U-turn | 336 | 352 (partial repair; frame fallback) | [Screenshot](media/local_joins/uturn_round_comparison.png) |
 | Widening out-of-plane U-turn, 6 → 12 mm | 336 | 336 (fallback) | [Screenshot](media/local_joins/uturn_taper_comparison.png) |
 
 ### Variable widths and out-of-plane U-turns
 
 The width examples supply real per-station width arrays to both renderers. Gentle taper permits the corner repair; the strong taper triggers the existing section-change guard. All U-turns go forward along X, rise along Z, and return along negative X with the default +Z up vector. The rounded versions rise 12 mm along a semicircle of radius 6 mm; the stepped version rises 10 mm through a vertical segment.
 
-**Known regression:** the constant-width rounded U-turn receives three accepted patches but develops a pronounced twist/notch near its upper return. Accepted-patch counts measure algorithm decisions, not visual correctness. The stepped U-turn only repairs its lower bend and retains the vertical-frame seam. The widening U-turn retains the original strip because its section changes exceed the guard. These captures deliberately preserve the failures; no renderer behavior was changed when adding the examples. This PR remains a draft, and these U-turns need further frame-continuity work.
+The rounded U-turn previously accepted three patches and introduced a pronounced twist near its upper return. Recomputing the patch frame from `up × tangent` gave the opposite orientation to the original transported frame. A new interface-frame guard rejects that patch; its upper-return triangles now remain exactly original. Two other patches remain (336 → 352 triangles). This removes the large added twist, but does **not** solve all bend seams or make the U-turn a clean swept surface. The stepped U-turn still retains its vertical-frame seam, and the widening U-turn falls back. The PR remains a draft.
+
+
+### Reused earlier examples and synchronized overview
+
+The gallery also uses the exact four scene generators from `bench/tube_lab/zr_metric.py`, previously used for PR #279/#280: rounded jittered zigzag with variable widths/heights, sharp V, tight hairpin, and mixed sparse corner/dense arc. The jog/retrace/loop path is copied from PR #281's `examples/39_planar_swept_union.py` at `05e85ef`. These compare the current original strip (collapse off) with local joins; they do not run the old PR renderers.
+
+| Historical path | Original → local triangles | Comparison |
+|---|---:|---|
+| Rounded zigzag | 924 → 924 | [Screenshot](media/local_joins/prior_zigzag_comparison.png) |
+| Sharp V | 216 → 240 | [Screenshot](media/local_joins/prior_sharpV_comparison.png) |
+| Tight hairpin | 360 → 384 | [Screenshot](media/local_joins/prior_hairpin_comparison.png) |
+| Mixed sparse/dense bends | 648 → 672 | [Screenshot](media/local_joins/prior_mixed_comparison.png) |
+| PR #281 jog/retrace/loop | 336 → 396 | [Screenshot](media/local_joins/prior_union_demo_comparison.png) |
+
+The historical examples expose remaining limits: the smoothness gate leaves the zigzag's inner folds untouched, the tight hairpin still overlaps, and the retraced/overlapping sections of the PR #281 path are not unioned. A repair count is not a visual-quality score.
+
+`python bench/tube_lab/local_joins.py --demo-only` builds both interactive pages without capturing screenshots. Serve `bench/tube_lab/out/local_joins` and open `overview.html` for all **19 examples**, each with original and local joins side by side. All 38 objects share a 0–100% slider and looping playback (ten seconds printing, two seconds held at completion). Each pair shares a camera: drag either side to orbit, scroll to zoom, or select top/side/perspective. Click a title to enlarge that pair; Escape or “All examples” returns to the grid. Material-map and wireframe switches apply to every example. One WebGL context renders the whole grid with separate viewports.
+
+![All examples at 100%](media/local_joins/animated_overview.png)
 
 
 ![S-jog comparison](media/local_joins/issue_277_comparison.png)

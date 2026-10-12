@@ -328,3 +328,40 @@ def test_breaks_and_top_anchor(viewer_client, viewer_page):
     viewer_page.wait_for_function(
         "() => window.threejsViewer._objects.get('t').userData.localJoinCommittedPairs===6"
     )
+
+
+@pytest.mark.browser
+def test_out_of_plane_return_keeps_incompatible_frame_unpatched(
+    viewer_client, viewer_page
+):
+    # The original transported U stays +Y across vertical. Recomputing U from
+    # up x tangent on the upper return gives -Y and twists corresponding seams.
+    angles = np.linspace(0, np.pi, 7)
+    arc = np.column_stack(
+        [6 * np.sin(angles), np.zeros(len(angles)), 6 * (1 - np.cos(angles))]
+    )
+    p = np.vstack(
+        [
+            [[-30, 0, 0], [-20, 0, 0], [-10, 0, 0]],
+            arc,
+            [[-10, 0, 12], [-20, 0, 12], [-30, 0, 12]],
+        ]
+    )
+    viewer_client.add_parametric_tube(
+        "t", p, np.full(len(p), 8), np.full(len(p), 2), surface="local_join"
+    )
+    viewer_page.wait_for_function(
+        "() => !!window.threejsViewer._objects.get('t')?.userData.localJoinStats"
+    )
+    result = viewer_page.evaluate("""() => {
+        const o=window.threejsViewer._objects.get('t'), u=o.userData;
+        const cap=u.tubeCapIndicesPerCap, pair=u.tubeIndicesPerRingPair;
+        const original=Array.from(o.geometry.index.array.slice(cap+7*pair,cap+12*pair));
+        const repaired=Array.from(u.localJoinCompleted.geometry.index.array);
+        // Exact original upper-return triangles must survive in the completed
+        // mesh, including winding and section-vertex correspondence.
+        const suffix=repaired.slice(-original.length);
+        return {stats:u.localJoinStats,original,suffix};
+    }""")
+    assert result["stats"]["fallback"]["frame reversal"] >= 1
+    assert result["suffix"] == result["original"]
