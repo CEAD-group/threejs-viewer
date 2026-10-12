@@ -189,3 +189,100 @@ def test_hairpin_winding_main_worker_and_frontier(
     restored = viewer_page.evaluate(_READ_GEOMETRY, "hairpin")
     np.testing.assert_array_equal(restored["indices"], initial["indices"])
     np.testing.assert_allclose(restored["positions"], initial["positions"], atol=1e-5)
+
+
+def _proper_strand_crossings(rings):
+    """Count interior intersections of non-adjacent strand segments in XY."""
+
+    def cross(a, b):
+        return a[0] * b[1] - a[1] * b[0]
+
+    count = 0
+    for strand in range(6):
+        xy = rings[:, strand, :2]
+        for i in range(len(xy) - 1):
+            for j in range(i + 2, len(xy) - 1):
+                a, b = xy[i + 1] - xy[i], xy[j + 1] - xy[j]
+                delta = xy[j] - xy[i]
+                denominator = cross(a, b)
+                if abs(denominator) < 1e-8:
+                    continue
+                t, u = cross(delta, b) / denominator, cross(delta, a) / denominator
+                count += 1e-5 < t < 1 - 1e-5 and 1e-5 < u < 1 - 1e-5
+    return count
+
+
+@pytest.mark.parametrize("issue", [277, 278])
+@pytest.mark.parametrize("rotated", [False, True])
+def test_sub_bead_excursion_has_no_fold_loop_or_notch(
+    viewer_client, viewer_page, worker_code, issue, rotated
+):
+    spine = _spine(issue)
+    w, h = (11.83, 2.0) if issue == 277 else (9.46, 2.5)
+    up = [0, 0, 1]
+    if rotated:
+        spine = spine[:, [2, 0, 1]].copy()
+        up = [1, 0, 0]
+    widths, heights = np.full(len(spine), w), np.full(len(spine), h)
+    worker = _worker_geometry(viewer_page, worker_code, spine, widths, heights, up)
+    viewer_client.add_parametric_tube(
+        "excursion",
+        spine,
+        widths,
+        heights,
+        up_vector=up,
+        lod=False,
+        strand_collapse=False,
+    )
+    _wait_for_object(viewer_page, "excursion")
+    main = viewer_page.evaluate(_READ_GEOMETRY, "excursion")
+    for geometry in (worker, main):
+        rings = np.asarray(geometry["positions"])[: len(spine) * 18].reshape(-1, 6, 3)
+        # The actual path and bead height remain intact; only frames change.
+        np.testing.assert_allclose(rings.mean(axis=1), spine, atol=3e-5)
+        assert np.all(np.ptp(rings @ np.asarray(up), axis=1) >= h - 3e-5)
+        if rotated:
+            rings = rings[:, :, [1, 2, 0]]
+        if issue == 277:
+            # Previously seven crossings remained even with correct winding.
+            assert _proper_strand_crossings(rings) == 0
+        else:
+            # A tiny retrace must not rotate a wide ring along the path and
+            # cut a notch into the otherwise continuous curved bead.
+            path = _spine(issue)
+            heading = path[16] - path[13]
+            heading /= np.linalg.norm(heading)
+            offsets = rings[14:16] - path[14:16, None, :]
+            assert np.max(np.abs(offsets @ heading)) < 0.1 * w
+        _assert_outward(geometry)
+
+
+@pytest.mark.parametrize("guard", ["corner", "hairpin", "long_jog", "break", "riser"])
+def test_excursion_frames_preserve_other_features(viewer_page, worker_code, guard):
+    if guard in ("corner", "hairpin"):
+        # Dense real bends smaller than a bead must retain their own frames.
+        angle = np.linspace(0, np.pi / 4 if guard == "corner" else np.pi, 12)
+        spine = np.column_stack(
+            (np.sin(angle), 1 - np.cos(angle), np.zeros_like(angle))
+        ).astype(np.float32)
+    else:
+        spine = _spine(277)
+        if guard == "riser":
+            spine[14:, 2] += 0.5
+    width = 1 if guard == "long_jog" else 11.83
+    changed = viewer_page.evaluate(
+        """({code, spine, width, guard}) => {
+            return new Function('self', 'spine', 'width', 'guard', code + `
+                const n = spine.length / 3, widths = new Float32Array(n).fill(width);
+                const frames = new Float32Array(n*6), miters = new Float32Array(n*3), tangents = new Float32Array(n*3);
+                computeMiterFrames(spine, n, frames, miters, tangents, 0,0,1,1,0,0);
+                const before = [...frames, ...miters, ...tangents];
+                const breaks = new Uint8Array(n);
+                if (guard === 'break') breaks[14] = 1;
+                stabilizeTubeExcursions(spine, widths, frames, miters, tangents, breaks, 0,0,1);
+                return [...frames, ...miters, ...tangents].some((v,i) => v !== before[i]);
+            `)({}, new Float32Array(spine.flat()), width, guard);
+        }""",
+        dict(code=worker_code, spine=spine.tolist(), width=width, guard=guard),
+    )
+    assert not changed

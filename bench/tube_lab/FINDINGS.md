@@ -187,6 +187,31 @@ approaches (spine identity / spline resample / linear densify, crossed with
 `zigzag_rounded.py` are owned by a concurrent bench-design effort and were
 not re-run for this document — see README.md for how to reproduce.)
 
+### 3.5 Sub-bead excursion frames (follow-up to PR #279, 2026-10-12)
+
+The initial height/winding fixes left folded offset strands on the #277
+S-jog and a notch at #278's tiny out-and-back move. `stabilizeTubeExcursions`
+now holds one cross-section frame through isolated planar excursions. It
+uses the bisector of the incoming/outgoing headings, requires cancellation
+of at least 60° of accumulated turning, and limits the run's arc length to
+the local bead half-width. Sustained bends, true U-turns, non-planar runs,
+travel breaks and explicit orientations are excluded. Path points, bead
+width/height, ring counts and animation pacing are unchanged.
+
+On the supplied #277 spine, proper XY intersections between non-adjacent
+segments of the same strand fall from **7 to 0**. On #278 the rings at the
+short reversal no longer swing along the path and cut a notch in the bead;
+shaded captures at the review's original cameras show a continuous surface.
+This is a local frame approximation, not a Boolean union of deposited
+volume: an actual retrace still contains overlapping geometry.
+
+The four existing benchmark scenes retain their pre-follow-up frames.
+Re-running `zr_metric.py` for `off` and `sc0.5` confirms **4/4 PASS**, with
+unchanged measurements: zigzag **9253 → 8577** dark pixels, **IoU 0.997743**,
+**924 triangles**; sharpV **2130**, hairpin **2851**, mixed **6949** dark pixels
+for both settings, each **IoU 1.0**. The earlier zigzag height-preservation
+trade-off remains; this follow-up does not generalize to resampling corners.
+
 ## 4. Rejected / dead-end approaches
 
 - **Blind spline resampling on sharp vertices** — rounds away the intended

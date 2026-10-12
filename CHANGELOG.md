@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Short planar S-jogs and out-and-back moves now use a stable cross-section frame through the excursion, removing the remaining fold loops and hairpin notches without moving the path or changing bead dimensions. Genuine corners, U-turns, risers, travel breaks and explicit orientations retain their frames.
+
 ## 0.0.69
 
 ### Tube S-jog fins and hairpin winding (#279, issues #277, #278)

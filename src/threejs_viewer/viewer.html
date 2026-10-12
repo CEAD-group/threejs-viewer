@@ -4634,6 +4634,93 @@ function computeMiterFrames(spine, nSpine, outFrames, outMiters, outTangents,
     }
 }
 
+// Short S-jogs and out-and-back moves can rotate a wide bead's cross-section
+// through almost 180 degrees within less than a half-width. Winding correction
+// fixes their lighting, but leaves folded sidewalls and notches. For an isolated
+// planar excursion with agreeing entry/exit headings, hold one frame through
+// the excursion instead. Do not move the spine or change ring/animation pacing.
+// Long bends, genuine U-turns, non-planar paths and explicit orientations retain
+// their frames. Shared with the LOD worker via toString().
+/**
+ * @param {Float32Array} spine
+ * @param {Float32Array} widths
+ * @param {Float32Array} frames
+ * @param {Float32Array} miters
+ * @param {Float32Array} tangents
+ * @param {Uint8Array|null} breaks
+ * @param {number} upX @param {number} upY @param {number} upZ
+ */
+function stabilizeTubeExcursions(spine, widths, frames, miters, tangents, breaks, upX, upY, upZ) {
+    const n = widths.length;
+    if (n < 4) return;
+    const turns = new Float32Array(n);
+    // lengths[i] is the incoming segment length at ring i.
+    const lengths = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+        lengths[i] = Math.hypot(spine[i*3] - spine[(i-1)*3],
+            spine[i*3+1] - spine[(i-1)*3+1], spine[i*3+2] - spine[(i-1)*3+2]);
+    }
+    for (let i = 1; i < n - 1; i++) {
+        if (lengths[i] < 1e-9 || lengths[i+1] < 1e-9) continue;
+        const ax = (spine[i*3] - spine[(i-1)*3]) / lengths[i];
+        const ay = (spine[i*3+1] - spine[(i-1)*3+1]) / lengths[i];
+        const az = (spine[i*3+2] - spine[(i-1)*3+2]) / lengths[i];
+        const bx = (spine[(i+1)*3] - spine[i*3]) / lengths[i+1];
+        const by = (spine[(i+1)*3+1] - spine[i*3+1]) / lengths[i+1];
+        const bz = (spine[(i+1)*3+2] - spine[i*3+2]) / lengths[i+1];
+        turns[i] = Math.acos(Math.max(-1, Math.min(1, ax*bx + ay*by + az*bz)));
+    }
+    // Curvature radius below the bead half-width: an offset strand can fold.
+    const tight = (/** @type {number} */ i) => turns[i] * widths[i] > lengths[i] + lengths[i+1];
+    const shoulderTurn = 8 * Math.PI / 180;
+    for (let i = 1; i < n - 1; i++) {
+        if (!tight(i)) continue;
+        let a = i, b = i;
+        // Bridge one low-curvature sample at an S-jog's inflection.
+        while (b + 1 < n - 1 && (tight(b+1) || (b+2 < n-1 && tight(b+2)))) b++;
+        i = b;
+        if (a > 1 && turns[a-1] > shoulderTurn) a--;
+        if (b < n-2 && turns[b+1] > shoulderTurn) b++;
+        let arc = 0, turn = 0, width = Infinity, valid = true;
+        for (let r = a; r <= b; r++) {
+            if (r > a) arc += lengths[r];
+            turn += turns[r];
+            width = Math.min(width, widths[r]);
+            if (breaks && (breaks[r] || breaks[r+1])) valid = false;
+            // Check segment directions as well as frames: a cone-frozen riser
+            // can inherit a planar frame, but must not be mistaken for a jog.
+            const dz = (spine[r*3] - spine[(r-1)*3]) * upX +
+                (spine[r*3+1] - spine[(r-1)*3+1]) * upY +
+                (spine[r*3+2] - spine[(r-1)*3+2]) * upZ;
+            if (Math.abs(dz) > 1e-5 * lengths[r]) valid = false;
+        }
+        if (!valid || arc > width * 0.5 || arc < 1e-9 || turn < Math.PI / 3) continue;
+        const ax = (spine[a*3] - spine[(a-1)*3]) / lengths[a];
+        const ay = (spine[a*3+1] - spine[(a-1)*3+1]) / lengths[a];
+        const az = (spine[a*3+2] - spine[(a-1)*3+2]) / lengths[a];
+        const bx = (spine[(b+1)*3] - spine[b*3]) / lengths[b+1];
+        const by = (spine[(b+1)*3+1] - spine[b*3+1]) / lengths[b+1];
+        const bz = (spine[(b+1)*3+2] - spine[b*3+2]) / lengths[b+1];
+        if (Math.abs(bx*upX + by*upY + bz*upZ) > 1e-5) continue;
+        // Require a return toward the entry heading, not just a short bend:
+        // at least 60 degrees of turning must cancel within the excursion.
+        const headingDot = Math.max(-1, Math.min(1, ax*bx + ay*by + az*bz));
+        if (headingDot < 0.5 || turn - Math.acos(headingDot) < Math.PI / 3) continue;
+        let tx = ax + bx, ty = ay + by, tz = az + bz;
+        const upDot = tx*upX + ty*upY + tz*upZ;
+        tx -= upDot*upX; ty -= upDot*upY; tz -= upDot*upZ;
+        const len = Math.hypot(tx, ty, tz);
+        tx /= len; ty /= len; tz /= len;
+        const ux = upY*tz - upZ*ty, uy = upZ*tx - upX*tz, uz = upX*ty - upY*tx;
+        for (let r = a; r <= b; r++) {
+            frames[r*6] = ux; frames[r*6+1] = uy; frames[r*6+2] = uz;
+            frames[r*6+3] = upX; frames[r*6+4] = upY; frames[r*6+5] = upZ;
+            tangents[r*3] = tx; tangents[r*3+1] = ty; tangents[r*3+2] = tz;
+            miters[r*3] = 1; miters[r*3+1] = 1; miters[r*3+2] = 0;
+        }
+    }
+}
+
 // Write one tube ring: `nCs` cross-section samples laid out around spine
 // point (sx,sy,sz) using local frame (U,V). `vOff` shifts along V for the
 // anchor offset (see the `heightOffset` / anchor parameter).
@@ -5895,6 +5982,8 @@ function computeSectionNormals(section, nCs, out) {
 // outside dependency is TUBE_MITER_LIMIT, defined at this scope's header.
 ${computeMiterFrames.toString()}
 
+${stabilizeTubeExcursions.toString()}
+
 ${writeRingVerts.toString()}
 
 ${writeCapRingVerts.toString()}
@@ -5980,6 +6069,7 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMa
 
     computeMiterFrames(spine, nSpine, localFrames, miters, tangents,
                        ux0, uy0, uz0, fbx, fby, fbz);
+    stabilizeTubeExcursions(spine, widths, localFrames, miters, tangents, breakMask, ux0, uy0, uz0);
 
     // Positions
     for (let i = 0; i < nSpine; i++) {
@@ -6679,6 +6769,7 @@ function buildParametricTubeGeometry(
     } else {
         computeMiterFrames(spine, nSpine, localFrames, miters, tangents,
                            upX, upY, upZ, fbX, fbY, fbZ);
+        stabilizeTubeExcursions(spine, widths, localFrames, miters, tangents, breakMask, upX, upY, upZ);
     }
 
     for (let i = 0; i < nSpine; i++) {
