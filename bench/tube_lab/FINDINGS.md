@@ -187,6 +187,12 @@ approaches (spine identity / spline resample / linear densify, crossed with
 `zigzag_rounded.py` are owned by a concurrent bench-design effort and were
 not re-run for this document — see README.md for how to reproduce.)
 
+### 3.5 Round joins (PR: round tube joins, 2026-10-12)
+
+- The bench's `APPROACHES` tuples gained a fourth element, `joins`; `off` is still the gate baseline and now means the viewer default (round joins), while a `miter` row shows the pre-round-join renderer for reference. Round joins add triangles by design (a joint body is about 120 triangles), so a miter row has fewer triangles than `off` but more crossing wireframe edges and a different footprint at every sharp corner; it is not expected to pass the gate.
+- Round joins are the first corner treatment that does not move a ring: every corner is the z-buffer union of the two straight prisms and the revolved bead section. A joined vertex carries an incoming-frame ring and an outgoing-frame ring, each closed by a half body, so both adjacent pairs are exact prisms; the first version shared one bisector ring and left a gap past 90° turns through which the inside of the body showed at the 278 apex. `strand_collapse` stays as an opt-in pass on the mitered strip (it implies `joins="miter"`); the fold loops it targets are hidden inside the joint bodies on the same corners.
+- `join_scale.py` is the scale bench: a million-point serpentine (hairpin every 250 points) with round and miter joins under the default LOD, reporting add time, worker rebuild time after a camera move, joint and triangle counts and frame time.
+
 ## 4. Rejected / dead-end approaches
 
 - **Blind spline resampling on sharp vertices** — rounds away the intended

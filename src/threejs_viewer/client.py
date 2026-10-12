@@ -362,6 +362,12 @@ def _sanitize_point_times(values, name: str, n_points: int, nan_to: float):
 
 
 _LOD_DEFAULT = object()  # sentinel: header "lod" key omitted
+
+# add_parametric_tube(joins=...): round joins (the viewer default) or the
+# plain mitered strip. The default tolerance mirrors TUBE_JOIN_TOLERANCE in
+# viewer.js, so the header omits it unless changed.
+_ALLOWED_TUBE_JOINS = frozenset({"round", "miter"})
+_TUBE_JOIN_TOLERANCE_DEFAULT = 0.015
 _LOD_ALLOWED_KEYS = {"epsilon_divisor", "threshold"}
 
 # add_points(lod=...) option keys (distinct from the parametric-tube lod).
@@ -2786,6 +2792,8 @@ class ViewerClient:
         texture_length: float = 25.0,
         normal_map: Optional[Union[str, Path, bytes]] = None,
         roughness_map: Optional[Union[str, Path, bytes]] = None,
+        joins: Optional[str] = None,
+        join_tolerance: float = 0.015,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -2888,6 +2896,27 @@ class ViewerClient:
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
+            joins: ``"round"`` (the default) renders every corner as the union
+                of the two straight bead segments and the bead section
+                revolved about the corner, which is the shape a nozzle
+                leaves when it turns on the spot. The viewer keeps the
+                shared mitered ring through gentle turns and only adds a
+                revolved joint body where the miter would deviate from
+                that union by more than ``join_tolerance``, so a smooth
+                path costs nothing extra and a sharp corner, an S-jog or
+                a hairpin renders without folds, fins or spikes. The
+                joints follow LOD: the tolerance is raised to the LOD
+                epsilon, so corners too small to see cost no triangles.
+                ``"miter"`` keeps the plain mitered strip (bevel past
+                120 degrees) of earlier versions. ``strand_collapse``
+                works on that strip only, so it selects ``"miter"`` when
+                ``joins`` is not given and is rejected with
+                ``joins="round"``.
+            join_tolerance: Maximum deviation of a miter from the round
+                join before the corner gets a joint body, as a fraction of
+                the bead half-extent, in (0, 1). It also sets the joint
+                body's resolution (chord error of the revolved section).
+                Smaller values round more corners at more triangles each.
             pickable: When True (default), this tube participates in
                 polyline/tube picking once picking is enabled (see
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
@@ -2962,6 +2991,26 @@ class ViewerClient:
             raise ValueError("widths must be finite and >= 0 at every spine point")
         if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr < 0):
             raise ValueError("heights must be finite and >= 0 at every spine point")
+        if joins is None:
+            joins = "miter" if strand_collapse else "round"
+        if joins not in _ALLOWED_TUBE_JOINS:
+            raise ValueError(
+                f"joins must be one of {sorted(_ALLOWED_TUBE_JOINS)}, got {joins!r}"
+            )
+        if joins == "round" and strand_collapse:
+            raise ValueError(
+                "strand_collapse snaps the rings of the mitered strip and does not "
+                'combine with joins="round"; pass joins="miter" or drop strand_collapse'
+            )
+        if not isinstance(
+            join_tolerance, (int, float, np.integer, np.floating)
+        ) or isinstance(join_tolerance, bool):
+            raise ValueError(
+                f"join_tolerance must be a number, got {type(join_tolerance).__name__}"
+            )
+        join_tolerance = float(join_tolerance)
+        if not (math.isfinite(join_tolerance) and 0 < join_tolerance < 1):
+            raise ValueError(f"join_tolerance must be in (0, 1), got {join_tolerance}")
 
         color_arr_in: Optional[np.ndarray] = None
         if colors is not None:
@@ -3027,6 +3076,12 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        # Round joins at the default tolerance are the viewer's own default,
+        # so the header carries the keys only when they differ.
+        if joins != "round":
+            header["joins"] = joins
+        if join_tolerance != _TUBE_JOIN_TOLERANCE_DEFAULT:
+            header["joinTolerance"] = join_tolerance
         sc_header = _serialize_strand_collapse(strand_collapse)
         if sc_header:
             header["strandCollapse"] = sc_header

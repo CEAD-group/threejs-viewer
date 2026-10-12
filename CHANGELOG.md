@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Round tube joins (issues #277, #278, supersedes PRs #280, #281, #282)
+
+- Parametric tubes render every corner as the union of the two straight bead segments and the bead section revolved about the corner, the shape a nozzle leaves when it turns on the spot. The viewer keeps the shared mitered ring through gentle turns and adds a revolved joint body only where the miter would deviate from that union by more than `join_tolerance` (default 1.5% of the bead half-extent), so smooth paths cost nothing extra and S-jogs, hairpins, sub-bead excursions and 3D elbows render without folds, fins or miter spikes. Drawn as closed opaque solids, the depth test resolves the union exactly, with no boolean operations, no second index buffer and no per-frame remeshing, so draw-range playback, textures, breaks, anchors, per-ring colours and LOD all keep working; under LOD the tolerance is raised to the LOD epsilon, so corners too small to see cost no triangles. `add_parametric_tube(joins="miter")` keeps the previous mitered strip.
+- A joined vertex carries an incoming-frame ring and an outgoing-frame ring, so the pairs on either side are exact prism ends and the two half bodies close them; a shared bisector ring let the inside of a body show through the top of the bead at a retrace.
+- `strand_collapse` applies to the mitered strip only: it selects `joins="miter"` when `joins` is not given and raises with `joins="round"`.
+- Tube LOD rebuilds now follow programmatic camera moves (`set_camera`, framing, view tweens), not only orbit drags.
+- The tube geometry build is one shared function on both the main thread and the LOD worker. `bench/tube_lab/join_scale.py` measures build, rebuild and frame times of a million-point serpentine with round and miter joins.
+
 ## 0.0.69
 
 ### Tube S-jog fins and hairpin winding (#279, issues #277, #278)
