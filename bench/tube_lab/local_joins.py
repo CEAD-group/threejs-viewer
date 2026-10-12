@@ -22,6 +22,26 @@ OUT = Path(__file__).parent / "out/local_joins"
 
 
 def scenes():
+    for name, title in [
+        ("pr49_bulbs", "PR #49/#50 · Ribweaver rectangle and bulbs"),
+        ("pr120_winddown", "PR #120 · full tilted G-code winddown"),
+        ("pr43_blobby", "PR #43 · blobby 3D path, varying width"),
+        ("pr56_wall_const", "PR #56 · eight-layer wall"),
+        ("pr56_wall_vary", "PR #56 · eight-layer wall, varying width"),
+    ]:
+        with np.load(Path(__file__).with_name("fixtures") / f"{name}.npz") as data:
+            yield dict(
+                name=name,
+                title=title,
+                spine=data["spine"],
+                w=data["widths"],
+                h=data["heights"],
+                up=data["up"].tolist(),
+                anchor=str(data["anchor"]),
+                breaks=data["breaks"],
+                lo=0,
+                hi=len(data["spine"]) - 1,
+            )
     # Exact generators used by the PR #279/#280 visual benchmark.
     from zr_metric import SCENES
 
@@ -314,6 +334,8 @@ def demo(maps):
                 section_values(s, "h"),
                 surface=surface,
                 up_vector=s["up"],
+                anchor=s.get("anchor", "center"),
+                break_before=s.get("breaks"),
                 lod=False,
                 texture=maps["color"],
                 normal_map=maps["normal"],
@@ -415,6 +437,8 @@ def run(selected=None):
                     section_values(s, "w"),
                     section_values(s, "h"),
                     up_vector=s["up"],
+                    anchor=s.get("anchor", "center"),
+                    break_before=s.get("breaks"),
                     lod=False,
                     surface=mode,
                     texture=maps["color"],
@@ -437,6 +461,11 @@ def run(selected=None):
             roi = spine[s["lo"] : s["hi"] + 1]
             centre = roi.mean(axis=0)
             extent = float(np.ptp(roi, axis=0).max() + float(np.max(s["w"])) * 3)
+            if name == "pr120_winddown":
+                # Dense wipe loops skew the station mean away from the full
+                # print's centre; fit the complete tilted raster, not its mean.
+                centre = (roi.min(axis=0) + roi.max(axis=0)) / 2
+                extent = float(np.linalg.norm(np.ptp(roi, axis=0)) * 1.1)
             page.evaluate(
                 """([t,d])=>{const v=window.threejsViewer;v._camera.position.set(t[0]+d*.75,t[1]-d,t[2]+d*.9);
              v._camera.up.set(0,0,1);v._controls.target.set(...t);v._camera.lookAt(v._controls.target);v._controls.update();

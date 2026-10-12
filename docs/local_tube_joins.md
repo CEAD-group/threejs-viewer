@@ -52,6 +52,19 @@ The rounded U-turn previously accepted three patches and introduced a pronounced
 
 ### Reused earlier examples and synchronized overview
 
+
+The first five tiles are the recovered, more complex historical paths. Their inputs are frozen in [`bench/tube_lab/fixtures`](../bench/tube_lab/fixtures/README.md), with provenance and all original stations, widths, heights, up vectors, and anchors retained.
+
+| Earlier complex case | Stations | Original → local triangles | Repairs | Comparison |
+|---|---:|---:|---:|---|
+| #49/#50 Ribweaver rectangle and bulbs | 100 | 1,380 → 1,392 | 1 | [Screenshot](media/local_joins/pr49_bulbs_comparison.png) |
+| #120 full tilted G-code winddown | 2,734 | 32,988 → 33,132 | 12 | [Screenshot](media/local_joins/pr120_winddown_comparison.png) |
+| #43 blobby 3D path, variable width | 97 | 1,344 → 1,344 | 0 | [Screenshot](media/local_joins/pr43_blobby_comparison.png) |
+| #56 eight-layer wall | 427 | 5,304 → 5,304 | 0 | [Screenshot](media/local_joins/pr56_wall_const_comparison.png) |
+| #56 eight-layer wall, variable width | 427 | 5,304 → 5,304 | 0 | [Screenshot](media/local_joins/pr56_wall_vary_comparison.png) |
+
+These cases reveal limited repair coverage: the blobby shape and both wall variants remain unchanged, and most difficult bulb sites fall back. The #49 input is the historical reduced reproduction, not the full source dump. The #120 case includes the entire retained G-code snippet. No paths were resampled to make the algorithm look better. Historical per-station colors are replaced by the shared mapped comparison material because local joins do not support those colors.
+
 The gallery also uses the exact four scene generators from `bench/tube_lab/zr_metric.py`, previously used for PR #279/#280: rounded jittered zigzag with variable widths/heights, sharp V, tight hairpin, and mixed sparse corner/dense arc. The jog/retrace/loop path is copied from PR #281's `examples/39_planar_swept_union.py` at `05e85ef`. These compare the current original strip (collapse off) with local joins; they do not run the old PR renderers.
 
 | Historical path | Original → local triangles | Comparison |
@@ -64,7 +77,7 @@ The gallery also uses the exact four scene generators from `bench/tube_lab/zr_me
 
 The historical examples expose remaining limits: the smoothness gate leaves the zigzag's inner folds untouched, the tight hairpin still overlaps, and the retraced/overlapping sections of the PR #281 path are not unioned. A repair count is not a visual-quality score.
 
-`python bench/tube_lab/local_joins.py --demo-only` builds both interactive pages without capturing screenshots. Serve `bench/tube_lab/out/local_joins` and open `overview.html` for all **19 examples**, each with original and local joins side by side. All 38 objects share a 0–100% slider and looping playback (ten seconds printing, two seconds held at completion). Each pair shares a camera: drag either side to orbit, scroll to zoom, or select top/side/perspective. Click a title to enlarge that pair; Escape or “All examples” returns to the grid. Material-map and wireframe switches apply to every example. One WebGL context renders the whole grid with separate viewports.
+`python bench/tube_lab/local_joins.py --demo-only` builds both interactive pages without capturing screenshots. Serve `bench/tube_lab/out/local_joins` and open `overview.html` for all **24 examples**, each with original and local joins side by side. All 48 objects share a 0–100% slider and looping playback (ten seconds printing, two seconds held at completion). Each pair shares a camera: drag either side to orbit, scroll to zoom, or select top/side/perspective. Click a title to enlarge that pair; Escape or “All examples” returns to the grid. Material-map and wireframe switches apply to every example. One WebGL context renders the whole grid with separate viewports.
 
 ![All examples at 100%](media/local_joins/animated_overview.png)
 

@@ -280,5 +280,90 @@
     "buildMs": 0.7999999970197678,
     "maxWindowSegments": 2,
     "triangleBudget": 96
+  },
+  "pr49_bulbs": {
+    "accepted": 1,
+    "clusters": 0,
+    "planar": 1,
+    "spatial": 0,
+    "smooth": 86,
+    "fallback": {
+      "section change": 3,
+      "short segments": 7
+    },
+    "originalTriangles": 1380,
+    "addedTriangles": 12,
+    "maxPatchTriangles": 36,
+    "buildMs": 2.2999999970197678,
+    "maxWindowSegments": 2,
+    "triangleBudget": 207
+  },
+  "pr120_winddown": {
+    "accepted": 12,
+    "clusters": 0,
+    "planar": 12,
+    "spatial": 0,
+    "smooth": 2708,
+    "fallback": {},
+    "originalTriangles": 32988,
+    "addedTriangles": 144,
+    "maxPatchTriangles": 36,
+    "buildMs": 6.300000011920929,
+    "maxWindowSegments": 2,
+    "triangleBudget": 4949
+  },
+  "pr43_blobby": {
+    "accepted": 0,
+    "clusters": 0,
+    "planar": 0,
+    "spatial": 0,
+    "smooth": 89,
+    "fallback": {
+      "short segments": 5,
+      "section change": 1
+    },
+    "originalTriangles": 1344,
+    "addedTriangles": 0,
+    "maxPatchTriangles": 0,
+    "buildMs": 0.09999999403953552,
+    "maxWindowSegments": 2,
+    "triangleBudget": 202
+  },
+  "pr56_wall_const": {
+    "accepted": 0,
+    "clusters": 0,
+    "planar": 0,
+    "spatial": 0,
+    "smooth": 411,
+    "fallback": {
+      "short segments": 4,
+      "vertical frame": 7,
+      "frame reversal": 3
+    },
+    "originalTriangles": 5304,
+    "addedTriangles": 0,
+    "maxPatchTriangles": 0,
+    "buildMs": 0.29999999701976776,
+    "maxWindowSegments": 2,
+    "triangleBudget": 796
+  },
+  "pr56_wall_vary": {
+    "accepted": 0,
+    "clusters": 0,
+    "planar": 0,
+    "spatial": 0,
+    "smooth": 411,
+    "fallback": {
+      "short segments": 3,
+      "vertical frame": 7,
+      "frame reversal": 3,
+      "section change": 1
+    },
+    "originalTriangles": 5304,
+    "addedTriangles": 0,
+    "maxPatchTriangles": 0,
+    "buildMs": 0.4000000059604645,
+    "maxWindowSegments": 2,
+    "triangleBudget": 796
   }
 }
