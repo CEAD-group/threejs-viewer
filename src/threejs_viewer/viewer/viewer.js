@@ -8929,7 +8929,7 @@ function dimensionGeometry(p1, p2, d, direction) {
         m = direction.clone().multiplyScalar(delta.dot(direction));
         fallback = direction;
     } else {
-        const axes = direction || 'XYZ';
+        const axes = typeof direction === 'string' ? direction || 'XYZ' : 'XYZ';
         m = new THREE.Vector3(
             axes.includes('X') ? delta.x : 0,
             axes.includes('Y') ? delta.y : 0,
