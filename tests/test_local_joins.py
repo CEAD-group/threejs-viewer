@@ -34,7 +34,7 @@ def test_local_join_validation():
         ({"surface_tolerance": 0}, "positive"),
         ({"surface_tolerance": float("nan")}, "positive"),
         ({"up_vector": [0, 0, 0]}, "up_vector"),
-        ({"colors": [0, 0]}, "uniform"),
+        ({"orientations": [[0, 0, 0, 1]] * 2}, "orientations"),
     ]:
         with pytest.raises(ValueError, match=message):
             client.add_parametric_tube(**(args | patch))
@@ -501,3 +501,287 @@ def test_lod_rebuilds_local_patches_preserving_playback_and_maps(
     assert near["count"] > result["reduced"]
     assert near["fraction"] == pytest.approx(0.37)
     assert near["children"] <= 1
+
+
+def _colour_spine():
+    return np.array(
+        [
+            [-30, 0, 0],
+            [-20, 0, 0],
+            [-10, 0, 0],
+            [0, 0, 0],
+            [0, 10, 0],
+            [80, 0, 0],
+            [90, 0, 0],
+            [100, 0, 0],
+        ],
+        dtype=np.float32,
+    )
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("kind", ["corner", "cluster"])
+def test_local_join_colour_provenance_and_unchanged_topology(
+    viewer_client, viewer_page, kind
+):
+    import json
+    from pathlib import Path
+
+    p = (
+        _colour_spine()[:5]
+        if kind == "corner"
+        else np.array(
+            json.loads(
+                (Path(__file__).parent / "data/tube_issue_277.json").read_text()
+            ),
+            dtype=np.float32,
+        )
+    )
+    p = p - p[0]
+    n = len(p)
+    packed = (
+        (np.arange(n, dtype=np.uint32) * (255 // n) << 16)
+        | (np.arange(n, dtype=np.uint32) % 2 * 255 << 8)
+        | 93
+    )
+    for name, colors in [("plain", None), ("t", packed)]:
+        viewer_client.add_parametric_tube(
+            name,
+            p,
+            np.full(n, 11.83),
+            np.full(n, 2),
+            colors=colors,
+            surface="local_join",
+            lod=False,
+        )
+    viewer_page.wait_for_function(
+        "() => !!window.threejsViewer._objects.get('t')?.userData.localJoinCompleted"
+    )
+    data = viewer_page.evaluate("""() => {
+        const v=threejsViewer,a=v._objects.get('plain'),b=v._objects.get('t');
+        const g=b.userData.localJoinCompleted.geometry,h=a.userData.localJoinCompleted.geometry;
+        const same=(x,y)=>x.length===y.length&&x.every((v,i)=>v===y[i]);
+        return {positions:Array.from(g.attributes.position.array),colors:Array.from(g.attributes.color.array),
+            base:Array.from(b.geometry.attributes.position.array.slice(0,b.userData.tubeNumSpinePoints*18)),
+            unchanged:same(g.attributes.position.array,h.attributes.position.array)&&same(g.index.array,h.index.array)&&same(a.geometry.index.array,b.geometry.index.array),
+            widths:Array.from(b.userData.tubeMorphData.widths),heights:Array.from(b.userData.tubeMorphData.heights),
+            stats:b.userData.localJoinStats};
+    }""")
+    assert data["unchanged"]
+    assert data["stats"]["accepted"] > 0
+    assert (data["stats"]["clusters"] > 0) == (kind == "cluster")
+    positions = np.asarray(data["positions"]).reshape(-1, 3)
+    actual = np.asarray(data["colors"]).reshape(-1, 3)
+    base = np.asarray(data["base"]).reshape(n, 6, 3)
+    rgb = (
+        np.column_stack([(packed >> 16) & 255, (packed >> 8) & 255, packed & 255]) / 255
+    )
+    expected = []
+    for point in positions:
+        # Interface vertices must retain their original station's data.
+        matches = np.argwhere(np.linalg.norm(base - point, axis=2) < 1e-5)
+        if len(matches):
+            expected.append(rgb[matches[0, 0]])
+        elif kind == "corner":
+            expected.append(rgb[3])
+        else:
+            # Independent tapered-capsule oracle. Minimize distance to the
+            # centreline minus interpolated radius, accounting for the viewer's
+            # tiny deposition-order width/height bias as well as the chamfer.
+            ab = np.diff(p[:, :2], axis=0).astype(float)
+            length = np.linalg.norm(ab, axis=1)
+            direction = ab / np.maximum(length[:, None], 1e-20)
+            relative = point[:2] - p[:-1, :2]
+            along = (relative * direction).sum(axis=1)
+            perpendicular = np.linalg.norm(
+                relative - along[:, None] * direction, axis=1
+            )
+            radius = np.asarray(data["widths"]) / 2
+            if abs(point[2] - p[0, 2]) > min(data["heights"]) / 4:
+                radius -= np.asarray(data["heights"]) / 2
+            slope = np.diff(radius) / np.maximum(length, 1e-20)
+            t = np.clip(
+                (
+                    along
+                    + slope
+                    * perpendicular
+                    / np.sqrt(np.maximum(1 - slope * slope, 1e-20))
+                )
+                / np.maximum(length, 1e-20),
+                0,
+                1,
+            )
+            distance = np.linalg.norm(relative - t[:, None] * ab, axis=1) - (
+                radius[:-1] + t * np.diff(radius)
+            )
+            i = int(np.argmin(distance))
+            expected.append(rgb[i] + t[i] * (rgb[i + 1] - rgb[i]))
+    np.testing.assert_allclose(actual, expected, atol=2e-5)
+    assert data["stats"]["colorSourceBytes"] == len(positions) * 8
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("initial_colors", [False, True])
+def test_local_join_live_colors_reset_and_break_caps(
+    viewer_client, viewer_page, initial_colors
+):
+    p = _colour_spine()
+    n = len(p)
+    breaks = np.zeros(n, dtype=np.uint8)
+    breaks[5] = 1
+    viewer_page.evaluate("window.__tubeDrawCapOverride=144")
+    viewer_client.add_parametric_tube(
+        "t",
+        p,
+        np.full(n, 8),
+        np.full(n, 2),
+        colors=np.full(n, 0xFF0000, dtype=np.uint32) if initial_colors else None,
+        break_before=breaks,
+        surface="local_join",
+        lod=False,
+        texture=_png_bytes(),
+        normal_map=_png_bytes(),
+        roughness_map=_png_bytes(),
+    )
+    viewer_page.wait_for_function(
+        "() => !!threejsViewer._objects.get('t')?.userData.localJoinCompleted"
+    )
+    viewer_page.evaluate("""() => {
+        const o=threejsViewer._objects.get('t');o.userData.parametricTube.setDrawRange(.63);
+        window.beforeColour={position:Array.from(o.geometry.attributes.position.array),
+            patch:o.userData.localJoinCompleted.geometry,indices:Array.from(o.geometry.index.array)};
+    }""")
+    for packed in (0x00FF00, 0x0000FF):
+        viewer_client.update_parametric_tube_colors(
+            "t", np.full(n, packed, dtype=np.uint32)
+        )
+        viewer_page.wait_for_function(
+            """(c) => {
+            const o=threejsViewer._objects.get('t'),g=o.userData.localJoinCompleted.geometry;
+            const expected=[(c>>16&255)/255,(c>>8&255)/255,(c&255)/255];
+            return g.attributes.color?.array.every((v,i)=>Math.abs(v-expected[i%3])<1e-6);
+        }""",
+            arg=packed,
+        )
+    state = viewer_page.evaluate("""() => {
+        const o=threejsViewer._objects.get('t'),u=o.userData,g=u.localJoinCompleted.geometry;
+        return {sameGeometry:g===beforeColour.patch,grouped:Array.isArray(o.material),maps:!!(u.tubeBaseMaterial.map&&u.tubeBaseMaterial.normalMap&&u.tubeBaseMaterial.roughnessMap),
+            flags:u.tubeBaseMaterial.vertexColors,position:Array.from(o.geometry.attributes.position.array),
+            original:beforeColour.position,indices:Array.from(o.geometry.index.array),oldIndices:beforeColour.indices};
+    }""")
+    assert (
+        state["sameGeometry"] and state["grouped"] and state["maps"] and state["flags"]
+    )
+    np.testing.assert_array_equal(state["position"], state["original"])
+    assert state["indices"] == state["oldIndices"]
+    viewer_client.update_parametric_tube_colors("t", None, base_color=0x123456)
+    viewer_page.wait_for_function("""() => {
+        const o=threejsViewer._objects.get('t'),u=o.userData;
+        return !o.geometry.attributes.color&&!u.localJoinCompleted.geometry.attributes.color&&!u.tubeBaseMaterial.vertexColors&&u.tubeBaseMaterial.color.getHex()===0x123456;
+    }""")
+    colors = np.array(
+        [
+            0x110000,
+            0x220000,
+            0x330000,
+            0x440000,
+            0x550000,
+            0x660000,
+            0x770000,
+            0x880000,
+        ],
+        dtype=np.uint32,
+    )
+    viewer_client.update_parametric_tube_colors("t", colors)
+    viewer_page.wait_for_function(
+        "() => !!threejsViewer._objects.get('t').userData.localJoinCompleted.geometry.attributes.color"
+    )
+    caps = viewer_page.evaluate("""() => {
+        const o=threejsViewer._objects.get('t'),u=o.userData;
+        for(const f of [1,.1,.75,0,1])u.parametricTube.setDrawRange(f);
+        const c=o.geometry.attributes.color.array,n=u.tubeNumSpinePoints,cs=u.tubeNCs,k=u.tubeMorphData.capAngles.length*cs;
+        return {start:Array.from(c.slice(n*cs*3,(n*cs+k)*3)),end:Array.from(c.slice((n*cs+k)*3,(n*cs+2*k)*3)),
+            rims:Array.from(c.slice((n*cs+2*k)*3)),patch:Array.from(u.localJoinCompleted.geometry.attributes.color.array)};
+    }""")
+    np.testing.assert_allclose(
+        np.asarray(caps["start"]).reshape(-1, 3),
+        np.tile([0x11 / 255, 0, 0], (len(caps["start"]) // 3, 1)),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(caps["end"]).reshape(-1, 3),
+        np.tile([0x88 / 255, 0, 0], (len(caps["end"]) // 3, 1)),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(caps["rims"]).reshape(-1, 3),
+        np.repeat([[0x55 / 255, 0, 0], [0x66 / 255, 0, 0]], 6, axis=0),
+        atol=1e-6,
+    )
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("change", ["add", "replace", "reset"])
+def test_local_join_colors_win_over_stale_lod_response(
+    viewer_client, viewer_page, change
+):
+    t = np.linspace(0, 8 * np.pi, 4000)
+    p = np.vstack(
+        [
+            [[0, -30, 0], [0, -20, 0], [40, -20, 0]],
+            np.column_stack([40 * np.cos(t), 40 * np.sin(t), t]),
+        ]
+    )
+    n = len(p)
+    breaks = np.zeros(n, dtype=np.uint8)
+    breaks[n // 2] = 1
+    viewer_client.add_parametric_tube(
+        "t",
+        p,
+        np.full(n, 4),
+        np.full(n, 2),
+        colors=None if change == "add" else np.full(n, 0xFF0000, dtype=np.uint32),
+        break_before=breaks,
+        surface="local_join",
+        lod={"threshold": 0},
+    )
+    viewer_page.wait_for_function(
+        "() => !!threejsViewer._objects.get('t')?.userData.localJoinCompleted"
+    )
+    viewer_page.evaluate("""() => {
+        const v=threejsViewer,o=v._objects.get('t');o.userData.parametricTube.setDrawRange(.37);
+        window.colourLODHandler=v._lodWorker.onmessage;
+        window.heldColourLOD=null;
+        v._lodWorker.onmessage=e=>{
+            if(e.data.positions&&!e.data.allReused)window.heldColourLOD=e;
+            else window.colourLODHandler(e);
+        };
+        v._camera.position.set(4000,-4000,4000);v._lodDirty=true;
+    }""")
+    viewer_page.wait_for_function("() => !!window.heldColourLOD", timeout=20000)
+    viewer_client.update_parametric_tube_colors(
+        "t", None if change == "reset" else np.full(n, 0x00FF00, dtype=np.uint32)
+    )
+    viewer_page.wait_for_function(
+        """(reset) => {
+        const u=threejsViewer._objects.get('t').userData;
+        return reset ? !u.tubeLOD.originalRingColors : u.tubeLOD.originalRingColors?.[1]===1;
+    }""",
+        arg=change == "reset",
+    )
+    result = viewer_page.evaluate("""() => {
+        const v=threejsViewer;v._lodWorker.onmessage=window.colourLODHandler;
+        window.colourLODHandler(window.heldColourLOD);
+        const o=v._objects.get('t'),u=o.userData,patch=u.localJoinCompleted;
+        const fraction=u.tubeLOD.currentDrawRange;
+        for(const f of [1,.7,0,.01,.9,1])u.parametricTube.setDrawRange(f);
+        const arrays=[o.geometry,patch?.geometry].filter(Boolean).map(g=>g.attributes.color?.array);
+        return {fraction,patch:!!patch,n:u.tubeNumSpinePoints,
+            noColors:arrays.every(a=>!a),green:arrays.every(a=>a&&a.every((x,i)=>Math.abs(x-(i%3===1?1:0))<1e-6)),
+            material:u.tubeBaseMaterial.vertexColors,breaks:u.tubeMorphData.breaks.some(x=>x)};
+    }""")
+    assert result["fraction"] == pytest.approx(0.37)
+    assert result["n"] < n // 2
+    assert result["patch"] and result["breaks"]
+    assert result["noColors"] if change == "reset" else result["green"]
+    assert result["material"] == (change != "reset")

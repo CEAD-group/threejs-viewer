@@ -2893,7 +2893,7 @@ class ViewerClient:
             surface: ``"rings"`` (default) uses the original strip.
                 ``"local_join"`` experimentally repairs eligible corners and
                 short almost-planar clusters. Supports nonplanar paths and all
-                three maps, but requires uniform color and implicit orientations.
+                three maps and per-point colors; requires implicit orientations.
                 LOD is supported; patches rebuild on the active reduced spine.
                 Strand collapse is disabled in this opt-in mode.
                 Unsupported or over-budget patches retain the original strip.
@@ -2993,10 +2993,8 @@ class ViewerClient:
         if surface not in ("rings", "local_join"):
             raise ValueError("surface must be 'rings' or 'local_join'")
         if surface == "local_join":
-            if orientations is not None or colors is not None:
-                raise ValueError(
-                    "local_join requires implicit orientations and uniform color"
-                )
+            if orientations is not None:
+                raise ValueError("local_join requires implicit orientations")
             if not np.isfinite(spine_arr).all():
                 raise ValueError("local_join spine must be finite")
             if surface_tolerance is not None and (

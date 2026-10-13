@@ -17,7 +17,11 @@ export function installLocalJoins(mesh, options) {
     const n = ud.tubeNumSpinePoints, cs = ud.tubeNCs, cap = ud.tubeCapIndicesPerCap;
     const pairSize = ud.tubeIndicesPerRingPair, originalIndex = geometry.index.array;
     const attrs = geometry.attributes, added = {};
-    for (const name of Object.keys(attrs)) added[name] = [];
+    const attributeNames = Object.keys(attrs).filter(name => name !== 'color');
+    // Only repaired vertices retain provenance; future colour updates need it
+    // even when the tube was initially added with a uniform material.
+    const addedStations = [], addedWeights = [];
+    for (const name of attributeNames) added[name] = [];
     const originalVertices = attrs.position.count;
     // One record per accepted patch, never per original station. Original
     // indices are retained only for these bounded windows (backward seeks).
@@ -26,7 +30,7 @@ export function installLocalJoins(mesh, options) {
         originalTriangles: originalIndex.length / 3, addedTriangles: 0, maxPatchTriangles: 0,
         buildMs: 0, maxWindowSegments: 2, triangleBudget: Math.max(96, Math.ceil(originalIndex.length / 3 * .15)),
         patchTriangles: 0, patchTriangleBudget: Math.max(192, Math.ceil(originalIndex.length / 3 * .15)),
-        patchIndexBytes: 0, savedIndexBytes: 0 };
+        patchIndexBytes: 0, savedIndexBytes: 0, colorSourceBytes: 0 };
     const reject = reason => { stats.fallback[reason] = (stats.fallback[reason] || 0) + 1; };
     const point = i => new THREE.Vector3().fromArray(md.spine, 3 * i);
     const up = new THREE.Vector3(...options.up).normalize();
@@ -64,7 +68,7 @@ export function installLocalJoins(mesh, options) {
         }
         if (!patch) return false;
         if (!withinBudget(patch.indices.length, (hi-lo)*pairSize/3)) return false;
-        for (const name of Object.keys(attrs)) {
+        for (const name of attributeNames) {
             const attr = attrs[name];
             for (let k = 0; k < patch.positions.length / 3; k++) {
                 if (name === 'position' || name === 'normal') {
@@ -77,6 +81,7 @@ export function installLocalJoins(mesh, options) {
                 } else for (let d = 0; d < attr.itemSize; d++) added[name].push(attr.array[(lo * cs + k % cs) * attr.itemSize + d]);
             }
         }
+        addedStations.push(...patch.stations); addedWeights.push(...patch.weights);
         appendPatch(lo, hi, patch.indices);
         stats.accepted++; stats.clusters++; stats.planar++;
         stats.addedTriangles += patch.indices.length / 3 - (hi-lo)*pairSize/3;
@@ -204,7 +209,7 @@ export function installLocalJoins(mesh, options) {
         }
         if (invalid || patch.length / 3 > 96) { reject('invalid or over budget'); continue; }
         if (!withinBudget(patch.length, 2 * pairSize / 3)) continue;
-        for (const name of Object.keys(attrs)) {
+        for (const name of attributeNames) {
             const attr = attrs[name];
             for (let k = 0; k < positions.length / 3; k++) {
                 if (name === 'position') added[name].push(...positions.slice(k * 3, k * 3 + 3));
@@ -216,6 +221,8 @@ export function installLocalJoins(mesh, options) {
                 } else for (let d = 0; d < attr.itemSize; d++) added[name].push(attr.array[(i * cs + k % cs) * attr.itemSize + d]);
             }
         }
+        // A rounded corner is deposited at station i, just like its cap.
+        for (let k = 0; k < positions.length / 3; k++) { addedStations.push(i); addedWeights.push(0); }
         appendPatch(i - 1, i + 1, patch);
         stats.accepted++; stats[planar ? 'planar' : 'spatial']++;
         stats.addedTriangles += patch.length / 3 - 2 * pairSize / 3;
@@ -238,7 +245,7 @@ export function installLocalJoins(mesh, options) {
         compactIndex[i] = remap.get(id);
     }
     remap.clear();
-    for (const name of Object.keys(attrs)) {
+    for (const name of attributeNames) {
         const old = attrs[name], size = old.itemSize;
         const array = new Float32Array(sourceIds.length * size);
         for (let i = 0; i < sourceIds.length; i++) {
@@ -251,7 +258,30 @@ export function installLocalJoins(mesh, options) {
     }
     completed.setIndex(new THREE.BufferAttribute(compactIndex, 1));
     stats.patchIndexBytes = compactIndex.byteLength;
+    const stations = new Uint32Array(sourceIds.length), weights = new Float32Array(sourceIds.length);
+    for (let k = 0; k < sourceIds.length; k++) {
+        const id = sourceIds[k];
+        stations[k] = id < originalVertices ? Math.floor(id / cs) : addedStations[id - originalVertices];
+        weights[k] = id < originalVertices ? 0 : addedWeights[id - originalVertices];
+    }
+    stats.colorSourceBytes = stations.byteLength + weights.byteLength;
     patchIndices.length = 0; sourceIds.length = 0;
+    addedStations.length = 0; addedWeights.length = 0;
+    ud.localJoinUpdateColors = () => {
+        const colors = ud.tubeMorphData.ringColors;
+        if (!colors) { completed.deleteAttribute('color'); return; }
+        let attr = /** @type {THREE.BufferAttribute} */ (completed.getAttribute('color'));
+        if (!attr) {
+            attr = new THREE.BufferAttribute(new Float32Array(stations.length * 3), 3);
+            completed.setAttribute('color', attr);
+        }
+        for (let k = 0; k < stations.length; k++) {
+            const a = stations[k] * 3, b = Math.min(n - 1, stations[k] + 1) * 3, t = weights[k];
+            for (let d = 0; d < 3; d++) attr.array[k * 3 + d] = colors[a + d] + t * (colors[b + d] - colors[a + d]);
+        }
+        attr.clearUpdateRanges(); attr.needsUpdate = true;
+    };
+    ud.localJoinUpdateColors();
     completed.computeBoundingBox(); completed.computeBoundingSphere();
     const frozen = new THREE.Mesh(completed, mesh.material);
     frozen.name = `${mesh.name}:completed`;
@@ -313,6 +343,7 @@ export function installLocalJoins(mesh, options) {
         delete base.setDrawRange;
         delete ud.localJoinCompleted;
         delete ud.localJoinDispose;
+        delete ud.localJoinUpdateColors;
         delete ud.localJoinCommittedPairs;
     };
     base.setDrawRange(ud.tubeLOD?.currentDrawRange ?? 1);
@@ -374,9 +405,9 @@ function localCluster(mesh, options, lo, hi, vertexBase, triangleBudget) {
         for (let i = 1; i < points.length; i++) {
             const a = points[i - 1], b = points[i], ra = a.r - (top ? a.h / 2 : 0), rb = b.r - (top ? b.h / 2 : 0);
             const hits = [];
-            for (const [p, r] of [[a, ra], [b, rb]]) {
+            for (const [p, r, station] of [[a, ra, lo + i - 1], [b, rb, lo + i]]) {
                 const dx = x - p.x;
-                if (Math.abs(dx) <= r) { const dy = Math.sqrt(Math.max(0, r * r - dx * dx)); hits.push(p.y - dy, p.y + dy); }
+                if (Math.abs(dx) <= r) { const dy = Math.sqrt(Math.max(0, r * r - dx * dx)); hits.push({y:p.y - dy, station, t:0}, {y:p.y + dy, station, t:0}); }
             }
             const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
             if (len > Math.abs(rb - ra) + 1e-9) {
@@ -387,36 +418,43 @@ function localCluster(mesh, options, lo, hi, vertexBase, triangleBudget) {
                     const ax = a.x + nx * ra, ay = a.y + ny * ra, bx = b.x + nx * rb, by = b.y + ny * rb;
                     if (Math.abs(bx - ax) > 1e-10) {
                         const t = (x - ax) / (bx - ax);
-                        if (t >= 0 && t <= 1) hits.push(ay + t * (by - ay));
+                        if (t >= 0 && t <= 1) hits.push({y:ay + t * (by - ay), station:lo + i - 1, t});
                     }
                 }
             }
-            if (hits.length) intervals.push([Math.min(...hits), Math.max(...hits)]);
+            if (hits.length) {
+                // Keep the segment that actually produces each envelope edge,
+                // not the nearest centreline (which can be a different pass).
+                hits.sort((a,b) => a.y - b.y || (a.station+a.t) - (b.station+b.t));
+                intervals.push([hits[0], hits[hits.length - 1]]);
+            }
         }
-        intervals.sort((a, b) => a[0] - b[0]);
+        intervals.sort((a, b) => a[0].y - b[0].y);
         if (!intervals.length) return null;
         let upper = intervals[0][1];
         for (let i = 1; i < intervals.length; i++) {
-            if (intervals[i][0] > upper + 1e-6) return null;
-            upper = Math.max(upper, intervals[i][1]);
+            if (intervals[i][0].y > upper.y + 1e-6) return null;
+            if (intervals[i][1].y >= upper.y) upper = intervals[i][1];
         }
         return [intervals[0][0], upper];
     };
-    const positions = [], coordinates = [];
+    const positions = [], coordinates = [], stations = [], weights = [];
     for (let k = 0; k <= steps; k++) {
         const x = start + (end - start) * k / steps, mid = envelope(x, false), top = envelope(x, true);
-        if (!mid || !top || top[0] < mid[0] - 1e-6 || top[1] > mid[1] + 1e-6) return null;
+        if (!mid || !top || top[0].y < mid[0].y - 1e-6 || top[1].y > mid[1].y + 1e-6) return null;
         // Recover actual height/rise from the nearest centreline segment.
         let best = Infinity, z = 0, h = 0, offset = 0;
-        const centre = (mid[0] + mid[1]) / 2;
+        const centre = (mid[0].y + mid[1].y) / 2;
         for (let j = 1; j < points.length; j++) {
             const a = points[j - 1], b = points[j], dx = b.x - a.x, dy = b.y - a.y;
             const t = THREE.MathUtils.clamp(((x - a.x) * dx + (centre - a.y) * dy) / Math.max(1e-12, dx*dx + dy*dy), 0, 1);
             const d = (x-a.x-t*dx)**2 + (centre-a.y-t*dy)**2;
             if (d < best) { best = d; z = a.z + t*(b.z-a.z); h = a.h+t*(b.h-a.h); offset = a.offset+t*(b.offset-a.offset); }
         }
-        const yz = [[mid[1], 0], [top[1], h/2], [top[0], h/2], [mid[0], 0], [top[0], -h/2], [top[1], -h/2]];
+        const sources = [mid[1], top[1], top[0], mid[0], top[0], top[1]];
+        const yz = [[mid[1].y, 0], [top[1].y, h/2], [top[0].y, h/2], [mid[0].y, 0], [top[0].y, -h/2], [top[1].y, -h/2]];
         for (let j = 0; j < 6; j++) {
+            stations.push(sources[j].station); weights.push(sources[j].t);
             positions.push(...origin.clone().addScaledVector(direction,x).addScaledVector(across,yz[j][0]).addScaledVector(up,z+offset+yz[j][1]).toArray());
             coordinates.push((md.arc?.[lo] || 0) + x/length*((md.arc?.[hi] || 0)-(md.arc?.[lo] || 0)));
         }
@@ -442,5 +480,5 @@ function localCluster(mesh, options, lo, hi, vertexBase, triangleBudget) {
         if (len < 1e-12) return null;
         for(let d=0;d<3;d++) normals[k+d]/=len;
     }
-    return {positions,normals,coordinates,indices,lo,hi};
+    return {positions,normals,coordinates,indices,lo,hi,stations,weights};
 }

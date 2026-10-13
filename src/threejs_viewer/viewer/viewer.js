@@ -5518,6 +5518,7 @@ class ParametricTube {
             tangents: msg.tangents,
             capAngles: msg.capAngles,
             ringColors: msg.reducedColors,
+            breaks: msg.reducedBreakMask || null,
             section: new Float32Array(nCs * 2),
             savedRing: new Float32Array(nCs * 3),
             savedRingNormals: null,
@@ -5990,6 +5991,7 @@ class ParametricTube {
         const capPer = ud.tubeCapIndicesPerCap || 0;
         const clamped = Math.max(0, Math.min(1, value));
 
+        ud.tubeDrawRange = clamped;
         if (ud.tubeLOD) ud.tubeLOD.currentDrawRange = value;
 
         const fracRingPairs = this.pairProgress(clamped);
@@ -6048,6 +6050,38 @@ function restoreFrontierRing(obj) {
     if (t) t.restoreFrontierRing();
 }
 
+/** Apply a complete colour field to the strip, both cap kinds and local patches.
+ * @param {any} obj
+ * @param {Float32Array} colors
+ */
+function setParametricTubeRingColors(obj, colors) {
+    const ud = obj.userData, md = ud.tubeMorphData, n = ud.tubeNumSpinePoints, cs = ud.tubeNCs;
+    restoreFrontierRing(obj);
+    let attr = obj.geometry.getAttribute('color');
+    if (!attr) {
+        attr = new THREE.BufferAttribute(new Float32Array(obj.geometry.getAttribute('position').count * 3), 3);
+        obj.geometry.setAttribute('color', attr);
+    }
+    const fill = (vertex, count, station) => fillRGBBlock(attr.array, vertex * 3, count,
+        colors[station * 3], colors[station * 3 + 1], colors[station * 3 + 2]);
+    for (let i = 0; i < n; i++) fill(i * cs, cs, i);
+    const capVertices = md.capAngles.length * cs;
+    fill(n * cs, capVertices, 0);
+    fill(n * cs + capVertices, capVertices, n - 1);
+    let rim = n * cs + 2 * capVertices;
+    if (md.breaks) for (let i = 1; i < n; i++) if (md.breaks[i]) {
+        fill(rim, cs, i - 1); fill(rim + cs, cs, i); rim += 2 * cs;
+    }
+    attr.clearUpdateRanges(); attr.needsUpdate = true;
+    const material = ud.tubeBaseMaterial || (Array.isArray(obj.material) ? obj.material[0] : obj.material);
+    material.vertexColors = true; material.color.setHex(0xffffff); material.needsUpdate = true;
+    ud.tubeHasColors = true; ud._colorFullUploadNeeded = true;
+    md.ringColors = colors;
+    ud.localJoinUpdateColors?.();
+    // Reapply the current fraction immediately, including a stationary frontier.
+    ud.parametricTube.setDrawRange(ud.tubeDrawRange ?? 1);
+}
+
 /**
  * Return a parametric tube from per-ring vertex colours to its plain material
  * colour, synchronously (issue #256). `baseColor` defaults to the add path's
@@ -6067,6 +6101,7 @@ function resetParametricTubeColors(obj, baseColor, lodWorker, tubeId) {
     // restoreFrontierRing skips colours; the active morph itself is left as is.
     if (md) { md.ringColors = null; md.savedRingColors = null; }
     if (obj.geometry.getAttribute('color')) obj.geometry.deleteAttribute('color');
+    ud.localJoinUpdateColors?.();
     const mat = ud.tubeBaseMaterial || (Array.isArray(obj.material) ? obj.material[0] : obj.material);
     mat.vertexColors = false;
     const fallback = mat.map ? 0xffffff : 0x7ab8cc;
@@ -12809,45 +12844,14 @@ export class ThreeJSViewer {
                 if (obj.geometry.getAttribute('color')) obj.geometry.deleteAttribute('color');
                 const md = obj.userData.tubeMorphData;
                 if (md) { md.ringColors = null; md.savedRingColors = null; }
+                obj.userData.localJoinUpdateColors?.();
             } else if (lod.colorVersion > 0 && lod.originalRingColors) {
-                const nRed = lod.keptIndices.length;
-                const nCs = obj.userData.tubeNCs;
-                const rc = lod.originalRingColors;
-                // Restore frontier ring before writing new colors
-                const md = obj.userData.tubeMorphData;
-                if (md) restoreFrontierRing(obj);
-                // Extract reduced Float32 RGB from original colors at kept indices
-                const redRc = new Float32Array(nRed * 3);
-                for (let i = 0; i < nRed; i++) {
-                    const oi = lod.keptIndices[i];
-                    redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
+                const current = new Float32Array(lod.keptIndices.length * 3);
+                for (let i = 0; i < lod.keptIndices.length; i++) {
+                    const source = lod.keptIndices[i] * 3;
+                    for (let d = 0; d < 3; d++) current[i * 3 + d] = lod.originalRingColors[source + d];
                 }
-                const colAttr = obj.geometry.getAttribute('color');
-                if (colAttr) {
-                    const out = colAttr.array;
-                    // Expand per-ring colors to per-vertex
-                    for (let i = 0; i < nRed; i++) {
-                        const r = redRc[i * 3], g = redRc[i * 3 + 1], b = redRc[i * 3 + 2];
-                        const base = i * nCs * 3;
-                        for (let j = 0; j < nCs; j++) {
-                            out[base + j * 3] = r; out[base + j * 3 + 1] = g; out[base + j * 3 + 2] = b;
-                        }
-                    }
-                    // Fill cap colors (start cap = first ring color, end cap = last ring color)
-                    const posCount = colAttr.count;
-                    const capVertsPerCap = (posCount - nRed * nCs) / 2;
-                    const startCapBase = nRed * nCs;
-                    const endCapBase = startCapBase + capVertsPerCap;
-                    const lr = (nRed - 1) * 3;
-                    for (let j = 0; j < capVertsPerCap; j++) {
-                        out[(startCapBase + j) * 3]     = redRc[0]; out[(startCapBase + j) * 3 + 1] = redRc[1]; out[(startCapBase + j) * 3 + 2] = redRc[2];
-                        out[(endCapBase + j) * 3]       = redRc[lr]; out[(endCapBase + j) * 3 + 1] = redRc[lr + 1]; out[(endCapBase + j) * 3 + 2] = redRc[lr + 2];
-                    }
-                    colAttr.clearUpdateRanges();
-                    colAttr.needsUpdate = true;
-                }
-                obj.userData._colorFullUploadNeeded = true;
-                if (md) md.ringColors = redRc;
+                setParametricTubeRingColors(obj, current);
             }
         };
         // ViewHelper — axis sprites are enlarged for easier hit-testing, and a
@@ -17714,6 +17718,7 @@ export class ThreeJSViewer {
                             heights: new Float32Array(buildHeights),
                             localFrames, miters, tangents: builtTangents, capAngles,
                             ringColors: buildRingColors ? new Float32Array(buildRingColors) : null,
+                            breaks: buildBreakMask ? new Uint8Array(buildBreakMask) : null,
                             section: new Float32Array(nCs * 2),
                             savedRing: new Float32Array(nCs * 3),
                             savedRingNormals: null,
@@ -17730,7 +17735,7 @@ export class ThreeJSViewer {
                             savedRingUVAlt: null,
                         };
                         if (data.surface === 'local_join') {
-                            if (orientations || ringColors) throw new Error('local_join requires implicit orientations and uniform color');
+                            if (orientations) throw new Error('local_join requires implicit orientations');
                             if (tubeLOD) mesh.userData.tubeLOD = tubeLOD;
                             mesh.userData.localJoinOptions = { up: upVector || [0, 0, 1], tolerance: data.surfaceTolerance };
                             installLocalJoins(mesh, { ...mesh.userData.localJoinOptions, breaks: buildBreakMask });
@@ -17978,14 +17983,9 @@ export class ThreeJSViewer {
                                 console.log(`Discarding superseded parametric tube color fetch for '${data.id}'`);
                                 return;
                             }
-                            if (obj.userData.localJoinStats) {
-                                console.warn('local_join does not support per-station color updates; use set_color');
-                                return;
-                            }
                             const lod = obj.userData.tubeLOD;
                             // Color data from Python is always for the original spine count
                             const nOrig = lod ? lod.originalCount : obj.userData.tubeNumSpinePoints;
-                            const nCs = obj.userData.tubeNCs;
                             if (buffer.byteLength < nOrig * 4) {
                                 console.warn(`update_parametric_tube_colors: blob too small (${buffer.byteLength} < ${nOrig * 4})`);
                                 return;
@@ -18000,120 +18000,20 @@ export class ThreeJSViewer {
                                 rc[i * 3 + 2] = (c & 0xff) / 255;
                             }
 
-                            // When LOD is active, store full colors and rebuild with reduced subset
-                            if (lod && lod.keptIndices) {
-                                lod.originalRingColors = new Float32Array(rc);
+                            if (lod) {
+                                lod.originalRingColors = rc;
                                 lod.colorVersion = (lod.colorVersion || 0) + 1;
-                                this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                // Extract reduced colors for current LOD level
-                                const nRed = lod.keptIndices.length;
-                                const redRc = new Float32Array(nRed * 3);
-                                const redPacked = new Uint32Array(nRed);
-                                for (let i = 0; i < nRed; i++) {
-                                    const oi = lod.keptIndices[i];
-                                    redRc[i * 3] = rc[oi * 3]; redRc[i * 3 + 1] = rc[oi * 3 + 1]; redRc[i * 3 + 2] = rc[oi * 3 + 2];
-                                    redPacked[i] = packed[oi];
-                                }
-                                // Update geometry colors for reduced mesh
-                                const n = nRed;
-                                // Restore frontier ring BEFORE writing new colors
-                                const md = obj.userData.tubeMorphData;
-                                if (md) restoreFrontierRing(obj);
-                                // Fill cap dome vertices with a single color
-                                /**
-                                 * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                 * @param {number} baseVert
-                                 * @param {number} capVerts
-                                 * @param {number} r
-                                 * @param {number} g
-                                 * @param {number} b
-                                 */
-                                function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                    for (let j = 0; j < capVerts; j++) {
-                                        arr[(baseVert + j) * 3]     = r;
-                                        arr[(baseVert + j) * 3 + 1] = g;
-                                        arr[(baseVert + j) * 3 + 2] = b;
-                                    }
-                                }
-                                const posCount = obj.geometry.getAttribute('position').count;
-                                const capVertsPerCap = (posCount - n * nCs) / 2;
-                                const startCapBaseVert = n * nCs;
-                                const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                const lr = (n - 1) * 3;
-                                const existing = obj.geometry.getAttribute('color');
-                                if (existing) {
-                                    expandRingColors(redPacked, n, nCs, existing.array);
-                                    fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                    fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                    existing.clearUpdateRanges();
-                                    existing.needsUpdate = true;
-                                } else {
-                                    const allColors = new Float32Array(posCount * 3);
-                                    expandRingColors(redPacked, n, nCs, allColors);
-                                    fillCapColors(allColors, startCapBaseVert, capVertsPerCap, redRc[0], redRc[1], redRc[2]);
-                                    fillCapColors(allColors, endCapBaseVert, capVertsPerCap, redRc[lr], redRc[lr + 1], redRc[lr + 2]);
-                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
-                                }
-                                obj.material.vertexColors = true;
-                                obj.material.color.setHex(0xffffff);
-                                obj.material.needsUpdate = true;
-                                obj.userData.tubeHasColors = true;
-                                obj.userData._colorFullUploadNeeded = true;
-                                if (md) md.ringColors = redRc;
-                            } else {
-                                // No LOD active — original path
-                                if (lod) {
-                                    lod.originalRingColors = new Float32Array(rc);
-                                    lod.colorVersion = (lod.colorVersion || 0) + 1;
-                                    this._lodWorker.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: lod.originalRingColors });
-                                }
-                                const n = nOrig;
-                                // Fill cap dome vertices with a single color
-                                /**
-                                 * @param {ArrayLike<number> & {[i: number]: number}} arr
-                                 * @param {number} baseVert
-                                 * @param {number} capVerts
-                                 * @param {number} r
-                                 * @param {number} g
-                                 * @param {number} b
-                                 */
-                                function fillCapColors(arr, baseVert, capVerts, r, g, b) {
-                                    for (let j = 0; j < capVerts; j++) {
-                                        arr[(baseVert + j) * 3]     = r;
-                                        arr[(baseVert + j) * 3 + 1] = g;
-                                        arr[(baseVert + j) * 3 + 2] = b;
-                                    }
-                                }
-                                const posCount = obj.geometry.getAttribute('position').count;
-                                const capVertsPerCap = (posCount - n * nCs) / 2;
-                                const startCapBaseVert = n * nCs;
-                                const endCapBaseVert = startCapBaseVert + capVertsPerCap;
-                                const lr = (n - 1) * 3;
-                                // Restore frontier ring BEFORE writing new colors so
-                                // the stale savedRingColors don't overwrite the update.
-                                const md = obj.userData.tubeMorphData;
-                                if (md) restoreFrontierRing(obj);
-                                const existing = obj.geometry.getAttribute('color');
-                                if (existing) {
-                                    expandRingColors(packed, n, nCs, existing.array);
-                                    fillCapColors(existing.array, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                    fillCapColors(existing.array, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                    existing.clearUpdateRanges();
-                                    existing.needsUpdate = true;
-                                } else {
-                                    const allColors = new Float32Array(posCount * 3);
-                                    expandRingColors(packed, n, nCs, allColors);
-                                    fillCapColors(allColors, startCapBaseVert, capVertsPerCap, rc[0], rc[1], rc[2]);
-                                    fillCapColors(allColors, endCapBaseVert, capVertsPerCap, rc[lr], rc[lr + 1], rc[lr + 2]);
-                                    obj.geometry.setAttribute('color', new THREE.BufferAttribute(allColors, 3));
-                                }
-                                obj.material.vertexColors = true;
-                                obj.material.color.setHex(0xffffff);
-                                obj.material.needsUpdate = true;
-                                obj.userData.tubeHasColors = true;
-                                obj.userData._colorFullUploadNeeded = true;
-                                if (md) md.ringColors = rc;
+                                this._lodWorker?.postMessage({ type: 'updateColors', tubeId: data.id, ringColors: rc });
                             }
+                            let current = rc;
+                            if (lod?.keptIndices) {
+                                current = new Float32Array(lod.keptIndices.length * 3);
+                                for (let i = 0; i < lod.keptIndices.length; i++) {
+                                    const source = lod.keptIndices[i] * 3;
+                                    for (let d = 0; d < 3; d++) current[i * 3 + d] = rc[source + d];
+                                }
+                            }
+                            setParametricTubeRingColors(obj, current);
                         } catch (e) {
                             this._reportLoadFailure(e, 'parametric tube color',
                                 () => console.error(`Error updating parametric_tube colors:`, e),
