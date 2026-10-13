@@ -144,3 +144,17 @@ Color-support validation at implementation `3591e88` (comparison harness `abc608
 - **212 four-version captures passed**: 60 paths in textured, width-colored and station-colored modes, plus 32 targeted close-ups with textures, width, height and alternating-station colors. Every view was scrubbed forward and backward; checks found no page errors or lost contexts. These are functional checks, not a claim that every depicted surface is visually correct.
 - All 60 textured paths retained identical allocated triangle counts, geometry-buffer bytes and accepted repair counts compared with the preceding `36f0caa` local-join implementation. The new eight-byte-per-patch-vertex CPU provenance is additional to those geometry buffers; the performance table above predates this color support.
 - Linked orbit/zoom, animation, flat/shaded colors, layer/elevation fields, texture maps, wireframe and full-resolution reloads passed interactive checks. TypeScript, Python lint/format and generated-build consistency checks passed.
+
+### Comparison camera correction
+
+The initial four-version screenshots used an excessively small near clipping
+plane (`1e-7 m` for small paths), causing depth-buffer fighting that looked like
+high-frequency surface shredding. The comparison now scales its near plane to
+1% of camera-to-target distance and bounds the far plane by the scene, updating
+both during orbit/zoom. The four-version images above were regenerated. Geometry
+and triangle counts are unchanged; visual judgments based on the old shredding
+are invalid. The older 24-case gallery used a separate camera configuration.
+
+`bench/tube_lab/check_comparison_camera.py` checks linked zoom/orbit, material
+rebuilds and framing. Capture results include clipping values and a harness
+source hash, preventing resume from reusing screenshots from the old camera.

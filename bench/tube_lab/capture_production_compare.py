@@ -52,7 +52,12 @@ def main():
         if args.resume and (OUT / "capture_results.json").exists()
         else []
     )
-    results = [r for r in results if r.get("revisions") == manifest["builds"]]
+    results = [
+        r
+        for r in results
+        if r.get("revisions") == manifest["builds"]
+        and r.get("harnessSha256") == manifest["harnessSha256"]
+    ]
     complete = {
         (r["case"], r["mode"], r["focus"]) for r in results if not r.get("error")
     }
@@ -102,6 +107,7 @@ def main():
                 image="screenshots/" + name,
                 sha256=entry["sha256"],
                 revisions=manifest["builds"],
+                harnessSha256=manifest["harnessSha256"],
             )
             try:
                 page.goto(
@@ -132,6 +138,11 @@ def main():
                     not b["contextLost"]
                     and b["drawCalls"] > 0
                     and b["submittedTriangles"] > 0
+                    for b in row["playbackStats"]
+                )
+                assert all(
+                    0.0099 <= b["cameraNear"] / b["cameraDistance"] <= 0.0101
+                    and b["cameraFar"] > b["cameraNear"]
                     for b in row["playbackStats"]
                 )
                 page.evaluate("(f)=>comparison.setProgress(f)", original)

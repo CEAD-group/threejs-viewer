@@ -242,7 +242,22 @@ def main():
     for key in ("color", "normal", "roughness"):
         (OUT / f"{key}.png").write_bytes(maps[key])
     (OUT / "manifest.json").write_text(
-        json.dumps(dict(builds=builds, cases=cases), indent=2)
+        json.dumps(
+            dict(
+                builds=builds,
+                cases=cases,
+                harnessSha256=hashlib.sha256(
+                    (
+                        child
+                        + Path(__file__).with_name("production_compare.js").read_text()
+                        + Path(__file__)
+                        .with_name("production_compare.html")
+                        .read_text()
+                    ).encode()
+                ).hexdigest(),
+            ),
+            indent=2,
+        )
     )
     for source, target in [
         ("production_compare.html", "index.html"),

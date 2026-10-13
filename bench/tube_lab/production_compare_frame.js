@@ -22,9 +22,17 @@ cmpScene.add(cmpLight, cmpLight.target);
 const cmpCamera = cmpViewer._camera;
 const cmpControls = new CompareOrbitControls(cmpCamera,cmpCanvas);
 cmpControls.enableDamping = false;
-let cmpObject = null, cmpMuted = false, cmpResult = null;
+let cmpObject = null, cmpMuted = false, cmpResult = null, cmpBounds = null;
 function cmpRender() {
     cmpRenderer.setSize(innerWidth, innerHeight, false);
+    if(cmpBounds) {
+        // Scale depth precision to the actual view. A fixed microscopic near
+        // plane made distinct bead surfaces fight in every pinned renderer.
+        const distance=cmpCamera.position.distanceTo(cmpControls.target);
+        cmpCamera.near=Math.max(1e-8,distance*.01);
+        cmpCamera.far=Math.max(cmpCamera.near*100,
+            cmpCamera.position.distanceTo(cmpBounds.center)+cmpBounds.radius*1.5);
+    }
     cmpCamera.aspect = innerWidth / Math.max(1, innerHeight);
     cmpCamera.updateProjectionMatrix();
     cmpRenderer.render(cmpScene,cmpCamera);
@@ -47,8 +55,7 @@ function cmpPacked(t) {
 }
 async function cmpLoad({entry, mode, shading, lod, camera, wire}) {
     const colored = !['texture','plain'].includes(mode);
-    cmpCamera.near = Math.max(1e-7,entry.presets[0].radius*1e-6);
-    cmpCamera.far = Math.max(10,entry.presets[0].radius*1000);
+    cmpBounds={center:new THREE.Vector3().fromArray(entry.presets[0].center),radius:entry.presets[0].radius};
     cmpSetCamera(camera);
     const response=await fetch(entry.blob);if(!response.ok)throw Error(`Blob HTTP ${response.status}`);
     const original=await response.arrayBuffer(), n=entry.points;
@@ -112,5 +119,5 @@ async function cmpLoad({entry, mode, shading, lod, camera, wire}) {
     cmpSetCamera(camera);return cmpResult;
 }
 window.compareFrame={load:cmpLoad,camera:cmpSetCamera,progress(f){if(cmpObject){cmpObject.userData.parametricTube.setDrawRange(f);cmpRender();}},
-    stats(){return {...cmpResult,drawCalls:cmpRenderer.info.render.calls,submittedTriangles:cmpRenderer.info.render.triangles,contextLost:cmpRenderer.getContext().isContextLost()};}};
+    stats(){return {...cmpResult,drawCalls:cmpRenderer.info.render.calls,submittedTriangles:cmpRenderer.info.render.triangles,contextLost:cmpRenderer.getContext().isContextLost(),cameraNear:cmpCamera.near,cameraFar:cmpCamera.far,cameraDistance:cmpCamera.position.distanceTo(cmpControls.target)};}};
 window.compareReady=true;
