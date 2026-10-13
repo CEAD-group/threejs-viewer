@@ -131,3 +131,16 @@ Large backward/forward jumps are measured separately with `--seeks --samples 6 -
 `bench/tube_lab/production_compare.py` builds a local four-version comparison using the production captures in `tmp/toolpath_testdata` and the earlier example generators. It reads the original metre-unit tube blobs unchanged; data modes add only the optional packed-color block. The production column uses viewer v0.0.67, pinned by the configured Ribweaver 0.1.35 production image. The other columns are v0.0.69/#279, this PR, and a pinned #283 revision.
 
 Run the generator, then serve `bench/tube_lab/out/production_compare` on localhost port 8767. The interface links cameras and playback and supports material maps, flat or shaded colors by width, height, elevation, layer and station, plus alternating-station diagnostics. `capture_production_compare.py` records screenshots and geometry/playback checks; `--details` adds close-ups and `--case` filters cases. Output and the private input captures stay gitignored. This is a visual/functional comparison, not a GPU benchmark.
+
+The public #277 reproduction below uses the same four pinned builds, left to right: production v0.0.67, v0.0.69/#279, this PR, #283.
+
+![Four versions with flat per-station colors](media/local_joins/issue_277_four_versions_colours.png)
+
+![Four versions with color, normal and roughness maps](media/local_joins/issue_277_four_versions_textures.png)
+
+Color-support validation at implementation `3591e88` (comparison harness `abc608e`):
+
+- **903 tests passed** in the full local suite; **23 local-join tests passed in Firefox**. This covers color provenance, live updates/resets, paused frontiers, break caps and stale LOD worker responses.
+- **212 four-version captures passed**: 60 paths in textured, width-colored and station-colored modes, plus 32 targeted close-ups with textures, width, height and alternating-station colors. Every view was scrubbed forward and backward; checks found no page errors or lost contexts. These are functional checks, not a claim that every depicted surface is visually correct.
+- All 60 textured paths retained identical allocated triangle counts, geometry-buffer bytes and accepted repair counts compared with the preceding `36f0caa` local-join implementation. The new eight-byte-per-patch-vertex CPU provenance is additional to those geometry buffers; the performance table above predates this color support.
+- Linked orbit/zoom, animation, flat/shaded colors, layer/elevation fields, texture maps, wireframe and full-resolution reloads passed interactive checks. TypeScript, Python lint/format and generated-build consistency checks passed.
