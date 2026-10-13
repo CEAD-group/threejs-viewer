@@ -94,6 +94,39 @@ def test_round_joins_keep_every_vertex_inside_the_bead_envelope(
     )
 
 
+def test_round_joins_keep_an_anchored_exact_retrace_below_the_spine(
+    viewer_client, viewer_page
+):
+    """At an exact 180 degree retrace the outgoing segment flips T while the
+    sweep keeps U, so a joint frame with V = T x U pointed down and an
+    anchor="top" ring sat a bead height above the spine (the hairpins test
+    data). Both joint rings must follow the neighbouring strip ring's U and
+    V, so the outgoing ring is ring v+1 moved back along the segment."""
+    fwd = [(i * 0.8, 0.0, 7.5) for i in range(8)]
+    back = [((6 - i) * 0.8, 0.0, 7.5) for i in range(7)]
+    spine = np.array(fwd + back, dtype=np.float32)
+    n, w, h = len(spine), 9.9, 2.475
+    viewer_client.add_parametric_tube(
+        "t", spine, np.full(n, w), np.full(n, h), lod=False, anchor="top"
+    )
+    _wait_for_object(viewer_page, "t")
+    g = viewer_page.evaluate(READ, "t")
+    assert g["joints"] == [7]
+    points = np.asarray(g["positions"]).reshape(-1, 3)
+    # Anchored at the top: nothing above the spine, nothing below one bead.
+    assert points[:, 2].max() < 7.5 + 0.02
+    assert points[:, 2].min() > 7.5 - h - 0.02
+    base = g["jointVertBase"]
+    outgoing = points[base : base + 6]
+    ring_next = points[8 * 6 : 9 * 6]
+    # Strip rings carry the deposition bias (up to 0.1% of the bead), the
+    # joint rings do not.
+    delta = outgoing - ring_next
+    assert np.allclose(delta[:, 1:], 0.0, atol=0.02), delta
+    assert np.allclose(delta[:, 0], 0.8, atol=0.02), delta
+    _assert_outward(g)
+
+
 def _corner_spine():
     """Three 90 degree corners with short legs, a bead wider than the legs."""
     pts = [

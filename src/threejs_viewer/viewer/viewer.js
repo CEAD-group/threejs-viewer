@@ -5014,7 +5014,7 @@ function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors
      * @param {number} rUx @param {number} rUy @param {number} rUz - reference U
      * @param {Float32Array} out @param {number} o
      */
-    function segmentFrame(dx, dy, dz, rUx, rUy, rUz, out, o) {
+    function segmentFrame(dx, dy, dz, rUx, rUy, rUz, rVx, rVy, rVz, out, o) {
         let Ux, Uy, Uz, vx, vy, vz;
         if (Math.abs(dx * upX + dy * upY + dz * upZ) > 0.99) {
             const d = rUx * dx + rUy * dy + rUz * dz;
@@ -5035,8 +5035,12 @@ function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors
             if (ul > 1e-12) { Ux /= ul; Uy /= ul; Uz /= ul; }
         }
         if (Ux * rUx + Uy * rUy + Uz * rUz < 0) { Ux = -Ux; Uy = -Uy; Uz = -Uz; }
-        // V = T × U keeps V even in T, as the hairpin sweep does for a flipped U.
+        // Both axes follow the reference ring, so the two rings pair vertex
+        // for vertex: at an exact retrace T flips while U does not, and a
+        // V = T × U would point down (an anchored ring then sits above the
+        // spine). The sweep keeps V up through a flipped U the same way.
         vx = dy * Uz - dz * Uy; vy = dz * Ux - dx * Uz; vz = dx * Uy - dy * Ux;
+        if (vx * rVx + vy * rVy + vz * rVz < 0) { vx = -vx; vy = -vy; vz = -vz; }
         out[o] = Ux; out[o + 1] = Uy; out[o + 2] = Uz;
         out[o + 3] = vx; out[o + 4] = vy; out[o + 5] = vz;
         out[o + 6] = dx; out[o + 7] = dy; out[o + 8] = dz;
@@ -5068,7 +5072,8 @@ function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors
         const prevJoint = q > 0 && jointVerts[q - 1] === v - 1 ? (q - 1) * 9 : -1;
         const rIn = prevJoint >= 0 ? jointFrames : localFrames;
         const rInO = prevJoint >= 0 ? prevJoint : (v - 1) * 6;
-        segmentFrame(ix, iy, iz, rIn[rInO], rIn[rInO + 1], rIn[rInO + 2], frameScratch, 0);
+        segmentFrame(ix, iy, iz, rIn[rInO], rIn[rInO + 1], rIn[rInO + 2],
+                     rIn[rInO + 3], rIn[rInO + 4], rIn[rInO + 5], frameScratch, 0);
         for (let c = 0; c < 6; c++) localFrames[v * 6 + c] = frameScratch[c];
         tangents[v * 3] = ix; tangents[v * 3 + 1] = iy; tangents[v * 3 + 2] = iz;
         miters[v * 3] = 1; miters[v * 3 + 1] = 1; miters[v * 3 + 2] = 0;
@@ -5079,7 +5084,8 @@ function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors
         // Outgoing ring, aligned to ring v+1 (a joint there is rewritten next
         // with this ring as its reference, so the two agree either way).
         const n6 = (v + 1) * 6;
-        segmentFrame(ox, oy, oz, localFrames[n6], localFrames[n6 + 1], localFrames[n6 + 2], jointFrames, q * 9);
+        segmentFrame(ox, oy, oz, localFrames[n6], localFrames[n6 + 1], localFrames[n6 + 2],
+                     localFrames[n6 + 3], localFrames[n6 + 4], localFrames[n6 + 5], jointFrames, q * 9);
         writeRingVerts(positions, base * 3, section, nCs,
                        jointFrames[q * 9], jointFrames[q * 9 + 1], jointFrames[q * 9 + 2],
                        jointFrames[q * 9 + 3], jointFrames[q * 9 + 4], jointFrames[q * 9 + 5],
