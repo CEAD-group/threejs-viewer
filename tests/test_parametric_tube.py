@@ -277,22 +277,50 @@ def test_add_parametric_tube_strand_collapse_default_omits_header_key():
 
 
 def test_add_parametric_tube_joins_default_omits_header_keys():
-    """Round joins at the default tolerance are the viewer's own default."""
+    """The mitered strip at the default tolerance and budget is the viewer's
+    own default, so an explicit "miter" sends the same header."""
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
-    c.add_parametric_tube("t", spine, widths, heights)
-    header, _ = c._binary_messages[-1]
-    assert "joins" not in header
-    assert "joinTolerance" not in header
+    for kw in ({}, {"joins": "miter"}):
+        c.add_parametric_tube("t", spine, widths, heights, **kw)
+        header, _ = c._binary_messages[-1]
+        assert "joins" not in header
+        assert "joinTolerance" not in header
+        assert "joinBudget" not in header
 
 
-def test_add_parametric_tube_joins_miter_sets_header():
+def test_add_parametric_tube_joins_round_sets_header():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
-    c.add_parametric_tube("t", spine, widths, heights, joins="miter")
+    c.add_parametric_tube("t", spine, widths, heights, joins="round")
     header, _ = c._binary_messages[-1]
-    assert header["joins"] == "miter"
+    assert header["joins"] == "round"
     assert "joinTolerance" not in header
+    assert "joinBudget" not in header
+
+
+def test_add_parametric_tube_join_budget_in_header_when_changed():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, joins="round", join_budget=0.5)
+    header, _ = c._binary_messages[-1]
+    assert header["joinBudget"] == 0.5
+    c.add_parametric_tube("t", spine, widths, heights, joins="round", join_budget=None)
+    header, _ = c._binary_messages[-1]
+    assert header["joinBudget"] is None
+    c.add_parametric_tube(
+        "t", spine, widths, heights, joins="round", join_budget=np.float32(0.15)
+    )
+    header, _ = c._binary_messages[-1]
+    assert "joinBudget" not in header
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, float("nan"), float("inf"), "0.1", True])
+def test_add_parametric_tube_join_budget_rejects_out_of_range(bad):
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="join_budget"):
+        c.add_parametric_tube("t", spine, widths, heights, join_budget=bad)
 
 
 def test_add_parametric_tube_join_tolerance_in_header_when_changed():
@@ -316,13 +344,13 @@ def test_add_parametric_tube_joins_rejects_unknown(bad):
 
 
 def test_add_parametric_tube_strand_collapse_selects_miter_joins():
-    """strand_collapse snaps the mitered strip's rings, so it implies
-    joins="miter" and is rejected together with an explicit "round"."""
+    """strand_collapse snaps the mitered strip's rings, so it keeps the
+    default miter joins and is rejected together with an explicit "round"."""
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
     c.add_parametric_tube("t", spine, widths, heights, strand_collapse=True)
     header, _ = c._binary_messages[-1]
-    assert header["joins"] == "miter"
+    assert "joins" not in header
     assert header["strandCollapse"] is True
     c.add_parametric_tube(
         "t",
@@ -333,7 +361,7 @@ def test_add_parametric_tube_strand_collapse_selects_miter_joins():
         joins="miter",
     )
     header, _ = c._binary_messages[-1]
-    assert header["joins"] == "miter"
+    assert "joins" not in header
     with pytest.raises(ValueError, match="strand_collapse"):
         c.add_parametric_tube(
             "t", spine, widths, heights, strand_collapse=True, joins="round"
@@ -356,10 +384,11 @@ def test_add_toolpath_forwards_joins():
     c = _capture_client()
     pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
     tp = Toolpath.from_points(pts, bead_width=0.5, bead_height=0.2)
-    c.add_toolpath("tp", tp, joins="miter", join_tolerance=0.03)
+    c.add_toolpath("tp", tp, joins="round", join_tolerance=0.03, join_budget=None)
     header, _ = c._binary_messages[-1]
-    assert header["joins"] == "miter"
+    assert header["joins"] == "round"
     assert header["joinTolerance"] == 0.03
+    assert header["joinBudget"] is None
 
 
 def test_add_parametric_tube_strand_collapse_true_sets_header():

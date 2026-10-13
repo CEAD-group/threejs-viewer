@@ -363,11 +363,12 @@ def _sanitize_point_times(values, name: str, n_points: int, nan_to: float):
 
 _LOD_DEFAULT = object()  # sentinel: header "lod" key omitted
 
-# add_parametric_tube(joins=...): round joins (the viewer default) or the
-# plain mitered strip. The default tolerance mirrors TUBE_JOIN_TOLERANCE in
-# viewer.js, so the header omits it unless changed.
+# add_parametric_tube(joins=...): the plain mitered strip (the viewer default)
+# or round joins. The default tolerance and budget mirror TUBE_JOIN_TOLERANCE
+# and TUBE_JOIN_BUDGET in viewer.js, so the header omits them unless changed.
 _ALLOWED_TUBE_JOINS = frozenset({"round", "miter"})
 _TUBE_JOIN_TOLERANCE_DEFAULT = 0.015
+_TUBE_JOIN_BUDGET_DEFAULT = 0.15
 _LOD_ALLOWED_KEYS = {"epsilon_divisor", "threshold"}
 
 # add_points(lod=...) option keys (distinct from the parametric-tube lod).
@@ -2794,6 +2795,7 @@ class ViewerClient:
         roughness_map: Optional[Union[str, Path, bytes]] = None,
         joins: Optional[str] = None,
         join_tolerance: float = 0.015,
+        join_budget: Optional[float] = 0.15,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -2896,27 +2898,33 @@ class ViewerClient:
                 The current bead can be toggled in the live viewer
                 with the ``S`` key, or via
                 ``set_strand_collapse_enabled``.
-            joins: ``"round"`` (the default) renders every corner as the union
-                of the two straight bead segments and the bead section
-                revolved about the corner, which is the shape a nozzle
-                leaves when it turns on the spot. The viewer keeps the
-                shared mitered ring through gentle turns and only adds a
-                revolved joint body where the miter would deviate from
-                that union by more than ``join_tolerance``, so a smooth
-                path costs nothing extra and a sharp corner, an S-jog or
-                a hairpin renders without folds, fins or spikes. The
-                joints follow LOD: the tolerance is raised to the LOD
+            joins: ``"miter"`` (the default) renders the plain mitered
+                strip (bevel past 120 degrees). ``"round"`` renders every
+                corner as the union of the two straight bead segments and
+                the bead section revolved about the corner, which is the
+                shape a nozzle leaves when it turns on the spot. The viewer
+                keeps the shared mitered ring through gentle turns and only
+                adds a revolved joint body where the miter would deviate
+                from that union by more than ``join_tolerance``, so a
+                smooth path costs nothing extra and a sharp corner, an
+                S-jog or a hairpin renders without folds, fins or spikes.
+                The joints follow LOD: the tolerance is raised to the LOD
                 epsilon, so corners too small to see cost no triangles.
-                ``"miter"`` keeps the plain mitered strip (bevel past
-                120 degrees) of earlier versions. ``strand_collapse``
-                works on that strip only, so it selects ``"miter"`` when
-                ``joins`` is not given and is rejected with
-                ``joins="round"``.
+                ``strand_collapse`` works on the mitered strip only and is
+                rejected with ``joins="round"``.
             join_tolerance: Maximum deviation of a miter from the round
                 join before the corner gets a joint body, as a fraction of
                 the bead half-extent, in (0, 1). It also sets the joint
                 body's resolution (chord error of the revolved section).
                 Smaller values round more corners at more triangles each.
+            join_budget: Joint triangles the viewer may add with
+                ``joins="round"``, as a fraction of the mitered strip's
+                triangles (default 0.15). When more corners qualify, the
+                sharpest ones keep their joints; a tube always keeps at
+                least 64 joints, so a short path is never starved. The cap
+                keeps a noisy path, where every vertex turns sharply, near
+                the strip's cost instead of eleven times it. ``None`` lifts
+                the cap.
             pickable: When True (default), this tube participates in
                 polyline/tube picking once picking is enabled (see
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
@@ -2992,7 +3000,7 @@ class ViewerClient:
         if not np.all(np.isfinite(heights_arr)) or np.any(heights_arr < 0):
             raise ValueError("heights must be finite and >= 0 at every spine point")
         if joins is None:
-            joins = "miter" if strand_collapse else "round"
+            joins = "miter"
         if joins not in _ALLOWED_TUBE_JOINS:
             raise ValueError(
                 f"joins must be one of {sorted(_ALLOWED_TUBE_JOINS)}, got {joins!r}"
@@ -3011,6 +3019,16 @@ class ViewerClient:
         join_tolerance = float(join_tolerance)
         if not (math.isfinite(join_tolerance) and 0 < join_tolerance < 1):
             raise ValueError(f"join_tolerance must be in (0, 1), got {join_tolerance}")
+        if join_budget is not None:
+            if not isinstance(
+                join_budget, (int, float, np.integer, np.floating)
+            ) or isinstance(join_budget, bool):
+                raise ValueError(
+                    f"join_budget must be a number or None, got {type(join_budget).__name__}"
+                )
+            join_budget = float(join_budget)
+            if not (math.isfinite(join_budget) and join_budget > 0):
+                raise ValueError(f"join_budget must be > 0 or None, got {join_budget}")
 
         color_arr_in: Optional[np.ndarray] = None
         if colors is not None:
@@ -3076,12 +3094,17 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
-        # Round joins at the default tolerance are the viewer's own default,
-        # so the header carries the keys only when they differ.
-        if joins != "round":
+        # The mitered strip at the default tolerance and budget is the
+        # viewer's own default, so the header carries the keys only when
+        # they differ; a null budget lifts the cap.
+        if joins == "round":
             header["joins"] = joins
         if join_tolerance != _TUBE_JOIN_TOLERANCE_DEFAULT:
             header["joinTolerance"] = join_tolerance
+        if join_budget is None or not math.isclose(
+            join_budget, _TUBE_JOIN_BUDGET_DEFAULT, rel_tol=1e-6
+        ):
+            header["joinBudget"] = join_budget
         sc_header = _serialize_strand_collapse(strand_collapse)
         if sc_header:
             header["strandCollapse"] = sc_header

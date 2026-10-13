@@ -1,12 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.0.70
 
 ### Round tube joins (issues #277, #278, supersedes PRs #280, #281, #282)
 
-- Parametric tubes render every corner as the union of the two straight bead segments and the bead section revolved about the corner, the shape a nozzle leaves when it turns on the spot. The viewer keeps the shared mitered ring through gentle turns and adds a revolved joint body only where the miter would deviate from that union by more than `join_tolerance` (default 1.5% of the bead half-extent), so smooth paths cost nothing extra and S-jogs, hairpins, sub-bead excursions and 3D elbows render without folds, fins or miter spikes. Drawn as closed opaque solids, the depth test resolves the union exactly, with no boolean operations, no second index buffer and no per-frame remeshing, so draw-range playback, textures, breaks, anchors, per-ring colours and LOD all keep working; under LOD the tolerance is raised to the LOD epsilon, so corners too small to see cost no triangles. `add_parametric_tube(joins="miter")` keeps the previous mitered strip.
+- `add_parametric_tube(joins="round")` renders every corner as the union of the two straight bead segments and the bead section revolved about the corner, the shape a nozzle leaves when it turns on the spot. The viewer keeps the shared mitered ring through gentle turns and adds a revolved joint body only where the miter would deviate from that union by more than `join_tolerance` (default 1.5% of the bead half-extent), so smooth paths cost nothing extra and S-jogs, hairpins, sub-bead excursions and 3D elbows render without folds, fins or miter spikes. Drawn as closed opaque solids, the depth test resolves the union exactly, with no boolean operations, no second index buffer and no per-frame remeshing, so draw-range playback, textures, breaks, anchors, per-ring colours and LOD all keep working; under LOD the tolerance is raised to the LOD epsilon, so corners too small to see cost no triangles.
+- The default stays `joins="miter"`, the mitered strip of earlier versions, byte-identical on the wire and in the geometry, so existing scenes do not change; a producer opts in per tube. On the hull programs round joins add about 10% triangles; on panel-slicer junction data with width-modulated shallow crossings they would add 2 to 4x, which is why they are not the default.
+- `join_budget` (default 0.15, `None` for no cap) bounds the joint triangles to that fraction of the strip's, spent on the sharpest corners first, with a floor of 64 joints per tube so a short path is never starved. It keeps a noisy path where every vertex turns sharply near 1.15x the strip instead of 11x.
 - A joined vertex carries an incoming-frame ring and an outgoing-frame ring, so the pairs on either side are exact prism ends and the two half bodies close them; a shared bisector ring let the inside of a body show through the top of the bead at a retrace.
-- `strand_collapse` applies to the mitered strip only: it selects `joins="miter"` when `joins` is not given and raises with `joins="round"`.
+- `strand_collapse` applies to the mitered strip only and raises with `joins="round"`.
 - Tube LOD rebuilds now follow programmatic camera moves (`set_camera`, framing, view tweens), not only orbit drags.
 - The tube geometry build is one shared function on both the main thread and the LOD worker. `bench/tube_lab/join_scale.py` measures build, rebuild and frame times of a million-point serpentine with round and miter joins.
 

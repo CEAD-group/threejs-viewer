@@ -4414,6 +4414,14 @@ const TUBE_MITER_LIMIT = 2;
 // turns up to about 20° and draws each joint at 5 rings per quarter turn,
 // where the chord error of the body is the same 1.5%.
 const TUBE_JOIN_TOLERANCE = 0.015;
+// Joint bodies may add at most this fraction of the mitered strip's ring-pair
+// triangles per tube, so a noisy path whose every vertex turns sharply stays
+// near the strip's cost instead of the 11x that joining all of them costs.
+// Candidates are ranked by miter spike relative to the bead half-extent, so
+// the sharpest corners keep their joints. A tube always keeps at least
+// TUBE_JOIN_MIN_JOINTS joints, so the budget never starves a short path.
+const TUBE_JOIN_BUDGET = 0.15;
+const TUBE_JOIN_MIN_JOINTS = 64;
 
 // The revolved rings of a joint body are built this fraction smaller than
 // the ring they close, about the section's anchored centre (the base ring
@@ -4441,8 +4449,11 @@ function tubeJoinRingCount(tolFrac) {
 // floor for the tolerance (the LOD epsilon). Endpoints, the two ends of a
 // break and vertices with a zero section never join; a zero-length segment
 // carries the previous direction, as computeMiterFrames does, so a
-// duplicated vertex attributes its turn to the next one. Shared with the LOD
-// worker via toString() injection: keep it dependency-free.
+// duplicated vertex attributes its turn to the next one. When more than
+// `maxJoints` vertices qualify, the ones with the largest spike relative to
+// their half-extent keep their flag (ties resolved in path order), so a
+// budget drops the gentlest corners first. Shared with the LOD worker via
+// toString() injection: keep it dependency-free.
 /**
  * @param {Float32Array} spine
  * @param {Float32Array} widths
@@ -4451,10 +4462,12 @@ function tubeJoinRingCount(tolFrac) {
  * @param {Uint8Array | null} breakMask
  * @param {number} tolFrac
  * @param {Float32Array | null} eps
+ * @param {number} maxJoints - joint limit, Infinity for none
  * @param {Uint8Array} outFlags
  */
-function markTubeJoins(spine, widths, heights, nSpine, breakMask, tolFrac, eps, outFlags) {
+function markTubeJoins(spine, widths, heights, nSpine, breakMask, tolFrac, eps, maxJoints, outFlags) {
     let count = 0;
+    const score = maxJoints < Infinity ? new Float32Array(nSpine) : null;
     let pX = 0, pY = 0, pZ = 0;
     let haveIn = false;
     for (let i = 0; i < nSpine; i++) {
@@ -4474,11 +4487,27 @@ function markTubeJoins(spine, widths, heights, nSpine, breakMask, tolFrac, eps, 
                 const spike = cosHalf > 1e-6 ? r * (1 / cosHalf - 1) : Infinity;
                 let tol = tolFrac * r;
                 if (eps && eps[i] > tol) tol = eps[i];
-                if (spike > tol) { outFlags[i] = 1; count++; }
+                if (spike > tol) {
+                    outFlags[i] = 1; count++;
+                    if (score) score[i] = spike / r;
+                }
             }
         }
         pX = dx; pY = dy; pZ = dz;
         haveIn = true;
+    }
+    if (score && count > maxJoints) {
+        const flagged = new Float32Array(count);
+        let q = 0;
+        for (let i = 0; i < nSpine; i++) if (outFlags[i]) flagged[q++] = score[i];
+        flagged.sort();
+        const cut = flagged[count - maxJoints];
+        count = 0;
+        for (let i = 0; i < nSpine; i++) {
+            if (!outFlags[i]) continue;
+            if (score[i] >= cut && count < maxJoints) count++;
+            else outFlags[i] = 0;
+        }
     }
     return count;
 }
@@ -5931,6 +5960,8 @@ const N_CROSS_SECTION = N_CS;
 const N_CAP_RINGS = 8;
 const TUBE_MITER_LIMIT = ${TUBE_MITER_LIMIT};
 const TUBE_JOIN_INSET = ${TUBE_JOIN_INSET};
+const TUBE_JOIN_BUDGET = ${TUBE_JOIN_BUDGET};
+const TUBE_JOIN_MIN_JOINTS = ${TUBE_JOIN_MIN_JOINTS};
 const TUBE_STRAND_COLLAPSE_WIN = ${TUBE_STRAND_COLLAPSE_WIN};
 const TUBE_STRAND_COLLAPSE_MIN_GAP = ${TUBE_STRAND_COLLAPSE_MIN_GAP};
 const TUBE_STRAND_COLLAPSE_TOL_FRAC = ${TUBE_STRAND_COLLAPSE_TOL_FRAC};
@@ -6076,9 +6107,9 @@ ${writeTubeUVs.toString()}
 // ---- Geometry build (plain math, no Three.js) ----
 
 function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMask,
-                       joinTol, joinEps, joinRings) {
+                       joinTol, joinEps, joinRings, joinBudget) {
     return buildTubeArrays(spine, widths, heights, null, upVec, ringColors, vOffs, breakMask || null,
-                           joinTol || 0, joinEps || null, joinRings || 1);
+                           joinTol || 0, joinEps || null, joinRings || 1, joinBudget || TUBE_JOIN_BUDGET);
 }
 
 // ---- Per-tube state cache ----
@@ -6111,6 +6142,7 @@ self.onmessage = function(e) {
             // only) and rings per joint half; see buildTubeArrays.
             joinTol: msg.joinTol || 0,
             joinRings: msg.joinRings || 1,
+            joinBudget: msg.joinBudget || TUBE_JOIN_BUDGET,
         });
         _rdpCache.delete(msg.tubeId);
         return;
@@ -6268,7 +6300,7 @@ self.onmessage = function(e) {
     // Build geometry in worker
     const tBuild0 = performance.now();
     const geo = buildGeometry(redSpine, redWidths, redHeights, upVec, redColors, redVOffs, redBreakMask,
-                              tube.joinTol, joinEps, tube.joinRings);
+                              tube.joinTol, joinEps, tube.joinRings, tube.joinBudget);
 
     // Texture coordinates (textured tubes only): the kept points keep their
     // full-resolution arc length, so the image stays put across LOD levels.
@@ -6526,9 +6558,10 @@ function distanceWeightedRDP(spine, widths, heights, ringColors, boundingRadius,
  * @param {number} joinTol - round-join tolerance as a fraction of the half-extent, 0 = miter only
  * @param {Float32Array | null} joinEps - per-vertex absolute tolerance floor, or null
  * @param {number} joinRings - revolution rings per joint half
+ * @param {number} joinBudget - joint triangles allowed as a fraction of the strip's, Infinity for no limit
  */
 function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors, vOffs, breakMask,
-                         joinTol, joinEps, joinRings) {
+                         joinTol, joinEps, joinRings, joinBudget) {
     const nCs = N_CROSS_SECTION;
     const nSpine = spine.length / 3;
     if (nSpine < 2) {
@@ -6558,15 +6591,20 @@ function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors
 
     // Round joins: which vertices get a revolved body, and its resolution.
     // Explicit orientations own every ring's frame, so they get no joints.
+    // A joint costs 2 * jointRings * nCs * 2 triangles against nCs * 2 per
+    // ring pair, so the budget fraction bounds the joint count directly.
+    const jointRings = Math.max(1, joinRings | 0);
+    const budget = joinBudget > 0 ? joinBudget : TUBE_JOIN_BUDGET;
+    const maxJoints = budget === Infinity ? Infinity
+        : Math.max(TUBE_JOIN_MIN_JOINTS, Math.floor(budget * (nSpine - 1) / (2 * jointRings)));
     const joinFlags = new Uint8Array(nSpine);
     const nJoints = joinTol > 0 && !orientations
-        ? markTubeJoins(spine, widths, heights, nSpine, breakMask, joinTol, joinEps, joinFlags) : 0;
+        ? markTubeJoins(spine, widths, heights, nSpine, breakMask, joinTol, joinEps, maxJoints, joinFlags) : 0;
     const jointVerts = new Uint32Array(nJoints);
     if (nJoints) {
         let q = 0;
         for (let i = 0; i < nSpine; i++) if (joinFlags[i]) jointVerts[q++] = i;
     }
-    const jointRings = Math.max(1, joinRings | 0);
     const jointAngles = new Float32Array(jointRings);
     for (let k = 0; k < jointRings; k++) {
         jointAngles[k] = ((k + 1) / jointRings) * (Math.PI * 0.5);
@@ -7079,14 +7117,16 @@ function buildTubeArrays(spine, widths, heights, orientations, upVec, ringColors
  * @param {number} joinTol
  * @param {Float32Array | null} joinEps
  * @param {number} joinRings
+ * @param {number} joinBudget
  */
 function buildParametricTubeGeometry(
     spine, widths, heights,
     orientations, upVector, ringColors, vOffs, breakMask,
-    joinTol, joinEps, joinRings,
+    joinTol, joinEps, joinRings, joinBudget,
 ) {
     const g = buildTubeArrays(spine, widths, heights, orientations, upVector, ringColors, vOffs,
-                              breakMask || null, joinTol || 0, joinEps || null, joinRings || 1);
+                              breakMask || null, joinTol || 0, joinEps || null, joinRings || 1,
+                              joinBudget || TUBE_JOIN_BUDGET);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(g.positions, 3));
     if (g.colors) geometry.setAttribute('color', new THREE.BufferAttribute(g.colors, 3));
@@ -19358,20 +19398,24 @@ class ThreeJSViewer {
                         const hasColors = !!ringColors;
                         const upVector = data.upVector || null;
                         const heightOffset = data.heightOffset || 0;
-                        // Round joins (default) or the plain mitered strip; the
-                        // tolerance is a fraction of the bead half-extent. Strand
-                        // collapse snaps the strip's rings, so it belongs to the
-                        // mitered strip: it selects miter joins when none are
-                        // named and is dropped under round joins.
-                        let joins = data.joins === 'miter' || (data.joins !== 'round' && data.strandCollapse)
-                            ? 'miter' : 'round';
+                        // The plain mitered strip (default) or round joins on
+                        // request; the tolerance is a fraction of the bead
+                        // half-extent. Strand collapse snaps the strip's rings,
+                        // so it belongs to the mitered strip and wins over a
+                        // round request. `joinBudget` caps the joint triangles
+                        // as a fraction of the strip's; null lifts the cap.
+                        let joins = data.joins === 'round' ? 'round' : 'miter';
                         if (joins === 'round' && data.strandCollapse) {
-                            console.warn(`parametric_tube '${data.id}': strandCollapse ignored with round joins`);
+                            console.warn(`parametric_tube '${data.id}': strandCollapse keeps the mitered strip, round joins ignored`);
+                            joins = 'miter';
                         }
                         const joinTol = joins === 'miter' ? 0
                             : (typeof data.joinTolerance === 'number' && data.joinTolerance > 0
                                 ? data.joinTolerance : TUBE_JOIN_TOLERANCE);
                         const joinRings = tubeJoinRingCount(joinTol);
+                        const joinBudget = data.joinBudget === null ? Infinity
+                            : (typeof data.joinBudget === 'number' && data.joinBudget > 0
+                                ? data.joinBudget : TUBE_JOIN_BUDGET);
                         let joinEps = null;
 
                         // Per-ring anchor offset along V, captured from the heights
@@ -19523,9 +19567,7 @@ class ThreeJSViewer {
                         // the worker can extract the snap factor without re-parsing.
                         let strandCollapse = false;
                         let strandCollapseCfg = null;
-                        if (joins === 'round') {
-                            // dropped above
-                        } else if (data.strandCollapse === true) {
+                        if (data.strandCollapse === true) {
                             strandCollapse = true;
                             strandCollapseCfg = true;
                         } else if (data.strandCollapse && typeof data.strandCollapse === 'object') {
@@ -19544,7 +19586,7 @@ class ThreeJSViewer {
                                 totalIndexCount, jointVerts, jointVertBase, jointRings: builtJointRings, jointIndexCount, jointFrames } = buildParametricTubeGeometry(
                             buildSpine, buildWidths, buildHeights,
                             buildOrientations, upVector, buildRingColors, buildVOffs, buildBreakMask,
-                            joinTol, joinEps, joinRings,
+                            joinTol, joinEps, joinRings, joinBudget,
                         );
                         if (buildArc) {
                             const nVerts = geometry.getAttribute('position').count;
@@ -19598,6 +19640,7 @@ class ThreeJSViewer {
                         mesh.userData.tubeBreakMask = buildBreakMask;
                         mesh.userData.tubeJoins = joins;
                         mesh.userData.tubeJoinTolerance = joinTol;
+                        mesh.userData.tubeJoinBudget = joinBudget;
                         mesh.userData.tubeJointVerts = jointVerts;
                         mesh.userData.tubeJointVertBase = jointVertBase;
                         mesh.userData.tubeJointRings = builtJointRings;
@@ -19678,6 +19721,7 @@ class ThreeJSViewer {
                                 strandCollapse: strandCollapseCfg,
                                 joinTol,
                                 joinRings,
+                                joinBudget,
                             });
                         }
                         // Async strand-collapse offload: post the un-collapsed

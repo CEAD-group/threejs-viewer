@@ -107,7 +107,7 @@ def test_round_joins_keep_an_anchored_exact_retrace_below_the_spine(
     spine = np.array(fwd + back, dtype=np.float32)
     n, w, h = len(spine), 9.9, 2.475
     viewer_client.add_parametric_tube(
-        "t", spine, np.full(n, w), np.full(n, h), lod=False, anchor="top"
+        "t", spine, np.full(n, w), np.full(n, h), lod=False, anchor="top", joins="round"
     )
     _wait_for_object(viewer_page, "t")
     g = viewer_page.evaluate(READ, "t")
@@ -147,7 +147,7 @@ def test_round_joins_sit_between_pairs_and_draw_range_restores(
     spine = _corner_spine()
     n = len(spine)
     viewer_client.add_parametric_tube(
-        "c", spine, np.full(n, 8.0), np.full(n, 3.0), lod=False
+        "c", spine, np.full(n, 8.0), np.full(n, 3.0), lod=False, joins="round"
     )
     _wait_for_object(viewer_page, "c")
     initial = viewer_page.evaluate(READ, "c")
@@ -195,7 +195,7 @@ def test_round_joins_skip_break_ends_and_zero_sections(viewer_client, viewer_pag
     mask = np.zeros(n, dtype=np.uint8)
     mask[2] = 1  # the ribbon breaks before vertex 2: vertices 1 and 2 are strip ends
     viewer_client.add_parametric_tube(
-        "b", spine, widths, np.full(n, 3.0), lod=False, break_before=mask
+        "b", spine, widths, np.full(n, 3.0), lod=False, break_before=mask, joins="round"
     )
     _wait_for_object(viewer_page, "b")
     g = viewer_page.evaluate(READ, "b")
@@ -212,7 +212,9 @@ def test_round_joins_follow_the_lod_epsilon(viewer_client, viewer_page):
     x = t * 300.0
     y = 20.0 * (np.floor(t * 10) % 2)
     spine = np.column_stack([x, y, np.zeros(n)]).astype(np.float32)
-    viewer_client.add_parametric_tube("l", spine, np.full(n, 8.0), np.full(n, 3.0))
+    viewer_client.add_parametric_tube(
+        "l", spine, np.full(n, 8.0), np.full(n, 3.0), joins="round"
+    )
     _wait_for_object(viewer_page, "l")
     viewer_client.frame_object("l")
     time.sleep(0.5)
@@ -261,6 +263,7 @@ def test_round_joins_take_colour_updates_and_textures(
         colors=np.full(n, 0xFF0000, dtype=np.uint32),
         break_before=mask,
         texture=png,
+        joins="round",
     )
     _wait_for_object(viewer_page, "t")
     viewer_client.update_parametric_tube_colors(
@@ -293,7 +296,7 @@ def test_round_joins_worker_build_matches_main_thread(
     spine = _issue_spine(277)
     n = len(spine)
     viewer_client.add_parametric_tube(
-        "w", spine, np.full(n, 11.83), np.full(n, 2.0), lod=False
+        "w", spine, np.full(n, 11.83), np.full(n, 2.0), lod=False, joins="round"
     )
     _wait_for_object(viewer_page, "w")
     main = viewer_page.evaluate(READ, "w")
@@ -317,3 +320,42 @@ def test_round_joins_worker_build_matches_main_thread(
     assert worker["joints"] == main["joints"] == [12, 13, 15, 16]
     np.testing.assert_array_equal(worker["indices"], main["indices"])
     np.testing.assert_allclose(worker["positions"], main["positions"], atol=1e-6)
+
+
+def _zigzag(turns_deg, seg=5.0):
+    """Planar path turning by each angle in turn; vertex k+1 turns by turns_deg[k]."""
+    pts = [np.zeros(3)]
+    heading = 0.0
+    for k, t in enumerate(turns_deg):
+        pts.append(pts[-1] + seg * np.array([np.cos(heading), np.sin(heading), 0.0]))
+        heading += np.radians(t) * (1 if k % 2 else -1)
+    pts.append(pts[-1] + seg * np.array([np.cos(heading), np.sin(heading), 0.0]))
+    return np.asarray(pts, dtype=np.float32)
+
+
+def test_round_join_budget_keeps_the_sharpest_corners(viewer_client, viewer_page):
+    """The joint budget bounds the joints per tube (at least 64) and spends
+    them on the corners with the largest relative miter spike; None lifts it."""
+    turns = [150.0 if k % 3 == 0 else 40.0 for k in range(300)]
+    spine = _zigzag(turns)
+    n = len(spine)
+    sharp = {k + 1 for k, t in enumerate(turns) if t == 150.0}
+    for name, budget in (("capped", 0.15), ("open", None)):
+        viewer_client.add_parametric_tube(
+            name,
+            spine,
+            np.full(n, 0.8),
+            np.full(n, 0.3),
+            lod=False,
+            joins="round",
+            join_budget=budget,
+        )
+        _wait_for_object(viewer_page, name)
+    capped = viewer_page.evaluate(READ, "capped")
+    opened = viewer_page.evaluate(READ, "open")
+    assert len(opened["joints"]) == 300, "every corner exceeds the tolerance"
+    # 0.15 * 300 / (2 * 5 rings) = 4 is under the floor of 64 joints.
+    assert len(capped["joints"]) == 64
+    assert set(capped["joints"]) <= sharp
+    assert capped["joints"] == sorted(capped["joints"])
+    assert capped["total"] < opened["total"]
