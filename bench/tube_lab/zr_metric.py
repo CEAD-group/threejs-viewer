@@ -308,16 +308,20 @@ def adaptive(step, pin_deg=35.0, dense_factor=0.75):
     )
 
 
-# label, spine transform, strand_collapse
+# label, spine transform, strand_collapse, joins (None = the viewer default,
+# round joins). "off" is the gate baseline: the plain ring tube as the viewer
+# draws it by default. "miter" is the pre-round-join renderer, shown for
+# reference; it is expected to fail the gate on the corner scenes.
 APPROACHES = [
-    ("off", _identity, False),
-    ("sc0.5", _identity, {"max_snap_factor": 0.5}),
-    ("sc1.0", _identity, {"max_snap_factor": 1.0}),
-    ("spline3", spline(3.0), False),
-    ("spline1.5", spline(1.5), False),
-    ("spline3+sc0.5", spline(3.0), {"max_snap_factor": 0.5}),
-    ("adaptive3", adaptive(3.0), False),
-    ("adaptive3+sc0.5", adaptive(3.0), {"max_snap_factor": 0.5}),
+    ("off", _identity, False, None),
+    ("miter", _identity, False, "miter"),
+    ("sc0.5", _identity, {"max_snap_factor": 0.5}, None),
+    ("sc1.0", _identity, {"max_snap_factor": 1.0}, None),
+    ("spline3", spline(3.0), False, None),
+    ("spline1.5", spline(1.5), False, None),
+    ("spline3+sc0.5", spline(3.0), {"max_snap_factor": 0.5}, None),
+    ("adaptive3", adaptive(3.0), False, None),
+    ("adaptive3+sc0.5", adaptive(3.0), {"max_snap_factor": 0.5}, None),
 ]
 
 
@@ -389,7 +393,7 @@ def main():
             pg.wait_for_timeout(300)
             pg.screenshot(path=str(OUT / f"zrm_{scene_name}_LINE.png"))
             rows = []
-            for lab, xform, sc in APPROACHES:
+            for lab, xform, sc, joins in APPROACHES:
                 sp, w, ht, lo, hi = xform(
                     sc0["sp"].copy(),
                     sc0["w"].copy(),
@@ -409,6 +413,7 @@ def main():
                     strand_collapse=sc,
                     roughness=0.45,
                     metalness=0.05,
+                    **({"joins": joins} if joins else {}),
                 )
                 time.sleep(0.4)
                 pg.wait_for_function(

@@ -276,6 +276,121 @@ def test_add_parametric_tube_strand_collapse_default_omits_header_key():
     assert "strandCollapse" not in header
 
 
+def test_add_parametric_tube_joins_default_omits_header_keys():
+    """The mitered strip at the default tolerance and budget is the viewer's
+    own default, so an explicit "miter" sends the same header."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    for kw in ({}, {"joins": "miter"}):
+        c.add_parametric_tube("t", spine, widths, heights, **kw)
+        header, _ = c._binary_messages[-1]
+        assert "joins" not in header
+        assert "joinTolerance" not in header
+        assert "joinBudget" not in header
+
+
+def test_add_parametric_tube_joins_round_sets_header():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, joins="round")
+    header, _ = c._binary_messages[-1]
+    assert header["joins"] == "round"
+    assert "joinTolerance" not in header
+    assert "joinBudget" not in header
+
+
+def test_add_parametric_tube_join_budget_in_header_when_changed():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, joins="round", join_budget=0.5)
+    header, _ = c._binary_messages[-1]
+    assert header["joinBudget"] == 0.5
+    c.add_parametric_tube("t", spine, widths, heights, joins="round", join_budget=None)
+    header, _ = c._binary_messages[-1]
+    assert header["joinBudget"] is None
+    c.add_parametric_tube(
+        "t", spine, widths, heights, joins="round", join_budget=np.float32(0.15)
+    )
+    header, _ = c._binary_messages[-1]
+    assert "joinBudget" not in header
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, float("nan"), float("inf"), "0.1", True])
+def test_add_parametric_tube_join_budget_rejects_out_of_range(bad):
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="join_budget"):
+        c.add_parametric_tube("t", spine, widths, heights, join_budget=bad)
+
+
+def test_add_parametric_tube_join_tolerance_in_header_when_changed():
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, join_tolerance=0.05)
+    header, _ = c._binary_messages[-1]
+    assert "joins" not in header
+    assert header["joinTolerance"] == 0.05
+    c.add_parametric_tube("t", spine, widths, heights, join_tolerance=np.float32(0.02))
+    header, _ = c._binary_messages[-1]
+    assert abs(header["joinTolerance"] - 0.02) < 1e-6
+
+
+@pytest.mark.parametrize("bad", ["bevel", "", True])
+def test_add_parametric_tube_joins_rejects_unknown(bad):
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="joins"):
+        c.add_parametric_tube("t", spine, widths, heights, joins=bad)
+
+
+def test_add_parametric_tube_strand_collapse_selects_miter_joins():
+    """strand_collapse snaps the mitered strip's rings, so it keeps the
+    default miter joins and is rejected together with an explicit "round"."""
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    c.add_parametric_tube("t", spine, widths, heights, strand_collapse=True)
+    header, _ = c._binary_messages[-1]
+    assert "joins" not in header
+    assert header["strandCollapse"] is True
+    c.add_parametric_tube(
+        "t",
+        spine,
+        widths,
+        heights,
+        strand_collapse={"max_snap_factor": 1.0},
+        joins="miter",
+    )
+    header, _ = c._binary_messages[-1]
+    assert "joins" not in header
+    with pytest.raises(ValueError, match="strand_collapse"):
+        c.add_parametric_tube(
+            "t", spine, widths, heights, strand_collapse=True, joins="round"
+        )
+
+
+@pytest.mark.parametrize(
+    "bad", [0.0, 1.0, -0.1, float("nan"), float("inf"), "0.1", True]
+)
+def test_add_parametric_tube_join_tolerance_rejects_out_of_range(bad):
+    c = _capture_client()
+    spine, widths, heights = _simple_tube_args()
+    with pytest.raises(ValueError, match="join_tolerance"):
+        c.add_parametric_tube("t", spine, widths, heights, join_tolerance=bad)
+
+
+def test_add_toolpath_forwards_joins():
+    from threejs_viewer import Toolpath
+
+    c = _capture_client()
+    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]], dtype=np.float32)
+    tp = Toolpath.from_points(pts, bead_width=0.5, bead_height=0.2)
+    c.add_toolpath("tp", tp, joins="round", join_tolerance=0.03, join_budget=None)
+    header, _ = c._binary_messages[-1]
+    assert header["joins"] == "round"
+    assert header["joinTolerance"] == 0.03
+    assert header["joinBudget"] is None
+
+
 def test_add_parametric_tube_strand_collapse_true_sets_header():
     c = _capture_client()
     spine, widths, heights = _simple_tube_args()
@@ -1898,12 +2013,16 @@ def test_parametric_tube_dense_riser_frames_frozen(viewer_client, viewer_page):
     _wait_for_object(viewer_page, "riser")
     worst = viewer_page.evaluate(
         """([id, n]) => {
-            const md = window.threejsViewer._objects.get(id).userData.tubeMorphData;
-            const lf = md.localFrames, tg = md.tangents;
-            const cone = (i) => Math.abs(tg[i * 3 + 2]) > 0.99;
+            const ud = window.threejsViewer._objects.get(id).userData;
+            const md = ud.tubeMorphData;
+            const lf = md.localFrames, tg = md.tangents, jv = ud.tubeJointVerts;
+            const jointOf = (i) => { for (let q = 0; q < jv.length; q++) if (jv[q] === i) return q; return -1; };
+            const cone = (i) => jointOf(i) < 0 && Math.abs(tg[i * 3 + 2]) > 0.99;
             // Every in-cone ring's V must equal a *bracketing out-of-cone*
             // ring's V verbatim (frame freeze). In-cone neighbors don't
             // count: a run touching the spine end has only one valid side.
+            // A joined elbow bounds the run with its outgoing ring (entry)
+            // or its incoming strip ring (exit).
             let worst = 1;
             for (let i = 0; i < n; i++) {
                 if (!cone(i)) continue;
@@ -1911,8 +2030,10 @@ def test_parametric_tube_dense_riser_frames_frozen(viewer_client, viewer_page):
                 let b = i; while (b < n - 1 && cone(b)) b++;
                 const dot = (j, k) =>
                     lf[j*6+3]*lf[k*6+3] + lf[j*6+4]*lf[k*6+4] + lf[j*6+5]*lf[k*6+5];
+                const dotJoint = (j, q) =>
+                    lf[j*6+3]*md.jointFrames[q*9+3] + lf[j*6+4]*md.jointFrames[q*9+4] + lf[j*6+5]*md.jointFrames[q*9+5];
                 let best = -1;
-                if (!cone(a)) best = Math.max(best, dot(i, a));
+                if (!cone(a)) best = Math.max(best, jointOf(a) >= 0 ? dotJoint(i, jointOf(a)) : dot(i, a));
                 if (!cone(b)) best = Math.max(best, dot(i, b));
                 if (best === -1) continue; // whole spine in cone: not this test
                 if (best < worst) worst = best;
@@ -1927,10 +2048,14 @@ def test_parametric_tube_dense_riser_frames_frozen(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_parametric_tube_miter_limit_bevels_sharp_corners(viewer_client, viewer_page):
-    """Turns sharper than 120 deg (miter ratio > TUBE_MITER_LIMIT = 2) drop to
-    a bevel; a 119 deg turn keeps its ~2x miter. The old limit of 4 let a
-    150 deg corner grow a 3.86x blade."""
+@pytest.mark.parametrize("joins", ["miter", "round"])
+def test_parametric_tube_miter_limit_bevels_sharp_corners(
+    viewer_client, viewer_page, joins
+):
+    """With joins="miter": turns sharper than 120 deg (miter ratio >
+    TUBE_MITER_LIMIT = 2) drop to a bevel; a 119 deg turn keeps its ~2x miter.
+    The old limit of 4 let a 150 deg corner grow a 3.86x blade. With round
+    joins both corners are beveled and carry a joint body instead."""
 
     def corner_spine(turn_deg):
         a = np.radians(turn_deg)
@@ -1950,6 +2075,7 @@ def test_parametric_tube_miter_limit_bevels_sharp_corners(viewer_client, viewer_
             spine=spine,
             widths=np.full(n, w, dtype=np.float32),
             heights=np.full(n, h, dtype=np.float32),
+            joins=joins,
         )
         _wait_for_object(viewer_page, name)
         # corner ring = index 4 (origin); max planar offset of its verts
@@ -1968,7 +2094,16 @@ def test_parametric_tube_miter_limit_bevels_sharp_corners(viewer_client, viewer_
             }""",
             [name, 4],
         )
+        joints = viewer_page.evaluate(
+            "id => Array.from(window.threejsViewer._objects.get(id).userData.tubeJointVerts)",
+            name,
+        )
+        assert joints == ([4] if joins == "round" else []), (name, joints)
     hw = w / 2
+    if joins == "round":
+        assert results["c150"] < hw * 1.05, results
+        assert results["c119"] < hw * 1.05, results
+        return
     # 150 deg: beveled -> corner verts stay within the unmitered half-width.
     assert results["c150"] < hw * 1.05, results
     # 119 deg: mitered -> widest vert sits at ~1.97x half-width along the

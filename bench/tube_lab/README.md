@@ -71,8 +71,11 @@ it needs a curvature-scaled step).
 
 - New scene: add a `scene_*()` returning
   `dict(sp, w, ht, lo, hi, cx, cy, ext)` and append to `SCENES`.
-- New approach: add `(label, spine_transform, strand_collapse_arg)` to
-  `APPROACHES`. A spine transform is
+- New approach: add `(label, spine_transform, strand_collapse_arg, joins)` to
+  `APPROACHES` (`joins` is `None` for the viewer default of round joins, or
+  `"miter"` for the plain mitered strip; a row with a `strand_collapse_arg`
+  renders the mitered strip either way, since collapse only applies to it).
+  A spine transform is
   `fn(sp, w, ht, lo, hi) -> (sp, w, ht, lo, hi)`; `spline(step)` /
   `lindens(step)` / `adaptive(step, pin_deg, dense_factor)` / `_identity`
   exist. `adaptive` is the curvature-adaptive resampler: pins vertices whose
