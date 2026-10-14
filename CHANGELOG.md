@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.71
 
 ### Bead texture handedness after reversals
 
