@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Bead texture handedness after reversals
+
+- A textured tube keeps one texture handedness across a reversal: on rings whose cross-section U axis the hairpin sweep left flipped, `v` is mirrored so the tile's sides stay on the same world side and the normal map's relief keeps one orientation. Before, every layer after a retrace (layers 48 and 52 of the boat hull) showed the other side of the tile with a mirrored relief and read as a differently shaded band. Applies to the main-thread build, the LOD worker, the draw-range frontier and the end cap.
+
 ## 0.0.70
 
 ### Round tube joins (issues #277, #278, supersedes PRs #280, #281, #282)

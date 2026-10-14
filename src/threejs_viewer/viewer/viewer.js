@@ -3180,6 +3180,35 @@ function tubeSectionTexV(out, width, height) {
     }
 }
 
+// Per-ring flag: 1 where the ring's U axis points against the constant-up
+// convention U = V x T. The hairpin sweep in buildTubeArrays flips U at a
+// tangent reversal and keeps it flipped for the rest of the run, which keeps
+// the strip from twisting but mirrors the ring's vertex order in the world.
+// The texture's v walks the ring from the +U side, so without this flag the
+// layers after a reversal showed the other side of the tile and a mirrored
+// normal-map relief, visibly shaded unlike their neighbours (boat layers 48
+// and 52). A ring whose V x T vanishes (frozen riser frame) carries the
+// previous ring's flag. Shared with the LOD worker via toString() injection.
+/**
+ * @param {Float32Array} localFrames - stride 6: U, V per ring
+ * @param {Float32Array} tangents - stride 3
+ * @param {number} nSpine
+ */
+function tubeTexMirrorFlags(localFrames, tangents, nSpine) {
+    const flags = new Uint8Array(nSpine);
+    let prev = 0;
+    for (let i = 0; i < nSpine; i++) {
+        const Ux = localFrames[i * 6],     Uy = localFrames[i * 6 + 1], Uz = localFrames[i * 6 + 2];
+        const Vx = localFrames[i * 6 + 3], Vy = localFrames[i * 6 + 4], Vz = localFrames[i * 6 + 5];
+        const Tx = tangents[i * 3], Ty = tangents[i * 3 + 1], Tz = tangents[i * 3 + 2];
+        const rx = Vy * Tz - Vz * Ty, ry = Vz * Tx - Vx * Tz, rz = Vx * Ty - Vy * Tx;
+        const d = Ux * rx + Uy * ry + Uz * rz;
+        if (Math.abs(d) > 1e-6) prev = d < 0 ? 1 : 0;
+        flags[i] = prev;
+    }
+    return flags;
+}
+
 // Write one ring of texture coordinates: u for the whole ring, texV across it.
 // With `section`, the ring is a revolution-cap ring at sin(θ) = sinT (signed
 // by the cap's direction): each vertex sweeps along the tangent by |cu|·sinT
@@ -3253,13 +3282,20 @@ function tubeUVPeriod(arc, n, length) {
  * @param {Uint32Array | null} jointVerts - spine indices carrying a round-join body
  * @param {number} jointVertBase - first joint vertex
  * @param {number} jointRings - revolution rings per joint half
+ * @param {Uint8Array | null} mirror - per-ring flags from tubeTexMirrorFlags, or null
  */
 function writeTubeUVs(uv, alt, arc, widths, heights, nSpine, nCs, nCapRings, breakMask, period,
-                      jointVerts, jointVertBase, jointRings) {
+                      jointVerts, jointVertBase, jointRings, mirror) {
     const texV = new Float32Array(nCs);
     const section = new Float32Array(nCs * 2);
-    for (let i = 0; i < nSpine; i++) {
+    // v across ring i, mirrored where the ring's U runs against the
+    // constant-up convention so the tile's sides stay on the same world side.
+    const ringTexV = (i) => {
         tubeSectionTexV(texV, widths[i], heights[i]);
+        if (mirror && mirror[i]) for (let k = 0; k < nCs; k++) texV[k] = 1 - texV[k];
+    };
+    for (let i = 0; i < nSpine; i++) {
+        ringTexV(i);
         writeTubeRingUVs(uv, alt, i * nCs, nCs, texV, arc[i], null, 0, period);
     }
     const startCapBase = nSpine * nCs;
@@ -3269,7 +3305,7 @@ function writeTubeUVs(uv, alt, arc, widths, heights, nSpine, nCs, nCapRings, bre
         const capBase = e === 0 ? startCapBase : endCapBase;
         const tSign = e === 0 ? -1 : 1;
         sampleChamferedRect(section, widths[i], heights[i]);
-        tubeSectionTexV(texV, widths[i], heights[i]);
+        ringTexV(i);
         for (let k = 0; k < nCapRings; k++) {
             const sinT = Math.sin(((k + 1) / nCapRings) * (Math.PI * 0.5)) * tSign;
             writeTubeRingUVs(uv, alt, capBase + k * nCs, nCs, texV, arc[i], section, sinT, period);
@@ -3296,7 +3332,7 @@ function writeTubeUVs(uv, alt, arc, widths, heights, nSpine, nCs, nCapRings, bre
         for (let q = 0; q < jointVerts.length; q++) {
             const i = jointVerts[q];
             sampleChamferedRect(section, widths[i], heights[i]);
-            tubeSectionTexV(texV, widths[i], heights[i]);
+            ringTexV(i);
             writeTubeRingUVs(uv, alt, base, nCs, texV, arc[i], null, 0, period);
             base += nCs;
             for (let e = 0; e < 2; e++) {
@@ -4413,6 +4449,8 @@ ${orientTubeTriangles.toString()}
 
 ${tubeSectionTexV.toString()}
 
+${tubeTexMirrorFlags.toString()}
+
 ${writeTubeRingUVs.toString()}
 
 ${tubeUVPeriod.toString()}
@@ -4620,13 +4658,14 @@ self.onmessage = function(e) {
 
     // Texture coordinates (textured tubes only): the kept points keep their
     // full-resolution arc length, so the image stays put across LOD levels.
-    let uv = null, uvAlt = null, uvPeriod = 0;
+    let uv = null, uvAlt = null, uvPeriod = 0, texMirror = null;
     if (redArc) {
         uv = new Float32Array(geo.totalVerts * 2);
         uvAlt = new Float32Array(geo.totalVerts);
         uvPeriod = tubeUVPeriod(redArc, nRed, tube.texLength);
+        texMirror = tubeTexMirrorFlags(geo.localFrames, geo.tangents, nRed);
         writeTubeUVs(uv, uvAlt, redArc, redWidths, redHeights, nRed, N_CS, N_CAP_RINGS, redBreakMask, uvPeriod,
-                     geo.jointVerts, geo.jointVertBase, geo.jointRings);
+                     geo.jointVerts, geo.jointVertBase, geo.jointRings, texMirror);
     }
 
     // Strand-collapse pass on the reduced spine. The reduced mesh sees
@@ -4659,7 +4698,7 @@ self.onmessage = function(e) {
         // Worker-side timing, kept on tubeLOD.lastTiming for benches.
         timing: { totalMs: performance.now() - tUpdate0, buildMs: performance.now() - tBuild0 },
         positions: geo.positions, normals: geo.normals, colors: geo.colors, indices: geo.indices,
-        uv, uvAlt, uvPeriod, reducedArc: redArc,
+        uv, uvAlt, uvPeriod, reducedArc: redArc, texMirror,
         localFrames: geo.localFrames, miters: geo.miters, tangents: geo.tangents,
         capAngles: geo.capAngles, endCapPattern: geo.endCapPattern,
         ringPairs: geo.ringPairs, indicesPerRingPair: geo.indicesPerRingPair,
@@ -5756,6 +5795,7 @@ class ParametricTube {
             vOffs: msg.reducedVOffs || null,
             arc: msg.reducedArc || null,
             uvPeriod: msg.uvPeriod || 0,
+            texMirror: msg.texMirror || null,
             savedRingUVs: null,
             savedRingUVAlt: null,
         };
@@ -5969,6 +6009,9 @@ class ParametricTube {
             md.morphedState.u = u;
             if (!md._texVScratch) md._texVScratch = new Float32Array(nCs);
             tubeSectionTexV(md._texVScratch, w, h);
+            if (md.texMirror && md.texMirror[iB]) {
+                for (let k = 0; k < nCs; k++) md._texVScratch[k] = 1 - md._texVScratch[k];
+            }
             const altAttr = obj.geometry.getAttribute('uvAlt');
             writeTubeRingUVs(uvAttr.array, altAttr ? altAttr.array : null, iB * nCs, nCs,
                              md._texVScratch, u, null, 0, md.uvPeriod);
@@ -6060,6 +6103,9 @@ class ParametricTube {
             const u = md.morphedState ? md.morphedState.u : md.arc[lastVisibleRing];
             if (!md._texVScratch) md._texVScratch = new Float32Array(nCs);
             tubeSectionTexV(md._texVScratch, w, h);
+            if (md.texMirror && md.texMirror[lastVisibleRing]) {
+                for (let k = 0; k < nCs; k++) md._texVScratch[k] = 1 - md._texVScratch[k];
+            }
             const altAttr = obj.geometry.getAttribute('uvAlt');
             for (let k = 0; k < nCapRings; k++) {
                 writeTubeRingUVs(uvAttr.array, altAttr ? altAttr.array : null, ecBase + k * nCs, nCs,
@@ -17904,14 +17950,16 @@ export class ThreeJSViewer {
                             buildOrientations, upVector, buildRingColors, buildVOffs, buildBreakMask,
                             joinTol, joinEps, joinRings, joinBudget,
                         );
+                        let texMirror = null;
                         if (buildArc) {
                             const nVerts = geometry.getAttribute('position').count;
                             const uv = new Float32Array(nVerts * 2);
                             const uvAlt = new Float32Array(nVerts);
                             uvPeriod = tubeUVPeriod(buildArc, buildN, texLength);
+                            texMirror = tubeTexMirrorFlags(localFrames, builtTangents, buildN);
                             writeTubeUVs(uv, uvAlt, buildArc, buildWidths, buildHeights, buildN, nCs,
                                          capAngles.length, buildBreakMask, uvPeriod,
-                                         jointVerts, jointVertBase, builtJointRings);
+                                         jointVerts, jointVertBase, builtJointRings, texMirror);
                             geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
                             geometry.setAttribute('uvAlt', new THREE.BufferAttribute(uvAlt, 1));
                         }
@@ -17998,6 +18046,7 @@ export class ThreeJSViewer {
                             vOffs: buildVOffs ? new Float32Array(buildVOffs) : null,
                             arc: buildArc,
                             uvPeriod,
+                            texMirror,
                             savedRingUVs: null,
                             savedRingUVAlt: null,
                         };
