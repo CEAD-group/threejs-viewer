@@ -1745,8 +1745,9 @@ function applyOpacity(obj, opacity) {
         // only legible on a depth-priming mesh (see resolveHighlightStyle) — so a highlight
         // riding on this mesh may need to swap style. Collected and re-applied
         // after the walk: re-applying rebuilds the outline child, and mutating
-        // the tree mid-traverse is how you skip a node.
-        if (child.userData.__highlightEdge && child.userData.__highlightOpts) highlighted.push(child);
+        // the tree mid-traverse is how you skip a node. Keyed on the retained
+        // opts, not the outline, since a highlighted skinned mesh may have none.
+        if (child.userData.__highlightOpts) highlighted.push(child);
     });
     for (const child of highlighted) applyHighlight(child, true, child.userData.__highlightOpts);
 }
@@ -1789,13 +1790,19 @@ const HIGHLIGHT_DEFAULT_THRESHOLD_DEG = 30;
  * `depthTest: false` hull would paint its backfaces over the object body), so
  * a silhouette highlight is hidden by objects in front of it, where the edge
  * outline draws always-on-top.
- * @param {THREE.BufferGeometry} geometry
+ *
+ * For a skinned source (issue #288) the hull is a `SkinnedMesh` bound to the
+ * source's skeleton with the same bind matrix and bind mode, so the GPU poses
+ * it with the very bone matrices that pose the mesh and it follows every
+ * clip or bone change with no per-frame work; it extrudes along the skinned
+ * normal.
+ * @param {any} source  the mesh being outlined
  * @param {THREE.Color} color
  * @param {number} widthPx
  * @param {{value: THREE.Vector2}} resolution  shared drawing-buffer size uniform
  * @returns {THREE.Mesh}
  */
-function buildHighlightSilhouette(geometry, color, widthPx, resolution) {
+function buildHighlightSilhouette(source, color, widthPx, resolution) {
     const mat = new THREE.MeshBasicMaterial({
         color, side: THREE.BackSide,
         depthWrite: false, toneMapped: false, fog: false,
@@ -1815,7 +1822,13 @@ function buildHighlightSilhouette(geometry, color, widthPx, resolution) {
                 // Push along the normal in clip space: normalize in NDC, then
                 // scale by w so the offset stays constant in pixels with
                 // perspective divide (and is simply constant under ortho).
+                // Skinned: objectNormal is the posed normal (transformedNormal
+                // is negated under BackSide's FLIP_SIDED).
+                #ifdef USE_SKINNING
+                vec3 outlineN = normalize(normalMatrix * objectNormal);
+                #else
                 vec3 outlineN = normalize(normalMatrix * normal);
+                #endif
                 vec2 outlineDir = (projectionMatrix * vec4(outlineN, 0.0)).xy;
                 if (length(outlineDir) > 1e-8) {
                     gl_Position.xy += normalize(outlineDir)
@@ -1826,7 +1839,14 @@ function buildHighlightSilhouette(geometry, color, widthPx, resolution) {
     // Distinct cache key: the stock MeshBasicMaterial program must not be
     // reused for (or replaced by) this patched one.
     mat.customProgramCacheKey = () => 'tjsv-highlight-silhouette';
-    const hull = new THREE.Mesh(geometry, mat);
+    let hull;
+    if (source.isSkinnedMesh) {
+        hull = new THREE.SkinnedMesh(source.geometry, mat);
+        hull.bind(source.skeleton, source.bindMatrix);
+        hull.bindMode = source.bindMode;
+    } else {
+        hull = new THREE.Mesh(source.geometry, mat);
+    }
     hull.userData.__highlightSharedGeometry = true;
     return hull;
 }
@@ -1881,20 +1901,24 @@ function meshPrimesDepth(child) {
 /**
  * Resolve the outline style actually usable on this mesh. `'silhouette'`
  * degrades to `'edges'` when the hull could not represent the mesh honestly:
- * a skinned mesh (the hull's basic material is un-skinned, so it would lag the
- * skeleton), geometry with no `normal` attribute (nothing to extrude along, so
- * the hull collapses onto the mesh), or a mesh that cannot prime the depth
- * buffer the hull is culled against (the hull would paint a solid shell — see
+ * geometry with no `normal` attribute (nothing to extrude along, so the hull
+ * collapses onto the mesh), or a mesh that cannot prime the depth buffer the
+ * hull is culled against (the hull would paint a solid shell — see
  * meshPrimesDepth).
+ *
+ * A skinned mesh gets no `'edges'` outline at all and resolves to `null`
+ * (issue #288): EdgesGeometry reads the unskinned positions and LineSegments
+ * is not skinned, so the outline would be drawn in the bind pose, away from
+ * the mesh on screen.
  * @param {any} child
  * @param {string} wantStyle
- * @returns {string}
+ * @returns {string|null}
  */
 function resolveHighlightStyle(child, wantStyle) {
-    if (wantStyle !== 'silhouette') return 'edges';
-    if (child.isSkinnedMesh) return 'edges';
-    if (!child.geometry.attributes || !child.geometry.attributes.normal) return 'edges';
-    if (!meshPrimesDepth(child)) return 'edges';
+    const fallback = child.isSkinnedMesh ? null : 'edges';
+    if (wantStyle !== 'silhouette') return fallback;
+    if (!child.geometry.attributes || !child.geometry.attributes.normal) return fallback;
+    if (!meshPrimesDepth(child)) return fallback;
     return 'silhouette';
 }
 
@@ -1917,12 +1941,12 @@ function resolveHighlightStyle(child, wantStyle) {
  * `'edges'` is the EdgesGeometry feature-edge outline, always-on-top, with a
  * tunable threshold angle (issue #158).
  *
- * A skinned mesh, one whose geometry carries no `normal` attribute, or one
- * that cannot prime the depth buffer falls back to `'edges'` (see
- * resolveHighlightStyle): the hull is drawn with a plain (un-skinned) basic
- * material, extrudes along the normal, and is culled by the object's own
- * depth — so it would respectively lag the skeleton, collapse onto the mesh,
- * or paint a solid shell. The depth case is the translucent object, and a
+ * A mesh whose geometry carries no `normal` attribute, or one that cannot
+ * prime the depth buffer, falls back to `'edges'` (see resolveHighlightStyle):
+ * the hull extrudes along the normal and is culled by the object's own
+ * depth, so it would respectively collapse onto the mesh or paint a solid
+ * shell. A skinned mesh in either case gets no outline, since the edge
+ * outline is not skinned (issue #288). The depth case is the translucent object, and a
  * later `set_opacity` on an already-highlighted mesh re-resolves the style
  * from the retained opts so the order of the two calls does not matter.
  * @param {THREE.Object3D} obj
@@ -1973,8 +1997,9 @@ function applyHighlight(obj, enabled, opts = {}) {
                 return;
             }
             if (existing) disposeHighlightOutline(child, existing);  // style change
+            if (style === null) return;  // nothing honest to draw (skinned mesh)
             const outline = style === 'silhouette'
-                ? buildHighlightSilhouette(child.geometry, col, widthPx, resolution)
+                ? buildHighlightSilhouette(child, col, widthPx, resolution)
                 : buildHighlightEdges(child.geometry, col, thr);
             // Draw after the object so the hull tests against a depth buffer
             // that already holds it (an opaque object may otherwise sort after
