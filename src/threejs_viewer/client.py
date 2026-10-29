@@ -3745,7 +3745,10 @@ class ViewerClient:
         ``depthWrite`` cleared — i.e. anything with ``opacity < 1``, whether
         from :meth:`set_opacity` or an add-time ``opacity=`` — is outlined
         with ``"edges"`` instead, whatever ``style`` asks for. The same
-        fallback covers skinned meshes and geometry with no vertex normals.
+        fallback covers geometry with no vertex normals. A skinned mesh gets
+        a silhouette that follows its bones, and no outline where it would
+        otherwise get ``"edges"``, because the edge outline is drawn in the
+        bind pose.
 
         **Known limitation:** that leaves one combination with no visible
         highlight — a *smooth* translucent body (a sphere, a fillet), where

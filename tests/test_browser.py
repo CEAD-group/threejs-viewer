@@ -8869,6 +8869,130 @@ _WORLD_POS_JS = """(id) => {
 }"""
 
 
+_SKINNED_ARM_JS = """
+async () => {
+ const T = await import('three');
+ const v = window.threejsViewer;
+ // A bar along X with smooth normals: a flat-faced box seen face-on gives
+ // the hull nothing to push outward.
+ const geo = new T.CylinderGeometry(0.25, 0.25, 4, 16, 8).rotateZ(-Math.PI / 2);
+ const pos = geo.attributes.position;
+ const idx = [], wts = [];
+ for (let i = 0; i < pos.count; i++) {
+  idx.push(pos.getX(i) > 1e-6 ? 1 : 0, 0, 0, 0);
+  wts.push(1, 0, 0, 0);
+ }
+ geo.setAttribute('skinIndex', new T.Uint16BufferAttribute(idx, 4));
+ geo.setAttribute('skinWeight', new T.Float32BufferAttribute(wts, 4));
+ const root = new T.Bone();
+ const elbow = new T.Bone();
+ root.add(elbow);
+ const mesh = new T.SkinnedMesh(geo, new T.MeshStandardMaterial({ color: 0x1133aa }));
+ const rig = v._objects.get('rig');
+ rig.add(root);
+ rig.add(mesh);
+ rig.updateMatrixWorld(true);
+ mesh.bind(new T.Skeleton([root, elbow]));
+ // Fold the right half up: the posed arm is an L, the bind pose a straight bar.
+ elbow.rotation.z = Math.PI / 2;
+ window.__elbow = elbow;
+}
+"""
+
+# Render and count selection-orange pixels inside two screen windows: the
+# right half of the bind-pose bar (empty once folded) and the folded-up arm.
+_ORANGE_IN_WINDOWS_JS = """
+async () => {
+ const T = await import('three');
+ const v = window.threejsViewer;
+ v._scene.updateMatrixWorld(true);
+ v._renderer.render(v._scene, v._camera);
+ const gl = v._renderer.getContext();
+ const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+ const px = new Uint8Array(w * h * 4);
+ gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+ const toPx = (x, y) => {
+  const p = new T.Vector3(x, y, 0).project(v._camera);
+  return [(p.x + 1) / 2 * w, (p.y + 1) / 2 * h];
+ };
+ const count = (x0, y0, x1, y1) => {
+  const [ax, ay] = toPx(x0, y0), [bx, by] = toPx(x1, y1);
+  let n = 0;
+  for (let y = Math.floor(Math.min(ay, by)); y <= Math.ceil(Math.max(ay, by)); y++) {
+   for (let x = Math.floor(Math.min(ax, bx)); x <= Math.ceil(Math.max(ax, bx)); x++) {
+    const i = (y * w + x) * 4;
+    if (px[i] > 150 && px[i + 1] > 80 && px[i + 1] < 200 && px[i + 2] < 90) n++;
+   }
+  }
+  return n;
+ };
+ return { bindBar: count(0.8, -0.4, 2.0, 0.4), foldedArm: count(-0.4, 0.8, 0.4, 2.0) };
+}
+"""
+
+
+@pytest.mark.browser
+def test_set_highlight_follows_skinned_pose(viewer_client, viewer_page):
+    """A skinned mesh's silhouette hull is a SkinnedMesh on the source's
+    skeleton, so it outlines the posed shape and keeps following the bones;
+    before, the edge fallback drew the bind pose (issue #288)."""
+    viewer_client.add_group("rig")
+    viewer_client.set_camera(position=[0, 0, 12], target=[0, 0, 0], up=[0, 1, 0])
+    settle(viewer_client)
+    viewer_page.evaluate(_SKINNED_ARM_JS)
+
+    viewer_client.set_highlight("rig", width_px=6)
+    state = _wait_highlight_state(viewer_page, "rig", lambda s: s["outlines"] == 1)
+    assert state["outlineStyles"] == ["silhouette"]
+    hull = viewer_page.evaluate(
+        "() => {"
+        " let h = null;"
+        " window.threejsViewer._objects.get('rig').traverse((c) => {"
+        "  if (c.userData.__highlightOutline) h = c;"
+        " });"
+        " return { skinned: !!h.isSkinnedMesh,"
+        "          sameSkeleton: h.skeleton === h.parent.skeleton,"
+        "          sameBindMatrix: h.bindMatrix.equals(h.parent.bindMatrix) };"
+        "}"
+    )
+    assert hull == {"skinned": True, "sameSkeleton": True, "sameBindMatrix": True}
+
+    folded = viewer_page.evaluate(_ORANGE_IN_WINDOWS_JS)
+    assert folded["foldedArm"] > 20, folded
+    assert folded["bindBar"] == 0, f"outline drawn in the bind pose: {folded}"
+
+    # Straighten the arm: the outline moves with the bone, no re-send needed.
+    viewer_page.evaluate("() => { window.__elbow.rotation.z = 0; }")
+    straight = viewer_page.evaluate(_ORANGE_IN_WINDOWS_JS)
+    assert straight["bindBar"] > 20, straight
+    assert straight["foldedArm"] == 0, straight
+
+
+@pytest.mark.browser
+def test_set_highlight_skips_skinned_mesh_without_a_silhouette(
+    viewer_client, viewer_page
+):
+    """The edge outline is not skinned, so a skinned mesh that cannot take a
+    silhouette (style="edges", or translucent) gets no outline rather than a
+    bind-pose one, and gains the hull once it turns opaque (issue #288)."""
+    viewer_client.add_group("rig")
+    settle(viewer_client)
+    viewer_page.evaluate(_SKINNED_ARM_JS)
+
+    viewer_client.set_highlight("rig", style="edges")
+    settle(viewer_client)
+    assert _highlight_state(viewer_page, "rig")["outlines"] == 0
+
+    viewer_client.set_opacity("rig", 0.4)
+    viewer_client.set_highlight("rig")
+    settle(viewer_client)
+    assert _highlight_state(viewer_page, "rig")["outlines"] == 0
+
+    viewer_client.set_opacity("rig", 1.0)
+    state = _wait_highlight_state(viewer_page, "rig", lambda s: s["outlines"] == 1)
+    assert state["outlineStyles"] == ["silhouette"]
+
+
 @pytest.mark.browser
 @pytest.mark.parametrize(
     "kwargs",
