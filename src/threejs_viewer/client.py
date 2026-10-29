@@ -850,6 +850,10 @@ class ViewerClient:
         # cmin/cmax fixed at add_points time, whether it has a time window).
         # Dropped on replace-by-LOD, delete(id), and clear().
         self._points_flat: Dict[str, dict] = {}
+        # add_usda groups: id -> child object ids currently in the viewer, so
+        # a reload replaces them in place and deletes the ones that vanished.
+        # Dropped on delete(id) and clear().
+        self._usd_children: Dict[str, List[str]] = {}
         # Blob keys of appends already handed to the viewer, oldest first.
         # Unlike an add_* blob (one per object) a stream produces one per
         # update forever, so they are evicted after the browser has had ample
@@ -2249,6 +2253,125 @@ class ViewerClient:
         if transform:
             header["transform"] = transform
         self._send_binary(header, b"".join(parts))
+
+    def add_usda(
+        self,
+        source,
+        id: Optional[str] = None,
+        *,
+        color: int = 0x7C9CC4,
+        opacity: float = 1.0,
+        metalness: float = 0.1,
+        roughness: float = 0.55,
+        edges: bool = True,
+        edge_color: int = 0x10151D,
+        edge_width: float = 1.5,
+        surface_angle: float = 10.0,
+        curve_angle: float = 10.0,
+        chord_height: float = 0.0,
+        y_up: bool = False,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        visible: bool = True,
+    ) -> str:
+        """
+        Add USD BRep geometry to the scene: shaded faces plus BRep edges.
+
+        Needs the optional ``usd_brep`` package, which tessellates the exact
+        geometry. Calling it again with the same ``id`` replaces the geometry
+        in place, which is how a watched file is reloaded.
+
+        Args:
+            source: A ``.usda``/``.usdc``/``.usd`` file path (every BrepArray
+                prim, or its Mesh prims when the file holds no BReps), a
+                ``usd_brep.Brep``, a ``usd_brep.PolyBrep``, or a list of those.
+            id: Group id the bodies are added under. Defaults to the file
+                stem for a path, otherwise ``"usd"``.
+            color: Face color (hex)
+            opacity: Face opacity (0.0 = invisible, 1.0 = fully opaque)
+            metalness: PBR metalness (0-1)
+            roughness: PBR roughness (0-1)
+            edges: Draw the BRep edges over the faces
+            edge_color: Edge color (hex)
+            edge_width: Edge width in pixels
+            surface_angle: Surface angular tolerance in degrees; smaller is finer
+            curve_angle: Curve angular tolerance in degrees; smaller is finer
+            chord_height: Max distance between mesh and true surface in
+                modeling units; ``0`` disables the criterion
+            y_up: Convert Y-up geometry to the viewer's Z-up
+            parent: Optional parent group id
+            position: [x, y, z] position
+            rotation: [x, y, z] Euler rotation in radians
+            scale: [x, y, z] scale
+            visible: Initial visibility
+
+        Returns:
+            The group id. Bodies live under it as ``{id}/body{i}`` and
+            ``{id}/body{i}/edges``.
+
+        ``parent``, the transform and ``visible`` apply when the group is
+        first added; a reload keeps the existing group.
+        """
+        from .usd import is_usd_path, load_bodies
+
+        if id is None:
+            id = Path(source).stem if is_usd_path(source) else "usd"
+        bodies = load_bodies(
+            source,
+            surface_angle=surface_angle,
+            curve_angle=curve_angle,
+            chord_height=chord_height,
+        )
+
+        def to_viewer(points):
+            if not y_up:
+                return points
+            return np.stack([points[:, 0], -points[:, 2], points[:, 1]], axis=1)
+
+        previous = self._usd_children.get(id)
+        if previous is None:
+            self.add_group(
+                id,
+                parent=parent,
+                position=position,
+                rotation=rotation,
+                scale=scale,
+                visible=visible,
+            )
+        children: List[str] = []
+        for i, body in enumerate(bodies):
+            mesh_id = f"{id}/body{i}"
+            self.add_mesh(
+                mesh_id,
+                to_viewer(body.positions),
+                body.indices,
+                normals=to_viewer(body.normals),
+                color=color,
+                opacity=opacity,
+                metalness=metalness,
+                roughness=roughness,
+                parent=id,
+                # Push the faces back so the edges on them don't z-fight.
+                polygon_offset=1.0 if edges else None,
+            )
+            children.append(mesh_id)
+            if edges and len(body.edges):
+                edge_id = f"{mesh_id}/edges"
+                self.add_polyline(
+                    edge_id,
+                    to_viewer(body.edges),
+                    color=edge_color,
+                    line_width=edge_width,
+                    parent=id,
+                    segments=True,
+                )
+                children.append(edge_id)
+        for stale in set(previous or ()) - set(children):
+            self.delete(stale)
+        self._usd_children[id] = children
+        return id
 
     def add_points(
         self,
@@ -3676,6 +3799,7 @@ class ViewerClient:
         """Delete an object from the scene."""
         self._release_points_lod(id)
         self._points_flat.pop(id, None)
+        self._usd_children.pop(id, None)
         self._drop_append_blobs(id)
         self._send({"type": "delete_object", "id": id})
 
@@ -5614,6 +5738,7 @@ class ViewerClient:
         # clear must raise rather than land on nothing — and their retained
         # append blobs can never be fetched again, so drop them with the state.
         self._points_flat.clear()
+        self._usd_children.clear()
         self._drop_append_blobs()
         self._send({"type": "clear_scene"})
 

@@ -146,6 +146,23 @@ v.set_opacity("box1", 0.5)
 v.set_color("ball", 0xFF0000, opacity=0.3)
 ```
 
+### USD BRep geometry
+
+```python
+# Needs the usd_brep package, which tessellates the exact geometry.
+# Shaded faces plus BRep edges; takes a usd_brep Brep or a USD file path.
+v.add_usda(brep)
+v.add_usda("part.usda")
+
+# Calling it again with the same id replaces the geometry in place.
+# Handy for re-running a modelling script or reloading a file when it changes.
+v.add_usda("part.usda", id="part")
+```
+
+`examples/39_usd_connecting_rod.py` models an engine connecting rod and shows it on a floor grid.
+
+![Connecting rod modelled with usd_brep booleans](docs/media/usd_connecting_rod.png)
+
 ### Transforms
 
 ```python
