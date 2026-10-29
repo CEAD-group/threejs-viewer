@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.72
+
+### USD BRep geometry (#285)
+
+- `add_usda(source, id=None, ...)` shows exact CAD geometry as shaded faces plus BRep edges. `source` is a `.usda`/`.usdc`/`.usd` path, a `usd_brep.Brep`/`PolyBrep`, or a list of those; a file contributes every BrepArray prim, or its Mesh prims when it has no BReps. Tessellation uses the optional `usd_brep` package, imported on first use, with `surface_angle`, `curve_angle` and `chord_height` as knobs. Each body is an unwelded `add_mesh` with the source surfaces' corner normals, so sharp edges stay sharp, and the edges are one `segments=True` polyline, under the group `id` as `{id}/body{i}` and `{id}/body{i}/edges`. Calling it again with the same id replaces the bodies in place and deletes the ones that vanished. Geometry is taken as Z-up unless `y_up=True`. Python only; example `39_usd_connecting_rod.py`.
+
+### Skinned mesh highlight follows the pose (#289, issue #288)
+
+- `set_highlight` on a skinned mesh draws the silhouette in its posed shape. The hull is a `SkinnedMesh` bound to the source's skeleton, bind matrix and bind mode, so it follows the bones and any clip or `bind_clip` driving them. Before, skinned meshes fell back to the `edges` outline, which is not skinned and was drawn in the bind pose (a drag chain's cables highlighted as a straight line metres behind the folded chain).
+- A skinned mesh that would get `edges` (asked for, translucent, or without normals) now gets no outline instead of a bind-pose one, and gains the silhouette once it turns opaque.
+- CI: the browser job runs on `ubuntu-24.04`, since Playwright cannot install browsers on `ubuntu-latest` (26.04).
+
 ## 0.0.71
 
 ### Bead texture handedness after reversals
