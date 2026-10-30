@@ -131,6 +131,9 @@
             padding: 6px 26px 8px 8px;
             color: var(--tjsv-text);
             font-size: 12px;
+            /* A touch scroll that reaches the end of the body must not chain to the page. */
+            overscroll-behavior: contain;
+            touch-action: pan-y;
         }
         .threejs-viewer .tjsv-menu-status {
             color: var(--tjsv-text-dim);
@@ -157,6 +160,26 @@
             color: var(--tjsv-text-dim);
             margin: 6px 0 2px;
         }
+        .threejs-viewer .tjsv-menu-section {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 0;
+            cursor: pointer;
+            user-select: none;
+        }
+        .threejs-viewer .tjsv-menu-section:hover { color: var(--tjsv-text); }
+        .threejs-viewer .tjsv-menu-section:focus { outline: none; }
+        .threejs-viewer .tjsv-menu-section:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
+        .threejs-viewer .tjsv-menu-chevron {
+            width: 0;
+            height: 0;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid currentColor;
+            transition: transform 0.15s;
+        }
+        .threejs-viewer .tjsv-menu-section.collapsed .tjsv-menu-chevron { transform: rotate(-90deg); }
         .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 6px 0; }
         .threejs-viewer .tjsv-menu-custom { margin: 2px 0; }
 
@@ -8317,13 +8340,17 @@ class CameraController {
 //   replacing the object walk) for layers that are not plain id shapes;
 //   an `apply` that returns `false` vetoes the flip (the row reverts and
 //   onChange does not fire).
+//   A `label` with `collapsible: true` heads a foldable section: the rows
+//   after it, up to the next `divider` or collapsible label, hide while it
+//   is collapsed (`collapsed`, default false; persisted under storageKey
+//   like the other values; getValue/setItem({collapsed}) read and set it).
 
 /** @typedef {{
  *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
  *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
  *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
  *   match?: (objId: string) => boolean, apply?: (on: boolean, item: MenuItemSpec) => (boolean|void),
- *   disabled?: any, hidden?: any,
+ *   disabled?: any, hidden?: any, collapsible?: boolean, collapsed?: any,
  *   onClick?: (item: MenuItemSpec) => void,
  *   onChange?: (value: any, item: MenuItemSpec) => void,
  *   render?: (el: HTMLElement, item: MenuItemSpec) => void,
@@ -8493,6 +8520,8 @@ class MenuController {
             spec: { ...spec, mode, items: (spec.items || []).map(it => ({ ...it })) },
             open: false, root: null, button: null, body: null,
             /** @type {Map<string, any>} */ items: new Map(),
+            /** @type {any[]} every item record in body order, with or without an id */ order: [],
+            /** @type {WeakMap<object, boolean>} fold state of collapsible labels without an id */ folds: new WeakMap(),
             state: /** @type {Record<string, any>} */ ({}),
         };
         if (spec.storageKey) {
@@ -8641,6 +8670,28 @@ class MenuController {
         if (type === 'divider') {
             el = document.createElement('div');
             el.className = 'tjsv-menu-divider';
+        } else if (type === 'label' && it.collapsible) {
+            // Focusable role=button, so Chromium's touch adjustment treats the
+            // header as a tap target instead of moving the tap onto the next control.
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-caption tjsv-menu-section';
+            el.setAttribute('role', 'button');
+            el.tabIndex = 0;
+            const chev = document.createElement('span');
+            chev.className = 'tjsv-menu-chevron';
+            chev.setAttribute('aria-hidden', 'true');
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            el.appendChild(chev);
+            el.appendChild(lab);
+            el.addEventListener('click', () => this._toggleSection(m, rec));
+            el.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                // Space would otherwise also reach the viewer's play/pause key.
+                e.preventDefault(); e.stopPropagation();
+                this._toggleSection(m, rec);
+            });
         } else if (type === 'label') {
             el = document.createElement('div');
             el.className = 'tjsv-menu-caption';
@@ -8734,6 +8785,7 @@ class MenuController {
             }
         }
         if (it.id) m.items.set(it.id, rec);
+        m.order.push(rec);
         m.body.appendChild(el);
     }
 
@@ -8744,6 +8796,10 @@ class MenuController {
         if (!it) return undefined;
         const type = it.type || 'button';
         if (it.id && it.id in m.state) return m.state[it.id];
+        if (type === 'label' && it.collapsible) {
+            const local = m.folds.get(it);
+            return local !== undefined ? local : !!evalProp(it.collapsed, it);
+        }
         if (type === 'toggle' || type === 'eye') {
             const c = evalProp(it.checked, it);
             return c === undefined ? type === 'eye' : !!c;
@@ -8773,6 +8829,25 @@ class MenuController {
         if (typeof it.onClick === 'function') it.onClick(it);
         this._emit(m, it, undefined);
         this.refresh(m);
+    }
+
+    /** Fold or unfold a collapsible label's section. @param {any} m @param {any} rec */
+    _toggleSection(m, rec) {
+        const it = rec.spec;
+        if (evalProp(it.disabled, it)) return;
+        const collapsed = !this._valueOf(m, it);
+        this._setFold(m, it, collapsed);
+        if (typeof it.onChange === 'function') it.onChange(collapsed, it);
+        this._emit(m, it, collapsed);
+    }
+
+    /** @param {any} m @param {MenuItemSpec} it @param {boolean} collapsed */
+    _setFold(m, it, collapsed) {
+        if (it.id) { m.state[it.id] = collapsed; this._persist(m); }
+        else m.folds.set(it, collapsed);
+        this.refresh(m);
+        // The body height changed, so the cap and the upward lift recompute.
+        if (m.open) this._placeBody(m);
     }
 
     /** Value change of any stateful item. @param {any} m @param {any} rec @param {any} value */
@@ -8813,6 +8888,9 @@ class MenuController {
         const it = rec.spec;
         Object.assign(it, patch || {});
         if ('options' in patch) it.options = normalizeOptions(it.options);
+        if ('collapsed' in patch && it.collapsible) {
+            this._setFold(m, it, !!evalProp(patch.collapsed, it));
+        }
         if ('checked' in patch || 'value' in patch) {
             const v = 'checked' in patch ? !!patch.checked : patch.value;
             if (it.id) m.state[it.id] = v;
@@ -8847,18 +8925,28 @@ class MenuController {
     refresh(only) {
         const targets = only ? [only] : [...this._menus.values()];
         for (const m of targets) {
-            for (const rec of m.items.values()) this._paint(m, rec);
-            // Items without an id (dividers, captions) never change.
+            // A divider or the next collapsible label ends a section.
+            let folded = false;
+            for (const rec of m.order) {
+                const type = rec.spec.type || 'button';
+                if (type === 'divider') folded = false;
+                if (type === 'label' && rec.spec.collapsible) {
+                    this._paint(m, rec, false);
+                    folded = !rec.el.hidden && !!this._valueOf(m, rec.spec);
+                } else {
+                    this._paint(m, rec, folded);
+                }
+            }
         }
     }
 
-    /** @param {any} m @param {any} rec */
-    _paint(m, rec) {
+    /** @param {any} m @param {any} rec @param {boolean} [folded] inside a collapsed section */
+    _paint(m, rec, folded = false) {
         const it = rec.spec;
         const el = rec.el;
         if (!el) return;
         const type = it.type || 'button';
-        el.hidden = !!evalProp(it.hidden, it);
+        el.hidden = folded || !!evalProp(it.hidden, it);
         const disabled = !!evalProp(it.disabled, it);
         el.classList.toggle('disabled', disabled);
         if (el instanceof HTMLButtonElement) el.disabled = disabled;
@@ -8880,6 +8968,10 @@ class MenuController {
             }
             const st = el.querySelector('.tjsv-menu-state');
             if (st) st.textContent = evalProp(it.state, it) ?? '';
+        } else if (type === 'label' && it.collapsible) {
+            const collapsed = !!this._valueOf(m, it);
+            el.setAttribute('aria-expanded', String(!collapsed));
+            el.classList.toggle('collapsed', collapsed);
         } else if (type === 'select') {
             const v = this._valueOf(m, it);
             if (rec.input && v !== undefined) rec.input.value = String(v);

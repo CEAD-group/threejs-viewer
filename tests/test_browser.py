@@ -7590,6 +7590,159 @@ def test_python_add_menu_round_trip(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_add_menu_collapsible_sections(viewer_client, viewer_page):
+    """A collapsible label folds the rows up to the next divider or
+    collapsible label: the body shrinks, aria-expanded flips, Enter and Space
+    toggle it, setItem/getValue drive it and onMenuAction reports it."""
+    page = viewer_page
+    page.evaluate(
+        "() => {"
+        " window.__log = [];"
+        " const v = window.threejsViewer;"
+        " v.addMenu({id: 'sec', label: 'Sec', items: ["
+        "   {type: 'label', id: 'a', label: 'A', collapsible: true},"
+        "   {type: 'toggle', id: 'a1', label: 'A1'},"
+        "   {type: 'label', label: 'Plain caption'},"
+        "   {type: 'toggle', id: 'a2', label: 'A2', hidden: () => window.__hideA2},"
+        "   {type: 'divider'},"
+        "   {type: 'toggle', id: 'after', label: 'After'},"
+        "   {type: 'label', id: 'b', label: 'B', collapsible: true, collapsed: true},"
+        "   {type: 'toggle', id: 'b1', label: 'B1'},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push([a.item, a.type, a.value]));"
+        "}"
+    )
+    page.locator("[data-menu=sec] .tjsv-menu-btn").click()
+
+    def snap():
+        return page.evaluate(
+            "() => { const r = document.querySelector('[data-menu=sec]');"
+            " const vis = id => !r.querySelector(`[data-item=${id}]`).hidden;"
+            " return {a1: vis('a1'), a2: vis('a2'), after: vis('after'), b1: vis('b1'),"
+            "  caption: [...r.querySelectorAll('.tjsv-menu-caption')]"
+            "     .find(e => e.textContent === 'Plain caption').hidden === false,"
+            "  aExp: r.querySelector('[data-item=a]').getAttribute('aria-expanded'),"
+            "  bExp: r.querySelector('[data-item=b]').getAttribute('aria-expanded'),"
+            "  h: r.querySelector('.tjsv-menu').offsetHeight}; }"
+        )
+
+    start = snap()
+    assert {k: v for k, v in start.items() if k != "h"} == {
+        "a1": True,
+        "a2": True,
+        "after": True,
+        "b1": False,
+        "caption": True,
+        "aExp": "true",
+        "bExp": "false",
+    }
+    header = page.locator("[data-menu=sec] [data-item=a]")
+    assert header.get_attribute("role") == "button"
+    assert header.get_attribute("tabindex") == "0"
+    header.click()
+    folded = snap()
+    assert folded["a1"] is False and folded["a2"] is False
+    assert folded["caption"] is False
+    assert folded["after"] is True, "the divider ends the section"
+    assert folded["aExp"] == "false"
+    assert folded["h"] < start["h"]
+
+    # Enter unfolds and Space folds.
+    header.focus()
+    page.keyboard.press("Enter")
+    assert snap()["a1"] is True
+    page.keyboard.press(" ")
+    assert snap()["a1"] is False
+
+    # The item's own hidden still applies once the section is open again.
+    page.evaluate(
+        "() => { window.__hideA2 = true;"
+        " window.threejsViewer.getMenu('sec').setItem('a', {collapsed: false}); }"
+    )
+    opened = snap()
+    assert opened["a1"] is True and opened["a2"] is False
+    menu = "window.threejsViewer.getMenu('sec')"
+    assert page.evaluate(f"() => {menu}.getValue('a')") is False
+    assert page.evaluate(f"() => {menu}.getValue('b')") is True
+    page.locator("[data-menu=sec] [data-item=b]").click()
+    assert snap()["b1"] is True
+    assert page.evaluate("() => window.__log") == [
+        ["a", "label", True],
+        ["a", "label", False],
+        ["a", "label", True],
+        ["b", "label", False],
+    ]
+
+
+@pytest.mark.browser
+def test_python_menu_section_fold_persists_across_reload(viewer_client, viewer_page):
+    """With a storageKey the fold state survives a page reload (the menu is
+    replayed on reconnect), and the fold reaches Python as a label action."""
+    import threading
+
+    page = viewer_page
+    page.evaluate(
+        "() => { try { localStorage.removeItem('tjsv-test.sec'); } catch (e) {} }"
+    )
+    got = []
+    ev = threading.Event()
+
+    def cb(action):
+        got.append(action)
+        ev.set()
+
+    viewer_client.on_menu_action(cb)
+    viewer_client.add_menu(
+        "py",
+        label="Py",
+        storage_key="tjsv-test.sec",
+        items=[
+            {"type": "label", "id": "s", "label": "S", "collapsible": True},
+            {"type": "toggle", "id": "t", "label": "T"},
+        ],
+    )
+    settle(viewer_client)
+    page.locator("[data-menu=py] .tjsv-menu-btn").click()
+    page.locator("[data-menu=py] [data-item=s]").click()
+    assert ev.wait(5), "no menu_action reached Python"
+    assert got == [{"menu": "py", "item": "s", "type": "label", "value": True}]
+    stored = page.evaluate("() => JSON.parse(localStorage.getItem('tjsv-test.sec'))")
+    assert stored == {"s": True}
+
+    page.reload()
+    page.wait_for_selector("[data-menu=py] [data-item=t]", state="attached")
+    assert page.evaluate(
+        "() => [document.querySelector('[data-item=t]').hidden,"
+        "       document.querySelector('[data-item=s]').getAttribute('aria-expanded')]"
+    ) == [True, "false"]
+
+
+@pytest.mark.browser
+def test_menu_body_contains_overscroll_on_short_viewer(viewer_client, viewer_page):
+    """A long body in a short viewer is capped and scrolls, and its scroll
+    does not chain to the page on touch."""
+    page = viewer_page
+    page.set_viewport_size({"width": 800, "height": 260})
+    frames(page)
+    out = page.evaluate(
+        "() => { const items = [];"
+        " for (let i = 0; i < 40; i++)"
+        "   items.push({type: 'toggle', id: 't' + i, label: 'Row ' + i});"
+        " const m = window.threejsViewer.addMenu({id: 'long', label: 'Long', items});"
+        " m.open();"
+        " const b = m.el.querySelector('.tjsv-menu'); const cs = getComputedStyle(b);"
+        " return {overscroll: cs.overscrollBehaviorY, touch: cs.touchAction,"
+        "         overflow: cs.overflowY, scrolls: b.scrollHeight > b.clientHeight}; }"
+    )
+    assert out == {
+        "overscroll": "contain",
+        "touch": "pan-y",
+        "overflow": "auto",
+        "scrolls": True,
+    }
+
+
+@pytest.mark.browser
 def test_status_chip_neutral_default_and_set_status(viewer_client, viewer_page):
     """autoConnect:false defaults the status chip to a neutral 'Local data'
     instead of 'Waiting for Python...' (issue #78); setStatus lets the

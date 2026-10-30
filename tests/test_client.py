@@ -909,6 +909,48 @@ def test_add_menu_rejects_bad_specs(kwargs, match):
         client.add_menu(**kwargs)
 
 
+def test_add_menu_collapsible_label_payload_and_update():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_menu(
+        "demo",
+        items=[
+            {"type": "label", "id": "sec", "label": "Scene", "collapsible": True},
+            {"type": "toggle", "id": "t", "label": "T"},
+            {"type": "label", "id": "sec2", "collapsible": True, "collapsed": True},
+        ],
+    )
+    items = sent[0]["menu"]["items"]
+    assert items[0] == {
+        "type": "label",
+        "id": "sec",
+        "label": "Scene",
+        "collapsible": True,
+    }
+    assert items[2]["collapsed"] is True
+    client.update_menu_item("demo", "sec", collapsed=True)
+    assert sent[-1]["patch"] == {"collapsed": True}
+    assert client._menus["demo"]["menu"]["items"][0]["collapsed"] is True
+    with pytest.raises(ValueError, match="must be a bool"):
+        client.update_menu_item("demo", "sec", collapsed="yes")
+
+
+@pytest.mark.parametrize(
+    "item, match",
+    [
+        ({"type": "label", "collapsible": 1}, "must be a bool"),
+        ({"type": "label", "collapsible": True, "collapsed": "no"}, "must be a bool"),
+        ({"type": "toggle", "id": "t", "collapsible": True}, "'label' items only"),
+    ],
+)
+def test_add_menu_rejects_bad_collapsible(item, match):
+    client = ViewerClient()
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match=match):
+        client.add_menu("m", items=[item])
+
+
 def test_update_menu_item_unknown_raises():
     client = ViewerClient()
     client._send = lambda m: None
