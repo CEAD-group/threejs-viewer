@@ -2651,10 +2651,11 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
             return { x: t.x, y: t.y, z: t.z };
         }"""
     )
-    # Visible box center is the origin; allow a small slack for floating point.
-    assert abs(target["x"]) < 1e-3, target
-    assert abs(target["y"]) < 1e-3, target
-    assert abs(target["z"]) < 1e-3, target
+    # Visible box center is the origin; the perspective fit may shift the
+    # target sideways within the box (#287), never toward the hidden one.
+    assert abs(target["x"]) < 0.02, target
+    assert abs(target["y"]) < 0.02, target
+    assert abs(target["z"]) < 0.02, target
 
     # resetView: same expectation — orbit target snaps to the visible content.
     target = viewer_page.evaluate(
@@ -2665,9 +2666,9 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
             return { x: t.x, y: t.y, z: t.z };
         }"""
     )
-    assert abs(target["x"]) < 1e-3, target
-    assert abs(target["y"]) < 1e-3, target
-    assert abs(target["z"]) < 1e-3, target
+    assert abs(target["x"]) < 0.02, target
+    assert abs(target["y"]) < 0.02, target
+    assert abs(target["z"]) < 0.02, target
 
     # Re-show the hidden box: framing should now include it.
     viewer_client.set_visible("far", True)
@@ -6450,7 +6451,9 @@ def test_embedder_camera_pose_and_frame_box(viewer_client, viewer_page):
         " return [t.x, t.y, t.z];"
         "}"
     )
-    assert target == pytest.approx([12.0, 12.0, 12.0], abs=1e-4)
+    # The perspective fit shifts the target sideways on the view axis so the
+    # projected corners fill the view evenly; it stays inside the box (#287).
+    assert target == pytest.approx([12.0, 12.0, 12.0], abs=0.5)
 
     # invalid input degrades to a warning, never throws
     assert viewer_page.evaluate(
@@ -7587,6 +7590,159 @@ def test_python_add_menu_round_trip(viewer_client, viewer_page):
     viewer_client.remove_menu("py")
     settle(viewer_client)
     assert page.evaluate("() => document.querySelector('[data-menu=py]')") is None
+
+
+@pytest.mark.browser
+def test_add_menu_collapsible_sections(viewer_client, viewer_page):
+    """A collapsible label folds the rows up to the next divider or
+    collapsible label: the body shrinks, aria-expanded flips, Enter and Space
+    toggle it, setItem/getValue drive it and onMenuAction reports it."""
+    page = viewer_page
+    page.evaluate(
+        "() => {"
+        " window.__log = [];"
+        " const v = window.threejsViewer;"
+        " v.addMenu({id: 'sec', label: 'Sec', items: ["
+        "   {type: 'label', id: 'a', label: 'A', collapsible: true},"
+        "   {type: 'toggle', id: 'a1', label: 'A1'},"
+        "   {type: 'label', label: 'Plain caption'},"
+        "   {type: 'toggle', id: 'a2', label: 'A2', hidden: () => window.__hideA2},"
+        "   {type: 'divider'},"
+        "   {type: 'toggle', id: 'after', label: 'After'},"
+        "   {type: 'label', id: 'b', label: 'B', collapsible: true, collapsed: true},"
+        "   {type: 'toggle', id: 'b1', label: 'B1'},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push([a.item, a.type, a.value]));"
+        "}"
+    )
+    page.locator("[data-menu=sec] .tjsv-menu-btn").click()
+
+    def snap():
+        return page.evaluate(
+            "() => { const r = document.querySelector('[data-menu=sec]');"
+            " const vis = id => !r.querySelector(`[data-item=${id}]`).hidden;"
+            " return {a1: vis('a1'), a2: vis('a2'), after: vis('after'), b1: vis('b1'),"
+            "  caption: [...r.querySelectorAll('.tjsv-menu-caption')]"
+            "     .find(e => e.textContent === 'Plain caption').hidden === false,"
+            "  aExp: r.querySelector('[data-item=a]').getAttribute('aria-expanded'),"
+            "  bExp: r.querySelector('[data-item=b]').getAttribute('aria-expanded'),"
+            "  h: r.querySelector('.tjsv-menu').offsetHeight}; }"
+        )
+
+    start = snap()
+    assert {k: v for k, v in start.items() if k != "h"} == {
+        "a1": True,
+        "a2": True,
+        "after": True,
+        "b1": False,
+        "caption": True,
+        "aExp": "true",
+        "bExp": "false",
+    }
+    header = page.locator("[data-menu=sec] [data-item=a]")
+    assert header.get_attribute("role") == "button"
+    assert header.get_attribute("tabindex") == "0"
+    header.click()
+    folded = snap()
+    assert folded["a1"] is False and folded["a2"] is False
+    assert folded["caption"] is False
+    assert folded["after"] is True, "the divider ends the section"
+    assert folded["aExp"] == "false"
+    assert folded["h"] < start["h"]
+
+    # Enter unfolds and Space folds.
+    header.focus()
+    page.keyboard.press("Enter")
+    assert snap()["a1"] is True
+    page.keyboard.press(" ")
+    assert snap()["a1"] is False
+
+    # The item's own hidden still applies once the section is open again.
+    page.evaluate(
+        "() => { window.__hideA2 = true;"
+        " window.threejsViewer.getMenu('sec').setItem('a', {collapsed: false}); }"
+    )
+    opened = snap()
+    assert opened["a1"] is True and opened["a2"] is False
+    menu = "window.threejsViewer.getMenu('sec')"
+    assert page.evaluate(f"() => {menu}.getValue('a')") is False
+    assert page.evaluate(f"() => {menu}.getValue('b')") is True
+    page.locator("[data-menu=sec] [data-item=b]").click()
+    assert snap()["b1"] is True
+    assert page.evaluate("() => window.__log") == [
+        ["a", "label", True],
+        ["a", "label", False],
+        ["a", "label", True],
+        ["b", "label", False],
+    ]
+
+
+@pytest.mark.browser
+def test_python_menu_section_fold_persists_across_reload(viewer_client, viewer_page):
+    """With a storageKey the fold state survives a page reload (the menu is
+    replayed on reconnect), and the fold reaches Python as a label action."""
+    import threading
+
+    page = viewer_page
+    page.evaluate(
+        "() => { try { localStorage.removeItem('tjsv-test.sec'); } catch (e) {} }"
+    )
+    got = []
+    ev = threading.Event()
+
+    def cb(action):
+        got.append(action)
+        ev.set()
+
+    viewer_client.on_menu_action(cb)
+    viewer_client.add_menu(
+        "py",
+        label="Py",
+        storage_key="tjsv-test.sec",
+        items=[
+            {"type": "label", "id": "s", "label": "S", "collapsible": True},
+            {"type": "toggle", "id": "t", "label": "T"},
+        ],
+    )
+    settle(viewer_client)
+    page.locator("[data-menu=py] .tjsv-menu-btn").click()
+    page.locator("[data-menu=py] [data-item=s]").click()
+    assert ev.wait(5), "no menu_action reached Python"
+    assert got == [{"menu": "py", "item": "s", "type": "label", "value": True}]
+    stored = page.evaluate("() => JSON.parse(localStorage.getItem('tjsv-test.sec'))")
+    assert stored == {"s": True}
+
+    page.reload()
+    page.wait_for_selector("[data-menu=py] [data-item=t]", state="attached")
+    assert page.evaluate(
+        "() => [document.querySelector('[data-item=t]').hidden,"
+        "       document.querySelector('[data-item=s]').getAttribute('aria-expanded')]"
+    ) == [True, "false"]
+
+
+@pytest.mark.browser
+def test_menu_body_contains_overscroll_on_short_viewer(viewer_client, viewer_page):
+    """A long body in a short viewer is capped and scrolls, and its scroll
+    does not chain to the page on touch."""
+    page = viewer_page
+    page.set_viewport_size({"width": 800, "height": 260})
+    frames(page)
+    out = page.evaluate(
+        "() => { const items = [];"
+        " for (let i = 0; i < 40; i++)"
+        "   items.push({type: 'toggle', id: 't' + i, label: 'Row ' + i});"
+        " const m = window.threejsViewer.addMenu({id: 'long', label: 'Long', items});"
+        " m.open();"
+        " const b = m.el.querySelector('.tjsv-menu'); const cs = getComputedStyle(b);"
+        " return {overscroll: cs.overscrollBehaviorY, touch: cs.touchAction,"
+        "         overflow: cs.overflowY, scrolls: b.scrollHeight > b.clientHeight}; }"
+    )
+    assert out == {
+        "overscroll": "contain",
+        "touch": "pan-y",
+        "overflow": "auto",
+        "scrolls": True,
+    }
 
 
 @pytest.mark.browser
@@ -9471,6 +9627,199 @@ def test_object_click_skips_hidden_ancestor(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_object_click_skips_hidden_and_unpickable_descendants(
+    viewer_client, viewer_page
+):
+    """A hidden descendant of a visible group is not hit, so it neither
+    resolves to that group nor occludes the visible child behind it, and a
+    pickable=False subtree is a passthrough as for click-to-pivot (issue #287)."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    viewer_client.add_box(
+        "shell",
+        width=6,
+        height=6,
+        depth=0.5,
+        position=[0, 0, 2],
+        parent="grp",
+        visible=False,
+    )
+    viewer_client.add_group("vol", pickable=False)
+    viewer_client.add_box(
+        "fill", width=2, height=2, depth=0.5, position=[0, 0, 3], parent="vol"
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    hit_at = """([x, y, z]) => { const v = window.threejsViewer;
+      const w = v._renderer.domElement.clientWidth,
+            h = v._renderer.domElement.clientHeight;
+      const r = v._renderer.domElement.getBoundingClientRect();
+      const ndc = v._camera.position.clone().set(x, y, z).project(v._camera);
+      const hit = v._hitTrackedObject(r.left + (ndc.x*0.5+0.5)*w,
+                                      r.top + (-ndc.y*0.5+0.5)*h);
+      return hit && hit.id; }"""
+    # Through the hidden shell and the unpickable fill onto the child.
+    assert viewer_page.evaluate(hit_at, [0, 0, 0]) == "child"
+    # Through only the hidden shell: nothing, not the parent group.
+    assert viewer_page.evaluate(hit_at, [2, 0, 0]) is None
+
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_frame_object_ignores_hidden_and_grid_descendants(viewer_client, viewer_page):
+    """frameObject applies the framing rules of F/Home: a hidden mesh and a
+    parented floor grid under the group leave its fit unchanged, while an
+    object with nothing visible still frames its own extent (issue #287)."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    settle(viewer_client)
+    dist = """(id) => { const v = window.threejsViewer;
+      v.frameObject(v._objects.get(id));
+      return v._camera.position.distanceTo(v._controls.target); }"""
+    before = viewer_page.evaluate(dist, "grp")
+
+    viewer_client.add_box(
+        "shell",
+        width=40,
+        height=40,
+        depth=40,
+        position=[30, 0, 0],
+        parent="grp",
+        visible=False,
+    )
+    viewer_client.add_grid("floor", extent=200, parent="grp")
+    settle(viewer_client)
+    assert viewer_page.evaluate(dist, "grp") == pytest.approx(before, rel=1e-6)
+    # Framing the hidden shell itself falls back to its full box.
+    assert viewer_page.evaluate(dist, "shell") > 10 * before
+
+
+# Shared page helpers for the framing tests: set an oblique pose, run a framing
+# call, and measure the projected NDC extent of a point set and the view direction.
+_FRAME_HELPERS = """() => {
+  const v = window.threejsViewer;
+  window.__frame = {
+    pose(ortho, pos = [7, -3, 4], up = [0, 0, 1]) {
+      if (v._isOrtho !== ortho) v._switchCamera(ortho);
+      v._camera.up.set(...up);
+      v._camera.position.set(...pos);
+      v._controls.target.set(0, 0, 0);
+      v._camera.lookAt(0, 0, 0);
+      v._controls.update();
+    },
+    dir() {
+      return v._camera.position.clone().sub(v._controls.target).normalize().toArray();
+    },
+    dist() { return v._camera.position.distanceTo(v._controls.target); },
+    ndc(boxes) {
+      v._camera.updateMatrixWorld(true);
+      let mx = 0, my = 0;
+      for (const [min, max] of boxes) for (let i = 0; i < 8; i++) {
+        const n = v._camera.position.clone().set(
+          i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]
+        ).project(v._camera);
+        mx = Math.max(mx, Math.abs(n.x)); my = Math.max(my, Math.abs(n.y));
+      }
+      return [mx, my];
+    },
+  };
+}"""
+
+_BOX = [[-1, -0.5, -2], [3, 0.5, 1]]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_frame_fill_is_the_same_in_both_projections(viewer_client, viewer_page, ortho):
+    """`fill` is the share of the half-view the projected corners span on the
+    tighter axis, identical in perspective and ortho; a bare frameBox number
+    is the old margin, fill = 1 / margin; the default is 0.9 (issue #287)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    for opts, want in (
+        ({"fill": 0.8}, 0.8),
+        ({}, 0.9),
+        (1.25, 0.8),
+        ({"fill": 1}, 1.0),
+    ):
+        got = viewer_page.evaluate(
+            "([ortho, box, opts]) => { const f = window.__frame; f.pose(ortho);"
+            " window.threejsViewer.frameBox(box[0], box[1], opts);"
+            " return f.ndc([box]); }",
+            [ortho, _BOX, opts],
+        )
+        assert max(got) == pytest.approx(want, rel=0.01)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_framing_keeps_view_direction(viewer_client, viewer_page, ortho):
+    """Every framing call except Home keeps the view direction, including a
+    straight-down view framed twice, which must stay exactly top-down."""
+    viewer_client.add_box("a", position=[2, 1, 0])
+    viewer_client.add_box("b", width=3, position=[-4, 2, 1])
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    calls = [
+        "v.frameObject('a')",
+        "v.frameObject(v.getObject('b'), {fill: 0.5})",
+        "v.frameBox([0,0,0], [1,2,3])",
+        "v.frameBoxes([{min:[0,0,0], max:[1,1,1]}, {min:[5,5,5], max:[6,7,8]}])",
+        "v.framePoints([[0,0,0], [4,-2,1], {x: 1, y: 5, z: -3}])",
+        "v.frameAll()",
+    ]
+    for call in calls:
+        before, after = viewer_page.evaluate(
+            "([ortho, call]) => { const f = window.__frame, v = window.threejsViewer;"
+            " f.pose(ortho); const d0 = f.dir(); eval(call); return [d0, f.dir()]; }",
+            [ortho, call],
+        )
+        assert after == pytest.approx(before, abs=1e-9), call
+    top = viewer_page.evaluate(
+        "(ortho) => { const f = window.__frame, v = window.threejsViewer;"
+        " f.pose(ortho, [0, 0, 10], [0, 1, 0]);"
+        " v.framePoints([[-3,-1,0], [5,2,1]]); v.framePoints([[-3,-1,0], [5,2,1]]);"
+        " return f.dir(); }",
+        ortho,
+    )
+    assert top == [0, 0, 1]
+
+
+@pytest.mark.browser
+def test_home_fits_diagonal_parts_tighter_than_one_world_box(
+    viewer_client, viewer_page
+):
+    """Home frames one box per top-level object, so a long diagonal rail of
+    parts sits closer than its common AABB would put it, while every part
+    still fits inside the default fill."""
+    rail = []
+    for i in range(4):
+        c = [i * 1.0, i * 4.0, i * 3.0]  # diagonal on screen from Home
+        viewer_client.add_box(f"rail{i}", width=1, height=1, depth=1, position=c)
+        rail.append([[x - 0.5 for x in c], [x + 0.5 for x in c]])
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    parts, ndc, whole = viewer_page.evaluate(
+        "(rail) => { const f = window.__frame, v = window.threejsViewer;"
+        " v.resetView(); const d = f.dist(); const n = f.ndc(rail);"
+        " v.frameBox([-0.5, -0.5, -0.5], [3.5, 12.5, 9.5]);"
+        " return [d, n, f.dist()]; }",
+        rail,
+    )
+    assert max(ndc) == pytest.approx(0.9, rel=0.01)
+    assert parts < 0.9 * whole
+
+
+@pytest.mark.browser
 def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
     """A pointercancel between press and release (a cancelled touch or pen)
     clears the pending press, so the later pointerup is not a click."""
@@ -10134,11 +10483,11 @@ def test_model_cache_skipped_for_python_sidecar(viewer_client, viewer_page):
 
 # ========== Axis Control (rotary / linear range widgets) ==========
 
-_AXIS_CONTROL_SPHERE_PX = """(id) => {
+_AXIS_CONTROL_HANDLE_PX = """(id) => {
   const v = window.threejsViewer;
   const c = v._axisControls.controls.get(id);
   if (!c) return null;
-  const p = c.sphere.getWorldPosition(new v._camera.position.constructor());
+  const p = c.marker.getWorldPosition(new v._camera.position.constructor());
   p.project(v._camera);
   const w = v._renderer.domElement.clientWidth, h = v._renderer.domElement.clientHeight;
   return { x: (p.x * 0.5 + 0.5) * w, y: (-p.y * 0.5 + 0.5) * h };
@@ -10152,15 +10501,15 @@ def _axis_control_state(viewer_page, id):
         "(id) => { const c = window.threejsViewer._axisControls.controls.get(id);"
         " if (!c) return null;"
         " return { value: c.value, min: c.min, max: c.max, kind: c.kind,"
-        " spherePos: c.sphere.position.toArray(), groupPos: c.group.position.toArray() }; }",
+        " markerPos: c.marker.position.toArray(), groupPos: c.group.position.toArray() }; }",
         id,
     )
 
 
 def _drag_axis_control(viewer_page, id, dx, dy, steps=10):
     viewer_page.evaluate(_GIZMO_TOPDOWN)
-    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, id)
-    assert p is not None, f"axis control {id!r} sphere not found"
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, id)
+    assert p is not None, f"axis control {id!r} handle not found"
     cx, cy = p["x"], p["y"]
     viewer_page.mouse.move(cx, cy)
     viewer_page.mouse.down()
@@ -10171,7 +10520,7 @@ def _drag_axis_control(viewer_page, id, dx, dy, steps=10):
 
 @pytest.mark.browser
 def test_axis_control_linear_basic_geometry(viewer_client, viewer_page):
-    """add_axis_control('linear') places the sphere at `value` along the
+    """add_axis_control('linear') places the handle at `value` along the
     target's local axis and the line spans [min, max]."""
     viewer_client.add_box("mount", position=[1, 2, 3])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
@@ -10191,7 +10540,7 @@ def test_axis_control_linear_basic_geometry(viewer_client, viewer_page):
     )
 
     state = _axis_control_state(viewer_page, "elz")
-    assert state["spherePos"] == pytest.approx([0.4, 0, 0], abs=1e-6)
+    assert state["markerPos"] == pytest.approx([0.4, 0, 0], abs=1e-6)
     assert state["groupPos"] == pytest.approx([1, 2, 3], abs=1e-6)
 
     line_ends = viewer_page.evaluate(
@@ -10208,7 +10557,7 @@ def test_axis_control_linear_basic_geometry(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_axis_control_rotary_basic_geometry(viewer_client, viewer_page):
-    """add_axis_control('rotary') places the sphere on a circle of the given
+    """add_axis_control('rotary') places the handle on a circle of the given
     radius, in the plane perpendicular to the axis."""
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
@@ -10228,7 +10577,7 @@ def test_axis_control_rotary_basic_geometry(viewer_client, viewer_page):
         viewer_page, "() => window.threejsViewer._axisControls.controls.has('j1')"
     )
     state = _axis_control_state(viewer_page, "j1")
-    assert state["spherePos"] == pytest.approx(
+    assert state["markerPos"] == pytest.approx(
         [0, 2.0, 0], abs=1e-6
     )  # cos(0)=1, sin(0)=0
 
@@ -10236,10 +10585,10 @@ def test_axis_control_rotary_basic_geometry(viewer_client, viewer_page):
     _wait_for(
         viewer_page,
         "() => Math.abs(window.threejsViewer._axisControls.controls.get('j1')"
-        ".sphere.position.z - 2.0) < 1e-4",
+        ".marker.position.z - 2.0) < 1e-4",
     )
     state = _axis_control_state(viewer_page, "j1")
-    assert state["spherePos"] == pytest.approx([0, 0, 2.0], abs=1e-4)
+    assert state["markerPos"] == pytest.approx([0, 0, 2.0], abs=1e-4)
 
 
 @pytest.mark.browser
@@ -10333,7 +10682,7 @@ def test_axis_control_follows_moving_target(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_axis_control_linear_drag_reports_value(viewer_client, viewer_page):
-    """Dragging a linear control's sphere updates its value locally and
+    """Dragging a linear control's handle updates its value locally and
     reports {id, value, phase} through on_axis_control_change."""
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
@@ -10369,7 +10718,7 @@ def test_axis_control_linear_drag_reports_value(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_axis_control_rotary_drag_reports_value(viewer_client, viewer_page):
-    """Dragging a rotary control's sphere rotates it around its axis."""
+    """Dragging a rotary control's handle rotates it around its axis."""
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
     viewer_client.add_axis_control(
@@ -10400,8 +10749,8 @@ def test_axis_control_rotary_drag_reports_value(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_axis_control_hover_highlights_sphere(viewer_client, viewer_page):
-    """Hovering (not dragging) a control's sphere brightens its material; the
+def test_axis_control_hover_highlights_handle(viewer_client, viewer_page):
+    """Hovering (not dragging) a control's handle brightens its material; the
     resting colour is restored once the pointer moves away."""
     viewer_client.add_box("mount", position=[0, 0, 0])
     _wait_for(viewer_page, "() => window.threejsViewer._objects.has('mount')")
@@ -10420,13 +10769,13 @@ def test_axis_control_hover_highlights_sphere(viewer_client, viewer_page):
     )
     viewer_page.evaluate(_GIZMO_TOPDOWN)
 
-    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "elz")
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "elz")
     viewer_page.mouse.move(p["x"], p["y"])
     _wait_for(
         viewer_page,
         "() => window.threejsViewer._axisControls.controls.get('elz')._hovered === true",
     )
-    # A fixed corner, not an offset from the sphere: an offset risks landing
+    # A fixed corner, not an offset from the handle: an offset risks landing
     # outside the default viewport, where a synthetic mouse move may not
     # deliver a real 'pointermove' at all.
     viewer_page.mouse.move(20, 20)
@@ -10468,7 +10817,7 @@ def test_axis_control_custom_hover_color(viewer_client, viewer_page):
     base = colors()
     assert base == {"line": 0x4488FF, "handle": 0x4488FF}
 
-    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "elz")
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "elz")
     viewer_page.mouse.move(p["x"], p["y"])
     _wait_for(
         viewer_page,
@@ -10727,7 +11076,7 @@ def test_axis_control_remove_mid_drag_restores_orbit(viewer_client, viewer_page)
     settle(viewer_client)
     viewer_page.evaluate(_GIZMO_TOPDOWN)
     frames(viewer_page)
-    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "rail")
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "rail")
     viewer_page.mouse.move(p["x"], p["y"])
     viewer_page.mouse.down()
     viewer_page.mouse.move(p["x"] + 10, p["y"])
@@ -10764,7 +11113,7 @@ def test_axis_control_press_is_not_an_object_click(viewer_client, viewer_page):
     target_before = viewer_page.evaluate(
         "() => window.threejsViewer._controls.target.toArray()"
     )
-    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "rail")
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "rail")
     viewer_page.mouse.move(p["x"], p["y"])
     viewer_page.mouse.down()
     viewer_page.mouse.up()
@@ -10804,6 +11153,198 @@ def test_axis_control_rotary_guide_caps_at_one_turn(viewer_client, viewer_page):
     )
     assert r["step"] == pytest.approx(2 * math.pi / 64, abs=1e-6)
     assert r["value"] == pytest.approx(7.0)
+
+
+# Top-down camera at a given distance (perspective) or zoom (ortho), aimed at the origin.
+_AXIS_CONTROL_CAMERA = """([dist, zoom]) => {
+  const v = window.threejsViewer;
+  const cam = v._camera;
+  cam.position.set(0, 0, dist); cam.up.set(0, 1, 0);
+  v._controls.target.set(0, 0, 0); cam.lookAt(0, 0, 0);
+  if (cam.isOrthographicCamera) cam.zoom = zoom;
+  cam.updateProjectionMatrix();
+  v._controls.update(); cam.updateMatrixWorld(true);
+}"""
+
+# Largest screen offset, perpendicular to an x-axis handle at its value, that
+# the handle pick still accepts; plus the handle's projected length in px.
+_AXIS_CONTROL_PICK_REACH = """([id, pointerType]) => {
+  const v = window.threejsViewer;
+  const m = v._axisControls;
+  const c = m.controls.get(id);
+  const rect = v._renderer.domElement.getBoundingClientRect();
+  const px = (x) => {
+    const p = c.group.localToWorld(new v._camera.position.constructor(x, 0, 0)).project(v._camera);
+    return { x: rect.left + (p.x * 0.5 + 0.5) * rect.width, y: rect.top + (-p.y * 0.5 + 0.5) * rect.height };
+  };
+  const mid = px(c.value);
+  let reach = -1;
+  for (let d = 0; d <= 80; d += 0.25) {
+    if (m._pickHandle(mid.x, mid.y + d, pointerType) === c) reach = d; else break;
+  }
+  const a = px(c.value - 0.05), b = px(c.value + 0.05);
+  return { reach, lengthPx: Math.hypot(b.x - a.x, b.y - a.y) };
+}"""
+
+
+@pytest.mark.browser
+def test_axis_control_press_off_handle_does_not_drag(viewer_client, viewer_page):
+    """Issue #284: close in, a press 40 px beside the handle used to land in
+    the 0.1 m pick sphere. The pixel test only accepts presses near the drawn
+    handle, and a press on it still drags and reports."""
+    viewer_client.add_group("mount")
+    viewer_client.add_axis_control(
+        "rail",
+        target_id="mount",
+        axis="x",
+        kind="linear",
+        value=0.0,
+        min=-1.0,
+        max=1.0,
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { window.__acChanges = [];"
+        " window.threejsViewer.onAxisControlChange(m => window.__acChanges.push(m)); }"
+    )
+    viewer_page.evaluate(_AXIS_CONTROL_CAMERA, [1.5, 1])
+    frames(viewer_page)
+    viewer_page.evaluate(_AXIS_CONTROL_CAMERA, [1.5, 1])
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "rail")
+
+    viewer_page.mouse.move(p["x"], p["y"] + 40)
+    viewer_page.mouse.down()
+    active = viewer_page.evaluate("() => window.threejsViewer._axisControls._active")
+    viewer_page.mouse.move(p["x"] + 30, p["y"] + 40)
+    viewer_page.mouse.up()
+    frames(viewer_page)
+    assert active is None
+    assert viewer_page.evaluate("() => window.__acChanges") == []
+
+    viewer_page.evaluate(_AXIS_CONTROL_CAMERA, [1.5, 1])
+    frames(viewer_page)
+    viewer_page.evaluate(_AXIS_CONTROL_CAMERA, [1.5, 1])
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "rail")
+    viewer_page.mouse.move(p["x"], p["y"] + 3)
+    viewer_page.mouse.down()
+    for i in range(1, 11):
+        viewer_page.mouse.move(p["x"] + i * 10, p["y"] + 3)
+    viewer_page.mouse.up()
+    _wait_for(
+        viewer_page,
+        "() => window.__acChanges.length && window.__acChanges.at(-1).phase === 'end'",
+    )
+    end = viewer_page.evaluate("() => window.__acChanges.at(-1)")
+    assert end["id"] == "rail"
+    assert end["value"] > 0.05, end
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_axis_control_pick_radius_is_screen_constant(viewer_client, viewer_page, ortho):
+    """The pick radius is the same number of pixels at two camera distances
+    (perspective) or zooms (ortho), while the handle itself grows on screen.
+    pick_radius_px overrides it and a touch press gets a wider default."""
+    viewer_client.add_group("mount")
+    viewer_client.add_axis_control(
+        "rail",
+        target_id="mount",
+        axis="x",
+        kind="linear_unlimited",
+        value=0.0,
+    )
+    settle(viewer_client)
+    if ortho:
+        viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+        _wait_for(
+            viewer_page, "() => window.threejsViewer._camera.isOrthographicCamera"
+        )
+    settings = [[16, 1], [4, 4]]
+    results = []
+    for dist, zoom in settings:
+        viewer_page.evaluate(_AXIS_CONTROL_CAMERA, [dist, zoom])
+        frames(viewer_page)
+        viewer_page.evaluate(_AXIS_CONTROL_CAMERA, [dist, zoom])
+        results.append(
+            viewer_page.evaluate(_AXIS_CONTROL_PICK_REACH, ["rail", "mouse"])
+        )
+    # Default: half the 12 px handle width plus a 5 px margin.
+    for r in results:
+        assert r["reach"] == pytest.approx(11, abs=0.3), results
+    assert results[1]["lengthPx"] > 3 * results[0]["lengthPx"], results
+
+    touch = viewer_page.evaluate(_AXIS_CONTROL_PICK_REACH, ["rail", "touch"])
+    assert touch["reach"] == pytest.approx(20, abs=0.3), touch
+
+    viewer_client.update_axis_control("rail", pick_radius_px=25)
+    _wait_for(
+        viewer_page,
+        "() => window.threejsViewer._axisControls.controls.get('rail').pickRadiusPx === 25",
+    )
+    viewer_page.evaluate(_AXIS_CONTROL_CAMERA, settings[1])
+    custom = viewer_page.evaluate(_AXIS_CONTROL_PICK_REACH, ["rail", "mouse"])
+    assert custom["reach"] == pytest.approx(25, abs=0.3), custom
+
+
+@pytest.mark.browser
+def test_move_gizmo_wins_over_axis_control_on_small_box(viewer_client, viewer_page):
+    """Issue #284: on a box smaller than the handles, linear axis controls sit
+    on top of the move gizmo's centre. A press on the gizmo centre drags the
+    gizmo, the axis controls neither claim it nor report hover."""
+    moves = []
+    viewer_client.on_object_move(moves.append)
+    viewer_client.add_box("box", width=0.05, height=0.05, depth=0.05)
+    for axis in ("x", "y"):
+        viewer_client.add_axis_control(
+            f"face_{axis}",
+            target_id="box",
+            axis=axis,
+            kind="linear_unlimited",
+            value=0.0,
+        )
+    viewer_client.enable_move_gizmo("box")
+    settle(viewer_client)
+    _wait_for(
+        viewer_page,
+        "() => { const g = window.threejsViewer._transformGizmo;"
+        " return g.objectId === 'box' && g.helper.visible; }",
+    )
+    viewer_page.evaluate(
+        "() => { window.__acChanges = [];"
+        " window.threejsViewer.onAxisControlChange(m => window.__acChanges.push(m)); }"
+    )
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    cx, cy = proj["x"], proj["y"]
+    # The axis-control handles really do cover the gizmo centre.
+    assert viewer_page.evaluate(
+        "([x, y]) => window.threejsViewer._axisControls._pickHandle(x, y, 'mouse') !== null",
+        [cx, cy],
+    )
+    viewer_page.mouse.move(cx, cy)
+    frames(viewer_page)
+    hover = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return { busy: v._axisControls.busy(), axis: v._transformGizmo.control.axis }; }"
+    )
+    assert hover["axis"] is not None, hover
+    assert hover["busy"] is False, hover
+
+    viewer_page.mouse.down()
+    active = viewer_page.evaluate("() => window.threejsViewer._axisControls._active")
+    for i in range(1, 13):
+        viewer_page.mouse.move(cx + i * 12, cy)
+    viewer_page.mouse.up()
+    assert active is None
+    assert _wait_until(lambda: bool(moves) and moves[-1]["phase"] == "end"), moves
+    assert moves[-1]["id"] == "box"
+    x = viewer_page.evaluate(
+        "() => window.threejsViewer._objects.get('box').position.x"
+    )
+    assert x > 0.1, x
+    assert viewer_page.evaluate("() => window.__acChanges") == []
 
 
 @pytest.mark.browser
@@ -12329,7 +12870,7 @@ def test_is_gizmo_handle_active_during_hover_and_drag(viewer_client, viewer_page
     frames(viewer_page, 2)
     assert viewer_page.evaluate(active) is False
     viewer_page.evaluate(_GIZMO_TOPDOWN)
-    p = viewer_page.evaluate(_AXIS_CONTROL_SPHERE_PX, "ax")
+    p = viewer_page.evaluate(_AXIS_CONTROL_HANDLE_PX, "ax")
     assert p is not None
     viewer_page.mouse.move(p["x"], p["y"])
     frames(viewer_page, 2)

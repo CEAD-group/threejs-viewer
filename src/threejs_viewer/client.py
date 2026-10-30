@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import numpy as np
 from websockets.sync.server import serve as sync_serve
 
+from . import kinematics
 from .points_lod import (
     DEFAULT_MAX_DEPTH,
     DEFAULT_NODE_CAPACITY,
@@ -168,6 +169,14 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number (got {value!r})")
     return f
+
+
+def _validate_pick_radius_px(value: Optional[float]) -> Optional[float]:
+    """An axis-control pick radius: None (viewer default) or finite and > 0."""
+    value = _validate_finite("pick_radius_px", value)
+    if value is not None and value <= 0:
+        raise ValueError(f"pick_radius_px must be > 0 (got {value!r})")
+    return value
 
 
 def _validate_point3(name: str, value) -> List[float]:
@@ -815,6 +824,8 @@ class ViewerClient:
         self._sun_state: Dict[str, Any] = {}
         # Runtime set_display_quality value, re-sent on reconnect.
         self._display_quality_state: Optional[str] = None
+        # Runtime set_clipping_caps value, re-sent on reconnect.
+        self._clip_caps_state: Optional[bool] = None
         # Runtime set_environment_background / set_cubemap values, re-sent on
         # reconnect (the browser remembers the cubemap in localStorage, but a
         # different profile or a cleared one would not).
@@ -899,6 +910,10 @@ class ViewerClient:
         # a reconnect re-declares each one (the viewer resolves them per frame
         # but holds none of them across a fresh WS connection).
         self._clip_bindings: Dict[str, dict] = {}
+        # Kinematic chains and their static poses (set_kinematic_chain /
+        # set_joints), id -> message, replayed on reconnect in that order.
+        self._kinematic_chains: Dict[str, dict] = {}
+        self._joint_poses: Dict[str, dict] = {}
         # Pinned (persistent) gizmos added with add_gizmo — a list of
         # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
         # interactive gizmo above; any number can be active at once, each with its
@@ -1092,6 +1107,17 @@ class ViewerClient:
             except Exception:
                 pass
 
+        # Re-apply the clip-cap switch (set_clipping_caps).
+        if self._clip_caps_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {"type": "set_clipping_caps", "enabled": self._clip_caps_state}
+                    )
+                )
+            except Exception:
+                pass
+
         # Re-apply a runtime display quality (set_display_quality).
         if self._display_quality_state is not None:
             try:
@@ -1183,6 +1209,14 @@ class ViewerClient:
         # Re-declare clip bindings. Objects are not replayed; the viewer resolves
         # a binding once both ids exist, whenever they arrive.
         for spec in self._clip_bindings.values():
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
+        # Re-declare kinematic chains, then their static poses. Like clip
+        # bindings, a chain poses its objects whenever they arrive.
+        for spec in [*self._kinematic_chains.values(), *self._joint_poses.values()]:
             try:
                 websocket.send(json.dumps(spec))
             except Exception:
@@ -1353,8 +1387,9 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             visible: Initial visibility
-            pickable: When False, click-to-pivot passes through this group
-                and everything under it (issue #215).
+            pickable: When False, click-to-pivot, object clicks and
+                double-click framing pass through this group and everything
+                under it (issues #215, #287).
         """
         msg: dict = {"type": "add_group", "id": id}
         if parent:
@@ -1396,6 +1431,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a box primitive to the scene.
 
@@ -1404,6 +1440,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "width": width,
@@ -1435,6 +1472,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_sphere(
@@ -1457,6 +1495,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a sphere primitive to the scene.
 
@@ -1465,6 +1504,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {"radius": radius, "color": color, "opacity": opacity}
         if roughness is not None:
@@ -1490,6 +1530,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_cylinder(
@@ -1512,6 +1553,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a cylinder primitive to the scene.
 
@@ -1520,6 +1562,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "radiusTop": radius_top,
@@ -1544,6 +1587,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_capsule(
@@ -1565,6 +1609,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene.
 
@@ -1573,6 +1618,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "radius": radius,
@@ -1596,6 +1642,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_grid(
@@ -2054,7 +2101,9 @@ class ViewerClient:
                 carries no per-hover cost (the viewer keeps no pick data for
                 it). Picking is still globally gated by
                 :meth:`enable_polyline_picking`; ``pickable`` only narrows
-                *which* objects participate.
+                *which* objects participate. ``False`` also makes
+                click-to-pivot, object clicks and double-click framing pass
+                through the line.
             segments: When ``True``, render disjoint line *segments* instead
                 of one connected polyline: consecutive point pairs
                 ``(0,1), (2,3), ...`` each draw an independent edge
@@ -2066,7 +2115,9 @@ class ViewerClient:
                 renders ``THREE.LineSegments``. Per-vertex ``colors``,
                 ``set_draw_range`` (leading ``frac*N`` points, whole edges)
                 and ``update_polyline_colors`` work as usual. Segment soups
-                have no arc length, so the object is never pickable.
+                have no arc length, so the viewer never arc-length picks
+                them; ``pickable`` still governs click-to-pivot and object
+                clicks.
             position: [x, y, z] position
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
@@ -2091,7 +2142,6 @@ class ViewerClient:
                     f"segments=True needs an even point count "
                     f"(pairs of edge endpoints), got {n_points}"
                 )
-            pickable = False
 
         # Process colors if provided
         color_bytes = b""
@@ -2178,9 +2228,10 @@ class ViewerClient:
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
             visible: Initial visibility
-            pickable: When False, click-to-pivot passes through this mesh
-                (a translucent volume such as a workzone fill), so the
-                pivot lands on what sits behind it (issue #215).
+            pickable: When False, click-to-pivot, object clicks and
+                double-click framing pass through this mesh (a translucent
+                volume such as a workzone fill), so they land on what sits
+                behind it (issues #215, #287).
             depth_write: Overrides the default (depth only when opaque) and
                 survives ``set_opacity``/``set_color``.
             polygon_offset: With ``polygon_offset_units``, separates coplanar
@@ -2929,6 +2980,7 @@ class ViewerClient:
         joins: Optional[str] = None,
         join_tolerance: float = 0.015,
         join_budget: Optional[float] = 0.15,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -3063,7 +3115,11 @@ class ViewerClient:
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
-                from picking (it is then never hit-tested, at zero cost).
+                from picking (it is then never hit-tested, at zero cost);
+                click-to-pivot, object clicks and double-click framing then
+                pass through it too.
+            clip_cap: Override :meth:`set_clipping_caps` for this tube (also
+                accepted by :meth:`add_toolpath`).
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at
@@ -3227,6 +3283,8 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         # The mitered strip at the default tolerance and budget is the
         # viewer's own default, so the header carries the keys only when
         # they differ; a null budget lifts the cap.
@@ -3353,6 +3411,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
 
@@ -3393,6 +3452,7 @@ class ViewerClient:
             metalness, roughness: Standard PBR material properties.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
+            clip_cap: Override :meth:`set_clipping_caps` for this body.
 
         Reveal the swept body progressively along the path with
         :meth:`set_draw_range` or the ``draw_ranges`` animation channel.
@@ -3461,6 +3521,8 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         if parent:
             header["parent"] = parent
         if not visible:
@@ -3772,8 +3834,11 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Internal method to add a primitive."""
+        if clip_cap is not None:
+            params["clipCap"] = bool(clip_cap)
         transform = {}
         if position:
             transform["position"] = position
@@ -4039,6 +4104,175 @@ class ViewerClient:
         if self._ws is not None:
             self._send({"type": "unbind_clip", "id": id})
 
+    def set_kinematic_chain(
+        self,
+        id: str,
+        description,
+        object_ids: Dict[str, Optional[str]],
+        object_scale: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Declare a kinematic chain whose joint values pose scene objects.
+
+        ``description`` is a ``threejs_viewer.kinematic_chain`` version 1
+        description (a dict, or an object with ``to_dict()``), specified in
+        :mod:`threejs_viewer.kinematics`: ``axes``, ``solved`` and a
+        parent-first list of ``links``, each a row-major 4x4 ``origin`` on its
+        parent and at most one revolute, prismatic, solved or aim joint. Each
+        link's world matrix is ``(parent @ origin) @ motion``; the viewer runs
+        that forward kinematics itself, so an animation needs only the axis
+        values per keyframe (:meth:`Animation.set_joint_data`) and the links
+        stay consistent between keyframes. :func:`threejs_viewer.kinematics.compose`
+        is the reference the viewer's FK is tested against.
+
+        ``object_ids`` maps a link name to the scene object it poses; a link
+        missing from it, or mapped to None, is a frame only. Every key must be
+        a link name, so a renamed link fails here instead of silently posing
+        nothing. ``object_scale`` gives a uniform
+        scale for a link's object, applied on its rotation. The object gets its
+        link's world matrix, or the matrix relative to its parent when it is
+        parented. A posed object ignores a ``transforms`` channel for its id.
+
+        Send it once per cell and again after a tool or device change; a
+        resend keeps the :meth:`set_joints` pose when the axis count is
+        unchanged. Objects may arrive after the chain. Replayed on reconnect;
+        :meth:`clear` drops it.
+
+        Raises:
+            ValueError: For a description that breaks the format (see
+                :func:`threejs_viewer.kinematics.validate`), or an
+                ``object_ids``/``object_scale`` key that is not a link name.
+        """
+        description = kinematics.validate(description)
+        if not isinstance(object_ids, dict):
+            raise ValueError("object_ids must map link names to object ids")
+        names = {link["name"] for link in description["links"]}
+        unknown = (set(object_ids) | set(object_scale or {})) - names
+        if unknown:
+            raise ValueError(f"not links of the description: {sorted(unknown)}")
+        spec = {
+            "type": "set_kinematic_chain",
+            "id": id,
+            "description": description,
+            "object_ids": dict(object_ids),
+        }
+        if object_scale:
+            spec["object_scale"] = {
+                k: _validate_finite(f"object_scale[{k!r}]", v)
+                for k, v in object_scale.items()
+            }
+        pose = self._joint_poses.get(id)
+        if pose is not None and (
+            len(pose["values"]) != len(description["axes"])
+            or len(pose["solved"]) != len(description.get("solved") or [])
+        ):
+            # The viewer drops a pose that no longer fits the chain too.
+            del self._joint_poses[id]
+        self._kinematic_chains[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def remove_kinematic_chain(self, id: str) -> None:
+        """Forget chain ``id``; its objects keep their last pose."""
+        self._kinematic_chains.pop(id, None)
+        self._joint_poses.pop(id, None)
+        if self._ws is not None:
+            self._send({"type": "remove_kinematic_chain", "id": id})
+
+    def set_joints(self, id: str, values, solved=None) -> None:
+        """Pose chain ``id`` from axis values, without an animation.
+
+        ``values`` follows the description's axes order (degrees rotary, metres
+        linear) and ``solved`` its solved links (degrees). The pose is also what
+        the chain returns to after :meth:`unload_animation`, and is replayed on
+        reconnect.
+
+        Raises:
+            ValueError: For an unknown chain, a wrong value count, or a
+                non-finite value.
+        """
+        chain = self._kinematic_chains.get(id)
+        if chain is None:
+            raise ValueError(
+                f"no kinematic chain {id!r}; call set_kinematic_chain first"
+            )
+        desc = chain["description"]
+        values = [_validate_finite("values", v) for v in values]
+        solved = [_validate_finite("solved", v) for v in (solved or [])]
+        if len(values) != len(desc["axes"]):
+            raise ValueError(f"expected {len(desc['axes'])} values, got {len(values)}")
+        if len(solved) != len(desc.get("solved") or []):
+            raise ValueError(
+                f"expected {len(desc.get('solved') or [])} solved values, got {len(solved)}"
+            )
+        spec = {"type": "set_joints", "id": id, "values": values, "solved": solved}
+        self._joint_poses[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def query_kinematic_chain(
+        self, id: str, values=None, solved=None, timeout: float = 5.0
+    ) -> dict:
+        """Ask the viewer what its forward kinematics computes for chain ``id``.
+
+        This is the check that the viewer's FK agrees with the producer's own
+        (or with :func:`threejs_viewer.kinematics.compose`) on a real
+        description, rather than on fixtures that may age.
+
+        With ``values`` (``(n_poses, n_axes)``, plus ``(n_poses, n_solved)``
+        ``solved`` for descriptions with solved links) the viewer evaluates
+        each pose without moving anything and the result is ``{"names": [...],
+        "world": (n_poses, n_links, 4, 4) float64}``, exact to the viewer's
+        float64 arithmetic. Without ``values`` it reports the current pose:
+        ``"world"`` is ``(1, n_links, 4, 4)`` (None before any pose),
+        ``"posed"``, ``"object_ids"`` (link name to object id) and
+        ``"objects"`` (object id to its actual ``(4, 4)`` world matrix, which
+        also covers the object mapping, ``object_scale`` and parenting, at the
+        float32 precision three.js stores).
+
+        Raises:
+            ValueError: For an unknown chain or a pose with the wrong width.
+            TimeoutError: When the viewer does not answer.
+        """
+        msg = {"type": "query_kinematic_chain", "id": id}
+        if values is not None:
+            q = np.atleast_2d(np.asarray(values, dtype=np.float64))
+            s = (
+                np.zeros((len(q), 0))
+                if solved is None
+                else np.atleast_2d(np.asarray(solved, dtype=np.float64))
+            )
+            if not (np.isfinite(q).all() and np.isfinite(s).all()):
+                raise ValueError("values and solved must be finite")
+            msg["values"] = q.tolist()
+            msg["solved"] = s.tolist()
+        request_id = str(uuid.uuid4())
+        msg["requestId"] = request_id
+        event = threading.Event()
+        self._pending_responses[request_id] = event
+        self._send(msg)
+        if not event.wait(timeout=timeout):
+            self._pending_responses.pop(request_id, None)
+            raise TimeoutError("No response from viewer")
+        response = self._responses.pop(request_id, {})
+        self._pending_responses.pop(request_id, None)
+        if response.get("error"):
+            raise ValueError(response["error"])
+        world = response.get("world")
+        out = {
+            "names": response.get("names", []),
+            "world": None
+            if world is None
+            else np.asarray(world, dtype=np.float64).reshape(len(world), -1, 4, 4),
+        }
+        if values is None:
+            out["posed"] = response.get("posed", False)
+            out["object_ids"] = response.get("object_ids", {})
+            out["objects"] = {
+                k: np.asarray(v, dtype=np.float64).reshape(4, 4)
+                for k, v in response.get("objects", {}).items()
+            }
+        return out
+
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
         path — per render tick the viewer computes the pose from the REAL
@@ -4078,10 +4312,51 @@ class ViewerClient:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
-    def frame_object(self, id: str) -> None:
-        """Fit the camera to an object's bounding box (the programmatic
-        equivalent of double-clicking it in the viewer)."""
-        self._send({"type": "frame_object", "id": id})
+    @staticmethod
+    def _check_fill(fill: Optional[float]) -> Optional[float]:
+        if fill is None:
+            return None
+        fill = float(fill)
+        if not (math.isfinite(fill) and 0.0 < fill <= 1.0):
+            raise ValueError(f"fill must be in (0, 1], got {fill!r}")
+        return fill
+
+    def frame_object(self, id: str, fill: Optional[float] = None) -> None:
+        """Fit the camera to an object (the programmatic equivalent of
+        double-clicking it in the viewer), by the world box of each visible
+        descendant mesh, keeping the view direction.
+
+        Args:
+            id: Object id.
+            fill: Share of the view, on the tighter screen axis, that the
+                object spans, in (0, 1]. ``None`` uses the viewer default
+                0.9 (5% free on each side).
+        """
+        msg: dict = {"type": "frame_object", "id": id}
+        fill = self._check_fill(fill)
+        if fill is not None:
+            msg["fill"] = fill
+        self._send(msg)
+
+    def frame_points(self, points, fill: Optional[float] = None) -> None:
+        """Fit the camera to world-space points, keeping the view direction.
+
+        Args:
+            points: ``(N, 3)`` array-like of finite coordinates, N >= 1.
+            fill: As for :meth:`frame_object`.
+        """
+        pts = np.asarray(points, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) == 0:
+            raise ValueError(
+                f"points must have shape (N, 3) with N >= 1, got {pts.shape}"
+            )
+        if not np.isfinite(pts).all():
+            raise ValueError("points must be finite")
+        msg: dict = {"type": "frame_points", "points": pts.tolist()}
+        fill = self._check_fill(fill)
+        if fill is not None:
+            msg["fill"] = fill
+        self._send(msg)
 
     def set_view(self, name: str, animate: bool = True) -> None:
         """Snap the camera to a pre-defined view.
@@ -4161,14 +4436,19 @@ class ViewerClient:
                 ``prefix`` naming the viewer objects it shows/hides
                 (``checked`` defaults to ``True``); ``select`` and
                 ``segmented`` take ``options`` (a list of values or of
-                ``{"value", "label"}`` dicts) and ``value``.
+                ``{"value", "label"}`` dicts) and ``value``. A ``label``
+                with ``collapsible=True`` heads a foldable section: the rows
+                after it, up to the next ``divider`` or collapsible label,
+                hide while it is folded (``collapsed``, default ``False``).
+                A fold toggle is reported as a ``"label"`` action whose
+                ``value`` is the new collapsed state.
             label: The tab text. Every menu is a vertical tab folded against
                 the viewer's right edge; clicking it slides the body out.
             mode: ``"dropdown"`` (default: starts folded, an outside click
                 folds it back) or ``"panel"`` (starts open and stays open
                 across outside clicks, for a legend).
-            storage_key: Persist toggle/eye/select/segmented values in the
-                browser's localStorage under this key.
+            storage_key: Persist toggle/eye/select/segmented values and
+                section fold state in the browser's localStorage under this key.
             title: Tooltip on the tab.
             body_width: CSS width of the body (default ``"190px"``).
 
@@ -4224,6 +4504,13 @@ class ViewerClient:
                 out[key] = item[key]
         if "bind_key" in item:
             out["bindKey"] = bool(item["bind_key"])
+        for key in ("collapsible", "collapsed"):
+            if key in item:
+                if kind != "label":
+                    raise ValueError(f"{key!r} applies to 'label' items only: {item!r}")
+                if not isinstance(item[key], bool):
+                    raise ValueError(f"{key!r} must be a bool (got {item[key]!r})")
+                out[key] = item[key]
         if "options" in item:
             out["options"] = [
                 o if isinstance(o, dict) else {"value": o} for o in item["options"]
@@ -4235,7 +4522,7 @@ class ViewerClient:
 
         Accepts the item keys of :meth:`add_menu` (``label``, ``state``,
         ``checked``, ``value``, ``options``, ``disabled``, ``hidden``,
-        ``hint``). The stored menu is updated too, so a reconnect replays the
+        ``hint``, ``collapsed``). The stored menu is updated too, so a reconnect replays the
         patched state.
         """
         msg = self._menus.get(menu)
@@ -4245,6 +4532,9 @@ class ViewerClient:
             patch["options"] = [
                 o if isinstance(o, dict) else {"value": o} for o in patch["options"]
             ]
+        for key in ("collapsible", "collapsed"):
+            if key in patch and not isinstance(patch[key], bool):
+                raise ValueError(f"{key!r} must be a bool (got {patch[key]!r})")
         for it in msg["menu"]["items"]:
             if it.get("id") == item:
                 it.update(patch)
@@ -4523,6 +4813,27 @@ class ViewerClient:
                 "distance": float(distance),
             }
         )
+
+    def set_clipping_caps(self, enabled: bool = True) -> None:
+        """Cap the cut of clipped solids the viewer builds itself.
+
+        With caps on, a clipping plane or slab closes the cut through
+        primitives (box, sphere, cylinder, capsule), swept tool bodies
+        (:meth:`add_swept_tool`) and parametric tubes
+        (:meth:`add_parametric_tube`, :meth:`add_toolpath`) with a flat face
+        in the object's colour (per-vertex colours are interpolated along the
+        cut), so a solid no longer reads as a hollow shell. Meshes and loaded
+        models stay open, as do translucent and wireframe objects. A
+        per-object ``clip_cap=`` on the add call overrides this switch. Off by
+        default; also toggled by the "Cap cut solids" box in the clipping
+        panel (``C``).
+
+        Recorded and re-sent on reconnect; may be called before a viewer
+        connects.
+        """
+        self._clip_caps_state = bool(enabled)
+        if self._ws is not None:
+            self._send({"type": "set_clipping_caps", "enabled": bool(enabled)})
 
     def show_grid(
         self,
@@ -5328,12 +5639,19 @@ class ViewerClient:
         radius: Optional[float] = None,
         bbox_source_id: Optional[str] = None,
         window: float = 1.0,
+        pick_radius_px: Optional[float] = None,
     ) -> None:
         """Show a rotary or linear range control: a line spanning the axis's
         range of motion with a short, 4x-thicker section of the same line
         marking the current value (a small arc for rotary, a short segment
         for linear). The handle and the guide line always share one colour
-        pair; only the handle's invisible hitbox sphere is draggable/hoverable.
+        pair; only the handle is draggable/hoverable.
+
+        The handle is hit-tested in screen pixels: a press counts when it lands
+        within ``pick_radius_px`` CSS pixels of the drawn handle, so the hit
+        area stays the size of the handle at any zoom. The default is half the
+        handle's width plus 5 px (14 px for a touch press). Where a move-gizmo
+        handle is under the pointer the gizmo takes the press and the hover.
 
         Anchored every render frame at ``target_id``'s live world pivot,
         oriented along its local ``axis`` — a moving target (a jog, a drag)
@@ -5351,7 +5669,7 @@ class ViewerClient:
         - ``"linear"`` — a segment from ``min`` to ``max`` metres along the axis.
         - ``"linear_unlimited"`` — a segment spanning ``value - window`` to
           ``value + window``, which re-centres on every value change so the
-          visible window always follows the sphere; ``min``/``max`` are ignored.
+          visible window always follows the handle; ``min``/``max`` are ignored.
 
         ``radius`` (rotary only) is required unless ``bbox_source_id`` is
         given, in which case it defaults to half the world-space diagonal of
@@ -5362,7 +5680,7 @@ class ViewerClient:
         ``hover_color`` overrides the tint used while hovering/dragging;
         omit it to auto-derive a lightened variant of ``color``.
 
-        Dragging the sphere reports ``{id, value, phase}`` to every callback
+        Dragging the handle reports ``{id, value, phase}`` to every callback
         registered with :meth:`on_axis_control_change`, throttled during the
         drag (``"move"``) with a final unthrottled report on release
         (``"end"``) — same shape as :meth:`on_object_move`. The new value is
@@ -5374,7 +5692,8 @@ class ViewerClient:
         Raises:
             ValueError: For an unknown ``axis`` or ``kind``, a non-finite
                 number, a bounded ``kind`` without ``min``/``max`` or with
-                ``min > max``, or a ``radius``/``window`` that is not above zero.
+                ``min > max``, or a ``radius``/``window``/``pick_radius_px``
+                that is not above zero.
         """
         if axis not in _ALLOWED_AXIS_CONTROL_AXES:
             allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_AXES))
@@ -5396,6 +5715,7 @@ class ViewerClient:
         window = _validate_finite("window", window)
         if window <= 0:
             raise ValueError(f"window must be > 0 (got {window!r})")
+        pick_radius_px = _validate_pick_radius_px(pick_radius_px)
         spec = {
             "type": "add_axis_control",
             "id": id,
@@ -5410,6 +5730,7 @@ class ViewerClient:
             "radius": radius,
             "bbox_source_id": bbox_source_id,
             "window": window,
+            "pick_radius_px": pick_radius_px,
         }
         self._axis_controls[id] = spec
         if self._ws is not None:
@@ -5424,19 +5745,22 @@ class ViewerClient:
         max: Optional[float] = None,
         color: Optional[int] = None,
         hover_color: Optional[int] = None,
+        pick_radius_px: Optional[float] = None,
     ) -> None:
         """Update a control added with :meth:`add_axis_control` — its value,
-        range, and/or colour. Only the given fields change; the rest keep
+        range, colour and/or pick radius. Only the given fields change; the rest keep
         their last value. Passing ``color`` without ``hover_color``
         re-derives the hover tint from the new ``color``.
 
         Raises:
             ValueError: If ``id`` was never added with :meth:`add_axis_control`.
-            ValueError: For a non-finite number, or a resulting ``min > max``.
+            ValueError: For a non-finite number, a resulting ``min > max``, or
+                a ``pick_radius_px`` that is not above zero.
         """
         spec = self._axis_controls.get(id)
         if spec is None:
             raise ValueError(f"no axis control {id!r}")
+        pick_radius_px = _validate_pick_radius_px(pick_radius_px)
         value = _validate_finite("value", value)
         min = _validate_finite("min", min)
         max = _validate_finite("max", max)
@@ -5454,6 +5778,8 @@ class ViewerClient:
             spec["color"] = color
         if hover_color is not None:
             spec["hover_color"] = hover_color
+        if pick_radius_px is not None:
+            spec["pick_radius_px"] = pick_radius_px
         if self._ws is not None:
             self._send(
                 {
@@ -5464,6 +5790,7 @@ class ViewerClient:
                     "max": max,
                     "color": color,
                     "hover_color": hover_color,
+                    "pick_radius_px": pick_radius_px,
                 }
             )
 
@@ -5752,6 +6079,8 @@ class ViewerClient:
         # Axis controls and clip bindings likewise target now-removed objects.
         self._axis_controls = {}
         self._clip_bindings = {}
+        self._kinematic_chains = {}
+        self._joint_poses = {}
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a

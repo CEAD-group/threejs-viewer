@@ -909,6 +909,48 @@ def test_add_menu_rejects_bad_specs(kwargs, match):
         client.add_menu(**kwargs)
 
 
+def test_add_menu_collapsible_label_payload_and_update():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_menu(
+        "demo",
+        items=[
+            {"type": "label", "id": "sec", "label": "Scene", "collapsible": True},
+            {"type": "toggle", "id": "t", "label": "T"},
+            {"type": "label", "id": "sec2", "collapsible": True, "collapsed": True},
+        ],
+    )
+    items = sent[0]["menu"]["items"]
+    assert items[0] == {
+        "type": "label",
+        "id": "sec",
+        "label": "Scene",
+        "collapsible": True,
+    }
+    assert items[2]["collapsed"] is True
+    client.update_menu_item("demo", "sec", collapsed=True)
+    assert sent[-1]["patch"] == {"collapsed": True}
+    assert client._menus["demo"]["menu"]["items"][0]["collapsed"] is True
+    with pytest.raises(ValueError, match="must be a bool"):
+        client.update_menu_item("demo", "sec", collapsed="yes")
+
+
+@pytest.mark.parametrize(
+    "item, match",
+    [
+        ({"type": "label", "collapsible": 1}, "must be a bool"),
+        ({"type": "label", "collapsible": True, "collapsed": "no"}, "must be a bool"),
+        ({"type": "toggle", "id": "t", "collapsible": True}, "'label' items only"),
+    ],
+)
+def test_add_menu_rejects_bad_collapsible(item, match):
+    client = ViewerClient()
+    client._send = lambda m: None
+    with pytest.raises(ValueError, match=match):
+        client.add_menu("m", items=[item])
+
+
 def test_update_menu_item_unknown_raises():
     client = ViewerClient()
     client._send = lambda m: None
@@ -960,16 +1002,19 @@ def test_add_axis_control_payload_and_records_for_reconnect():
         "radius": 2.0,
         "bbox_source_id": None,
         "window": 1.0,
+        "pick_radius_px": None,
     }
-    client.update_axis_control("j1", value=1.0, max=4.0)
+    client.update_axis_control("j1", value=1.0, max=4.0, pick_radius_px=9)
     assert client._axis_controls["j1"]["value"] == 1.0
     assert client._axis_controls["j1"]["max"] == 4.0
+    assert client._axis_controls["j1"]["pick_radius_px"] == 9.0
 
     ws = _StubWS()
     client._ws = ws
     client.update_axis_control("j1", value=2.0)
     assert ws.sent[-1]["type"] == "update_axis_control"
     assert ws.sent[-1]["value"] == 2.0
+    assert ws.sent[-1]["pick_radius_px"] is None
     client.clear()
     assert client._axis_controls == {}
 
@@ -985,6 +1030,9 @@ def test_add_axis_control_payload_and_records_for_reconnect():
         ({"radius": 0.0}, "radius"),
         ({"window": -1.0}, "window"),
         ({"max": float("inf")}, "max"),
+        ({"pick_radius_px": 0.0}, "pick_radius_px"),
+        ({"pick_radius_px": -3}, "pick_radius_px"),
+        ({"pick_radius_px": float("nan")}, "pick_radius_px"),
     ],
 )
 def test_add_axis_control_validates(kwargs, match):
@@ -1009,7 +1057,10 @@ def test_update_axis_control_validates():
         client.update_axis_control("c", min=5.0)
     with pytest.raises(ValueError, match="value"):
         client.update_axis_control("c", value=float("nan"))
+    with pytest.raises(ValueError, match="pick_radius_px"):
+        client.update_axis_control("c", pick_radius_px=0)
     assert client._axis_controls["c"]["min"] == -1.0
+    assert client._axis_controls["c"]["pick_radius_px"] is None
 
 
 @pytest.mark.parametrize(
@@ -1257,3 +1308,43 @@ def test_dimension_tool_events_reach_callbacks():
     client._dispatch_dimension_event({"type": "dimension_tool_cancelled"})
     assert events[0]["event"] == "created" and events[0]["direction"] == "X"
     assert events[1] == {"event": "cancelled"}
+
+
+def test_set_clipping_caps_records_and_sends_when_connected():
+    """set_clipping_caps records the switch and sends it once a viewer is
+    connected (issue #259)."""
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.set_clipping_caps(True)
+    assert sent == []  # no viewer yet: recorded only
+    assert client._clip_caps_state is True
+    client._ws = object()
+    client.set_clipping_caps(False)
+    assert sent == [{"type": "set_clipping_caps", "enabled": False}]
+    assert client._clip_caps_state is False
+
+
+def test_reconnect_replays_clipping_caps(bound_client):
+    bound_client.set_clipping_caps(True)
+    with ws_connect(f"ws://127.0.0.1:{bound_client.port}", open_timeout=5) as ws:
+        while True:
+            msg = json.loads(ws.recv(timeout=5))
+            if msg["type"] == "set_clipping_caps":
+                break
+    assert msg == {"type": "set_clipping_caps", "enabled": True}
+
+
+def test_primitive_clip_cap_override_rides_params():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_box("b", clip_cap=False)
+    client.add_sphere("s", clip_cap=True)
+    client.add_cylinder("c")
+    client.add_capsule("p", clip_cap=True)
+    params = [m["object"]["params"] for m in sent]
+    assert params[0]["clipCap"] is False
+    assert params[1]["clipCap"] is True
+    assert "clipCap" not in params[2]
+    assert params[3]["clipCap"] is True

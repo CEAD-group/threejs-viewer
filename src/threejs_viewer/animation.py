@@ -304,6 +304,72 @@ class Animation:
             interpolation=interpolation,
         )
 
+    def set_joint_data(
+        self,
+        values: dict,
+        solved: dict | None = None,
+        dtype: str = "float32",
+        interpolation: InterpolationMode = "linear",
+    ) -> None:
+        """Convenience: add a 'joints' channel that poses kinematic chains.
+
+        ``values`` maps a chain id (see :meth:`ViewerClient.set_kinematic_chain`)
+        to its ``(n_frames, n_axes)`` axis values, in the description's axes
+        order: degrees for rotary axes, metres for linear ones. ``solved`` maps a
+        chain id to its ``(n_frames, n_solved)`` solved angles in degrees, for
+        descriptions with ``solved`` links. The viewer lerps each column between
+        keyframes and runs the forward kinematics per rendered frame, so the
+        joint values must be unwrapped (no jump from 179 to -179).
+
+        Each chain takes one row of ``n_axes + n_solved`` values per frame; the
+        channel stride is the widest chain and narrower rows are zero-padded.
+        float32 (the default) keeps 1e-5 degrees and micrometres on metre-scale
+        axes; pass ``dtype="float64"`` for longer travel.
+        """
+        if dtype not in ("float32", "float64"):
+            raise ValueError(f"dtype must be 'float32' or 'float64' (got {dtype!r})")
+        if not values:
+            raise ValueError("values must name at least one chain")
+        solved = solved or {}
+        unknown = set(solved) - set(values)
+        if unknown:
+            raise ValueError(f"solved names chains without values: {sorted(unknown)}")
+        rows = []
+        n_frames = None
+        for chain_id, q in values.items():
+            q = np.asarray(q, dtype=np.float64)
+            if q.ndim != 2:
+                raise ValueError(f"values[{chain_id!r}] must be (n_frames, n_axes)")
+            parts = [q]
+            if chain_id in solved:
+                s = np.asarray(solved[chain_id], dtype=np.float64)
+                if s.ndim != 2 or s.shape[0] != q.shape[0]:
+                    raise ValueError(
+                        f"solved[{chain_id!r}] must be (n_frames, n_solved) "
+                        f"with {q.shape[0]} frames"
+                    )
+                parts.append(s)
+            row = np.concatenate(parts, axis=1)
+            if not np.isfinite(row).all():
+                raise ValueError(f"joint values for {chain_id!r} must be finite")
+            if n_frames is None:
+                n_frames = row.shape[0]
+            elif row.shape[0] != n_frames:
+                raise ValueError("every chain needs the same number of frames")
+            rows.append(row)
+        stride = max(r.shape[1] for r in rows)
+        data = np.zeros((n_frames, len(rows), stride), dtype=np.float64)
+        for i, row in enumerate(rows):
+            data[:, i, : row.shape[1]] = row
+        self.add_channel(
+            "joints",
+            list(values),
+            data.reshape(n_frames, len(rows) * stride),
+            dtype=dtype,
+            stride=stride,
+            interpolation=interpolation,
+        )
+
     def set_camera_target(
         self,
         data: np.ndarray,
