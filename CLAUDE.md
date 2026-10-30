@@ -176,10 +176,10 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `04_flying_teapots.py` - Ring of 12 OBJ teapots with a seamless looping tumble, packed as one vectorised `transforms` channel
 - `05_lissajous_curves.py` - Mathematical curves with tracer animation
 - `06_realtime_streaming.py` - Real-time streaming mode (64 bouncing spheres via `batch_update`), ends on Ctrl+C
-- `07_stress_test.py` - Torus knot tube with hundreds of followers (performance test)
+- `07_stress_test.py` - Million-point torus-knot polyline with 600 primitives racing along it, all poses sent in one `batch_update` per frame at 60 fps (live loop, Ctrl+C to stop; vectorized numpy poses)
 - `08_glb_models.py` - GLB models with PBR materials (DamagedHelmet, Avocado)
 - `09_animated_glb.py` - Embedded GLTF animation via clip_times (AnimatedMorphCube + orbiting Avocado)
-- `10_animation_stress_test.py` - Animation stress test (520 objects × 2499 frames, vectorized numpy)
+- `10_animation_stress_test.py` - Animation stress test: the same torus knot with 600 followers pre-computed as one `Animation` (600 objects × 1800 frames, fully vectorized numpy) with binary `transforms` and indexed `colors` channels
 - `11_toolpath.py` - Spiral vase toolpath with draw_range animation (parametric tube + nozzle, smooth frontier morphing, viridis colormap, binary animation channels; the bead wears a colour + normal + roughness set from `bead_texture_maker.texture_set`, tinted by the colormap)
 - `12_transparency.py` - Transparency and opacity control (set_opacity, set_color with opacity)
 - `13_material_properties.py` - PBR material properties (roughness/metalness grid on primitives)

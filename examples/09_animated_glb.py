@@ -1,139 +1,69 @@
 """
 Animated GLB with Embedded Clip Times
 
-Loads the AnimatedMorphCube (which has an embedded morph target animation)
-and an Avocado that orbits around it. The animation timeline drives both
-the cube's embedded clip time and the avocado's orbit transform in sync.
+An AnimatedMorphCube plays its embedded morph clip while an avocado orbits it.
+One animation timeline drives the cube's clip time (clip_times channel) and
+the avocado's orbit (transforms channel); scrub it with the timeline.
 
 Run: uv run python examples/09_animated_glb.py
 """
 
-import math
 import urllib.request
 from pathlib import Path
 
+from itertools import product
+
+import numpy as np
+
 from threejs_viewer import Animation, viewer
 
-CACHE_DIR = Path(__file__).parent / "tmp"
-
-MODELS = {
-    "morphcube": {
-        "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/AnimatedMorphCube/glTF-Binary/AnimatedMorphCube.glb",
-    },
-    "avocado": {
-        "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb",
-    },
-}
+KHRONOS = (
+    "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models"
+)
 
 
-def download_model(name: str, url: str) -> Path:
-    CACHE_DIR.mkdir(exist_ok=True)
-    path = CACHE_DIR / f"{name}.glb"
-    if path.exists():
-        print(f"  {name}: cached")
-        return path
-    print(f"  {name}: downloading...")
-    urllib.request.urlretrieve(url, path)
-    print(f"  {name}: {path.stat().st_size / 1024:.0f} KB")
+def download(name):
+    path = Path.home() / ".cache" / "threejs-viewer" / f"{name}.glb"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(f"{KHRONOS}/{name}/glTF-Binary/{name}.glb", path)
     return path
 
 
-print("Downloading models...")
-model_paths = {name: download_model(name, info["url"]) for name, info in MODELS.items()}
+CLIP_DURATION = 3.0  # length of the cube's embedded clip, in seconds
+ORBIT_RADIUS, AVOCADO_SCALE = 2.6, 30.0
 
 v = viewer()
 v.clear()
+v.add_grid("floor", cell_size=0.5, extent=30.0, fade_start=0.3)
+v.add_model_binary(
+    "morphcube",
+    download("AnimatedMorphCube"),
+    "glb",
+    position=[0, 0, 1],
+    scale=[1.2] * 3,
+    y_up=True,
+)
+v.add_model_binary("avocado", download("Avocado"), "glb", y_up=True)
 
-# Load models
-print("Loading models...")
-v.add_model_binary("morphcube", model_paths["morphcube"], format="glb", y_up=True)
-v.add_model_binary("avocado", model_paths["avocado"], format="glb", y_up=True)
+# One orbit per clip playthrough; the clip time follows a cosine so it runs 0 -> end -> 0
+times = np.linspace(0, CLIP_DURATION, 91)
+angle = 2 * np.pi * times / CLIP_DURATION
+c, s, k, R = np.cos(angle), np.sin(angle), AVOCADO_SCALE, ORBIT_RADIUS
+# Column-major 4x4: scaled rotation about Z (facing along the path) plus translation
+orbit = np.zeros((len(times), 1, 16))
+orbit[:, 0, [0, 1, 4, 5, 10]] = np.stack([k * c, k * s, -k * s, k * c, k + 0 * c], 1)
+orbit[:, 0, 12:] = np.stack([R * c, R * s, 0.5 + 0 * c, 1 + 0 * c], 1)
 
-# Place morphcube at origin, raised slightly
-CUBE_SCALE = 0.5
-# fmt: off
-v.set_matrix("morphcube", [
-    CUBE_SCALE, 0,          0,          0,
-    0,          CUBE_SCALE, 0,          0,
-    0,          0,          CUBE_SCALE, 0,
-    0,          0,          1,          1,
-])
-# fmt: on
-
-# The AnimatedMorphCube clip is ~3 seconds long
-CLIP_DURATION = 3.0
-ORBIT_RADIUS = 3.0
-AVOCADO_SCALE = 20.0
-
-# Animation: one full orbit = one full clip playthrough
-duration = CLIP_DURATION
-fps = 30
-n_frames = int(duration * fps)
-
-print("Building animation...")
 animation = Animation(loop=True)
-
-for i in range(n_frames):
-    t = i / fps
-    progress = t / duration  # 0 to 1
-
-    # Avocado orbits in XY plane around the cube
-    angle = progress * 2 * math.pi
-    ax = ORBIT_RADIUS * math.cos(angle)
-    ay = ORBIT_RADIUS * math.sin(angle)
-    az = 0.5
-    s = AVOCADO_SCALE
-
-    animation.add_frame(
-        time=t,
-        transforms={
-            # Keep morphcube stationary
-            "morphcube": [
-                CUBE_SCALE,
-                0,
-                0,
-                0,
-                0,
-                CUBE_SCALE,
-                0,
-                0,
-                0,
-                0,
-                CUBE_SCALE,
-                0,
-                0,
-                0,
-                1,
-                1,
-            ],
-            # Orbit avocado, facing forward along its path
-            "avocado": [
-                s * math.cos(angle),
-                s * math.sin(angle),
-                0,
-                0,
-                s * -math.sin(angle),
-                s * math.cos(angle),
-                0,
-                0,
-                0,
-                0,
-                s,
-                0,
-                ax,
-                ay,
-                az,
-                1,
-            ],
-        },
-        # Sine wave: smoothly 0 -> CLIP_DURATION -> 0
-        clip_times={
-            "morphcube": CLIP_DURATION * 0.5 * (1 - math.cos(2 * math.pi * progress))
-        },
-    )
-
+animation.set_frame_times(times)
+animation.set_transform_data(["avocado"], orbit)
+animation.set_clip_time_data(
+    ["morphcube"], (CLIP_DURATION * 0.5 * (1 - np.cos(angle)))[:, None]
+)
 v.load_animation(animation)
 
-print(f"Animation: {n_frames} frames, {duration:.1f}s (loop).")
-print("Morphcube plays its embedded morph animation while avocado orbits.")
-v.wait_for_assets()
+v.wait_for_assets(disconnect=False)
+v.set_view("iso", animate=False)
+v.frame_points(list(product([-2.8, 2.8], [-2.8, 2.8], [0, 2.6])), fill=0.95)
+v.disconnect()
