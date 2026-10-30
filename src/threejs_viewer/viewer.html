@@ -8240,13 +8240,13 @@ class CameraController {
     }
 
     /**
-     * Aim the active camera at `bbox` with `perspMargin` extra distance multiplier
-     * (ortho always uses a 1.2 half-extent padding; perspMargin applies to perspective).
-     * Shared by frameObject / frameAll.
+     * Aim the active camera at `bbox` along the current view direction so all
+     * eight corners land inside the view, each at most 1/`margin` of the way
+     * from the centre to the frustum edge. Shared by frameObject / frameAll.
      * @param {any} bbox
-     * @param {number} perspMargin
+     * @param {number} margin
      */
-    fitToBox(bbox, perspMargin) {
+    fitToBox(bbox, margin) {
         const v = this.v;
         if (bbox.isEmpty()) return;
         const center = bbox.getCenter(new THREE.Vector3());
@@ -8256,6 +8256,32 @@ class CameraController {
         const dir = v._camera.position.clone().sub(center);
         if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
         else dir.normalize();
+        // Camera basis as Matrix4.lookAt builds it, so the fit matches the
+        // orientation the lookAt below produces.
+        const right = new THREE.Vector3().crossVectors(v._camera.up, dir);
+        if (right.lengthSq() < 1e-10) {
+            const alt = Math.abs(dir.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+            right.crossVectors(alt, dir);
+        }
+        right.normalize();
+        const up = new THREE.Vector3().crossVectors(dir, right);
+        // Each corner's offset from the centre on the camera basis.
+        const corner = new THREE.Vector3();
+        let maxX = 0, maxY = 0;
+        /** @type {Array<[number, number, number]>} */
+        const offs = [];
+        for (let i = 0; i < 8; i++) {
+            corner.set(
+                i & 1 ? bbox.max.x : bbox.min.x,
+                i & 2 ? bbox.max.y : bbox.min.y,
+                i & 4 ? bbox.max.z : bbox.min.z,
+            ).sub(center);
+            const x = Math.abs(corner.dot(right));
+            const y = Math.abs(corner.dot(up));
+            offs.push([x, y, corner.dot(dir)]);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+        }
         if (v._isOrtho) {
             const w = v.container.clientWidth;
             const h = v.container.clientHeight;
@@ -8263,19 +8289,20 @@ class CameraController {
             // yet (e.g. frameObject called while hidden), fall back to aspect=1
             // instead of silently no-opping.
             const aspect = (w > 0 && h > 0) ? (w / h) : 1;
-            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
-            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
-            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
+            const fitHalf = Math.max(maxY, maxX / aspect, 1e-6) * margin;
             v._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
             v._orthoCamera.updateProjectionMatrix();
             v._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
         } else {
-            const vFov = THREE.MathUtils.degToRad(v._perspCamera.fov / 2);
-            const aspect = v._perspCamera.aspect || 1;
-            const hFov = Math.atan(Math.tan(vFov) * aspect);
-            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
-            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
-            const dist = Math.max(distV, distH) * perspMargin;
+            const tanV = Math.tan(THREE.MathUtils.degToRad(v._perspCamera.fov / 2));
+            const tanH = tanV * (v._perspCamera.aspect || 1);
+            // A corner at depth offset z sits dist - z in front of the camera
+            // and fits when its lateral offset times margin is within that
+            // depth times the half-FOV tangent.
+            let dist = 1e-6;
+            for (const [x, y, z] of offs) {
+                dist = Math.max(dist, z + x * margin / tanH, z + y * margin / tanV);
+            }
             v._camera.position.copy(center).addScaledVector(dir, dist);
         }
         // ViewerControls never calls camera.lookAt, so explicitly re-orient
@@ -22642,9 +22669,9 @@ class ThreeJSViewer {
 
     /**
      * @param {THREE.Box3} bbox
-     * @param {number} perspMargin
+     * @param {number} margin
      */
-    _fitCameraToBox(bbox, perspMargin) { this._camController.fitToBox(bbox, perspMargin); }
+    _fitCameraToBox(bbox, margin) { this._camController.fitToBox(bbox, margin); }
 
     // ========== Destroy ==========
 

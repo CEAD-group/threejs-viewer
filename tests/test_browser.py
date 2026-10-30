@@ -9546,6 +9546,42 @@ def test_frame_object_ignores_hidden_and_grid_descendants(viewer_client, viewer_
     assert viewer_page.evaluate(dist, "shell") > 10 * before
 
 
+_FIT_CORNERS_NDC = """([margin, ortho]) => {
+  const v = window.threejsViewer;
+  if (v._isOrtho !== ortho) v._switchCamera(ortho);
+  v._camera.up.set(0, 0, 1);
+  v._camera.position.set(7, -3, 4);
+  v._controls.target.set(0, 0, 0);
+  v._camera.lookAt(0, 0, 0);
+  const min = [-1, -0.5, -2], max = [3, 0.5, 1];
+  v.frameBox(min, max, margin);
+  v._camera.updateMatrixWorld(true);
+  let mx = 0, my = 0;
+  for (let i = 0; i < 8; i++) {
+    const c = v._camera.position.clone().set(
+      i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]);
+    const n = c.project(v._camera);
+    mx = Math.max(mx, Math.abs(n.x)); my = Math.max(my, Math.abs(n.y));
+  }
+  return [mx, my];
+}"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_fit_to_box_keeps_every_corner_inside_the_margin(
+    viewer_client, viewer_page, ortho
+):
+    """fitToBox fits the eight box corners on the camera basis, so an oblique
+    view never clips one, and the ortho branch honours the margin instead of
+    a fixed 1.2 (issue #287): the outermost corner sits at 1/margin in NDC."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    for margin in (1.0, 1.5):
+        mx, my = viewer_page.evaluate(_FIT_CORNERS_NDC, [margin, ortho])
+        assert max(mx, my) == pytest.approx(1 / margin, abs=1e-6)
+
+
 @pytest.mark.browser
 def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
     """A pointercancel between press and release (a cancelled touch or pen)
