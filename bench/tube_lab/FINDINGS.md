@@ -37,7 +37,7 @@ review commit `640aed0`, which found 1.0 over-snaps tight/messy folds
 (spiky-cusp + z-fighting seam, over-snap spikes shooting along the adjacent
 straight on jittered reversals) and lowered the default to 0.5 after
 validating against a wider probe set (tight hairpin, the real #50
-ribweaver-bulb apexes at 0.00% pixel diff vs. the old 1.0-tuned baseline, a
+downstream-bulb apexes at 0.00% pixel diff vs. the old 1.0-tuned baseline, a
 sharp jittered ±120° reversal, a rounded jittered S-curve). **0.5 is what
 ships and what the code contains today** — treat REPORT_119.md's "keep 1.0"
 line as historical, not current guidance.
@@ -118,7 +118,7 @@ defense-in-depth, not the primary mechanism, on this data.
 
 As noted in §1, the #119 harness's own conclusion ("keep 1.0") was
 superseded by the broader post-review probe set in `640aed0` that also
-covered non-#119 scenes (the #50 ribweaver bulb, jittered ±120° reversals)
+covered non-#119 scenes (the #50 downstream bulb, jittered ±120° reversals)
 where 1.0 over-snapped. 0.5 is a compromise across both problem sets, not
 a re-run of the #119 numbers above at a different value.
 
@@ -203,7 +203,7 @@ not re-run for this document — see README.md for how to reproduce.)
   Ruled out as a mechanism for either quality axis.
 - **`max_snap_factor` below 0.5** (0.25) — under-shoots real wide-bead
   corners: strands stop short of the apex, leaving a protruding wedge
-  (measured against the #50 ribweaver-bulb tuned baseline). Also under-
+  (measured against the #50 downstream-bulb tuned baseline). Also under-
   collapses `hairpin_dense` (168→2 rings moved, §3.2).
 - **`max_snap_factor = 1.0`** (the original #51/#119 default) — over-snaps
   tight/messy folds: spiky-cusp + z-fighting seam, and over-snap spikes

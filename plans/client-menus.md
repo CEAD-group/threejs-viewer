@@ -1,15 +1,15 @@
 # Client-defined menus: one menu mechanism for the viewer and its embedders
 
 > **Status: decided and implemented (PR after #204, branch `client-menus`);
-> the ribweaver migration is open.** Decision artifact from the 2026-09-15
+> the downstream migration is open.** Decision artifact from the 2026-09-15
 > discussion with Thijs. The viewer's own options menu (#204) and any menu an
 > embedder or a Python script adds now share one `MenuController` in
 > `viewer.js`; this file records why, the shape that was chosen, and what
-> still has to move out of ribweaver.
+> still has to move out of the downstream app.
 
 ## Problem
 
-ribweaver had three overlay families over the same canvas, each with its own
+The downstream app had three overlay families over the same canvas, each with its own
 CSS, positioning and behaviour:
 
 - `web/static/display_menu.js`: a rail of vertical tabs folding off the right
@@ -35,7 +35,7 @@ visibility and shortcut display. The client owns items and callbacks.
 - `viewer.addMenu(spec)` (JS) and `ViewerClient.add_menu(...)` (Python).
   The built-in options menu is the first caller of the same code path, so it
   cannot drift from client menus.
-- One visual idiom: ribweaver's N-panel rail, verbatim. Every menu is a
+- One visual idiom: an embedding app's N-panel rail, verbatim. Every menu is a
   vertical tab folded against the right edge whose body slides out on click;
   tabs stack, one is open at a time. A menu that must stay open (a legend)
   uses `mode: 'panel'`, which starts open and survives outside clicks. The
@@ -49,8 +49,8 @@ visibility and shortcut display. The client owns items and callbacks.
 - User-defined keyboard shortcuts: an item's `shortcut` is shown as a chip
   and bound (`bindKey: false` for chip only), unless the key is one the
   viewer's own handler consumes (refused with a warning).
-- Styling follows ribweaver's overlay palette, exposed as `--tjsv-*` tokens
-  on `.threejs-viewer` so ribweaver can override by setting variables.
+- Styling follows an embedding app's overlay palette, exposed as `--tjsv-*` tokens
+  on `.threejs-viewer` so an embedder can override by setting variables.
 
 ## Shapes
 
@@ -71,7 +71,7 @@ Handle: `setItem(id, patch)`, `getValue(id)`, `open/close/isOpen`,
 Python: `add_menu`, `update_menu_item`, `remove_menu`, `on_menu_action`.
 Menus are replayed on reconnect with their latest patched state.
 
-## Open: ribweaver migration
+## Open: downstream migration
 
 Per lane, replace the `DisplayMenu.mount` calls and the copied
 `.viewer-3d-controls` markup with `viewer.addMenu` calls and delete the

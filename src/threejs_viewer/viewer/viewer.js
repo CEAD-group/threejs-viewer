@@ -2284,7 +2284,7 @@ function wornAndOwnMaterials(obj) {
  * Whether a mesh under a tracked object casts / receives the sun's shadow.
  * Fat lines are instanced Meshes whose depth pass is meaningless; grids,
  * highlight/primitive outlines and wire overlays are furniture. A translucent
- * volume casting a full-black shadow reads wrong (ribweaver's workzone fill),
+ * volume casting a full-black shadow reads wrong (a workzone fill),
  * so it only receives; judged on the mesh's own materials, past a clay/debug
  * swap. Read by _updateSun's re-flag walk and by applyOpacity, the one place
  * transparent/opacity change afterwards.
@@ -4238,7 +4238,7 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // as a spiky fin at the cusp plus a z-fighting sawtooth. Dropping too far
     // (0.25) under-shoots real wide-bead corners: the strands stop short of
     // the apex and leave a protruding wedge (measured pixel-for-pixel against
-    // the #50 ribweaver-bulb tuned baseline). 0.5 is the sweet spot — it
+    // the #50 downstream-bulb tuned baseline). 0.5 is the sweet spot — it
     // reaches the apex on real corners identically to 1.0 (0.00% pixel diff on
     // the #50 bulb apexes) while staying gentle enough to avoid the tight-fold
     // fin. The large-segment exemption below independently removes the far-
@@ -4268,7 +4268,7 @@ function collapseTubeStrandFolds(positions, spine, widths, heights, localFrames,
     // instead of a clean crease. Falling back to un-collapsed geometry
     // (a fat self-intersecting blob) is the lesser visual evil.
     //
-    // 8° is below the real-corner peaks we measured on the ribweaver
+    // 8° is below the real-corner peaks we measured on a downstream
     // dump (14–23° on sharp 99° turns) and above the bulb-peak smooth-
     // bend peaks (5.8°), giving a clean discriminator. Beads sampled
     // very densely (sub-W/10 segments) at a wide-arc real fold might
@@ -7346,7 +7346,7 @@ class CameraController {
 // MENU  { id, label, title, mode: 'dropdown'|'panel', items: [ITEM…],
 //         storageKey, bodyWidth, hidden }
 //   Every menu is a vertical tab on the right-edge rail whose body slides
-//   out on click (ribweaver's N-panel). `dropdown` (the default) starts
+//   out on click (an embedding app's N-panel). `dropdown` (the default) starts
 //   folded and closes on an outside click; `panel` starts open and stays
 //   open across outside clicks (a legend). `bodyWidth` (CSS length,
 //   default 190px) sizes the body.
@@ -8683,7 +8683,7 @@ function createDracoLoader(options) {
 // mesh right after load; a multi-mesh model additionally gets the root marked
 // isModelGroup with the stamped-mesh list retained, and the draw fraction is
 // applied per child mesh (fine for assets authored with primitives ordered
-// along the reveal axis — the ribweaver rail-bellows use case). A root that
+// along the reveal axis — the rail-bellows use case). A root that
 // *is* a mesh (STL/PLY) needs no group marker: the stamp alone routes it
 // through the existing isMesh branch of the dispatchers.
 
@@ -14587,7 +14587,7 @@ export class ThreeJSViewer {
         // Init Three.js
         this._initThreeJS();
 
-        // Dev-debug convenience (ribweaver#495): last-constructed viewer's
+        // Dev-debug convenience: last-constructed viewer's
         // THREE/scene/camera/renderer, for console lighting/material tweaks.
         // Not a public API — internals may change.
         if (typeof window !== 'undefined') {
@@ -15278,14 +15278,14 @@ export class ThreeJSViewer {
      * Load the environment cubemap. Face source, in precedence order:
      *   1. named set `name` — from `options.cubemaps` (`{format, faces}`, faces
      *      gzip+base64, inlined by build.py), or from `static/cubemaps/index.json`
-     *      when the `viewer/` source dir is served (ribweaver), in which case
+     *      when the `viewer/` source dir is served, in which case
      *      the faces are fetched from `static/cubemaps/<name>/<face>.<format>`.
      *      Picked in the Lighting panel.
      *   2. `options.cubemapData` — gzip+base64 Radiance HDR per face, inlined by
      *      build.py; the standalone viewer.html path, works under `file://`.
      *   3. `static/cubemaps/paul-lobe-haus/<face>.hdr` next to this module —
      *      works when an embedder serves the `viewer/` source directory as
-     *      static files (ribweaver).
+     *      static files.
      * cubemapData in any other shape (the pre-HDR base64 JPEGs, or base64 of a
      * 404 body from an embedder still fetching `static/*.jpg`) falls to 3.
      * HDR faces are decoded in-file (`decodeRadianceHDR`); LDR sets go through

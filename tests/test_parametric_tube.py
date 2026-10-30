@@ -1665,7 +1665,7 @@ def test_parametric_tube_color_update_survives_two_draw_range_writes_per_frame(
     ), "_colorFullUploadNeeded was not cleared by a render"
 
 
-# 100-spine-point bead extracted from the ribweaver dump tube_8f5bba97.
+# 100-spine-point bead extracted from the downstream dump tube_8f5bba97.
 # Triggers the strand_collapse cross-link and wide-bead-corner bugs that
 # previously rendered as a flat triangulated diamond fan / cube-cluster.
 # See repro_min.py for the manual visual repro context.
@@ -1860,7 +1860,7 @@ def test_parametric_tube_strand_collapse_snap_distance_guarded(
 
     With ``max_snap_factor=1.0`` no ring should move more than ``max(W, H)``
     from its mitered baseline. Without the guard, this same input produced
-    displacements > 2·W on real ribweaver dumps.
+    displacements > 2·W on real downstream dumps.
     """
     spine, widths, heights = _u_shaped_cross_toolpath()
     W = float(widths[0])

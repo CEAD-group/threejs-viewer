@@ -243,7 +243,7 @@ window.threejsViewer = new ThreeJSViewer(container, {{
 </html>
 """
     OUTPUT_HTML.write_text(html, encoding="utf-8", newline="\n")
-    # Manifest for embedders serving the viewer/ source dir (ribweaver): the
+    # Manifest for embedders serving the viewer/ source dir: the
     # viewer reads it to offer the same sets, fetching faces as static files.
     manifest = [{"name": n, "format": cm["format"]} for n, cm in cubemaps.items()]
     (CUBEMAPS_DIR / "index.json").write_text(
