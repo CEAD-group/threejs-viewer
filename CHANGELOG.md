@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.0.73
+
+### Joint-driven animation (#293, issue #292)
+
+- `set_kinematic_chain(id, description, object_ids, object_scale=None)` declares a kinematic chain in the viewer's own format, `threejs_viewer.kinematic_chain` version 1 (axes, solved values and parent-first links with revolute, prismatic, solved and aim joints). The viewer runs the forward kinematics, so an animation needs one row of axis values per keyframe on the new `joints` channel (`Animation.set_joint_data`) instead of a 4x4 per link, and the links stay connected between keyframes where per-link matrix interpolation cuts chords. `set_joints` poses a chain without an animation and is the pose `unload_animation` returns to. `object_ids` is required and its keys must be link names.
+- The new module `threejs_viewer.kinematics` is the format spec, with `validate()` and a float64 reference `compose()`. The JS FK is exported from `viewer.js` (`compileKinematicChain`, `composeKinematicChainInto`, `composeKinematicChain`) and held to the reference at 1e-9 on a pinned chain and seeded random chains. `query_kinematic_chain` returns what the viewer computes, so a producer can check it against its own FK.
+
+### Section caps on clipped solids (#298, issue #259)
+
+- `set_clipping_caps(True)` (also the `clipCaps` option, `clip_caps` URL param, and a checkbox in the clip panel) closes the cut faces of primitives, parametric tubes, toolpaths and swept tools with flat caps in the object's colour, interpolating per-vertex colours along the cut. Off by default; `clip_cap=` per object overrides it. Caps follow plane moves, slab mode, draw range, breaks, LOD and round joins. Tubes over 20k drawn triangles are sliced on the LOD worker, so the main thread spends under 2 ms per plane move on a 2.4M-triangle tube. Meshes and loaded models stay open.
+
+### Framing (#295, issue #287)
+
+- Framing fills a fraction of the view (`fill`, default 0.9) that means the same in perspective and ortho, fitting the corners of each visible part's box instead of one world box, so diagonal content is framed tightly. New `framePoints(points, {fill, animate})` and `frameBoxes(boxes, opts)`; `frameObject(id, {fill})`, `frameBox(min, max, {fill})` (a bare number is still the old margin), and Python `frame_object(id, fill=None)` and `frame_points(points, fill=None)`. Every framing call keeps the view direction except Home, which still turns to iso.
+- Double-click framing, object clicks and the orbit pivot skip geometry under a hidden ancestor and objects added with `pickable=False`, so a hidden volume around a part no longer frames the whole group. `add_polyline(segments=True)` now honours `pickable`.
+
+### Polyline exact colours (#294, issue #291)
+
+- `add_polyline(..., exact_colors=True)` and `update_polyline_colors(..., exact_colors=)` render vertex colours as the sRGB bytes sent, not tone-mapped and not treated as linear, so categorical colours match their legend swatches. Under eye-dome lighting the composer still tone-maps the line colours; this is documented.
+
+### Axis-control picking (#296, issue #284)
+
+- Axis-control handles are hit-tested in screen pixels (11 px for a mouse, 20 px for touch, `pick_radius_px` to override) instead of a fixed 0.1 m sphere, so they no longer steal clicks from the move gizmo on small parts. Where a handle and the gizmo overlap, the gizmo wins.
+
+### Menus (#297, #300, issue #236)
+
+- A menu `label` with `collapsible: true` is a focusable section header that folds the rows under it; `collapsed` sets the initial state, which persists under the menu's `storageKey`. The menu body no longer chains touch scrolling to the page.
+- The toggle switch thumb is centred in both states and slightly larger than the pill.
+
+### Repository
+
+- Names of downstream projects were removed from the code, docs, tests, issues and pull requests (#299).
+
 ## 0.0.72
 
 ### USD BRep geometry (#285)
