@@ -5,7 +5,7 @@ Generates a spiral vase toolpath with animated draw_range and a nozzle
 following the tip.  Uses ``add_toolpath`` which renders the bead as a
 parametric tube (client-side geometry, smooth frontier morphing).  The bead
 wears an extruded-plastic texture set (colour, normal and roughness maps from
-``bead_texture_maker``) that repeats along the path; the viridis colouring
+``tools/bead_texture_maker``) that repeats along the path; the viridis colouring
 tints it.
 
 The animation uses one keyframe per spine point with linear interpolation,
@@ -18,7 +18,7 @@ Run: uv run python examples/11_toolpath.py
 import math
 
 import numpy as np
-from bead_texture_maker import texture_set
+from tools.bead_texture_maker import texture_set
 
 from threejs_viewer import Animation, Toolpath, viewer
 

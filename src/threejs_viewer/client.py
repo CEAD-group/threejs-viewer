@@ -3157,7 +3157,7 @@ class ViewerClient:
             roughness_map: Optional grayscale roughness map laid out like
                 ``texture``. The viewer multiplies it by ``roughness``, so pass
                 ``roughness=1.0`` to use the map's values as they are.
-                ``examples/bead_texture_maker.py`` generates a matching set.
+                ``examples/tools/bead_texture_maker.py`` generates a matching set.
         """
         lod_header = _serialize_lod(lod)
 

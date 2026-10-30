@@ -50,6 +50,7 @@ it needs a curvature-scaled step).
   the bench). Standalone run produces the `out/zr_R6_*` panels
   (input line / off / 0.5 / 1.0). 80%-decimation + uneven gaps + smooth
   Hann-windowed +40% width bump in the turn.
+- `corner_zfight_reference.py` - side-by-side viewer scene (formerly example 21) comparing no collapse, the viewer's `strand_collapse` and a Python reference mesh with the same snaps; run `uv run python bench/tube_lab/corner_zfight_reference.py`.
 - `FINDINGS.md` — consolidated findings/history from the investigation.
 
 ## Scenes (each a distinct regime)
