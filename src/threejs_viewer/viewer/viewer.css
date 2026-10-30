@@ -120,6 +120,9 @@
     padding: 6px 26px 8px 8px;
     color: var(--tjsv-text);
     font-size: 12px;
+    /* A touch scroll that reaches the end of the body must not chain to the page. */
+    overscroll-behavior: contain;
+    touch-action: pan-y;
 }
 .threejs-viewer .tjsv-menu-status {
     color: var(--tjsv-text-dim);
@@ -146,6 +149,26 @@
     color: var(--tjsv-text-dim);
     margin: 6px 0 2px;
 }
+.threejs-viewer .tjsv-menu-section {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 0;
+    cursor: pointer;
+    user-select: none;
+}
+.threejs-viewer .tjsv-menu-section:hover { color: var(--tjsv-text); }
+.threejs-viewer .tjsv-menu-section:focus { outline: none; }
+.threejs-viewer .tjsv-menu-section:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
+.threejs-viewer .tjsv-menu-chevron {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    transition: transform 0.15s;
+}
+.threejs-viewer .tjsv-menu-section.collapsed .tjsv-menu-chevron { transform: rotate(-90deg); }
 .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 6px 0; }
 .threejs-viewer .tjsv-menu-custom { margin: 2px 0; }
 
@@ -202,28 +225,34 @@
 .threejs-viewer .tjsv-menu-mark svg { width: 15px; height: 15px; display: block; }
 .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark { color: var(--tjsv-primary-hi); }
 /* Pill mark (default toggle) */
+/* Thumb larger than the pill, overhanging it by the same 2px at both ends. */
 .threejs-viewer .tjsv-toggle-track {
     position: relative;
     flex: 0 0 auto;
+    box-sizing: border-box;
     width: 26px;
-    height: 15px;
-    border-radius: 8px;
+    height: 12px;
+    margin: 0 2px;
+    border-radius: 6px;
     background: var(--tjsv-panel-3);
     border: 1px solid var(--tjsv-border);
     transition: background 0.15s ease, border-color 0.15s ease;
 }
 .threejs-viewer .tjsv-toggle-thumb {
     position: absolute;
-    top: 1.5px;
-    left: 1.5px;
-    width: 11px;
-    height: 11px;
+    top: 50%;
+    left: -3px;
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
     border-radius: 50%;
     background: var(--tjsv-text-dim);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    transform: translate(0, -50%);
     transition: transform 0.15s ease, background 0.15s ease;
 }
 .threejs-viewer .tjsv-menu-item.active .tjsv-toggle-track { background: var(--tjsv-primary); border-color: var(--tjsv-primary); }
-.threejs-viewer .tjsv-menu-item.active .tjsv-toggle-thumb { transform: translateX(11px); background: #fff; }
+.threejs-viewer .tjsv-menu-item.active .tjsv-toggle-thumb { transform: translate(14px, -50%); background: #fff; }
 .threejs-viewer .tjsv-menu-item.disabled .tjsv-toggle-track { opacity: 0.4; }
 
 /* Actions (np-action): a full-width button */
@@ -568,6 +597,23 @@
 }
 .threejs-viewer .clip-toggle-row button:hover { background: #555; }
 .threejs-viewer .clip-toggle-row button.active { background: #0066cc; }
+.threejs-viewer .clip-check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.threejs-viewer .clip-check-row input[type="checkbox"] {
+    accent-color: #0066cc;
+    cursor: pointer;
+    margin: 0;
+}
+.threejs-viewer .clip-section .clip-check-row .clip-check-label {
+    font-size: 12px;
+    color: #ccc;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: pointer;
+}
 .threejs-viewer .clip-normal-row {
     display: flex;
     gap: 4px;

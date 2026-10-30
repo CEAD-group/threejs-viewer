@@ -1,7 +1,7 @@
 """Client-defined menu: the viewer draws it, this script owns the contents.
 
 Adds a "Demo" dropdown next to the viewer's own options menu with one of each
-item type. Interactions come back to Python through ``on_menu_action`` and
+item type, grouped in two foldable sections. Interactions come back to Python through ``on_menu_action`` and
 are applied to the scene from here (browser -> Python -> browser), so the
 viewer never needs to know what "Recolour" means.
 
@@ -30,7 +30,8 @@ client.add_menu(
     title="Example menu driven from Python",
     storage_key="tjsv-example.demo",
     items=[
-        {"type": "label", "label": "Scene"},
+        # A collapsible label folds the rows up to the next divider.
+        {"type": "label", "id": "scene", "label": "Scene", "collapsible": True},
         {
             "type": "eye",
             "id": "boxes",
@@ -40,6 +41,12 @@ client.add_menu(
         },
         {"type": "eye", "id": "marker", "label": "Marker", "ids": ["marker"]},
         {"type": "divider"},
+        {
+            "type": "label",
+            "id": "controls",
+            "label": "Controls",
+            "collapsible": True,
+        },
         {
             "type": "button",
             "id": "recolour",

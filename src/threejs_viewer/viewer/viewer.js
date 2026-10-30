@@ -1,6 +1,6 @@
 // @ts-check
 import * as THREE from 'three';
-import { ViewerControls } from './controls.js';
+import { ViewerControls, isPickTarget } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -104,6 +104,11 @@ const VIEW_HELPER_SIZE_MAX = 512;
 const _viewTweenQuat = new THREE.Quaternion();
 const _viewTweenDir = new THREE.Vector3();
 const _viewTweenUp = new THREE.Vector3();
+// Share of the half-view, on the tighter screen axis, that framed content
+// spans: 0.9 leaves 5% of the view free on each side.
+const FRAME_DEFAULT_FILL = 0.9;
+const _frameTweenPos = new THREE.Vector3();
+const _frameTweenTarget = new THREE.Vector3();
 
 const CLIP_AXIS_NORMALS = {
     'x+': new THREE.Vector3(1, 0, 0),
@@ -132,6 +137,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {Object<string, string>} [cubemapData]       Map of face name (px/nx/py/ny/pz/nz) -> gzip+base64 Radiance HDR (omit to load static/cubemaps/paul-lobe-haus/*.hdr next to the module)
  * @property {Object<string, {format: string, faces: Object<string, string>}>} [cubemaps]  Named cubemap sets (format hdr/png/jpg, faces gzip+base64) offered in the Lighting panel's picker; URL `cubemap` / localStorage pick one
  * @property {boolean} [environmentBackground]           Show the environment cubemap as the scene background (default false; URL `env_background` wins)
+ * @property {boolean} [clipCaps]                      Cap the cut of clipped primitives, swept tools and tubes (default false; URL `clip_caps` wins)
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
@@ -282,6 +288,62 @@ function expandBoxSkippingOverlays(box, root) {
     expandBoxByNode(box, root);
     const kids = root.children;
     for (let i = 0; i < kids.length; i++) expandBoxSkippingOverlays(box, kids[i]);
+}
+
+/**
+ * The eight corners of every non-empty box, in world space.
+ * @param {Iterable<THREE.Box3>} boxes
+ * @returns {THREE.Vector3[]}
+ */
+function boxCorners(boxes) {
+    const out = [];
+    for (const b of boxes) {
+        if (!b || b.isEmpty()) continue;
+        for (let i = 0; i < 8; i++) {
+            out.push(new THREE.Vector3(
+                i & 1 ? b.max.x : b.min.x,
+                i & 2 ? b.max.y : b.min.y,
+                i & 4 ? b.max.z : b.min.z));
+        }
+    }
+    return out;
+}
+
+/**
+ * A non-empty Box3 from two `{x,y,z}` / `[x,y,z]` corners, or null with a
+ * warning naming `what`.
+ * @param {any} min @param {any} max @param {string} what
+ * @returns {THREE.Box3 | null}
+ */
+function boxFromMinMax(min, max, what) {
+    const lo = vec3Tuple(min), hi = vec3Tuple(max);
+    if (!lo || !hi) {
+        console.warn(`${what}: min/max must be finite 3-vectors`);
+        return null;
+    }
+    const box = new THREE.Box3(
+        new THREE.Vector3(lo[0], lo[1], lo[2]),
+        new THREE.Vector3(hi[0], hi[1], hi[2]));
+    if (box.isEmpty()) {
+        console.warn(`${what}: empty box (min > max on some axis)`);
+        return null;
+    }
+    return box;
+}
+
+/**
+ * Resolve a framing `fill` from an options object or, for frameBox's old
+ * positional form, a bare margin number (fill = 1 / margin).
+ * @param {any} opts
+ * @returns {{fill: number, animate: boolean}}
+ */
+function frameOptions(opts) {
+    if (typeof opts === 'number') {
+        return { fill: opts > 0 ? Math.min(1 / opts, 1) : FRAME_DEFAULT_FILL, animate: false };
+    }
+    const o = opts || {};
+    const fill = Number.isFinite(o.fill) && o.fill > 0 ? Math.min(o.fill, 1) : FRAME_DEFAULT_FILL;
+    return { fill, animate: o.animate === true };
 }
 
 // Scratch objects for matrix decompose/lerp. Module-scope to avoid per-frame alloc.
@@ -791,7 +853,502 @@ function makeChannelApply(viewer) {
         // No-ops: data is read directly in _applyCameraTracking, not per-object
         camera_target: () => {},
         camera_position: () => {},
+        // Applied after every other channel in _applyFrame (KinematicChainController.applyChannel).
+        joints: () => {},
     };
+}
+
+// ---- Kinematic chains --------------------------------------------------------
+// Forward kinematics over the `threejs_viewer.kinematic_chain` description,
+// version 1. The Python module `threejs_viewer.kinematics` is the spec and its
+// `compose` the reference evaluator. Pure float64 and no three.js, so an
+// embedder can pin it to its own FK in unit tests. The arithmetic repeats the
+// reference step for step, so the two agree to rounding.
+// Matrices are row-major 16-arrays, like the description's `origin`.
+
+/**
+ * @typedef {[number, number, number]} KCVec3
+ * @typedef {{offset: number, terms: Record<string, number>}} KCJointValue
+ * @typedef {{type: 'revolute', axis: KCVec3, point: KCVec3, value: KCJointValue}
+ *         | {type: 'prismatic', axis: KCVec3, value: KCJointValue}
+ *         | {type: 'solved', axis: KCVec3, point: KCVec3, index: number, method?: string}
+ *         | {type: 'aim', axis: KCVec3, point: KCVec3, body: KCVec3, target: {link: string|null, point: KCVec3}}} KCJoint
+ * @typedef {{name: string, parent: string|null, origin: number[][], joint: KCJoint|null}} KCLink
+ * @typedef {{name: string, kind?: string, limits?: Array<number|null>}} KCAxis
+ * @typedef {{format: string, version: number, units?: {length: string, angle: string},
+ *            axes: KCAxis[], solved?: string[], links: KCLink[]}} KinematicDescription
+ */
+
+/**
+ * One link resolved to indices and scalars, so composing a pose allocates nothing.
+ * @typedef {object} KCCompiledLink
+ * @property {number} parent  link index, -1 for the world
+ * @property {Float64Array} origin  row-major 4x4
+ * @property {number} kind  0 fixed, 1 revolute, 2 prismatic, 3 solved, 4 aim
+ * @property {number} x @property {number} y @property {number} z  unit axis (hinge for aim)
+ * @property {number} px @property {number} py @property {number} pz  point on the turn axis
+ * @property {number} offset
+ * @property {Array<[number, number]>} terms  [axis index, factor], in axes order
+ * @property {number} solvedIndex
+ * @property {number} bx @property {number} by @property {number} bz  aim body axis
+ * @property {number} target  aim target link index, -1 for the world
+ * @property {number} tx @property {number} ty @property {number} tz  aim target point
+ */
+
+/**
+ * @typedef {object} KinematicChainCompiled
+ * @property {string[]} names  link names, in description order
+ * @property {KCCompiledLink[]} links
+ * @property {number} nAxes
+ * @property {number} nSolved
+ */
+
+const KC_DEG = Math.PI / 180;
+const KC_FORMAT = 'threejs_viewer.kinematic_chain';
+const KC_KIND = { revolute: 1, prismatic: 2, solved: 3, aim: 4 };
+const KC_IDENTITY = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/**
+ * Resolve a kinematic description to indices, so composing a pose allocates
+ * nothing. Throws on an unsupported version, an unknown joint type, or a link
+ * named before its parent or aim target.
+ * @param {KinematicDescription} desc
+ * @returns {KinematicChainCompiled}
+ */
+export function compileKinematicChain(desc) {
+    // Refuse what this port was not written against rather than misread it.
+    if (!desc || desc.format !== KC_FORMAT || desc.version !== 1) {
+        throw new Error(`kinematic description: expected format ${KC_FORMAT} version 1 (got ${desc?.format} version ${desc?.version})`);
+    }
+    if (!Array.isArray(desc.links) || !Array.isArray(desc.axes)) {
+        throw new Error('kinematic description: needs axes and links arrays');
+    }
+    if (desc.units !== undefined && (desc.units.length !== 'm' || desc.units.angle !== 'deg')) {
+        throw new Error(`kinematic description: units must be m and deg (got ${JSON.stringify(desc.units)})`);
+    }
+    const solvedNames = desc.solved || [];
+    /** @type {Map<string, number>} */
+    const linkIndex = new Map();
+    const indexOf = (/** @type {string|null} */ name, /** @type {string} */ what) => {
+        if (name === null || name === undefined) return -1;
+        const i = linkIndex.get(name);
+        if (i === undefined) throw new Error(`${what}: ${name} is not listed before it`);
+        return i;
+    };
+    const links = desc.links.map((link, li) => {
+        const origin = new Float64Array(16);
+        link.origin.forEach((row, r) => row.forEach((v, c) => { origin[4 * r + c] = v; }));
+        /** @type {KCCompiledLink} */
+        const out = {
+            parent: indexOf(link.parent, `link ${link.name} parent`), origin, kind: 0,
+            x: 0, y: 0, z: 0, px: 0, py: 0, pz: 0, offset: 0, terms: [], solvedIndex: -1,
+            bx: 0, by: 0, bz: 0, target: -1, tx: 0, ty: 0, tz: 0,
+        };
+        const j = link.joint;
+        if (j) {
+            if (!(j.type in KC_KIND)) throw new Error(`link ${link.name}: unknown joint type ${j.type}`);
+            out.kind = KC_KIND[j.type];
+            [out.x, out.y, out.z] = j.axis;
+            if (j.type !== 'prismatic') [out.px, out.py, out.pz] = j.point;
+            if (j.type === 'revolute' || j.type === 'prismatic') {
+                out.offset = j.value.offset;
+                desc.axes.forEach((axis, ai) => {
+                    const f = j.value.terms[axis.name];
+                    if (f !== undefined) out.terms.push([ai, f]);
+                });
+                if (out.terms.length !== Object.keys(j.value.terms).length) {
+                    throw new Error(`link ${link.name}: terms name an axis that is not in axes`);
+                }
+            } else if (j.type === 'solved') {
+                if (!(j.index >= 0 && j.index < solvedNames.length)) {
+                    throw new Error(`link ${link.name}: solved index ${j.index} outside the ${solvedNames.length} solved columns`);
+                }
+                out.solvedIndex = j.index;
+            } else {
+                [out.bx, out.by, out.bz] = j.body;
+                out.target = indexOf(j.target.link, `link ${link.name} aim target`);
+                [out.tx, out.ty, out.tz] = j.target.point;
+            }
+        }
+        linkIndex.set(link.name, li);
+        return out;
+    });
+    return { names: desc.links.map((l) => l.name), links, nAxes: desc.axes.length, nSolved: solvedNames.length };
+}
+
+/**
+ * Row-major out = a @ b, summing k in ascending order. `out` must not alias `a` or `b`.
+ * @param {Float64Array} a @param {number} ao @param {Float64Array} b
+ * @param {Float64Array} out @param {number} oo
+ */
+function kcMatmul(a, ao, b, out, oo) {
+    for (let r = 0; r < 4; r++) {
+        const a0 = a[ao + 4 * r], a1 = a[ao + 4 * r + 1], a2 = a[ao + 4 * r + 2], a3 = a[ao + 4 * r + 3];
+        for (let c = 0; c < 4; c++) {
+            out[oo + 4 * r + c] = a0 * b[c] + a1 * b[4 + c] + a2 * b[8 + c] + a3 * b[12 + c];
+        }
+    }
+}
+
+// Scratch for one pose; composing is single-threaded.
+const _kcFrame = new Float64Array(16);
+const _kcMotion = new Float64Array(16);
+
+/**
+ * The reference's turn into _kcMotion: R about (x, y, z) by theta, translation p - R @ p.
+ * @param {KCCompiledLink} l @param {number} theta
+ */
+function kcTurn(l, theta) {
+    const { x, y, z, px, py, pz } = l;
+    const c = Math.cos(theta), s = Math.sin(theta), v = 1.0 - c;
+    const m = _kcMotion;
+    m[0] = c + x * x * v; m[1] = x * y * v - z * s; m[2] = x * z * v + y * s;
+    m[4] = y * x * v + z * s; m[5] = c + y * y * v; m[6] = y * z * v - x * s;
+    m[8] = z * x * v - y * s; m[9] = z * y * v + x * s; m[10] = c + z * z * v;
+    m[3] = px - (m[0] * px + m[1] * py + m[2] * pz);
+    m[7] = py - (m[4] * px + m[5] * py + m[6] * pz);
+    m[11] = pz - (m[8] * px + m[9] * py + m[10] * pz);
+    m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1;
+}
+
+/**
+ * Step 5 of the reference: the hinge angle (radians) laying the body axis onto the target.
+ * @param {KCCompiledLink} l @param {Float64Array} world @param {Float64Array} f
+ */
+function kcAimAngle(l, world, f) {
+    const { px, py, pz, tx, ty, tz } = l;
+    const pivot0 = (f[0] * px + f[1] * py + f[2] * pz) + f[3];
+    const pivot1 = (f[4] * px + f[5] * py + f[6] * pz) + f[7];
+    const pivot2 = (f[8] * px + f[9] * py + f[10] * pz) + f[11];
+    const h = l.target < 0 ? KC_IDENTITY : world, o = l.target < 0 ? 0 : 16 * l.target;
+    const d0 = ((h[o] * tx + h[o + 1] * ty + h[o + 2] * tz) + h[o + 3]) - pivot0;
+    const d1 = ((h[o + 4] * tx + h[o + 5] * ty + h[o + 6] * tz) + h[o + 7]) - pivot1;
+    const d2 = ((h[o + 8] * tx + h[o + 9] * ty + h[o + 10] * tz) + h[o + 11]) - pivot2;
+    // c_vec = F[:3, :3].T @ (target - pivot)
+    const c0 = f[0] * d0 + f[4] * d1 + f[8] * d2;
+    const c1 = f[1] * d0 + f[5] * d1 + f[9] * d2;
+    const c2 = f[2] * d0 + f[6] * d1 + f[10] * d2;
+    const { x: h0, y: h1, z: h2, bx, by, bz } = l;
+    const bh = bx * h0 + by * h1 + bz * h2;
+    const b0 = bx - bh * h0, b1 = by - bh * h1, b2 = bz - bh * h2;
+    const ch = c0 * h0 + c1 * h1 + c2 * h2;
+    const f0 = c0 - ch * h0, f1 = c1 - ch * h1, f2 = c2 - ch * h2;
+    const x0 = b1 * f2 - b2 * f1, x1 = b2 * f0 - b0 * f2, x2 = b0 * f1 - b1 * f0;
+    return Math.atan2(x0 * h0 + x1 * h1 + x2 * h2, f0 * b0 + f1 * b1 + f2 * b2);
+}
+
+/**
+ * World matrix of every link at one pose, 16 row-major entries per link into `out`.
+ * @param {KinematicChainCompiled} c
+ * @param {ArrayLike<number>} axes  in description axes order: degrees rotary, metres linear
+ * @param {ArrayLike<number>} [solved]  in description solved order, degrees
+ * @param {Float64Array} [out]
+ * @returns {Float64Array}
+ */
+export function composeKinematicChainInto(c, axes, solved = [], out = new Float64Array(16 * c.names.length)) {
+    const links = c.links;
+    for (let i = 0; i < links.length; i++) {
+        const l = links[i];
+        const o = 16 * i;
+        if (l.parent < 0) _kcFrame.set(l.origin);
+        else kcMatmul(out, 16 * l.parent, l.origin, _kcFrame, 0);
+        if (l.kind === 0) {
+            out.set(_kcFrame, o);
+            continue;
+        }
+        if (l.kind === 2 || l.kind === 1) {
+            let value = l.offset;
+            for (const [ai, factor] of l.terms) value = value + factor * axes[ai];
+            if (l.kind === 2) {
+                _kcMotion.set(KC_IDENTITY);
+                _kcMotion[3] = value * l.x; _kcMotion[7] = value * l.y; _kcMotion[11] = value * l.z;
+            } else {
+                kcTurn(l, value * KC_DEG);
+            }
+        } else if (l.kind === 3) {
+            kcTurn(l, solved[l.solvedIndex] * KC_DEG);
+        } else {
+            kcTurn(l, kcAimAngle(l, out, _kcFrame));
+        }
+        kcMatmul(_kcFrame, 0, _kcMotion, out, o);
+    }
+    return out;
+}
+
+/**
+ * World matrix (row-major Float64Array(16)) per link name at one pose; the
+ * convenience form of compileKinematicChain + composeKinematicChainInto.
+ * @param {KinematicDescription} desc
+ * @param {ArrayLike<number>} axes
+ * @param {ArrayLike<number>} [solved]
+ * @returns {Map<string, Float64Array>}
+ */
+export function composeKinematicChain(desc, axes, solved = []) {
+    const c = compileKinematicChain(desc);
+    const out = composeKinematicChainInto(c, axes, solved);
+    return new Map(c.names.map((name, i) => [name, out.subarray(16 * i, 16 * i + 16)]));
+}
+
+/**
+ * @typedef {object} KinematicChainState
+ * @property {string} id
+ * @property {KinematicChainCompiled} c
+ * @property {Array<{link: number, id: string, scale: number}>} targets
+ * @property {Map<string, number>} targetOfObject  object id -> index into targets
+ * @property {Float64Array} out  world matrices of the last pose
+ * @property {Float64Array} q  lerp scratch, axes
+ * @property {Float64Array} s  lerp scratch, solved
+ * @property {boolean} posed  `out` holds a pose that objects should wear
+ * @property {Float64Array | null} staticQ  last set_joints axes
+ * @property {Float64Array | null} staticS  last set_joints solved
+ * @property {boolean} warnedStride
+ */
+
+// Poses tracked objects from joint values: set_kinematic_chain registers a
+// chain, set_joints and the `joints` animation channel pose it. Each posed
+// object gets its link's world matrix, made local when the object is parented.
+class KinematicChainController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this._viewer = viewer;
+        /** @type {Map<string, KinematicChainState>} */
+        this._chains = new Map();
+        /** @type {Map<string, Array<KinematicChainState>>} object id -> chains posing it */
+        this._byObject = new Map();
+        this._world = new THREE.Matrix4();
+        this._parent = new THREE.Matrix4();
+    }
+
+    /**
+     * Register or replace chain `id`. A replaced chain keeps its set_joints pose
+     * when the axis and solved counts still match. Throws on a bad description,
+     * a missing object_ids, or an object_ids/object_scale key that is no link.
+     * @param {string} id
+     * @param {{description: KinematicDescription, object_ids: Record<string, string|null>,
+     *          object_scale?: Record<string, number>}} spec
+     */
+    set(id, spec) {
+        const c = compileKinematicChain(spec.description);
+        const ids = spec.object_ids;
+        const scale = spec.object_scale || {};
+        if (!ids || typeof ids !== 'object') {
+            throw new Error(`kinematic chain '${id}': object_ids (link name -> object id) is required`);
+        }
+        const linkNames = new Set(c.names);
+        for (const key of [...Object.keys(ids), ...Object.keys(scale)]) {
+            if (!linkNames.has(key)) throw new Error(`kinematic chain '${id}': ${key} is not a link of the description`);
+        }
+        /** @type {KinematicChainState['targets']} */
+        const targets = [];
+        /** @type {Map<string, number>} */
+        const targetOfObject = new Map();
+        c.names.forEach((name, link) => {
+            const objId = ids[name];
+            if (!objId) return;
+            if (targetOfObject.has(objId)) {
+                console.warn(`kinematic chain '${id}': object '${objId}' is mapped to more than one link; using the first`);
+                return;
+            }
+            targetOfObject.set(objId, targets.length);
+            targets.push({ link, id: objId, scale: scale[name] ?? 1 });
+        });
+        const prev = this._chains.get(id);
+        const keep = prev && prev.c.nAxes === c.nAxes && prev.c.nSolved === c.nSolved;
+        /** @type {KinematicChainState} */
+        const chain = {
+            id, c, targets, targetOfObject,
+            out: new Float64Array(16 * c.names.length),
+            q: new Float64Array(c.nAxes), s: new Float64Array(c.nSolved),
+            posed: false,
+            staticQ: keep ? prev.staticQ : null, staticS: keep ? prev.staticS : null,
+            warnedStride: false,
+        };
+        this._chains.set(id, chain);
+        this._reindex();
+        if (chain.staticQ) this.pose(chain, chain.staticQ, chain.staticS);
+    }
+
+    /** @param {string} id */
+    remove(id) {
+        if (this._chains.delete(id)) this._reindex();
+    }
+
+    clear() {
+        this._chains.clear();
+        this._byObject.clear();
+    }
+
+    /** @param {string} id */
+    has(id) { return this._chains.has(id); }
+
+    /**
+     * Static pose (also the pose unload_animation returns to). Throws on a
+     * wrong value count or a non-finite value.
+     * @param {string} id @param {ArrayLike<number>} values @param {ArrayLike<number>} [solved]
+     * @returns {boolean} false for an unknown chain
+     */
+    setJoints(id, values, solved) {
+        const chain = this._chains.get(id);
+        if (!chain) return false;
+        const q = Float64Array.from(values || []);
+        const s = Float64Array.from(solved || []);
+        if (q.length !== chain.c.nAxes || s.length !== chain.c.nSolved) {
+            throw new Error(`set_joints '${id}': expected ${chain.c.nAxes} values and ${chain.c.nSolved} solved, got ${q.length} and ${s.length}`);
+        }
+        if (!arrayFinite(q) || !arrayFinite(s)) throw new Error(`set_joints '${id}': values must be finite`);
+        chain.staticQ = q;
+        chain.staticS = s;
+        this.pose(chain, q, s);
+        return true;
+    }
+
+    /**
+     * Compose `chain` at (q, s) and write every mapped object that exists.
+     * @param {KinematicChainState} chain @param {ArrayLike<number>} q @param {ArrayLike<number> | null} s
+     */
+    pose(chain, q, s) {
+        composeKinematicChainInto(chain.c, q, s || [], chain.out);
+        chain.posed = true;
+        for (const t of chain.targets) this._write(chain, t);
+        const v = this._viewer;
+        v._sceneBoundsDirty = true;
+        v._shadowDirty = true;
+    }
+
+    /**
+     * The `joints` channel: one row of `stride` values per chain in `ch.ids`,
+     * axes then solved, lerped in joint space between keyframes.
+     * @param {BinaryChannel} ch @param {number} base @param {number | null} baseNext @param {number} t
+     */
+    applyChannel(ch, base, baseNext, t) {
+        const interp = shouldInterpChannel(ch, baseNext, t);
+        const data = ch.data;
+        for (let i = 0; i < ch.ids.length; i++) {
+            const chain = this._chains.get(ch.ids[i]);
+            if (!chain) continue;
+            const nq = chain.c.nAxes, ns = chain.c.nSolved;
+            if (nq + ns > ch.stride) {
+                if (!chain.warnedStride) {
+                    chain.warnedStride = true;
+                    console.warn(`joints channel: stride ${ch.stride} is shorter than chain '${chain.id}' needs (${nq} axes + ${ns} solved); not posing it`);
+                }
+                continue;
+            }
+            const a = base + i * ch.stride;
+            const b = interp ? /** @type {number} */ (baseNext) + i * ch.stride : a;
+            for (let j = 0; j < nq; j++) chain.q[j] = data[a + j] + (data[b + j] - data[a + j]) * t;
+            for (let j = 0; j < ns; j++) chain.s[j] = data[a + nq + j] + (data[b + nq + j] - data[a + nq + j]) * t;
+            this.pose(chain, chain.q, chain.s);
+        }
+    }
+
+    /**
+     * The `query_kinematic_chain` reply. With `values` (one row per pose) it
+     * evaluates the FK at those poses without moving anything; without, it
+     * reports the current pose and each posed object's actual world matrix.
+     * Matrices are row-major 16-arrays; JSON carries the float64 values exactly.
+     * @param {string} id @param {number[][] | undefined} values @param {number[][] | undefined} solved
+     */
+    query(id, values, solved) {
+        const chain = this._chains.get(id);
+        if (!chain) return { error: `no kinematic chain '${id}'` };
+        const c = chain.c;
+        const split = (/** @type {Float64Array} */ out) =>
+            c.names.map((_, i) => Array.from(out.subarray(16 * i, 16 * i + 16)));
+        if (values) {
+            const out = new Float64Array(16 * c.names.length);
+            const world = [];
+            for (let k = 0; k < values.length; k++) {
+                const q = values[k] || [], s = (solved && solved[k]) || [];
+                if (q.length !== c.nAxes || s.length !== c.nSolved) {
+                    return { error: `pose ${k}: expected ${c.nAxes} values and ${c.nSolved} solved, got ${q.length} and ${s.length}` };
+                }
+                composeKinematicChainInto(c, q, s, out);
+                world.push(split(out));
+            }
+            return { names: c.names, world };
+        }
+        /** @type {Record<string, number[]>} */
+        const objects = {};
+        for (const t of chain.targets) {
+            const obj = this._viewer._objects.get(t.id);
+            if (!obj) continue;
+            obj.updateWorldMatrix(true, false);
+            const e = obj.matrixWorld.elements;
+            objects[t.id] = [0, 1, 2, 3].flatMap((r) => [0, 1, 2, 3].map((col) => e[4 * col + r]));
+        }
+        return {
+            names: c.names,
+            posed: chain.posed,
+            world: chain.posed ? [split(chain.out)] : null,
+            object_ids: Object.fromEntries(chain.targets.map((t) => [c.names[t.link], t.id])),
+            objects,
+        };
+    }
+
+    /** A newly registered object wears the current pose of every chain mapping it. @param {string} id */
+    onRegister(id) {
+        const chains = this._byObject.get(id);
+        if (!chains) return;
+        for (const chain of chains) {
+            if (chain.posed) this._write(chain, chain.targets[/** @type {number} */ (chain.targetOfObject.get(id))]);
+        }
+    }
+
+    /** unload_animation restored every matrixAutoUpdate; return to the static poses. */
+    onUnloadAnimation() {
+        for (const chain of this._chains.values()) {
+            if (chain.staticQ) this.pose(chain, chain.staticQ, chain.staticS);
+            else chain.posed = false;
+        }
+    }
+
+    _reindex() {
+        this._byObject.clear();
+        for (const chain of this._chains.values()) {
+            for (const objId of chain.targetOfObject.keys()) {
+                const list = this._byObject.get(objId);
+                if (list) list.push(chain); else this._byObject.set(objId, [chain]);
+            }
+        }
+    }
+
+    /**
+     * Row-major link world (times the object scale on the rotation) into `m`.
+     * @param {KinematicChainState} chain @param {{link: number, scale: number}} t @param {THREE.Matrix4} m
+     */
+    _linkMatrix(chain, t, m) {
+        const o = chain.out, b = 16 * t.link, k = t.scale;
+        m.set(
+            o[b] * k, o[b + 1] * k, o[b + 2] * k, o[b + 3],
+            o[b + 4] * k, o[b + 5] * k, o[b + 6] * k, o[b + 7],
+            o[b + 8] * k, o[b + 9] * k, o[b + 10] * k, o[b + 11],
+            0, 0, 0, 1,
+        );
+        return m;
+    }
+
+    /** @param {KinematicChainState} chain @param {{link: number, id: string, scale: number}} t */
+    _write(chain, t) {
+        const v = this._viewer;
+        const obj = v._objects.get(t.id);
+        if (!obj) return;
+        const m = this._linkMatrix(chain, t, this._world);
+        const parent = obj.parent;
+        if (parent && parent !== v._scene) {
+            // A parent posed by this chain may not have its new matrixWorld yet.
+            const pi = parent.userData.id !== undefined ? chain.targetOfObject.get(parent.userData.id) : undefined;
+            if (pi !== undefined && v._objects.get(parent.userData.id) === parent) {
+                this._linkMatrix(chain, chain.targets[pi], this._parent);
+            } else {
+                parent.updateWorldMatrix(true, false);
+                this._parent.copy(parent.matrixWorld);
+            }
+            m.premultiply(this._parent.invert());
+        }
+        obj.matrixAutoUpdate = false;
+        setObjectMatrix4Checked(obj, m, 'kinematic chain');
+    }
 }
 
 // ---- Point-cloud time-window filter ----------------------------------------
@@ -1089,6 +1646,38 @@ function abortable(promise, signal) {
         signal.addEventListener('abort', onAbort, { once: true });
         promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
     });
+}
+
+/** @type {Float32Array | null} */
+let SRGB_BYTE_TO_LINEAR = null;
+
+/**
+ * Turn packed uint8 polyline colours into float vertex colours (issue #291).
+ * Plain mode keeps the historical `byte / 255`; `exact` treats the bytes as
+ * sRGB and decodes them to linear working space, so with `toneMapped: false`
+ * the canvas shows the byte values the producer sent.
+ * @param {Uint8Array} bytes
+ * @param {number} count - number of components to convert
+ * @param {boolean} exact
+ * @returns {Float32Array}
+ */
+function polylineColorFloats(bytes, count, exact) {
+    const out = new Float32Array(count);
+    if (exact) {
+        if (!SRGB_BYTE_TO_LINEAR) {
+            // Built from THREE.Color so it follows three's sRGB transfer.
+            SRGB_BYTE_TO_LINEAR = new Float32Array(256);
+            const c = new THREE.Color();
+            for (let i = 0; i < 256; i++) {
+                SRGB_BYTE_TO_LINEAR[i] = c.setRGB(i / 255, 0, 0, THREE.SRGBColorSpace).r;
+            }
+        }
+        const lut = SRGB_BYTE_TO_LINEAR;
+        for (let i = 0; i < count; i++) out[i] = lut[bytes[i]];
+    } else {
+        for (let i = 0; i < count; i++) out[i] = bytes[i] / 255;
+    }
+    return out;
 }
 
 /**
@@ -1726,6 +2315,8 @@ function applyOpacity(obj, opacity) {
         // Same for a primitive's `outline`: an accent that follows the fill's
         // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
+        // A clip cap follows its owner's colour and hides while it is translucent.
+        if (child.userData.__clipCap) return;
         // Embedder overlays mounted under this object keep their own look.
         if (isUnderOverlay(child)) return;
         for (const mat of ownMaterials(child)) {
@@ -1969,7 +2560,7 @@ function applyHighlight(obj, enabled, opts = {}) {
         // overlays (share the parent's geometry — a duplicate outline), and
         // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
-            || child.userData.__highlightOutline) return;
+            || child.userData.__highlightOutline || child.userData.__clipCap) return;
         // An embedder overlay riding the object is not part of the selection.
         if (isUnderOverlay(child)) return;
         const style = resolveHighlightStyle(child, wantStyle);
@@ -4482,6 +5073,13 @@ ${tubeUVPeriod.toString()}
 
 ${writeTubeUVs.toString()}
 
+// Clip cap slicer for tubes (issue #259), shared with the main thread.
+${clipCapBasis.toString()}
+
+${convexHull2D.toString()}
+
+${sliceTubeClipCap.toString()}
+
 
 // ---- Geometry build (plain math, no Three.js) ----
 
@@ -4494,9 +5092,35 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMa
 // ---- Per-tube state cache ----
 const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints, epsilonDivisor }
 const _rdpCache = new Map(); // tubeId -> { chunkDists, chunkIndices }
+const _clipCapGeoms = new Map(); // cap id -> { key, pos, col, idx }
 
 self.onmessage = function(e) {
     const msg = e.data;
+
+    // 'clipCap': slice a tube's drawn bands by the clip planes. The geometry
+    // copy is cached per cap id and only resent when it changed.
+    if (msg.type === 'clipCap') {
+        if (msg.positions) {
+            _clipCapGeoms.set(msg.capId, { key: msg.geomKey, pos: msg.positions, col: msg.colors, idx: msg.indices });
+        }
+        const g = _clipCapGeoms.get(msg.capId);
+        if (!g || g.key !== msg.geomKey) {
+            self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, missing: true });
+            return;
+        }
+        const caps = sliceTubeClipCap(g.pos, g.col, g.idx, Math.min(msg.end, g.idx.length), msg.planes, msg.block);
+        const transfer = [];
+        for (const c of caps) {
+            transfer.push(c.pos.buffer);
+            if (c.col) transfer.push(c.col.buffer);
+        }
+        self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, caps }, transfer);
+        return;
+    }
+    if (msg.type === 'clipCapDispose') {
+        _clipCapGeoms.delete(msg.capId);
+        return;
+    }
 
     // 'init': register original arrays for a tube
     if (msg.type === 'init') {
@@ -6554,48 +7178,157 @@ class CameraController {
     }
 
     /**
-     * Aim the active camera at `bbox` with `perspMargin` extra distance multiplier
-     * (ortho always uses a 1.2 half-extent padding; perspMargin applies to perspective).
-     * Shared by frameObject / frameAll.
-     * @param {any} bbox
-     * @param {number} perspMargin
+     * Solve the camera pose that frames world `points` along the current view
+     * direction (never changed): the projected extent spans `fill` of the
+     * view on the tighter screen axis, in both projections. Perspective
+     * solves the distance and the lateral shift exactly per screen axis (the
+     * tightest frustum wedge around the points); ortho solves the zoom and
+     * the shift. Returns null for an empty point set.
+     * @param {ArrayLike<THREE.Vector3>} points world-space points
+     * @param {number} fill fraction of the half-view on the tighter axis, (0, 1]
+     * @returns {{position: THREE.Vector3, target: THREE.Vector3, zoom: number | null} | null}
      */
-    fitToBox(bbox, perspMargin) {
+    solveFit(points, fill) {
         const v = this.v;
-        if (bbox.isEmpty()) return;
-        const center = bbox.getCenter(new THREE.Vector3());
-        const size = bbox.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-        v._controls.target.copy(center);
-        const dir = v._camera.position.clone().sub(center);
-        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
-        else dir.normalize();
+        const n = points.length;
+        if (!n) return null;
+        const f = Number.isFinite(fill) && fill > 0 ? Math.min(fill, 1) : FRAME_DEFAULT_FILL;
+        const dir = v._camera.position.clone().sub(v._controls.target);
+        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1);
+        dir.normalize();
+        // Camera basis as Matrix4.lookAt builds it, so the solve matches the
+        // orientation the final lookAt produces.
+        const right = new THREE.Vector3().crossVectors(v._camera.up, dir);
+        if (right.lengthSq() < 1e-10) {
+            right.crossVectors(Math.abs(dir.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0), dir);
+        }
+        right.normalize();
+        const up = new THREE.Vector3().crossVectors(dir, right);
+        const xs = new Float64Array(n), ys = new Float64Array(n), zs = new Float64Array(n);
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < n; i++) {
+            const p = points[i];
+            xs[i] = p.dot(right); ys[i] = p.dot(up); zs[i] = p.dot(dir);
+            x0 = Math.min(x0, xs[i]); x1 = Math.max(x1, xs[i]);
+            y0 = Math.min(y0, ys[i]); y1 = Math.max(y1, ys[i]);
+            z0 = Math.min(z0, zs[i]); z1 = Math.max(z1, zs[i]);
+        }
+        const span = Math.max(x1 - x0, y1 - y0, z1 - z0);
+        const zMid = (z0 + z1) / 2;
+        const at = (/** @type {number} */ cx, /** @type {number} */ cy, /** @type {number} */ cz) =>
+            new THREE.Vector3().addScaledVector(right, cx).addScaledVector(up, cy).addScaledVector(dir, cz);
+        if (!(span > 1e-9)) {
+            // A single point (or coincident ones): centre it, keep the distance.
+            const dist = v._camera.position.distanceTo(v._controls.target);
+            return { position: at(x0, y0, z0 + dist), target: at(x0, y0, z0), zoom: null };
+        }
         if (v._isOrtho) {
             const w = v.container.clientWidth;
             const h = v.container.clientHeight;
-            // Preserve pre-refactor behavior: if the container isn't laid out
-            // yet (e.g. frameObject called while hidden), fall back to aspect=1
-            // instead of silently no-opping.
+            // A container not laid out yet falls back to aspect 1 rather than no-opping.
             const aspect = (w > 0 && h > 0) ? (w / h) : 1;
-            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
-            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
-            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
-            v._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
-            v._orthoCamera.updateProjectionMatrix();
-            v._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
-        } else {
-            const vFov = THREE.MathUtils.degToRad(v._perspCamera.fov / 2);
-            const aspect = v._perspCamera.aspect || 1;
-            const hFov = Math.atan(Math.tan(vFov) * aspect);
-            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
-            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
-            const dist = Math.max(distV, distH) * perspMargin;
-            v._camera.position.copy(center).addScaledVector(dir, dist);
+            const halfH = Math.max((y1 - y0) / 2, (x1 - x0) / 2 / aspect, 1e-9) / f;
+            const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+            return {
+                position: at(cx, cy, zMid + span * 2),
+                target: at(cx, cy, zMid),
+                zoom: ORTHO_FRUSTUM / halfH,
+            };
         }
-        // ViewerControls never calls camera.lookAt, so explicitly re-orient
-        // to actually frame the object (not just translate along old view ray).
-        v._camera.lookAt(center);
+        const tanV = Math.tan(THREE.MathUtils.degToRad(v._perspCamera.fov / 2));
+        const tanH = tanV * (v._perspCamera.aspect || 1);
+        // Per screen axis with slope k = fill * tan(halfFov), a point fits when
+        // |c - u| <= k * (cz - z); the least cz satisfying both sides of every
+        // point is the apex of the wedge through the two binding points.
+        const wedge = (/** @type {Float64Array} */ us, /** @type {number} */ k) => {
+            let a = -Infinity, b = -Infinity;
+            for (let i = 0; i < n; i++) {
+                a = Math.max(a, zs[i] + us[i] / k);
+                b = Math.max(b, zs[i] - us[i] / k);
+            }
+            return { c: k * (a - b) / 2, cz: (a + b) / 2 };
+        };
+        // The looser axis has slack at the chosen depth: centre it in its feasible interval.
+        const centre = (/** @type {Float64Array} */ us, /** @type {number} */ k, /** @type {number} */ cz) => {
+            let lo = -Infinity, hi = Infinity;
+            for (let i = 0; i < n; i++) {
+                lo = Math.max(lo, us[i] - k * (cz - zs[i]));
+                hi = Math.min(hi, us[i] + k * (cz - zs[i]));
+            }
+            return (lo + hi) / 2;
+        };
+        const kx = f * tanH, ky = f * tanV;
+        const wx = wedge(xs, kx), wy = wedge(ys, ky);
+        // Keep every point a sliver in front of the camera (a flat face-on set).
+        const cz = Math.max(wx.cz, wy.cz, z1 + span * 1e-3);
+        const cx = wx.cz >= wy.cz ? wx.c : centre(xs, kx, cz);
+        const cy = wy.cz > wx.cz ? wy.c : centre(ys, ky, cz);
+        return { position: at(cx, cy, cz), target: at(cx, cy, Math.min(zMid, cz - span * 1e-3)), zoom: null };
+    }
+
+    /**
+     * Frame world `points` (see `solveFit`), jumping or tweening there.
+     * @param {ArrayLike<THREE.Vector3>} points @param {number} fill
+     * @param {boolean} [animate]
+     */
+    fitToPoints(points, fill, animate = false) {
+        const v = this.v;
+        const fit = this.solveFit(points, fill);
+        if (!fit) return;
+        v._viewTween = null;
+        if (animate) {
+            v._frameTween = {
+                start: performance.now(),
+                fromPos: v._camera.position.clone(), toPos: fit.position,
+                fromTarget: v._controls.target.clone(), toTarget: fit.target,
+                fromZoom: v._orthoCamera.zoom, toZoom: fit.zoom,
+            };
+            return;
+        }
+        v._frameTween = null;
+        this.applyFit(fit.position, fit.target, fit.zoom);
+    }
+
+    /**
+     * Write a framing pose. ViewerControls never calls camera.lookAt, so the
+     * camera is re-oriented explicitly (the direction is unchanged by design).
+     * @param {THREE.Vector3} position @param {THREE.Vector3} target
+     * @param {number | null} zoom ortho zoom, or null to leave it
+     */
+    applyFit(position, target, zoom) {
+        const v = this.v;
+        if (zoom != null && v._isOrtho) {
+            v._orthoCamera.zoom = zoom;
+            v._orthoCamera.updateProjectionMatrix();
+        }
+        v._controls.target.copy(target);
+        v._camera.position.copy(position);
+        v._camera.lookAt(target);
         v._controls.update();
+    }
+
+    /** @param {number} now */
+    updateFrameTween(now) {
+        const v = this.v;
+        const tw = v._frameTween;
+        if (!tw) return;
+        const raw = Math.min(Math.max((now - tw.start) / VIEW_TWEEN_MS, 0), 1);
+        const e = raw * raw * (3 - 2 * raw);
+        const zoom = tw.toZoom == null ? null : tw.fromZoom * Math.pow(tw.toZoom / tw.fromZoom, e);
+        this.applyFit(
+            _frameTweenPos.lerpVectors(tw.fromPos, tw.toPos, e),
+            _frameTweenTarget.lerpVectors(tw.fromTarget, tw.toTarget, e),
+            zoom);
+        if (raw >= 1) v._frameTween = null;
+    }
+
+    /**
+     * Frame `boxes` by their eight corners each (see `solveFit`).
+     * @param {Iterable<THREE.Box3>} boxes @param {number} fill
+     * @param {boolean} [animate]
+     */
+    fitToBoxes(boxes, fill, animate = false) {
+        this.fitToPoints(boxCorners(boxes), fill, animate);
     }
 }
 
@@ -6633,13 +7366,17 @@ class CameraController {
 //   replacing the object walk) for layers that are not plain id shapes;
 //   an `apply` that returns `false` vetoes the flip (the row reverts and
 //   onChange does not fire).
+//   A `label` with `collapsible: true` heads a foldable section: the rows
+//   after it, up to the next `divider` or collapsible label, hide while it
+//   is collapsed (`collapsed`, default false; persisted under storageKey
+//   like the other values; getValue/setItem({collapsed}) read and set it).
 
 /** @typedef {{
  *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
  *   bindKey?: boolean, state?: any, active?: any, checked?: any, value?: any,
  *   options?: Array<{value: string, label?: string}>, ids?: string[], prefix?: string,
  *   match?: (objId: string) => boolean, apply?: (on: boolean, item: MenuItemSpec) => (boolean|void),
- *   disabled?: any, hidden?: any,
+ *   disabled?: any, hidden?: any, collapsible?: boolean, collapsed?: any,
  *   onClick?: (item: MenuItemSpec) => void,
  *   onChange?: (value: any, item: MenuItemSpec) => void,
  *   render?: (el: HTMLElement, item: MenuItemSpec) => void,
@@ -6809,6 +7546,8 @@ class MenuController {
             spec: { ...spec, mode, items: (spec.items || []).map(it => ({ ...it })) },
             open: false, root: null, button: null, body: null,
             /** @type {Map<string, any>} */ items: new Map(),
+            /** @type {any[]} every item record in body order, with or without an id */ order: [],
+            /** @type {WeakMap<object, boolean>} fold state of collapsible labels without an id */ folds: new WeakMap(),
             state: /** @type {Record<string, any>} */ ({}),
         };
         if (spec.storageKey) {
@@ -6957,6 +7696,28 @@ class MenuController {
         if (type === 'divider') {
             el = document.createElement('div');
             el.className = 'tjsv-menu-divider';
+        } else if (type === 'label' && it.collapsible) {
+            // Focusable role=button, so Chromium's touch adjustment treats the
+            // header as a tap target instead of moving the tap onto the next control.
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-caption tjsv-menu-section';
+            el.setAttribute('role', 'button');
+            el.tabIndex = 0;
+            const chev = document.createElement('span');
+            chev.className = 'tjsv-menu-chevron';
+            chev.setAttribute('aria-hidden', 'true');
+            const lab = document.createElement('span');
+            lab.className = 'tjsv-menu-label';
+            lab.textContent = it.label || '';
+            el.appendChild(chev);
+            el.appendChild(lab);
+            el.addEventListener('click', () => this._toggleSection(m, rec));
+            el.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                // Space would otherwise also reach the viewer's play/pause key.
+                e.preventDefault(); e.stopPropagation();
+                this._toggleSection(m, rec);
+            });
         } else if (type === 'label') {
             el = document.createElement('div');
             el.className = 'tjsv-menu-caption';
@@ -7050,6 +7811,7 @@ class MenuController {
             }
         }
         if (it.id) m.items.set(it.id, rec);
+        m.order.push(rec);
         m.body.appendChild(el);
     }
 
@@ -7060,6 +7822,10 @@ class MenuController {
         if (!it) return undefined;
         const type = it.type || 'button';
         if (it.id && it.id in m.state) return m.state[it.id];
+        if (type === 'label' && it.collapsible) {
+            const local = m.folds.get(it);
+            return local !== undefined ? local : !!evalProp(it.collapsed, it);
+        }
         if (type === 'toggle' || type === 'eye') {
             const c = evalProp(it.checked, it);
             return c === undefined ? type === 'eye' : !!c;
@@ -7089,6 +7855,25 @@ class MenuController {
         if (typeof it.onClick === 'function') it.onClick(it);
         this._emit(m, it, undefined);
         this.refresh(m);
+    }
+
+    /** Fold or unfold a collapsible label's section. @param {any} m @param {any} rec */
+    _toggleSection(m, rec) {
+        const it = rec.spec;
+        if (evalProp(it.disabled, it)) return;
+        const collapsed = !this._valueOf(m, it);
+        this._setFold(m, it, collapsed);
+        if (typeof it.onChange === 'function') it.onChange(collapsed, it);
+        this._emit(m, it, collapsed);
+    }
+
+    /** @param {any} m @param {MenuItemSpec} it @param {boolean} collapsed */
+    _setFold(m, it, collapsed) {
+        if (it.id) { m.state[it.id] = collapsed; this._persist(m); }
+        else m.folds.set(it, collapsed);
+        this.refresh(m);
+        // The body height changed, so the cap and the upward lift recompute.
+        if (m.open) this._placeBody(m);
     }
 
     /** Value change of any stateful item. @param {any} m @param {any} rec @param {any} value */
@@ -7129,6 +7914,9 @@ class MenuController {
         const it = rec.spec;
         Object.assign(it, patch || {});
         if ('options' in patch) it.options = normalizeOptions(it.options);
+        if ('collapsed' in patch && it.collapsible) {
+            this._setFold(m, it, !!evalProp(patch.collapsed, it));
+        }
         if ('checked' in patch || 'value' in patch) {
             const v = 'checked' in patch ? !!patch.checked : patch.value;
             if (it.id) m.state[it.id] = v;
@@ -7163,18 +7951,28 @@ class MenuController {
     refresh(only) {
         const targets = only ? [only] : [...this._menus.values()];
         for (const m of targets) {
-            for (const rec of m.items.values()) this._paint(m, rec);
-            // Items without an id (dividers, captions) never change.
+            // A divider or the next collapsible label ends a section.
+            let folded = false;
+            for (const rec of m.order) {
+                const type = rec.spec.type || 'button';
+                if (type === 'divider') folded = false;
+                if (type === 'label' && rec.spec.collapsible) {
+                    this._paint(m, rec, false);
+                    folded = !rec.el.hidden && !!this._valueOf(m, rec.spec);
+                } else {
+                    this._paint(m, rec, folded);
+                }
+            }
         }
     }
 
-    /** @param {any} m @param {any} rec */
-    _paint(m, rec) {
+    /** @param {any} m @param {any} rec @param {boolean} [folded] inside a collapsed section */
+    _paint(m, rec, folded = false) {
         const it = rec.spec;
         const el = rec.el;
         if (!el) return;
         const type = it.type || 'button';
-        el.hidden = !!evalProp(it.hidden, it);
+        el.hidden = folded || !!evalProp(it.hidden, it);
         const disabled = !!evalProp(it.disabled, it);
         el.classList.toggle('disabled', disabled);
         if (el instanceof HTMLButtonElement) el.disabled = disabled;
@@ -7196,6 +7994,10 @@ class MenuController {
             }
             const st = el.querySelector('.tjsv-menu-state');
             if (st) st.textContent = evalProp(it.state, it) ?? '';
+        } else if (type === 'label' && it.collapsible) {
+            const collapsed = !!this._valueOf(m, it);
+            el.setAttribute('aria-expanded', String(!collapsed));
+            el.classList.toggle('collapsed', collapsed);
         } else if (type === 'select') {
             const v = this._valueOf(m, it);
             if (rec.input && v !== undefined) rec.input.value = String(v);
@@ -7366,6 +8168,8 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165) — wireframing
         // one would draw the whole extruded shell as a wire cage.
         if (obj.userData.__highlightOutline) return;
+        // Clip caps follow the wire-only mode from ClipCapController.
+        if (obj.userData.__clipCap) return;
         if (!obj.material) return;
         for (const m of wornAndOwnMaterials(obj)) this._applyWireframeToMaterial(m);
         let overlay = obj.userData.wireframeOverlay;
@@ -7583,7 +8387,7 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165): a material swap
         // would turn the outline into a solid shell. Same for primitive outlines.
         return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
-            || ud.__highlightOutline || ud.__primitiveOutline)
+            || ud.__highlightOutline || ud.__primitiveOutline || ud.__clipCap)
             && !isUnderOverlay(obj);
     }
 
@@ -8253,7 +9057,7 @@ class ModelCache {
 // @param {Float32Array} profileArr  (M*2) (height_along_axis, radius) rows
 // @param {number} sections          cross-section facets per ring (>= 3)
 // @param {Float32Array|null} ringColors  (N*3) per-station RGB in 0..1, or null
-// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number}}
+// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number, levels: number, sections: number, startCapIndexCount: number}}
 function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringColors) {
     const N = stationPos.length / 3;
     const M = profileArr.length / 2;
@@ -8412,7 +9216,969 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeVertexNormals();
     geometry.setDrawRange(0, indices.length);
-    return { geometry, ringPairCount, indicesPerRingPair, capIndexCount };
+    return {
+        geometry, ringPairCount, indicesPerRingPair, capIndexCount,
+        levels: L, sections, startCapIndexCount: capBandsPerEnd + cap0Fan,
+    };
+}
+
+// ========== Clip caps (issue #259) ==========
+//
+// Analytic section caps for solids the viewer builds itself: primitives (the
+// convex hull of the triangle-edge crossings), swept tool bodies (a union of
+// convex station-pair cells), parametric tubes (a union of convex hulls, one
+// per drawn ring band, sliced on the LOD worker when large) and the torus (the
+// drawn triangles sliced and chained into loops). Each cap is a child mesh of its owner, built in the
+// owner's local frame and clipped only by the other slab plane. Opt-in:
+// `clipCaps` option / `clip_caps` URL param / `set_clipping_caps`, or a
+// per-object `clipCap` override. Meshes and models stay open.
+
+// On the main thread, above this many drawn triangles or once a rebuild took
+// longer than CLIP_CAP_SYNC_MS, a cap rebuild runs at most every
+// CLIP_CAP_THROTTLE_MS (the tube LOD cadence) so a drag stays usable.
+const CLIP_CAP_SYNC_TRIANGLES = 200000;
+const CLIP_CAP_SYNC_MS = 8;
+const CLIP_CAP_THROTTLE_MS = 500;
+// Tubes drawing more triangles than this are sliced on the LOD worker.
+const CLIP_CAP_WORKER_TRIANGLES = 20000;
+// Closed convex primitives; a plane is a sheet and gets no cap. The torus is
+// closed but not convex, so it goes through the triangle slicer.
+const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
+
+/**
+ * Unit basis (u, v) of a plane with unit normal n, u × v = n.
+ * @param {number} nx @param {number} ny @param {number} nz
+ * @returns {number[]} [ux, uy, uz, vx, vy, vz]
+ */
+function clipCapBasis(nx, ny, nz) {
+    // a × n with a the axis least aligned with n.
+    let ux, uy, uz;
+    if (Math.abs(nx) < 0.9) { ux = 0; uy = nz; uz = -ny; } else { ux = -nz; uy = 0; uz = nx; }
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    return [ux, uy, uz, ny * uz - nz * uy, nz * ux - nx * uz, nx * uy - ny * ux];
+}
+
+/**
+ * Indices of the 2D convex hull of the points, counter-clockwise
+ * (Andrew's monotone chain; duplicates and collinear points dropped).
+ * @param {ArrayLike<number>} xs @param {ArrayLike<number>} ys @param {number} n
+ * @returns {number[]}
+ */
+function convexHull2D(xs, ys, n) {
+    /** @type {number[]} */ const order = [];
+    for (let i = 0; i < n; i++) order.push(i);
+    order.sort((a, b) => (xs[a] - xs[b]) || (ys[a] - ys[b]));
+    /** @param {number} o @param {number} a @param {number} b */
+    const cross = (o, a, b) => (xs[a] - xs[o]) * (ys[b] - ys[o]) - (ys[a] - ys[o]) * (xs[b] - xs[o]);
+    /** @type {number[]} */ const lower = [];
+    for (const i of order) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], i) <= 0) lower.pop();
+        lower.push(i);
+    }
+    /** @type {number[]} */ const upper = [];
+    for (let k = order.length - 1; k >= 0; k--) {
+        const i = order[k];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], i) <= 0) upper.pop();
+        upper.push(i);
+    }
+    lower.pop(); upper.pop();
+    return lower.concat(upper);
+}
+
+/**
+ * Even-odd point-in-polygon test in 2D.
+ * @param {THREE.Vector2} q @param {THREE.Vector2[]} poly
+ */
+function pointInPolygon2D(q, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i], b = poly[j];
+        if ((a.y > q.y) !== (b.y > q.y)
+            && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+}
+
+/**
+ * Accumulates cap triangles (local positions, optional colours) for one
+ * plane. Every triangle is wound so its face normal is -n: the cut face as
+ * seen from the removed side.
+ */
+class ClipCapBuilder {
+    /**
+     * @param {number} nx @param {number} ny @param {number} nz @param {number} c
+     *   the plane in the owner's local frame (kept side n·x + c >= 0)
+     * @param {boolean} withColor
+     */
+    constructor(nx, ny, nz, c, withColor) {
+        this.nx = nx; this.ny = ny; this.nz = nz; this.c = c;
+        this.basis = clipCapBasis(nx, ny, nz);
+        /** @type {number[]} */ this.pos = [];
+        /** @type {number[] | null} */ this.col = withColor ? [] : null;
+        /** @type {number[]} scratch crossing points of one convex cell */
+        this._p = [];
+        /** @type {number[]} */ this._c = [];
+    }
+
+    /** @param {number} x @param {number} y @param {number} z */
+    dist(x, y, z) { return this.nx * x + this.ny * y + this.nz * z + this.c; }
+
+    resetPoints() { this._p.length = 0; this._c.length = 0; }
+
+    /**
+     * Add the crossing of edge a→b (signed distances on opposite sides).
+     * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} col
+     * @param {number} a @param {number} b @param {number} sa @param {number} sb
+     */
+    addCrossing(pos, col, a, b, sa, sb) {
+        const t = sa / (sa - sb);
+        const a3 = a * 3, b3 = b * 3;
+        this._p.push(pos[a3] + t * (pos[b3] - pos[a3]),
+                     pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]),
+                     pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]));
+        if (!this.col) return;
+        if (col) {
+            this._c.push(col[a3] + t * (col[b3] - col[a3]),
+                         col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]),
+                         col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]));
+        } else {
+            this._c.push(1, 1, 1);
+        }
+    }
+
+    /** Fan the convex hull of the scratch points; returns the triangle count. */
+    emitConvex() {
+        const p = this._p, n = p.length / 3;
+        if (n < 3) return 0;
+        const [ux, uy, uz, vx, vy, vz] = this.basis;
+        const xs = new Float64Array(n), ys = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
+            xs[i] = x * ux + y * uy + z * uz;
+            ys[i] = x * vx + y * vy + z * vz;
+        }
+        const hull = convexHull2D(xs, ys, n);
+        if (hull.length < 3) return 0;
+        // The hull runs counter-clockwise about +n; reversed it faces -n.
+        for (let k = 1; k < hull.length - 1; k++) {
+            this._vertex(hull[0]);
+            this._vertex(hull[k + 1]);
+            this._vertex(hull[k]);
+        }
+        return hull.length - 2;
+    }
+
+    /** @param {number} i */
+    _vertex(i) {
+        this.pos.push(this._p[i * 3], this._p[i * 3 + 1], this._p[i * 3 + 2]);
+        if (this.col) this.col.push(this._c[i * 3], this._c[i * 3 + 1], this._c[i * 3 + 2]);
+    }
+
+    /**
+     * Triangulate closed loops of points on the plane. Loops running
+     * counter-clockwise about +n are filled; clockwise ones are holes in the
+     * smallest filled loop containing them. Overlapping filled loops (a round
+     * join body inside its bead) each get their own coplanar fan.
+     * @param {{pts: number[], cols: number[] | null}[]} loops
+     */
+    emitLoops(loops) {
+        const [ux, uy, uz, vx, vy, vz] = this.basis;
+        /** @type {{v: THREE.Vector2[], area: number, loop: any, holes: any[], box: number[]}[]} */
+        const outer = [];
+        /** @type {{v: THREE.Vector2[], area: number, loop: any}[]} */
+        const holes = [];
+        for (const loop of loops) {
+            const n = loop.pts.length / 3;
+            if (n < 3) continue;
+            /** @type {THREE.Vector2[]} */ const v = [];
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (let i = 0; i < n; i++) {
+                const x = loop.pts[i * 3], y = loop.pts[i * 3 + 1], z = loop.pts[i * 3 + 2];
+                const px = x * ux + y * uy + z * uz, py = x * vx + y * vy + z * vz;
+                v.push(new THREE.Vector2(px, py));
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
+            }
+            const area = THREE.ShapeUtils.area(v);
+            if (!(Math.abs(area) > 0)) continue;
+            if (area > 0) outer.push({ v, area, loop, holes: [], box: [minX, minY, maxX, maxY] });
+            else holes.push({ v, area, loop });
+        }
+        for (const h of holes) {
+            const q = h.v[0];
+            /** @type {any} */ let best = null;
+            for (const o of outer) {
+                const b = o.box;
+                if (q.x < b[0] || q.x > b[2] || q.y < b[1] || q.y > b[3]) continue;
+                if (!pointInPolygon2D(q, o.v)) continue;
+                if (!best || o.area < best.area) best = o;
+            }
+            if (best) best.holes.push(h);
+        }
+        for (const o of outer) {
+            const parts = [o, ...o.holes];
+            /** @type {THREE.Vector2[]} */ const V = [];
+            /** @type {number[]} */ const P = [];
+            /** @type {number[]} */ const C = [];
+            for (const part of parts) {
+                for (let i = 0; i < part.v.length; i++) {
+                    V.push(part.v[i]);
+                    P.push(part.loop.pts[i * 3], part.loop.pts[i * 3 + 1], part.loop.pts[i * 3 + 2]);
+                    if (this.col) {
+                        const cs = part.loop.cols;
+                        if (cs) C.push(cs[i * 3], cs[i * 3 + 1], cs[i * 3 + 2]); else C.push(1, 1, 1);
+                    }
+                }
+            }
+            // Copies: triangulateShape drops a closing duplicate in place,
+            // which would shift the index mapping built above.
+            const faces = THREE.ShapeUtils.triangulateShape(o.v.slice(), o.holes.map((h) => h.v.slice()));
+            for (const f of faces) {
+                let a = f[0], b = f[1], c = f[2];
+                const ccw = (V[b].x - V[a].x) * (V[c].y - V[a].y) - (V[b].y - V[a].y) * (V[c].x - V[a].x);
+                if (ccw > 0) { const t = b; b = c; c = t; }
+                for (const i of [a, b, c]) {
+                    this.pos.push(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
+                    if (this.col) this.col.push(C[i * 3], C[i * 3 + 1], C[i * 3 + 2]);
+                }
+            }
+        }
+    }
+
+    /** @returns {THREE.BufferGeometry | null} */
+    toGeometry() {
+        if (!this.pos.length) return null;
+        const g = new THREE.BufferGeometry();
+        const n = this.pos.length / 3;
+        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.pos), 3));
+        const normals = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+            normals[i * 3] = -this.nx; normals[i * 3 + 1] = -this.ny; normals[i * 3 + 2] = -this.nz;
+        }
+        g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        if (this.col) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.col), 3));
+        g.computeBoundingSphere();
+        return g;
+    }
+}
+
+/**
+ * Cap of a convex solid (primitives): the hull of every triangle edge
+ * crossing the plane, exact for a convex polyhedron.
+ * @param {THREE.BufferGeometry} geometry @param {ClipCapBuilder} out
+ */
+function buildConvexClipCap(geometry, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const index = geometry.getIndex();
+    const idx = index ? index.array : null;
+    const nTri = (idx ? idx.length : pos.length / 3) / 3;
+    out.resetPoints();
+    // Vertices on the plane are section points too: a seam vertex at -1e-17
+    // has no edge to its twin at 0, so no crossing would ever reach it.
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const eps = 1e-7 * (geometry.boundingSphere ? geometry.boundingSphere.radius : 1);
+    for (let v = 0; v < pos.length / 3; v++) {
+        if (Math.abs(out.dist(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2])) <= eps) out.addCrossing(pos, null, v, v, 0, -1);
+    }
+    for (let t = 0; t < nTri; t++) {
+        const a = idx ? idx[t * 3] : t * 3;
+        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
+        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
+        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
+        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+        if ((sa >= 0) !== (sb >= 0)) out.addCrossing(pos, null, a, b, sa, sb);
+        if ((sb >= 0) !== (sc >= 0)) out.addCrossing(pos, null, b, c, sb, sc);
+        if ((sc >= 0) !== (sa >= 0)) out.addCrossing(pos, null, c, a, sc, sa);
+    }
+    out.emitConvex();
+}
+
+/**
+ * Swept tool cap. The body between two stations and two profile levels is
+ * close to the convex hull of its four rings, so the section is the union of
+ * those cells' convex sections (coplanar overlaps are harmless on an opaque
+ * body). Only station pairs under the draw range contribute.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {{stations: number, levels: number, sections: number, startCapIndexCount: number, indicesPerRingPair: number}} layout
+ * @param {ClipCapBuilder} out
+ */
+function buildSweptClipCap(geometry, layout, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const colAttr = geometry.getAttribute('color');
+    const col = colAttr ? /** @type {ArrayLike<number>} */ (colAttr.array) : null;
+    const N = layout.stations, L = layout.levels, S = layout.sections;
+    const total = geometry.getIndex().count;
+    const count = Math.min(total, geometry.drawRange.count);
+    if (count <= 0 || N < 1 || L < 2) return;
+    const pairs = Math.max(0, Math.min(N - 1,
+        Math.floor((count - layout.startCapIndexCount) / layout.indicesPerRingPair)));
+    const nRings = (pairs > 0 ? pairs + 1 : 1) * L;
+    // Signed distance per vertex and its range per ring, for the stations in play.
+    const sd = new Float64Array(nRings * S);
+    const rMin = new Float64Array(nRings), rMax = new Float64Array(nRings);
+    for (let r = 0; r < nRings; r++) {
+        let lo = Infinity, hi = -Infinity;
+        for (let s = 0; s < S; s++) {
+            const v = r * S + s;
+            const d = out.dist(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
+            sd[v] = d;
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+        }
+        rMin[r] = lo; rMax[r] = hi;
+    }
+    /** @param {number} a @param {number} b */
+    const edge = (a, b) => {
+        if ((sd[a] >= 0) !== (sd[b] >= 0)) out.addCrossing(pos, col, a, b, sd[a], sd[b]);
+    };
+    /** @param {number[]} rings */
+    const cell = (rings) => {
+        let lo = Infinity, hi = -Infinity;
+        for (const r of rings) {
+            if (rMin[r] < lo) lo = rMin[r];
+            if (rMax[r] > hi) hi = rMax[r];
+        }
+        if (lo >= 0 || hi < 0) return;
+        out.resetPoints();
+        const base = rings.map((r) => r * S);
+        // Ring edges plus same-facet connectors between every ring pair:
+        // the edges of the cell's hull for near-parallel rings.
+        for (let s = 0; s < S; s++) {
+            const s1 = (s + 1) % S;
+            for (const b of base) edge(b + s, b + s1);
+            for (let i = 0; i < base.length; i++) {
+                for (let j = i + 1; j < base.length; j++) edge(base[i] + s, base[j] + s);
+            }
+        }
+        out.emitConvex();
+    };
+    if (pairs === 0) {
+        for (let l = 0; l < L - 1; l++) cell([l, l + 1]);
+        return;
+    }
+    for (let k = 0; k < pairs; k++) {
+        for (let l = 0; l < L - 1; l++) {
+            cell([k * L + l, k * L + l + 1, (k + 1) * L + l, (k + 1) * L + l + 1]);
+        }
+    }
+}
+
+/**
+ * Slice the drawn triangles of a surface made of closed pieces and chain the
+ * crossings into loops. A segment runs along n × N with N the outward vertex
+ * normal, so an outer boundary turns counter-clockwise about +n and a hole
+ * clockwise. Used for the torus primitive.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {ClipCapBuilder} out
+ */
+function buildSlicedClipCap(geometry, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const nAttr = geometry.getAttribute('normal');
+    const nrm = nAttr ? /** @type {ArrayLike<number>} */ (nAttr.array) : null;
+    const cAttr = geometry.getAttribute('color');
+    const col = out.col && cAttr && cAttr.itemSize === 3 ? /** @type {ArrayLike<number>} */ (cAttr.array) : null;
+    const index = geometry.getIndex();
+    const idx = index ? index.array : null;
+    const total = idx ? idx.length : pos.length / 3;
+    const start = Math.max(0, geometry.drawRange.start);
+    const end = Math.min(total, start + geometry.drawRange.count);
+    const t0 = Math.ceil(start / 3), t1 = Math.floor(end / 3);
+    if (t1 <= t0) return;
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const radius = Math.max(geometry.boundingSphere ? geometry.boundingSphere.radius : 1, 1e-9);
+    const quant = radius * 1e-7;
+    const nx = out.nx, ny = out.ny, nz = out.nz;
+
+    // Welded crossing points and directed segments between them.
+    /** @type {Map<string, number>} */ const keyOf = new Map();
+    /** @type {number[]} */ const PX = [];
+    /** @type {number[]} */ const PC = [];
+    /** @type {number[]} */ const segFrom = [];
+    /** @type {number[]} */ const segTo = [];
+    /** @param {number} o */
+    const weld = (o) => {
+        const x = cross[o], y = cross[o + 1], z = cross[o + 2];
+        const key = `${Math.round(x / quant)},${Math.round(y / quant)},${Math.round(z / quant)}`;
+        let id = keyOf.get(key);
+        if (id === undefined) {
+            id = PX.length / 3;
+            keyOf.set(key, id);
+            PX.push(x, y, z);
+            PC.push(cross[o + 3], cross[o + 4], cross[o + 5]);
+        }
+        return id;
+    };
+    const cross = new Float64Array(18);
+    let nc = 0;
+    /** @param {number} a @param {number} b @param {number} sa @param {number} sb */
+    const crossing = (a, b, sa, sb) => {
+        // Canonical endpoint order, so a shared edge (or a duplicated rim
+        // vertex) gives the same bits from both of its triangles.
+        let a3 = a * 3, b3 = b * 3;
+        if (pos[a3] > pos[b3] || (pos[a3] === pos[b3] && (pos[a3 + 1] > pos[b3 + 1]
+            || (pos[a3 + 1] === pos[b3 + 1] && pos[a3 + 2] > pos[b3 + 2])))) {
+            const ti = a3; a3 = b3; b3 = ti;
+            const ts = sa; sa = sb; sb = ts;
+        }
+        const t = sa / (sa - sb);
+        const o = nc * 6;
+        cross[o] = pos[a3] + t * (pos[b3] - pos[a3]);
+        cross[o + 1] = pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]);
+        cross[o + 2] = pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]);
+        if (col) {
+            cross[o + 3] = col[a3] + t * (col[b3] - col[a3]);
+            cross[o + 4] = col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]);
+            cross[o + 5] = col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]);
+        } else {
+            cross[o + 3] = 1; cross[o + 4] = 1; cross[o + 5] = 1;
+        }
+        nc++;
+    };
+    for (let t = t0; t < t1; t++) {
+        const a = idx ? idx[t * 3] : t * 3;
+        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
+        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
+        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
+        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+        const pa = sa >= 0, pb = sb >= 0, pc = sc >= 0;
+        if (pa === pb && pb === pc) continue;
+        nc = 0;
+        if (pa !== pb) crossing(a, b, sa, sb);
+        if (pb !== pc) crossing(b, c, sb, sc);
+        if (pc !== pa) crossing(c, a, sc, sa);
+        if (nc !== 2) continue;
+        const i0 = weld(0), i1 = weld(6);
+        if (i0 === i1) continue;
+        // Outward normal: the vertex normals when present, else the winding.
+        let Nx, Ny, Nz;
+        if (nrm) {
+            Nx = nrm[a * 3] + nrm[b * 3] + nrm[c * 3];
+            Ny = nrm[a * 3 + 1] + nrm[b * 3 + 1] + nrm[c * 3 + 1];
+            Nz = nrm[a * 3 + 2] + nrm[b * 3 + 2] + nrm[c * 3 + 2];
+        } else {
+            const e1x = pos[b * 3] - pos[a * 3], e1y = pos[b * 3 + 1] - pos[a * 3 + 1], e1z = pos[b * 3 + 2] - pos[a * 3 + 2];
+            const e2x = pos[c * 3] - pos[a * 3], e2y = pos[c * 3 + 1] - pos[a * 3 + 1], e2z = pos[c * 3 + 2] - pos[a * 3 + 2];
+            Nx = e1y * e2z - e1z * e2y; Ny = e1z * e2x - e1x * e2z; Nz = e1x * e2y - e1y * e2x;
+        }
+        const mx = ny * Nz - nz * Ny, my = nz * Nx - nx * Nz, mz = nx * Ny - ny * Nx;
+        const dx = cross[6] - cross[0], dy = cross[7] - cross[1], dz = cross[8] - cross[2];
+        if (dx * mx + dy * my + dz * mz >= 0) { segFrom.push(i0); segTo.push(i1); }
+        else { segFrom.push(i1); segTo.push(i0); }
+    }
+    const nSeg = segFrom.length;
+    if (!nSeg) return;
+
+    // Chain: outgoing segment lists per point, walked until the loop closes.
+    const nPts = PX.length / 3;
+    const head = new Int32Array(nPts).fill(-1);
+    const next = new Int32Array(nSeg);
+    for (let s = nSeg - 1; s >= 0; s--) { next[s] = head[segFrom[s]]; head[segFrom[s]] = s; }
+    const used = new Uint8Array(nSeg);
+    /** @type {number[][]} */ const closed = [];
+    /** @type {number[][]} */ const open = [];
+    for (let s0 = 0; s0 < nSeg; s0++) {
+        if (used[s0]) continue;
+        const chain = [segFrom[s0]];
+        let s = s0;
+        let isClosed = false;
+        for (;;) {
+            used[s] = 1;
+            const to = segTo[s];
+            if (to === segFrom[s0]) { isClosed = true; break; }
+            chain.push(to);
+            let n2 = -1;
+            for (let q = head[to]; q >= 0; q = next[q]) if (!used[q]) { n2 = q; break; }
+            if (n2 < 0) break;
+            s = n2;
+        }
+        (isClosed ? closed : open).push(chain);
+    }
+    // A chain broken at a near-coincident point the weld missed: join its end
+    // to the closest chain start within tolerance, then close what is left.
+    const tol2 = (radius * 1e-4) ** 2;
+    /** @param {number} p @param {number} q */
+    const d2 = (p, q) => (PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
+        + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2;
+    let merged = true;
+    while (merged && open.length) {
+        merged = false;
+        for (let i = 0; i < open.length && !merged; i++) {
+            const tail = open[i][open[i].length - 1];
+            let best = -1, bestD = tol2;
+            for (let j = 0; j < open.length; j++) {
+                const d = d2(tail, open[j][0]);
+                if (d <= bestD) { bestD = d; best = j; }
+            }
+            if (best === i) { closed.push(open[i]); open.splice(i, 1); merged = true; }
+            else if (best >= 0) {
+                open[i] = open[i].concat(open[best]);
+                open.splice(best, 1);
+                merged = true;
+            }
+        }
+    }
+    for (const ch of open) closed.push(ch);
+    out.emitLoops(closed.map((ch) => {
+        /** @type {number[]} */ const pts = [];
+        /** @type {number[]} */ const cols = [];
+        for (const p of ch) {
+            pts.push(PX[p * 3], PX[p * 3 + 1], PX[p * 3 + 2]);
+            cols.push(PC[p * 3], PC[p * 3 + 1], PC[p * 3 + 2]);
+        }
+        return { pts, cols: col ? cols : null };
+    }));
+}
+
+/**
+ * Tube clip cap, free of Three.js so the LOD worker runs the same code. A
+ * tube's index buffer is a run of `block`-index bands (nCs * 6), each joining
+ * two rings: ring pairs, revolution cap bands, joint bands and the relocated
+ * end cap alike. A band is close to the convex hull of its two rings, so its
+ * section is the hull of its edge crossings, and the cap is the union of
+ * those fans. A break slot (flat end fans padded with (a, a, a) triangles)
+ * has no volume and is skipped. Every fan faces -n.
+ * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} col
+ * @param {ArrayLike<number>} idx @param {number} end  drawn index count
+ * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
+ * @param {number} block
+ * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+ */
+function sliceTubeClipCap(pos, col, idx, end, planes, block) {
+    const nBlocks = Math.floor(end / block);
+    const sd = new Float64Array(block);
+    /** @type {number[]} */ const P = [];
+    /** @type {number[]} */ const C = [];
+    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    for (const plane of planes) {
+        const nx = plane[0], ny = plane[1], nz = plane[2], c = plane[3];
+        const basis = clipCapBasis(nx, ny, nz);
+        /** @type {number[]} */ const tp = [];
+        /** @type {number[]} */ const tc = [];
+        for (let k = 0; k < nBlocks; k++) {
+            const o = k * block;
+            let lo = Infinity, hi = -Infinity;
+            for (let i = 0; i < block; i++) {
+                const v = idx[o + i] * 3;
+                const d = nx * pos[v] + ny * pos[v + 1] + nz * pos[v + 2] + c;
+                sd[i] = d;
+                if (d < lo) lo = d;
+                if (d > hi) hi = d;
+            }
+            if (lo >= 0 || hi < 0) continue;
+            let breakSlot = false;
+            for (let i = 0; i < block; i += 3) {
+                if (idx[o + i] === idx[o + i + 1] && idx[o + i] === idx[o + i + 2]) { breakSlot = true; break; }
+            }
+            if (breakSlot) continue;
+            P.length = 0; C.length = 0;
+            for (let i = 0; i < block; i += 3) {
+                for (let e = 0; e < 3; e++) {
+                    const ia = i + e, ib = i + (e + 1) % 3;
+                    const sa = sd[ia], sb = sd[ib];
+                    if ((sa >= 0) === (sb >= 0)) continue;
+                    const a = idx[o + ia] * 3, b = idx[o + ib] * 3;
+                    const t = sa / (sa - sb);
+                    P.push(pos[a] + t * (pos[b] - pos[a]), pos[a + 1] + t * (pos[b + 1] - pos[a + 1]),
+                           pos[a + 2] + t * (pos[b + 2] - pos[a + 2]));
+                    if (col) {
+                        C.push(col[a] + t * (col[b] - col[a]), col[a + 1] + t * (col[b + 1] - col[a + 1]),
+                               col[a + 2] + t * (col[b + 2] - col[a + 2]));
+                    }
+                }
+            }
+            const n = P.length / 3;
+            const xs = new Float64Array(n), ys = new Float64Array(n);
+            for (let i = 0; i < n; i++) {
+                const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+                xs[i] = x * basis[0] + y * basis[1] + z * basis[2];
+                ys[i] = x * basis[3] + y * basis[4] + z * basis[5];
+            }
+            const hull = convexHull2D(xs, ys, n);
+            // The hull runs counter-clockwise about +n; reversed it faces -n.
+            for (let h = 1; h < hull.length - 1; h++) {
+                for (let e = 0; e < 3; e++) {
+                    const q = (e === 0 ? hull[0] : e === 1 ? hull[h + 1] : hull[h]) * 3;
+                    tp.push(P[q], P[q + 1], P[q + 2]);
+                    if (col) tc.push(C[q], C[q + 1], C[q + 2]);
+                }
+            }
+        }
+        out.push({ pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
+    }
+    return out;
+}
+
+/**
+ * Cap geometry from flat triangle arrays; null when there is nothing to draw.
+ * @param {Float32Array} pos @param {Float32Array | null} col
+ * @param {number} nx @param {number} ny @param {number} nz
+ * @returns {THREE.BufferGeometry | null}
+ */
+function clipCapGeometry(pos, col, nx, ny, nz) {
+    if (!pos.length) return null;
+    const g = new THREE.BufferGeometry();
+    const n = pos.length / 3;
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const normals = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+        normals[i * 3] = -nx; normals[i * 3 + 1] = -ny; normals[i * 3 + 2] = -nz;
+    }
+    g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    if (col) g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.computeBoundingSphere();
+    return g;
+}
+
+/**
+ * Owns every clip cap: decides per frame which capped solids need a rebuild
+ * (plane, transform, geometry, draw range or colour layout changed), keeps
+ * each cap's material in step with its owner, and removes caps when clipping
+ * or the cap switch goes off. Caps are children of their owner mesh marked
+ * `userData.__clipCap`, never in `_objects`. Tubes over
+ * CLIP_CAP_WORKER_TRIANGLES drawn triangles are sliced on the LOD worker.
+ */
+class ClipCapController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** Global switch; a per-object `userData.clipCap` boolean overrides it. */
+        this.enabled = false;
+        /** @type {any[]} */ this._targets = [];
+        this._targetsGen = -1;
+        this._hasCaps = false;
+        this._inv = new THREE.Matrix4();
+        this._plane = new THREE.Plane();
+        /** Worker requests in flight. */
+        this.pending = 0;
+        /** Worker requests posted so far (test seam). */
+        this.requests = 0;
+        this._reqId = 0;
+        /** Main-thread ms spent on the last worker request and install (bench seam). */
+        this.lastRequestMs = 0;
+        this.lastInstallMs = 0;
+    }
+
+    /** @param {any} mesh */
+    _wants(mesh) {
+        const o = mesh.userData.clipCap;
+        return typeof o === 'boolean' ? o : this.enabled;
+    }
+
+    _collectTargets() {
+        /** @type {any[]} */ const out = [];
+        for (const obj of this.v._objects.values()) {
+            obj.traverse((/** @type {any} */ node) => {
+                if (node.isMesh && node.userData.clipCapKind) out.push(node);
+            });
+        }
+        // A target that left the scene drops its geometry copy on the worker.
+        const kept = new Set(out);
+        for (const mesh of this._targets) {
+            if (kept.has(mesh)) continue;
+            const st = mesh.userData.__clipCapState;
+            if (st && st.inflight) { st.inflight = 0; this.pending--; }
+            this._forgetWorkerCopy(mesh);
+        }
+        this._targets = out;
+        this._targetsGen = this.v._objGeneration;
+    }
+
+    /** Per frame, from _animate. Free while clipping is off and no cap exists. */
+    update() {
+        const v = this.v;
+        const active = v._clipEnabled;
+        if (!active && !this._hasCaps) return;
+        if (this._targetsGen !== v._objGeneration) this._collectTargets();
+        let any = false;
+        const now = performance.now();
+        for (const mesh of this._targets) {
+            if (!active || !mesh.parent || !this._wants(mesh)) { this._remove(mesh); continue; }
+            if (this._updateTarget(mesh, now)) any = true;
+        }
+        this._hasCaps = any || this.pending > 0;
+    }
+
+    /**
+     * True when no worker request is in flight and every capped target's
+     * caps match its current plane, transform and geometry (test seam).
+     */
+    settled() {
+        if (this.pending > 0) return false;
+        if (!this.v._clipEnabled) return true;
+        if (this._targetsGen !== this.v._objGeneration) return false;
+        for (const mesh of this._targets) {
+            if (!mesh.parent || !this._wants(mesh)) continue;
+            const s = this._signature(mesh);
+            if (!s) continue;
+            const st = mesh.userData.__clipCapState;
+            if (!st || !sameSignature(st.sig, s.sig)) return false;
+        }
+        return true;
+    }
+
+    /** @param {any} mesh */
+    _remove(mesh) {
+        const st = mesh.userData.__clipCapState;
+        if (!st) return;
+        for (const cap of st.caps) {
+            if (!cap) continue;
+            mesh.remove(cap);
+            cap.geometry.dispose();
+            cap.material.dispose();
+        }
+        if (st.inflight) { st.inflight = 0; this.pending--; }
+        this._forgetWorkerCopy(mesh);
+        delete mesh.userData.__clipCapState;
+        this.v._shadowDirty = true;
+    }
+
+    /** @param {any} mesh */
+    _forgetWorkerCopy(mesh) {
+        const st = mesh.userData.__clipCapState;
+        if (!st || !st.workerGeomKey) return;
+        st.workerGeomKey = '';
+        if (this.v._lodWorker) this.v._lodWorker.postMessage({ type: 'clipCapDispose', capId: mesh.uuid });
+    }
+
+    /**
+     * Owner material plus the rebuild signature: geometry id and versions,
+     * draw range, colour mode and each plane in the owner's local frame.
+     * Null when the owner must stay open (translucent, wire cage, no positions).
+     * @param {any} mesh
+     */
+    _signature(mesh) {
+        const own = ownMaterials(mesh)[0];
+        // A translucent body or a wire cage shows its inside on purpose.
+        if (!own || own.transparent || own.opacity < 1 || own.wireframe) return null;
+        const geom = mesh.geometry;
+        const posAttr = geom.getAttribute('position');
+        if (!posAttr) return null;
+        const index = geom.getIndex();
+        const colAttr = geom.getAttribute('color');
+        const withColor = !!(colAttr && own.vertexColors);
+        mesh.updateWorldMatrix(true, false);
+        this._inv.copy(mesh.matrixWorld).invert();
+        const planes = this.v._clipPlanes;
+        const sig = [geom.id, posAttr.version, index ? index.version : -1,
+            geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0,
+            withColor ? colAttr.version : -1, planes.length];
+        /** @type {number[][]} */ const local = [];
+        for (const p of planes) {
+            this._plane.copy(p).applyMatrix4(this._inv);
+            const n = this._plane.normal;
+            local.push([n.x, n.y, n.z, this._plane.constant]);
+            sig.push(n.x, n.y, n.z, this._plane.constant);
+        }
+        return { own, sig, local, withColor };
+    }
+
+    /**
+     * @param {any} mesh @param {number} now
+     * @returns {boolean} whether the mesh carries a cap afterwards
+     */
+    _updateTarget(mesh, now) {
+        const s = this._signature(mesh);
+        if (!s) { this._remove(mesh); return false; }
+        const { own, sig, local, withColor } = s;
+        let st = mesh.userData.__clipCapState;
+        if (!st) {
+            st = mesh.userData.__clipCapState = {
+                sig: null, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
+            };
+        }
+        // One request in flight per target: when it lands its signature is
+        // compared again, so the final state always gets built.
+        if (!st.inflight && !sameSignature(st.sig, sig)) {
+            const geom = mesh.geometry;
+            const index = geom.getIndex();
+            const total = index ? index.count : geom.getAttribute('position').count;
+            const drawn = Math.min(total, geom.drawRange.count) / 3;
+            const workerTris = typeof window !== 'undefined' && /** @type {any} */ (window).__clipCapWorkerTriangles != null
+                ? /** @type {any} */ (window).__clipCapWorkerTriangles : CLIP_CAP_WORKER_TRIANGLES;
+            if (mesh.userData.clipCapKind === 'tube' && index && drawn > workerTris && this.v._lodWorker) {
+                this._request(mesh, st, sig, local, withColor);
+            } else {
+                const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
+                if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
+                    const t0 = performance.now();
+                    this._install(mesh, st, this._build(mesh, local, withColor), local);
+                    st.sig = sig;
+                    st.last = now;
+                    st.cost = performance.now() - t0;
+                }
+            }
+        }
+        this._syncMaterials(mesh, st, own, withColor);
+        return st.caps.some(Boolean);
+    }
+
+    /**
+     * Main-thread cap arrays per plane.
+     * @param {any} mesh @param {number[][]} local @param {boolean} withColor
+     * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+     */
+    _build(mesh, local, withColor) {
+        const kind = mesh.userData.clipCapKind;
+        const geom = mesh.geometry;
+        if (kind === 'tube') {
+            const index = geom.getIndex();
+            const colAttr = geom.getAttribute('color');
+            const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+            return sliceTubeClipCap(geom.getAttribute('position').array, withColor ? colAttr.array : null,
+                index.array, end, local, mesh.userData.tubeIndicesPerRingPair);
+        }
+        return local.map(([nx, ny, nz, c]) => {
+            const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
+            if (kind === 'convex') buildConvexClipCap(geom, out);
+            else if (kind === 'swept') buildSweptClipCap(geom, mesh.userData.sweptLayout, out);
+            else if (kind === 'sliced') buildSlicedClipCap(geom, out);
+            return { pos: new Float32Array(out.pos), col: out.col ? new Float32Array(out.col) : null };
+        });
+    }
+
+    /**
+     * Post a slice request to the LOD worker. The geometry is copied (never
+     * the renderer's own buffers) and only when it changed since the last
+     * request, so a plane drag on a static tube posts planes alone.
+     * @param {any} mesh @param {any} st @param {number[]} sig @param {number[][]} local @param {boolean} withColor
+     */
+    _request(mesh, st, sig, local, withColor) {
+        const t0 = performance.now();
+        const geom = mesh.geometry;
+        const posAttr = geom.getAttribute('position');
+        const index = geom.getIndex();
+        const colAttr = geom.getAttribute('color');
+        const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+        // Draw range is left out: a shorter reveal reuses the cached copy.
+        const geomKey = [sig[0], sig[1], sig[2], sig[5], sig[6]].join(':');
+        /** @type {any} */ const msg = {
+            type: 'clipCap', capId: mesh.uuid, reqId: ++this._reqId, geomKey,
+            planes: local, end, block: mesh.userData.tubeIndicesPerRingPair,
+        };
+        /** @type {ArrayBuffer[]} */ const transfer = [];
+        if (st.workerGeomKey !== geomKey || st.workerEnd < end) {
+            msg.positions = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+            msg.indices = /** @type {Uint32Array} */ (index.array).slice(0, end);
+            msg.colors = withColor ? new Float32Array(/** @type {Float32Array} */ (colAttr.array)) : null;
+            transfer.push(msg.positions.buffer, msg.indices.buffer);
+            if (msg.colors) transfer.push(msg.colors.buffer);
+            st.workerGeomKey = geomKey;
+            st.workerEnd = end;
+        }
+        st.inflight = msg.reqId;
+        st.inflightSig = sig;
+        st.inflightLocal = local;
+        this.pending++;
+        this.requests++;
+        this.v._lodWorker.postMessage(msg, transfer);
+        this.lastRequestMs = performance.now() - t0;
+    }
+
+    /**
+     * A slice result from the LOD worker; dropped unless it answers the
+     * target's current request.
+     * @param {any} msg
+     */
+    onWorkerResult(msg) {
+        const mesh = this._targets.find((m) => m.uuid === msg.capId);
+        const st = mesh && mesh.userData.__clipCapState;
+        if (!st || st.inflight !== msg.reqId) return;
+        this.pending--;
+        st.inflight = 0;
+        if (msg.missing) {
+            // The worker lost the geometry copy (terminated): resend next frame.
+            st.workerGeomKey = '';
+            return;
+        }
+        const t0 = performance.now();
+        this._install(mesh, st, msg.caps, st.inflightLocal);
+        st.sig = st.inflightSig;
+        st.last = performance.now();
+        this.lastInstallMs = st.last - t0;
+    }
+
+    /**
+     * Swap in cap meshes from per-plane triangle arrays.
+     * @param {any} mesh @param {any} st
+     * @param {{pos: Float32Array, col: Float32Array | null}[]} results @param {number[][]} local
+     */
+    _install(mesh, st, results, local) {
+        const planes = this.v._clipPlanes;
+        const n = Math.min(planes.length, results.length);
+        for (let i = 0; i < n; i++) {
+            const g = clipCapGeometry(results[i].pos, results[i].col, local[i][0], local[i][1], local[i][2]);
+            let cap = st.caps[i];
+            if (!g) {
+                if (cap) cap.visible = false;
+                continue;
+            }
+            if (!cap) {
+                const mat = new THREE.MeshStandardMaterial({
+                    side: THREE.DoubleSide,
+                    // Coplanar with the cut rim: pull the cap forward a hair.
+                    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+                    fog: false,
+                });
+                cap = new THREE.Mesh(g, mat);
+                cap.userData.__clipCap = true;
+                cap.name = `${mesh.userData.id || mesh.name}::clipcap`;
+                st.caps[i] = cap;
+                mesh.add(cap);
+            } else {
+                cap.geometry.dispose();
+                cap.geometry = g;
+            }
+            cap.visible = true;
+            // Clipped by every plane but its own, which it lies on.
+            const others = planes.filter((/** @type {any} */ _, /** @type {number} */ j) => j !== i);
+            const mat = cap.material;
+            const cur = mat.clippingPlanes;
+            if (!cur || cur.length !== others.length || cur.some((/** @type {any} */ p, /** @type {number} */ j) => p !== others[j])) {
+                mat.clippingPlanes = others;
+                mat.clipShadows = true;
+                mat.needsUpdate = true;
+            }
+        }
+        for (let i = n; i < st.caps.length; i++) {
+            const cap = st.caps[i];
+            if (!cap) continue;
+            mesh.remove(cap);
+            cap.geometry.dispose();
+            cap.material.dispose();
+        }
+        st.caps.length = n;
+        this.v._shadowDirty = true;
+    }
+
+    /** @param {any} mesh @param {any} st @param {any} own @param {boolean} withColor */
+    _syncMaterials(mesh, st, own, withColor) {
+        // The M cycle's wire-only mode wires the cap too, so a cut stays readable.
+        const wire = !!(this.v._shading && this.v._shading.wireframeMode === 1);
+        for (const cap of st.caps) {
+            if (!cap) continue;
+            const mat = cap.material;
+            if (own.color) mat.color.copy(own.color);
+            if (own.roughness !== undefined) mat.roughness = own.roughness;
+            if (own.metalness !== undefined) mat.metalness = own.metalness;
+            const vc = withColor && !!cap.geometry.getAttribute('color');
+            if (mat.vertexColors !== vc) { mat.vertexColors = vc; mat.needsUpdate = true; }
+            mat.wireframe = wire;
+            cap.castShadow = mesh.castShadow;
+            cap.receiveShadow = mesh.receiveShadow;
+        }
+    }
+}
+
+/**
+ * @param {number[] | null} a @param {number[]} b
+ */
+function sameSignature(a, b) {
+    return !!a && a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 // ========== Depth cues (depth perception for flat white line drawings) ==========
@@ -11041,8 +12807,7 @@ function buildGizmoAxisPicker(name, scale) {
     else if (name === 'Z') geo.rotateX(Math.PI / 2);
     const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
     mesh.name = name;
-    // Raycast-only hitbox — three's raycaster ignores `.visible` (same trick
-    // as the axis-control widget's own invisible pick sphere).
+    // Raycast-only hitbox: three's raycaster ignores `.visible`.
     mesh.visible = false;
     return mesh;
 }
@@ -11885,9 +13650,10 @@ class TransformGizmoController {
 // ========== Axis Control (rotary / linear range indicators) ==========
 // A range-display control distinct from the move/rotate TransformControls
 // gizmo above: a line showing an axis's range of motion — an arc, a full
-// circle, a segment, or a window that follows the value — with a small
-// flat-shaded sphere marking the current value. Only the sphere is
-// draggable/hoverable; the line is a visual guide (its own raycast is a
+// circle, a segment, or a window that follows the value — with a short,
+// thicker handle section marking the current value. Only the handle is
+// draggable/hoverable, hit-tested in screen pixels against its projected
+// polyline (issue #284); the line is a visual guide (its own raycast is a
 // no-op). Anchored every frame at a target object's world pivot, oriented so
 // the control's own local +X is that target's chosen local axis in world
 // space (`Quaternion.setFromUnitVectors`, same "derive the world direction
@@ -11903,16 +13669,15 @@ class TransformGizmoController {
 //   linear            segment from `min` to `max` metres along the axis
 //   linear_unlimited  segment from `value - window` to `value + window`,
 //                     recomputed on every value change so it re-centres
-//                     ("moves with the sphere")
+//                     ("moves with the handle")
 //
-// Sphere local position: rotary* -> (0, R cos(value), R sin(value)); linear*
+// Value marker local position: rotary* -> (0, R cos(value), R sin(value)); linear*
 // -> (value, 0, 0). Dragging projects the pointer onto a plane (perpendicular
 // to the axis for rotary; containing the axis and facing the camera for
 // linear, the same construction TransformControlsPlane uses for a
 // single-axis translate) and reports {id, value, phase} back, same shape as
 // the move gizmo's onObjectMove.
 
-const AXIS_CONTROL_SPHERE_RADIUS = 0.1;    // invisible pick-only hitbox, not rendered
 const AXIS_CONTROL_ARC_SEGMENTS = 64;
 const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
 const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
@@ -11922,6 +13687,9 @@ const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 4;  // handle 
 const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.05;   // radians either side of value, rotary handle arc
 const AXIS_CONTROL_HANDLE_ARC_SEGMENTS = 12;
 const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.05;  // world units either side of value, linear handle segment
+// Pick radius margin past the handle's drawn half width, in CSS px; a finger needs more slack than a mouse.
+const AXIS_CONTROL_PICK_MARGIN_PX = 5;
+const AXIS_CONTROL_PICK_MARGIN_TOUCH_PX = 14;
 
 const _acUnitX = new THREE.Vector3(1, 0, 0);
 const _acScratchA = new THREE.Vector3();
@@ -11931,7 +13699,7 @@ const _acPlane = new THREE.Plane();
 const _acQuat = new THREE.Quaternion();
 
 /** One rotary/linear axis-control instance. Built once; `_rebuild()` re-derives
- * line geometry and sphere position from `value`/`min`/`max`. */
+ * line geometry, the handle polyline and the value marker from `value`/`min`/`max`. */
 class AxisControl {
     /** @param {string} id @param {any} opts */
     constructor(id, opts) {
@@ -11946,6 +13714,10 @@ class AxisControl {
         // Set while the radius waits for `bboxSourceId` to be in the scene.
         this.bboxSourceId = opts.radiusPending ? opts.bboxSourceId : null;
         this.window = opts.window != null ? opts.window : AXIS_CONTROL_DEFAULT_WINDOW;
+        /** @type {number|null} CSS px; null derives it from the handle width and pointer type */
+        this.pickRadiusPx = opts.pickRadiusPx != null ? opts.pickRadiusPx : null;
+        /** @type {number[]} handle polyline in the group's local frame, flat xyz */
+        this._handlePoints = [];
         this._hovered = false;
         this._dragging = false;
         this._framePivot = new THREE.Vector3();   // _liveFrame scratch, per control
@@ -11974,7 +13746,7 @@ class AxisControl {
         });
         this.line = new Line2(new LineGeometry(), this.lineMaterial);
         this.line.renderOrder = 900;
-        this.line.raycast = () => {};   // guide only — the sphere is the only pickable part
+        this.line.raycast = () => {};   // guide only, the handle is picked in screen space
 
         // The handle: a short, 3x-thick section of the same line, centred on
         // `value` — a small arc for rotary, a short segment for linear. This
@@ -11988,26 +13760,18 @@ class AxisControl {
         });
         this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
         this.handleLine.renderOrder = 901;
-        this.handleLine.raycast = () => {};   // guide only — the sphere is the only pickable part
+        this.handleLine.raycast = () => {};   // picked by AxisControlManager._handleDistancePx instead
 
-        // The sphere is kept as the pick target (three's raycaster ignores
-        // `.visible`, so it still hit-tests) but is never rendered — the
-        // handle line above is the visible indicator now.
-        this.sphereMaterial = new THREE.MeshStandardMaterial({
-            color: this._baseColor.clone(), flatShading: true, roughness: 0.5, metalness: 0.0,
-            depthTest: false, depthWrite: false, toneMapped: false,
-        });
-        this.sphere = new THREE.Mesh(new THREE.SphereGeometry(AXIS_CONTROL_SPHERE_RADIUS, 12, 8), this.sphereMaterial);
-        this.sphere.renderOrder = 901;
-        this.sphere.userData.axisControlId = id;
-        this.sphere.visible = false;
+        // Unrendered point at `value`, the reference a rotary drag measures its angle from.
+        this.marker = new THREE.Object3D();
+        this.marker.userData.axisControlId = id;
 
-        this.group.add(this.line, this.handleLine, this.sphere);
+        this.group.add(this.line, this.handleLine, this.marker);
         this._rebuild();
     }
 
     /** Re-derive the line geometry (kind-dependent), the handle segment, and
-     * the sphere's local position from the current value/min/max. Cheap
+     * the value marker's local position from the current value/min/max. Cheap
      * (<= ARC_SEGMENTS+1 verts) — called on every value/min/max change, not
      * per frame. */
     _rebuild() {
@@ -12027,7 +13791,7 @@ class AxisControl {
                 const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
                 flat.push(0, R * Math.cos(a), R * Math.sin(a));
             }
-            this.sphere.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
+            this.marker.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
 
             let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_ANGLE;
             let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_ANGLE;
@@ -12040,7 +13804,7 @@ class AxisControl {
             const lo = this.kind === 'linear_unlimited' ? this.value - this.window : this.min;
             const hi = this.kind === 'linear_unlimited' ? this.value + this.window : this.max;
             flat.push(lo, 0, 0, hi, 0, 0);
-            this.sphere.position.set(this.value, 0, 0);
+            this.marker.position.set(this.value, 0, 0);
 
             let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_LENGTH;
             let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_LENGTH;
@@ -12056,6 +13820,7 @@ class AxisControl {
         this.handleLine.geometry = new LineGeometry();
         this.handleLine.geometry.setPositions(handleFlat);
         this.handleLine.computeLineDistances();
+        this._handlePoints = handleFlat;
     }
 
     /** @param {number} value @param {{min?:number, max?:number}} [opts] */
@@ -12093,8 +13858,6 @@ class AxisControl {
         this.lineMaterial.dispose();
         this.handleLine.geometry.dispose();
         this.handleLineMaterial.dispose();
-        this.sphere.geometry.dispose();
-        this.sphereMaterial.dispose();
     }
 }
 
@@ -12118,7 +13881,7 @@ class AxisControlManager {
         this._dragV = new THREE.Vector3();
         this._dragRawAngle = 0;
         this._dragAccumAngle = 0;
-        this._dragValueOffset = 0;   // linear*: grab-point offset, so the sphere doesn't jump to the cursor
+        this._dragValueOffset = 0;   // linear*: grab-point offset, so the handle doesn't jump to the cursor
         this._lastReport = 0;
 
         const dom = viewer._renderer.domElement;
@@ -12134,7 +13897,9 @@ class AxisControlManager {
     }
 
     /** True while a handle is hovered or dragged, so a press or release
-     * there is this widget's gesture rather than a click. @returns {boolean} */
+     * there is this widget's gesture rather than a click. Hover is never set
+     * while a move-gizmo handle is under the pointer, so this cannot block
+     * the gizmo. @returns {boolean} */
     busy() {
         if (this._active) return true;
         for (const c of this.controls.values()) if (c._hovered) return true;
@@ -12187,10 +13952,11 @@ class AxisControlManager {
     /** Update one control's value/min/max (update_axis_control) — distinct
      * from the no-arg `update()` below, which repositions every control at
      * its target's live pivot once per render frame.
-     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
     setValue(id, opts) {
         const c = this.controls.get(id);
         if (!c) return;
+        if (opts.pickRadiusPx != null) c.pickRadiusPx = opts.pickRadiusPx;
         c.setValue(opts.value != null ? opts.value : c.value, opts);
         if (opts.color != null || opts.hoverColor != null) c.setColor(opts.color, opts.hoverColor);
     }
@@ -12247,7 +14013,7 @@ class AxisControlManager {
 
     /** Per-frame: reposition/orient every control at its target's live pivot
      * + axis direction (a moving target — a jog, a drag — carries its
-     * controls with it for free), then keep the hovered/dragging sphere
+     * controls with it for free), then keep the hovered/dragging handle
      * lit. Controls whose target has left the scene just hold their last
      * pose (matches the move gizmo's own "detach on parent loss" being the
      * caller's job, not silently vanishing mid-frame). */
@@ -12280,22 +14046,89 @@ class AxisControlManager {
         return this._ndc;
     }
 
-    /** @param {number} clientX @param {number} clientY @returns {AxisControl|null} */
-    _pickSphere(clientX, clientY) {
-        this._raycaster.setFromCamera(
-            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
-        const spheres = [];
-        const map = new Map();
-        for (const c of this.controls.values()) if (c.group.visible) { spheres.push(c.sphere); map.set(c.sphere, c); }
-        const hits = this._raycaster.intersectObjects(spheres, false);
-        return hits.length ? map.get(hits[0].object) : null;
+    /** Pick radius in CSS px for a control and pointer type.
+     * @param {AxisControl} c @param {string} pointerType @returns {number} */
+    _pickRadiusPx(c, pointerType) {
+        if (c.pickRadiusPx != null) return c.pickRadiusPx;
+        const margin = pointerType === 'touch' ? AXIS_CONTROL_PICK_MARGIN_TOUCH_PX : AXIS_CONTROL_PICK_MARGIN_PX;
+        return AXIS_CONTROL_HANDLE_WIDTH_PX / 2 + margin;
+    }
+
+    /** Screen distance in CSS px from a viewport point to a control's
+     * projected handle polyline; Infinity when no part of it is in view.
+     * A pixel test keeps the hit area the size of the drawn handle at any
+     * zoom and under both projections, where a world-size hitbox did not.
+     * @param {AxisControl} c @param {number} px @param {number} py
+     * @param {DOMRect} rect @returns {number} */
+    _handleDistancePx(c, px, py, rect) {
+        const cam = /** @type {any} */ (this.v._camera);
+        c.group.updateMatrixWorld();
+        const pts = c._handlePoints;
+        let best = Infinity;
+        let prevOk = false, ax = 0, ay = 0;
+        for (let i = 0; i < pts.length; i += 3) {
+            const p = _acScratchA.set(pts[i], pts[i + 1], pts[i + 2]).applyMatrix4(c.group.matrixWorld).project(cam);
+            // Outside the depth range (incl. behind a perspective eye) the projection is meaningless.
+            if (!(p.z >= -1 && p.z <= 1)) { prevOk = false; continue; }
+            const bx = (p.x * 0.5 + 0.5) * rect.width, by = (-p.y * 0.5 + 0.5) * rect.height;
+            let d;
+            if (prevOk) {
+                const dx = bx - ax, dy = by - ay;
+                const len2 = dx * dx + dy * dy;
+                const t = len2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+                d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+            } else {
+                d = Math.hypot(px - bx, py - by);
+            }
+            if (d < best) best = d;
+            prevOk = true; ax = bx; ay = by;
+        }
+        return best;
+    }
+
+    /** The control whose handle is nearest the pointer within its pick
+     * radius, or null. @param {number} clientX @param {number} clientY
+     * @param {string} pointerType @returns {AxisControl|null} */
+    _pickHandle(clientX, clientY, pointerType) {
+        if (!this.controls.size) return null;
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const cam = /** @type {any} */ (this.v._camera);
+        cam.updateMatrixWorld();   // a wheel zoom since the last render leaves matrixWorldInverse stale
+        const px = clientX - rect.left, py = clientY - rect.top;
+        let hit = null, bestD = Infinity;
+        for (const c of this.controls.values()) {
+            if (!c.group.visible) continue;
+            const d = this._handleDistancePx(c, px, py, rect);
+            if (d <= this._pickRadiusPx(c, pointerType) && d < bestD) { hit = c; bestD = d; }
+        }
+        return hit;
+    }
+
+    /** True when a move-gizmo handle (interactive or pinned) is under the
+     * pointer or dragged, so the gizmo keeps the gesture on overlap.
+     * `refresh` re-runs the gizmo's own hover test, for a touch press that
+     * arrives with no hover before it. @param {PointerEvent} e @param {boolean} refresh */
+    _gizmoHandleUnder(e, refresh) {
+        const tg = this.v._transformGizmo;
+        if (!tg || !tg.enabled) return false;
+        for (const g of tg._allGizmos()) {
+            const ctl = /** @type {any} */ (g.control);
+            if (ctl.dragging) return true;
+            if (!ctl.enabled || ctl.object === undefined) continue;
+            if (refresh) ctl.pointerHover(ctl._getPointer(e));
+            if (ctl.axis != null) return true;
+        }
+        return false;
     }
 
     /** @param {PointerEvent} e */
     _pointerDown(e) {
         if (e.button !== 0) return;
-        const hit = this._pickSphere(e.clientX, e.clientY);
+        const hit = this._pickHandle(e.clientX, e.clientY, e.pointerType);
         if (!hit) return;
+        // Left to TransformControls' own pointerdown, which runs after this capture listener.
+        if (this._gizmoHandleUnder(e, true)) return;
         const frame = this._liveFrame(hit);
         if (!frame) return;
         this._active = hit;
@@ -12323,11 +14156,11 @@ class AxisControlManager {
         e.preventDefault();
     }
 
-    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT sphere position
+    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT value marker
      * about its drag axis — the reference `_pointerMove` unwraps deltas
      * against. @param {AxisControl} c @param {THREE.Vector3} pivot @param {THREE.Vector3} axisDir */
     _angleOf(c, pivot, axisDir) {
-        const worldPos = c.sphere.getWorldPosition(_acScratchC);
+        const worldPos = c.marker.getWorldPosition(_acScratchC);
         const rel = worldPos.sub(pivot);
         rel.addScaledVector(axisDir, -rel.dot(axisDir));
         return Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
@@ -12359,8 +14192,9 @@ class AxisControlManager {
     _pointerMove(e) {
         const c = this._active;
         if (!c || !c._dragging) {
-            // Not dragging: plain hover check.
-            const hit = this._pickSphere(e.clientX, e.clientY);
+            // Not dragging: plain hover check. TransformControls' canvas pointermove
+            // has already refreshed its axis before this window listener runs.
+            const hit = this._gizmoHandleUnder(e, false) ? null : this._pickHandle(e.clientX, e.clientY, e.pointerType);
             for (const other of this.controls.values()) other._setHovered(other === hit);
             return;
         }
@@ -12538,6 +14372,8 @@ export class ThreeJSViewer {
         // a delete/re-add of either id (same id = same logical object).
         /** @type {Map<string, {source: {id:string, channel:string, from:number, to:number}}>} */
         this._clipBindings = new Map();
+        // set_kinematic_chain / set_joints / the `joints` channel.
+        this._kinematics = new KinematicChainController(this);
         this._objGeneration = 0;
         this._mixerGeneration = 0;
         this._pendingFetches = 0;
@@ -12630,6 +14466,10 @@ export class ThreeJSViewer {
         this._clipSlabThickness = 2.0;
         this._clipPosition = 0;
         this._clipDefaults = null;
+        // Section caps on clipped solids (issue #259). URL `clip_caps` > option > off.
+        this._clipCaps = new ClipCapController(this);
+        this._clipCaps.enabled = parseBoolOption(urlParams.get('clip_caps'))
+            ?? parseBoolOption(options.clipCaps) ?? false;
         this._clipSyncFromGizmo = false;
 
         // Scrubbing state
@@ -12873,6 +14713,7 @@ export class ThreeJSViewer {
         this._clipModeSlab = q('.tjsv-clip-mode-slab');
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
         this._clipClose = q('.tjsv-clip-close');
+        this._clipCapsCheck = q('.tjsv-clip-caps');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
         // Toolbar height tracks viewport width: the timeline-row wraps when
@@ -13055,6 +14896,10 @@ export class ThreeJSViewer {
         this._lodWorker = _getLodWorker();
         this._lodWorker.onmessage = /** @param {MessageEvent} e */ (e) => {
             const msg = e.data;
+            if (msg.type === 'clipCapResult') {
+                this._clipCaps.onWorkerResult(msg);
+                return;
+            }
             // 'collapseOnlyResult' is independent of LOD — runs even on tubes
             // without a tubeLOD record. Apply the snapped positions to the
             // mesh's existing geometry and let three.js re-upload them.
@@ -13187,6 +15032,8 @@ export class ThreeJSViewer {
         this._orthoAutoEntered = false;
         /** @type {{target: THREE.Vector3, dist: number, startDir: THREE.Vector3, rot: THREE.Quaternion, startUp: THREE.Vector3, endUp: THREE.Vector3, start: number} | null} */
         this._viewTween = null;
+        /** @type {{start: number, fromPos: THREE.Vector3, toPos: THREE.Vector3, fromTarget: THREE.Vector3, toTarget: THREE.Vector3, fromZoom: number, toZoom: number | null} | null} */
+        this._frameTween = null;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
         this._configureViewHelper(this._viewHelper);
@@ -13200,10 +15047,12 @@ export class ThreeJSViewer {
                 e.stopImmediatePropagation();
             } else {
                 this._viewTween = null;
+                this._frameTween = null;
             }
         }, true);
         this._renderer.domElement.addEventListener('wheel', () => {
             this._viewTween = null;
+            this._frameTween = null;
         }, { passive: true, capture: true });
 
         // Hover feedback: highlight the sprite under the cursor + pointer
@@ -13768,7 +15617,8 @@ export class ThreeJSViewer {
     _applyClipToObject(obj) {
         const planes = this._activeClippingPlanes();
         obj.traverse(/** @param {any} child */ child => {
-            if (!child.material) return;
+            // A clip cap carries every plane but its own (ClipCapController).
+            if (!child.material || child.userData.__clipCap) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
                 mat.clippingPlanes = planes;
@@ -13849,7 +15699,7 @@ export class ThreeJSViewer {
     _updateClipMaterials() {
         this._shadowDirty = true;
         this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.material) return;
+            if (!child.material || child.userData.__clipCap) return;
             if (this._isClipHelper(child)) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
@@ -14293,6 +16143,7 @@ export class ThreeJSViewer {
         // must pin matrixAutoUpdate off and pose the new object now, not
         // only on the next animation tick.
         if (this._followPaths.has(id)) this._applyFollowPaths();
+        this._kinematics.onRegister(id);
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -14398,6 +16249,10 @@ export class ThreeJSViewer {
             const geometry = PRIMITIVES[objData.primitive](params);
             const material = this._createMaterial(params);
             const mesh = new THREE.Mesh(geometry, material);
+            // Convex solids get the hull of their cut edges as a clip cap (issue #259).
+            if (CLIP_CAP_CONVEX_PRIMITIVES.has(objData.primitive)) mesh.userData.clipCapKind = 'convex';
+            else if (objData.primitive === 'torus') mesh.userData.clipCapKind = 'sliced';
+            if (typeof params.clipCap === 'boolean') mesh.userData.clipCap = params.clipCap;
             // A crisper accent over the translucent fill; opt-in, so every
             // other path stays the single Mesh it was.
             if (params.outline && (objData.primitive === 'box' || objData.primitive === 'sphere')) {
@@ -15444,6 +17299,7 @@ export class ThreeJSViewer {
         this._followPaths.clear();
         this._pendingReparent.clear();
         this._clipBindings.clear();
+        this._kinematics.clear();
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
@@ -15638,6 +17494,7 @@ export class ThreeJSViewer {
     _unloadAnimation(restoreVisibility = true) {
         this._animGeneration++;
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
+        this._kinematics.onUnloadAnimation();
         if (restoreVisibility) {
             for (const [id, baselineVisible] of this._baselineVisibility) {
                 const obj = this._objects.get(id);
@@ -15689,6 +17546,13 @@ export class ThreeJSViewer {
                     const baseNext = hasNext ? (frameIndex + 1) * nObj * ch.stride : null;
                     applyFn(ch, ch.refs, base, baseNext, hasNext ? t : 0);
                 }
+            }
+            // After the loop, so a chain overrides a transforms channel on the same id.
+            const joints = this._animation.channels.joints;
+            if (joints) {
+                const nObj = joints.ids.length;
+                this._kinematics.applyChannel(joints, frameIndex * nObj * joints.stride,
+                    hasNext ? (frameIndex + 1) * nObj * joints.stride : null, hasNext ? t : 0);
             }
         }
 
@@ -16219,6 +18083,10 @@ export class ThreeJSViewer {
             this._setClipThickness(this._clipSlabThickness + delta);
         });
 
+        // Cap toggle (issue #259)
+        this._clipCapsCheck.checked = this._clipCaps.enabled;
+        this._clipCapsCheck.addEventListener('change', () => this.setClipCaps(this._clipCapsCheck.checked));
+
         // Close button
         this._clipClose.addEventListener('click', () => this._toggleClipPanel());
 
@@ -16741,7 +18609,12 @@ export class ThreeJSViewer {
                 this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
                 break;
             case 'frame_object':
-                this._withObject(data.id, 'frame_object', (obj) => { this.frameObject(obj); });
+                this._withObject(data.id, 'frame_object', (obj) => {
+                    this.frameObject(obj, { fill: data.fill });
+                });
+                break;
+            case 'frame_points':
+                this.framePoints(data.points, { fill: data.fill });
                 break;
             case 'set_scene_visibility':
                 this._setSceneVisibility(data.visibility);
@@ -16757,7 +18630,7 @@ export class ThreeJSViewer {
                     colorObj.traverse(/** @param {any} child */ (child) => {
                         // Composes with set_highlight: the outline child keeps
                         // its own selection colour.
-                        if (!child.material || child.userData.__highlightOutline) return;
+                        if (!child.material || child.userData.__highlightOutline || child.userData.__clipCap) return;
                         // Embedder overlays under the object keep their own colour.
                         if (isUnderOverlay(child)) return;
                         for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(data.color); }
@@ -17100,12 +18973,10 @@ export class ThreeJSViewer {
 
                         /** @type {Float32Array | null} */
                         let colorData = null;
+                        const exactColors = data.exactColors === true;
                         if (data.hasVertexColors) {
-                            const colorBytes = rawData.slice(positionBytes);
-                            colorData = new Float32Array(numPoints * 3);
-                            for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                colorData[i] = colorBytes[i] / 255;
-                            }
+                            colorData = polylineColorFloats(
+                                rawData.subarray(positionBytes), numPoints * 3, exactColors);
                         }
 
                         // segments: disjoint edges from consecutive point
@@ -17166,6 +19037,11 @@ export class ThreeJSViewer {
                                 : new THREE.Line(geometry, material);
                             line.userData.isNativeLine = true;
                             geometry.setDrawRange(0, numPoints);
+                        }
+                        // Exact colours skip tone mapping, which would shift them again.
+                        if (exactColors) {
+                            line.material.toneMapped = false;
+                            line.userData.exactColors = true;
                         }
                         if (asSegments) line.userData.isLineSegments = true;
                         line.userData.totalPointCount = numPoints;
@@ -17526,9 +19402,15 @@ export class ThreeJSViewer {
                                 return;
                             }
                             const bytes = new Uint8Array(buffer, 0, numPoints * 3);
-                            const colorData = new Float32Array(numPoints * 3);
-                            for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                colorData[i] = bytes[i] / 255;
+                            // Omitted exactColors keeps what the line was added with.
+                            const exactColors = typeof data.exactColors === 'boolean'
+                                ? data.exactColors
+                                : obj.userData.exactColors === true;
+                            const colorData = polylineColorFloats(bytes, numPoints * 3, exactColors);
+                            obj.userData.exactColors = exactColors;
+                            if (obj.material.toneMapped === exactColors) {
+                                obj.material.toneMapped = !exactColors;
+                                obj.material.needsUpdate = true;
                             }
                             if (obj.userData.isNativeLine) {
                                 // Native line: plain per-vertex color attribute.
@@ -18006,6 +19888,9 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
+                        // Clip caps hull each drawn ring band (issue #259).
+                        mesh.userData.clipCapKind = 'tube';
+                        if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         // The mesh now owns the texture references; _deleteObject
                         // releases them.
                         if (texKeys) { mesh.userData.tubeTextureKeys = texKeys; texKeys = null; }
@@ -18227,9 +20112,10 @@ export class ThreeJSViewer {
                             }
                         }
                         const hasColors = !!ringColors;
-                        const { geometry } = buildSweptToolGeometry(
+                        const built = buildSweptToolGeometry(
                             stationPos, axisArr, profileArr, sections, ringColors,
                         );
+                        const geometry = built.geometry;
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
                             color: hasColors ? 0xffffff : (data.color ?? 0x9aa0a6),
@@ -18246,6 +20132,14 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isSweptTool = true;
+                        // Clip caps read the ring layout (issue #259).
+                        mesh.userData.clipCapKind = 'swept';
+                        mesh.userData.sweptLayout = {
+                            stations: nStations, levels: built.levels, sections: built.sections,
+                            startCapIndexCount: built.startCapIndexCount,
+                            indicesPerRingPair: built.indicesPerRingPair,
+                        };
+                        if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
@@ -18476,12 +20370,13 @@ export class ThreeJSViewer {
                     value: data.value, min: data.min, max: data.max, color: data.color,
                     hoverColor: data.hover_color,
                     radius: data.radius, bboxSourceId: data.bbox_source_id, window: data.window,
+                    pickRadiusPx: data.pick_radius_px,
                 });
                 break;
             case 'update_axis_control':
                 this._axisControls.setValue(data.id, {
                     value: data.value, min: data.min, max: data.max,
-                    color: data.color, hoverColor: data.hover_color,
+                    color: data.color, hoverColor: data.hover_color, pickRadiusPx: data.pick_radius_px,
                 });
                 break;
             case 'remove_axis_control':
@@ -18530,6 +20425,32 @@ export class ThreeJSViewer {
                 break;
             case 'unbind_clip':
                 this._bindClip(data.id, null);
+                break;
+            case 'set_kinematic_chain':
+                try {
+                    this._kinematics.set(data.id, data);
+                } catch (e) {
+                    console.error(`set_kinematic_chain '${data.id}':`, e);
+                }
+                break;
+            case 'remove_kinematic_chain':
+                this._kinematics.remove(data.id);
+                break;
+            case 'query_kinematic_chain':
+                return this._reply({
+                    type: 'kinematic_chain_response',
+                    requestId: data.requestId,
+                    id: data.id,
+                    ...this._kinematics.query(data.id, data.values, data.solved),
+                });
+            case 'set_joints':
+                try {
+                    if (!this._kinematics.setJoints(data.id, data.values, data.solved)) {
+                        console.warn(`set_joints: no kinematic chain '${data.id}'`);
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
                 break;
             case 'set_follow_path': {
                 this._onFetchStart();
@@ -18676,6 +20597,9 @@ export class ThreeJSViewer {
                 break;
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
+                break;
+            case 'set_clipping_caps':
+                this.setClipCaps(!!data.enabled);
                 break;
             case 'set_display_quality':
                 this.setDisplayQuality(data.quality);
@@ -18984,6 +20908,9 @@ export class ThreeJSViewer {
         // Billboards: re-face the camera after controls have moved it.
         this._updateBillboards();
 
+        // Section caps follow plane, transform and geometry changes (issue #259).
+        this._clipCaps.update();
+
         // Octree-streamed point clouds: budgeted LOD traversal + on-demand
         // node fetches (no-op when no LOD cloud is in the scene).
         this._updatePointsLOD();
@@ -19024,6 +20951,7 @@ export class ThreeJSViewer {
 
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
         this._updateViewTween(frameNow);
+        this._camController.updateFrameTween(frameNow);
         if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
@@ -19222,12 +21150,7 @@ export class ThreeJSViewer {
         /** @type {THREE.Intersection[]} */
         const hits = [];
         for (const obj of this._objects.values()) {
-            if (!obj || !obj.userData.isGrid) continue;
-            let shown = true;
-            for (let n = obj; n; n = n.parent) {
-                if (n.visible === false || n.userData.pickable === false) { shown = false; break; }
-            }
-            if (!shown) continue;
+            if (!obj || !obj.userData.isGrid || !isPickTarget(obj)) continue;
             THREE.Mesh.prototype.raycast.call(/** @type {THREE.Mesh} */ (obj), raycaster, hits);
         }
         if (hits.length === 0) return null;
@@ -19235,18 +21158,36 @@ export class ThreeJSViewer {
         return hits[0].point.clone();
     }
 
-    /** @param {THREE.Object3D} object */
-    frameObject(object) {
-        const bbox = new THREE.Box3();
+    /**
+     * Fit the camera to one object, by the world box of each of its visible,
+     * pickable descendant meshes, with the rules `_collectFrameableBounds`
+     * applies to the scene (hidden subtrees, floor grids and overlays
+     * skipped). Without a pickable part it uses every visible part, and with
+     * nothing visible (hidden itself, or only hidden children) its full
+     * extent, so an explicit request still moves the camera. The view
+     * direction is kept.
+     * @param {THREE.Object3D | string} objectOrId tracked id or Object3D
+     * @param {{fill?: number, animate?: boolean}} [opts] `fill` (default 0.9)
+     *   is the share of the view the content spans on the tighter axis
+     */
+    frameObject(objectOrId, opts) {
+        const object = typeof objectOrId === 'string' ? this._objects.get(objectOrId) : objectOrId;
+        if (!object) return;
+        const { fill, animate } = frameOptions(opts);
         object.updateWorldMatrix(true, true);
-        bbox.expandByObject(object);
-        // LOD point clouds know their full extent from the hierarchy even
-        // when few (or no) node payloads are streamed in yet.
-        if (object.userData.lodRootBox) {
-            bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
-                .applyMatrix4(object.matrixWorld));
+        let boxes = this._frameableParts(object, true, true);
+        if (!boxes.length) boxes = this._frameableParts(object, true, false);
+        if (!boxes.length) {
+            const bbox = new THREE.Box3().expandByObject(object);
+            // LOD point clouds know their full extent from the hierarchy even
+            // when few (or no) node payloads are streamed in yet.
+            if (object.userData.lodRootBox) {
+                bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
+                    .applyMatrix4(object.matrixWorld));
+            }
+            boxes = [bbox];
         }
-        this._fitCameraToBox(bbox, 1.5);
+        this._camController.fitToBoxes(boxes, fill, animate);
     }
 
     // ========== ViewHelper (corner gizmo) ==========
@@ -19384,6 +21325,7 @@ export class ThreeJSViewer {
         // bubble re-click must snap fresh, not flip). _snapOrthoAxisView
         // re-records the snap right after its setView call.
         this._gizmoAxisView = null;
+        this._frameTween = null;
         if (name === 'home') {
             this._viewTween = null;
             this._controls.cancelInertia();
@@ -19613,8 +21555,51 @@ export class ThreeJSViewer {
      */
     _collectFrameableBounds() {
         const bbox = new THREE.Box3();
+        this._expandFrameableBounds(bbox, this._scene);
+        return bbox;
+    }
+
+    /**
+     * Frameable world boxes under `root`, by the `_expandFrameableBounds`
+     * rules: one per geometry node (`perNode`), or one per child of `root`
+     * (the scene's top-level objects for Home). `pickableOnly` also skips
+     * `userData.pickable === false` subtrees, as clicks and the pivot do.
+     * @param {THREE.Object3D} root @param {boolean} perNode @param {boolean} pickableOnly
+     * @returns {THREE.Box3[]}
+     */
+    _frameableParts(root, perNode, pickableOnly) {
+        /** @type {THREE.Box3[]} */
+        const boxes = [];
+        if (perNode) {
+            this._visitFrameable(root, pickableOnly, (box) => { boxes.push(box); });
+            return boxes;
+        }
+        for (const child of root.children) {
+            const part = new THREE.Box3();
+            this._visitFrameable(child, pickableOnly, (box) => { part.union(box); });
+            if (!part.isEmpty()) boxes.push(part);
+        }
+        return boxes;
+    }
+
+    /**
+     * Union the frameable content of `root`'s subtree into `bbox`: the visit
+     * behind `_collectFrameableBounds` and `frameObject`.
+     * @param {THREE.Box3} bbox @param {THREE.Object3D} root
+     */
+    _expandFrameableBounds(bbox, root) {
+        this._visitFrameable(root, false, (box) => { bbox.union(box); });
+    }
+
+    /**
+     * Walk `root`'s frameable content and hand each node's world box to `emit`.
+     * @param {THREE.Object3D} root @param {boolean} pickableOnly
+     * @param {(box: THREE.Box3) => void} emit
+     */
+    _visitFrameable(root, pickableOnly, emit) {
         const visit = /** @param {any} child */ (child) => {
             if (!child.visible) return;
+            if (pickableOnly && child.userData && child.userData.pickable === false) return;
             // Embedder overlays are excluded from framing unless opted in.
             if (child.userData && child.userData.__overlay &&
                 !child.userData.__overlay.includeInBounds) return;
@@ -19632,21 +21617,21 @@ export class ThreeJSViewer {
                 child.updateWorldMatrix(true, false);
                 // Per node, not recursive: `visit` descends itself and
                 // applies the overlay/grid skips to each child.
-                expandBoxByNode(bbox, child);
+                const box = new THREE.Box3();
+                expandBoxByNode(box, child);
+                if (!box.isEmpty()) emit(box);
             }
             // LOD point clouds: frame the full advertised extent (root
             // octree cube), not just whatever nodes happen to be streamed
             // in right now.
             if (child.userData && child.userData.lodRootBox) {
                 child.updateWorldMatrix(true, false);
-                bbox.union(_lodBoundsBox.copy(child.userData.lodRootBox)
-                    .applyMatrix4(child.matrixWorld));
+                emit(child.userData.lodRootBox.clone().applyMatrix4(child.matrixWorld));
             }
             const kids = child.children;
             for (let i = 0; i < kids.length; i++) visit(kids[i]);
         };
-        visit(this._scene);
-        return bbox;
+        visit(root);
     }
 
     // ----- Picking (client-side API) -----
@@ -19733,26 +21718,55 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Fit the camera to a world-space AABB — `frameObject` for a box (e.g.
-     * auto-focus a just-committed region of interest). Vectors accept
-     * `{x,y,z}` or `[x,y,z]`.
-     * @param {any} min @param {any} max @param {number} [margin] fit margin
-     *   (1 = box exactly fills the view; default 1.5 like frameObject)
+     * Fit the camera to a world-space AABB (`frameObject` for a box, e.g.
+     * auto-focus a just-committed region of interest) by its eight corners,
+     * keeping the view direction. Vectors accept `{x,y,z}` or `[x,y,z]`.
+     * @param {any} min @param {any} max
+     * @param {{fill?: number, animate?: boolean} | number} [opts] options as
+     *   for frameObject; a bare number is the old margin (fill = 1 / margin)
      */
-    frameBox(min, max, margin = 1.5) {
-        const lo = vec3Tuple(min), hi = vec3Tuple(max);
-        if (!lo || !hi) {
-            console.warn('frameBox: min/max must be finite 3-vectors');
-            return;
+    frameBox(min, max, opts) {
+        const box = boxFromMinMax(min, max, 'frameBox');
+        if (!box) return;
+        const { fill, animate } = frameOptions(opts);
+        this._camController.fitToBoxes([box], fill, animate);
+    }
+
+    /**
+     * Fit the camera to several world-space boxes by their eight corners
+     * each, keeping the view direction, so a set of parts along a diagonal is
+     * framed tight instead of by their loose common AABB.
+     * @param {Array<{min: any, max: any}>} boxes
+     * @param {{fill?: number, animate?: boolean}} [opts] as for frameObject
+     */
+    frameBoxes(boxes, opts) {
+        /** @type {THREE.Box3[]} */
+        const out = [];
+        for (const b of boxes || []) {
+            const box = b && boxFromMinMax(b.min, b.max, 'frameBoxes');
+            if (box) out.push(box);
         }
-        const box = new THREE.Box3(
-            new THREE.Vector3(lo[0], lo[1], lo[2]),
-            new THREE.Vector3(hi[0], hi[1], hi[2]));
-        if (box.isEmpty()) {
-            console.warn('frameBox: empty box (min > max on some axis)');
-            return;
+        const { fill, animate } = frameOptions(opts);
+        this._camController.fitToBoxes(out, fill, animate);
+    }
+
+    /**
+     * Fit the camera to world-space points (`{x,y,z}` or `[x,y,z]`), keeping
+     * the view direction; non-finite points are skipped with one warning.
+     * @param {Array<any>} points
+     * @param {{fill?: number, animate?: boolean}} [opts] as for frameObject
+     */
+    framePoints(points, opts) {
+        /** @type {THREE.Vector3[]} */
+        const out = [];
+        let bad = 0;
+        for (const p of points || []) {
+            const t = vec3Tuple(p);
+            if (t) out.push(new THREE.Vector3(t[0], t[1], t[2])); else bad++;
         }
-        this._fitCameraToBox(box, margin);
+        if (bad) console.warn(`framePoints: skipped ${bad} non-finite point(s)`);
+        const { fill, animate } = frameOptions(opts);
+        this._camController.fitToPoints(out, fill, animate);
     }
 
     /**
@@ -19886,6 +21900,22 @@ export class ThreeJSViewer {
         this.el.style.setProperty('--tjsv-background', css);
         this._applyBackground();
         this._dimensions?.relabel();   // label plates wear the background colour
+    }
+
+    /**
+     * Cap the cut of clipped primitives, swept tools and parametric tubes
+     * (issue #259). A per-object `clipCap` boolean on the add message wins
+     * over this switch. Meshes and models always stay open.
+     * @param {boolean} enabled
+     */
+    setClipCaps(enabled) {
+        this._clipCaps.enabled = !!enabled;
+        if (this._clipCapsCheck) this._clipCapsCheck.checked = this._clipCaps.enabled;
+    }
+
+    /** @returns {boolean} whether the global clip-cap switch is on */
+    getClipCaps() {
+        return this._clipCaps.enabled;
     }
 
     /**
@@ -20271,9 +22301,11 @@ export class ThreeJSViewer {
      * the nearest hit to its top-level tracked object. Shared by the dblclick
      * framing handler and the object-click event so both agree on what "the
      * object under the cursor" is. Unlike `pick()` this includes lines and
-     * point clouds. A tracked object under a hidden ancestor (a child of a
-     * group hidden with set_visibility) is skipped: three's raycaster does
-     * not check visibility, and unrendered content must not report a click.
+     * point clouds. A hit is skipped when the hit node or any ancestor is
+     * hidden or sent with `pickable: false` (`isPickTarget`, the click-to-pivot
+     * rule of issue #215): three's raycaster does not check visibility, so a
+     * hidden descendant of a visible group would otherwise resolve to that
+     * group (issue #287).
      * @param {number} clientX @param {number} clientY
      * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
      */
@@ -20284,12 +22316,7 @@ export class ThreeJSViewer {
         /** @type {Map<THREE.Object3D, string>} */
         const ids = new Map();
         for (const [id, obj] of this._objects) {
-            if (!obj) continue;
-            let shown = true;
-            for (let n = obj; n; n = n.parent) {
-                if (n.visible === false) { shown = false; break; }
-            }
-            if (shown) { candidates.push(obj); ids.set(obj, id); }
+            if (obj && obj.visible) { candidates.push(obj); ids.set(obj, id); }
         }
         if (!candidates.length) return null;
         const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
@@ -20297,6 +22324,7 @@ export class ThreeJSViewer {
             // Parented overlays (issue #254) are inside the candidates but
             // belong to the embedder; a hit on one must not report its parent.
             if (isUnderOverlay(hit.object)) continue;
+            if (!isPickTarget(hit.object)) continue;
             // Walk up to the top-level object the user added (a value of _objects).
             let target = hit.object;
             while (target && !ids.has(target)) target = target.parent;
@@ -20659,15 +22687,17 @@ export class ThreeJSViewer {
     /** Direct-call JS equivalent of the `add_axis_control` WS message — same
      * effect, for an embedder holding a live `viewer` reference in the same
      * page (no WS round trip needed). `opts`: `{targetId, axis, kind, value,
-     * min, max, color, hoverColor, radius, bboxSourceId, window}` — see the
-     * WS message for the full shape. `hoverColor` is optional; omitting it
-     * auto-derives a lightened variant of `color`. Values are plain
+     * min, max, color, hoverColor, radius, bboxSourceId, window, pickRadiusPx}`,
+     * see the WS message for the full shape. `hoverColor` is optional; omitting it
+     * auto-derives a lightened variant of `color`. `pickRadiusPx` sets the
+     * handle's hit radius in CSS px (default: half the handle width plus 5 px,
+     * or 14 px for touch). Values are plain
      * THREE.js scene units: metres for linear(_unlimited), radians for
      * rotary(_unlimited) — no CSD-unit conversion happens here.
      * @param {string} id @param {any} opts */
     addAxisControl(id, opts) { this._axisControls.add(id, opts); }
 
-    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
     updateAxisControl(id, opts) { this._axisControls.setValue(id, opts); }
 
     /** @param {string} id */
@@ -20792,6 +22822,37 @@ export class ThreeJSViewer {
 
     /** @param {string} id */
     unbindClip(id) { this._bindClip(id, null); }
+
+    /**
+     * Direct-call JS equivalent of `set_kinematic_chain`: register (or replace)
+     * chain `id`. `description` is a `threejs_viewer.kinematic_chain` version 1
+     * description, `object_ids` (required) maps link names to the tracked
+     * objects they pose and `object_scale` a link name to a uniform scale on its
+     * object. Throws on a bad description or a key that names no link.
+     * @param {string} id
+     * @param {{description: KinematicDescription, object_ids: Record<string, string|null>,
+     *          object_scale?: Record<string, number>}} spec
+     */
+    setKinematicChain(id, spec) { this._kinematics.set(id, spec); }
+
+    /** @param {string} id */
+    removeKinematicChain(id) { this._kinematics.remove(id); }
+
+    /**
+     * Pose chain `id` from axis values (description axes order, degrees rotary,
+     * metres linear) and solved angles (degrees). Returns false for an unknown
+     * chain; throws on a wrong value count or a non-finite value.
+     * @param {string} id @param {ArrayLike<number>} values @param {ArrayLike<number>} [solved]
+     * @returns {boolean}
+     */
+    setJoints(id, values, solved) { return this._kinematics.setJoints(id, values, solved); }
+
+    /**
+     * JS twin of `query_kinematic_chain`: FK world matrices (row-major) at the
+     * given poses, or the current pose and posed objects' world matrices.
+     * @param {string} id @param {number[][]} [values] @param {number[][]} [solved]
+     */
+    queryKinematicChain(id, values, solved) { return this._kinematics.query(id, values, solved); }
 
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with
@@ -20920,7 +22981,7 @@ export class ThreeJSViewer {
             ? new THREE.Vector3()
             : bbox.getCenter(new THREE.Vector3());
         this._controls.target.copy(target);
-        // Pre-orient along the canonical direction so _fitCameraToBox (which
+        // Pre-orient along the canonical direction so fitToBoxes (which
         // preserves whatever direction the camera is already pointing) puts
         // the camera in the right spot after fitting.
         const isoDir = new THREE.Vector3(1, -1, 1).normalize();
@@ -20934,19 +22995,26 @@ export class ThreeJSViewer {
             this._camera.lookAt(target);
             this._controls.update();
         } else {
-            this._fitCameraToBox(bbox, 1.2);
+            this._camController.fitToBoxes(this._homeParts(bbox), FRAME_DEFAULT_FILL);
         }
     }
 
+    /** Frame the visible content from the current view direction (no reorient). */
     frameAll() {
-        this._fitCameraToBox(this._collectFrameableBounds(), 1.2);
+        const bbox = this._collectFrameableBounds();
+        if (!bbox.isEmpty()) this._camController.fitToBoxes(this._homeParts(bbox), FRAME_DEFAULT_FILL);
     }
 
     /**
-     * @param {THREE.Box3} bbox
-     * @param {number} perspMargin
+     * One box per visible, pickable top-level object, so Home fits the
+     * parts rather than their loose common AABB; `whole` (the
+     * `_collectFrameableBounds` box) when no part is pickable.
+     * @param {THREE.Box3} whole @returns {THREE.Box3[]}
      */
-    _fitCameraToBox(bbox, perspMargin) { this._camController.fitToBox(bbox, perspMargin); }
+    _homeParts(whole) {
+        const parts = this._frameableParts(this._scene, false, true);
+        return parts.length ? parts : [whole];
+    }
 
     // ========== Destroy ==========
 
