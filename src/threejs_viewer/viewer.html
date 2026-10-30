@@ -3384,6 +3384,38 @@ function abortable(promise, signal) {
     });
 }
 
+/** @type {Float32Array | null} */
+let SRGB_BYTE_TO_LINEAR = null;
+
+/**
+ * Turn packed uint8 polyline colours into float vertex colours (issue #291).
+ * Plain mode keeps the historical `byte / 255`; `exact` treats the bytes as
+ * sRGB and decodes them to linear working space, so with `toneMapped: false`
+ * the canvas shows the byte values the producer sent.
+ * @param {Uint8Array} bytes
+ * @param {number} count - number of components to convert
+ * @param {boolean} exact
+ * @returns {Float32Array}
+ */
+function polylineColorFloats(bytes, count, exact) {
+    const out = new Float32Array(count);
+    if (exact) {
+        if (!SRGB_BYTE_TO_LINEAR) {
+            // Built from THREE.Color so it follows three's sRGB transfer.
+            SRGB_BYTE_TO_LINEAR = new Float32Array(256);
+            const c = new THREE.Color();
+            for (let i = 0; i < 256; i++) {
+                SRGB_BYTE_TO_LINEAR[i] = c.setRGB(i / 255, 0, 0, THREE.SRGBColorSpace).r;
+            }
+        }
+        const lut = SRGB_BYTE_TO_LINEAR;
+        for (let i = 0; i < count; i++) out[i] = lut[bytes[i]];
+    } else {
+        for (let i = 0; i < count; i++) out[i] = bytes[i] / 255;
+    }
+    return out;
+}
+
 /**
  * Fetch a binary payload with an HTTP status guard (issue #142). Without the
  * guard a 404/500 error body (HTML/text) would be handed straight to a binary
@@ -20677,12 +20709,10 @@ class ThreeJSViewer {
 
                         /** @type {Float32Array | null} */
                         let colorData = null;
+                        const exactColors = data.exactColors === true;
                         if (data.hasVertexColors) {
-                            const colorBytes = rawData.slice(positionBytes);
-                            colorData = new Float32Array(numPoints * 3);
-                            for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                colorData[i] = colorBytes[i] / 255;
-                            }
+                            colorData = polylineColorFloats(
+                                rawData.subarray(positionBytes), numPoints * 3, exactColors);
                         }
 
                         // segments: disjoint edges from consecutive point
@@ -20743,6 +20773,11 @@ class ThreeJSViewer {
                                 : new THREE.Line(geometry, material);
                             line.userData.isNativeLine = true;
                             geometry.setDrawRange(0, numPoints);
+                        }
+                        // Exact colours skip tone mapping, which would shift them again.
+                        if (exactColors) {
+                            line.material.toneMapped = false;
+                            line.userData.exactColors = true;
                         }
                         if (asSegments) line.userData.isLineSegments = true;
                         line.userData.totalPointCount = numPoints;
@@ -21103,9 +21138,15 @@ class ThreeJSViewer {
                                 return;
                             }
                             const bytes = new Uint8Array(buffer, 0, numPoints * 3);
-                            const colorData = new Float32Array(numPoints * 3);
-                            for (let i = 0, n = numPoints * 3; i < n; i++) {
-                                colorData[i] = bytes[i] / 255;
+                            // Omitted exactColors keeps what the line was added with.
+                            const exactColors = typeof data.exactColors === 'boolean'
+                                ? data.exactColors
+                                : obj.userData.exactColors === true;
+                            const colorData = polylineColorFloats(bytes, numPoints * 3, exactColors);
+                            obj.userData.exactColors = exactColors;
+                            if (obj.material.toneMapped === exactColors) {
+                                obj.material.toneMapped = !exactColors;
+                                obj.material.needsUpdate = true;
                             }
                             if (obj.userData.isNativeLine) {
                                 // Native line: plain per-vertex color attribute.
