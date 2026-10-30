@@ -132,6 +132,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {Object<string, string>} [cubemapData]       Map of face name (px/nx/py/ny/pz/nz) -> gzip+base64 Radiance HDR (omit to load static/cubemaps/paul-lobe-haus/*.hdr next to the module)
  * @property {Object<string, {format: string, faces: Object<string, string>}>} [cubemaps]  Named cubemap sets (format hdr/png/jpg, faces gzip+base64) offered in the Lighting panel's picker; URL `cubemap` / localStorage pick one
  * @property {boolean} [environmentBackground]           Show the environment cubemap as the scene background (default false; URL `env_background` wins)
+ * @property {boolean} [clipCaps]                      Cap the cut of clipped primitives, swept tools and tubes (default false; URL `clip_caps` wins)
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
@@ -1726,6 +1727,8 @@ function applyOpacity(obj, opacity) {
         // Same for a primitive's `outline`: an accent that follows the fill's
         // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
+        // A clip cap follows its owner's colour and hides while it is translucent.
+        if (child.userData.__clipCap) return;
         // Embedder overlays mounted under this object keep their own look.
         if (isUnderOverlay(child)) return;
         for (const mat of ownMaterials(child)) {
@@ -1969,7 +1972,7 @@ function applyHighlight(obj, enabled, opts = {}) {
         // overlays (share the parent's geometry — a duplicate outline), and
         // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
-            || child.userData.__highlightOutline) return;
+            || child.userData.__highlightOutline || child.userData.__clipCap) return;
         // An embedder overlay riding the object is not part of the selection.
         if (isUnderOverlay(child)) return;
         const style = resolveHighlightStyle(child, wantStyle);
@@ -4482,6 +4485,13 @@ ${tubeUVPeriod.toString()}
 
 ${writeTubeUVs.toString()}
 
+// Clip cap slicer for tubes (issue #259), shared with the main thread.
+${clipCapBasis.toString()}
+
+${convexHull2D.toString()}
+
+${sliceTubeClipCap.toString()}
+
 
 // ---- Geometry build (plain math, no Three.js) ----
 
@@ -4494,9 +4504,35 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMa
 // ---- Per-tube state cache ----
 const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints, epsilonDivisor }
 const _rdpCache = new Map(); // tubeId -> { chunkDists, chunkIndices }
+const _clipCapGeoms = new Map(); // cap id -> { key, pos, col, idx }
 
 self.onmessage = function(e) {
     const msg = e.data;
+
+    // 'clipCap': slice a tube's drawn bands by the clip planes. The geometry
+    // copy is cached per cap id and only resent when it changed.
+    if (msg.type === 'clipCap') {
+        if (msg.positions) {
+            _clipCapGeoms.set(msg.capId, { key: msg.geomKey, pos: msg.positions, col: msg.colors, idx: msg.indices });
+        }
+        const g = _clipCapGeoms.get(msg.capId);
+        if (!g || g.key !== msg.geomKey) {
+            self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, missing: true });
+            return;
+        }
+        const caps = sliceTubeClipCap(g.pos, g.col, g.idx, Math.min(msg.end, g.idx.length), msg.planes, msg.block);
+        const transfer = [];
+        for (const c of caps) {
+            transfer.push(c.pos.buffer);
+            if (c.col) transfer.push(c.col.buffer);
+        }
+        self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, caps }, transfer);
+        return;
+    }
+    if (msg.type === 'clipCapDispose') {
+        _clipCapGeoms.delete(msg.capId);
+        return;
+    }
 
     // 'init': register original arrays for a tube
     if (msg.type === 'init') {
@@ -7435,6 +7471,8 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165) — wireframing
         // one would draw the whole extruded shell as a wire cage.
         if (obj.userData.__highlightOutline) return;
+        // Clip caps follow the wire-only mode from ClipCapController.
+        if (obj.userData.__clipCap) return;
         if (!obj.material) return;
         for (const m of wornAndOwnMaterials(obj)) this._applyWireframeToMaterial(m);
         let overlay = obj.userData.wireframeOverlay;
@@ -7652,7 +7690,7 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165): a material swap
         // would turn the outline into a solid shell. Same for primitive outlines.
         return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
-            || ud.__highlightOutline || ud.__primitiveOutline)
+            || ud.__highlightOutline || ud.__primitiveOutline || ud.__clipCap)
             && !isUnderOverlay(obj);
     }
 
@@ -8322,7 +8360,7 @@ class ModelCache {
 // @param {Float32Array} profileArr  (M*2) (height_along_axis, radius) rows
 // @param {number} sections          cross-section facets per ring (>= 3)
 // @param {Float32Array|null} ringColors  (N*3) per-station RGB in 0..1, or null
-// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number}}
+// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number, levels: number, sections: number, startCapIndexCount: number}}
 function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringColors) {
     const N = stationPos.length / 3;
     const M = profileArr.length / 2;
@@ -8481,7 +8519,969 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeVertexNormals();
     geometry.setDrawRange(0, indices.length);
-    return { geometry, ringPairCount, indicesPerRingPair, capIndexCount };
+    return {
+        geometry, ringPairCount, indicesPerRingPair, capIndexCount,
+        levels: L, sections, startCapIndexCount: capBandsPerEnd + cap0Fan,
+    };
+}
+
+// ========== Clip caps (issue #259) ==========
+//
+// Analytic section caps for solids the viewer builds itself: primitives (the
+// convex hull of the triangle-edge crossings), swept tool bodies (a union of
+// convex station-pair cells), parametric tubes (a union of convex hulls, one
+// per drawn ring band, sliced on the LOD worker when large) and the torus (the
+// drawn triangles sliced and chained into loops). Each cap is a child mesh of its owner, built in the
+// owner's local frame and clipped only by the other slab plane. Opt-in:
+// `clipCaps` option / `clip_caps` URL param / `set_clipping_caps`, or a
+// per-object `clipCap` override. Meshes and models stay open.
+
+// On the main thread, above this many drawn triangles or once a rebuild took
+// longer than CLIP_CAP_SYNC_MS, a cap rebuild runs at most every
+// CLIP_CAP_THROTTLE_MS (the tube LOD cadence) so a drag stays usable.
+const CLIP_CAP_SYNC_TRIANGLES = 200000;
+const CLIP_CAP_SYNC_MS = 8;
+const CLIP_CAP_THROTTLE_MS = 500;
+// Tubes drawing more triangles than this are sliced on the LOD worker.
+const CLIP_CAP_WORKER_TRIANGLES = 20000;
+// Closed convex primitives; a plane is a sheet and gets no cap. The torus is
+// closed but not convex, so it goes through the triangle slicer.
+const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
+
+/**
+ * Unit basis (u, v) of a plane with unit normal n, u × v = n.
+ * @param {number} nx @param {number} ny @param {number} nz
+ * @returns {number[]} [ux, uy, uz, vx, vy, vz]
+ */
+function clipCapBasis(nx, ny, nz) {
+    // a × n with a the axis least aligned with n.
+    let ux, uy, uz;
+    if (Math.abs(nx) < 0.9) { ux = 0; uy = nz; uz = -ny; } else { ux = -nz; uy = 0; uz = nx; }
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    return [ux, uy, uz, ny * uz - nz * uy, nz * ux - nx * uz, nx * uy - ny * ux];
+}
+
+/**
+ * Indices of the 2D convex hull of the points, counter-clockwise
+ * (Andrew's monotone chain; duplicates and collinear points dropped).
+ * @param {ArrayLike<number>} xs @param {ArrayLike<number>} ys @param {number} n
+ * @returns {number[]}
+ */
+function convexHull2D(xs, ys, n) {
+    /** @type {number[]} */ const order = [];
+    for (let i = 0; i < n; i++) order.push(i);
+    order.sort((a, b) => (xs[a] - xs[b]) || (ys[a] - ys[b]));
+    /** @param {number} o @param {number} a @param {number} b */
+    const cross = (o, a, b) => (xs[a] - xs[o]) * (ys[b] - ys[o]) - (ys[a] - ys[o]) * (xs[b] - xs[o]);
+    /** @type {number[]} */ const lower = [];
+    for (const i of order) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], i) <= 0) lower.pop();
+        lower.push(i);
+    }
+    /** @type {number[]} */ const upper = [];
+    for (let k = order.length - 1; k >= 0; k--) {
+        const i = order[k];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], i) <= 0) upper.pop();
+        upper.push(i);
+    }
+    lower.pop(); upper.pop();
+    return lower.concat(upper);
+}
+
+/**
+ * Even-odd point-in-polygon test in 2D.
+ * @param {THREE.Vector2} q @param {THREE.Vector2[]} poly
+ */
+function pointInPolygon2D(q, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i], b = poly[j];
+        if ((a.y > q.y) !== (b.y > q.y)
+            && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+}
+
+/**
+ * Accumulates cap triangles (local positions, optional colours) for one
+ * plane. Every triangle is wound so its face normal is -n: the cut face as
+ * seen from the removed side.
+ */
+class ClipCapBuilder {
+    /**
+     * @param {number} nx @param {number} ny @param {number} nz @param {number} c
+     *   the plane in the owner's local frame (kept side n·x + c >= 0)
+     * @param {boolean} withColor
+     */
+    constructor(nx, ny, nz, c, withColor) {
+        this.nx = nx; this.ny = ny; this.nz = nz; this.c = c;
+        this.basis = clipCapBasis(nx, ny, nz);
+        /** @type {number[]} */ this.pos = [];
+        /** @type {number[] | null} */ this.col = withColor ? [] : null;
+        /** @type {number[]} scratch crossing points of one convex cell */
+        this._p = [];
+        /** @type {number[]} */ this._c = [];
+    }
+
+    /** @param {number} x @param {number} y @param {number} z */
+    dist(x, y, z) { return this.nx * x + this.ny * y + this.nz * z + this.c; }
+
+    resetPoints() { this._p.length = 0; this._c.length = 0; }
+
+    /**
+     * Add the crossing of edge a→b (signed distances on opposite sides).
+     * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} col
+     * @param {number} a @param {number} b @param {number} sa @param {number} sb
+     */
+    addCrossing(pos, col, a, b, sa, sb) {
+        const t = sa / (sa - sb);
+        const a3 = a * 3, b3 = b * 3;
+        this._p.push(pos[a3] + t * (pos[b3] - pos[a3]),
+                     pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]),
+                     pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]));
+        if (!this.col) return;
+        if (col) {
+            this._c.push(col[a3] + t * (col[b3] - col[a3]),
+                         col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]),
+                         col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]));
+        } else {
+            this._c.push(1, 1, 1);
+        }
+    }
+
+    /** Fan the convex hull of the scratch points; returns the triangle count. */
+    emitConvex() {
+        const p = this._p, n = p.length / 3;
+        if (n < 3) return 0;
+        const [ux, uy, uz, vx, vy, vz] = this.basis;
+        const xs = new Float64Array(n), ys = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
+            xs[i] = x * ux + y * uy + z * uz;
+            ys[i] = x * vx + y * vy + z * vz;
+        }
+        const hull = convexHull2D(xs, ys, n);
+        if (hull.length < 3) return 0;
+        // The hull runs counter-clockwise about +n; reversed it faces -n.
+        for (let k = 1; k < hull.length - 1; k++) {
+            this._vertex(hull[0]);
+            this._vertex(hull[k + 1]);
+            this._vertex(hull[k]);
+        }
+        return hull.length - 2;
+    }
+
+    /** @param {number} i */
+    _vertex(i) {
+        this.pos.push(this._p[i * 3], this._p[i * 3 + 1], this._p[i * 3 + 2]);
+        if (this.col) this.col.push(this._c[i * 3], this._c[i * 3 + 1], this._c[i * 3 + 2]);
+    }
+
+    /**
+     * Triangulate closed loops of points on the plane. Loops running
+     * counter-clockwise about +n are filled; clockwise ones are holes in the
+     * smallest filled loop containing them. Overlapping filled loops (a round
+     * join body inside its bead) each get their own coplanar fan.
+     * @param {{pts: number[], cols: number[] | null}[]} loops
+     */
+    emitLoops(loops) {
+        const [ux, uy, uz, vx, vy, vz] = this.basis;
+        /** @type {{v: THREE.Vector2[], area: number, loop: any, holes: any[], box: number[]}[]} */
+        const outer = [];
+        /** @type {{v: THREE.Vector2[], area: number, loop: any}[]} */
+        const holes = [];
+        for (const loop of loops) {
+            const n = loop.pts.length / 3;
+            if (n < 3) continue;
+            /** @type {THREE.Vector2[]} */ const v = [];
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (let i = 0; i < n; i++) {
+                const x = loop.pts[i * 3], y = loop.pts[i * 3 + 1], z = loop.pts[i * 3 + 2];
+                const px = x * ux + y * uy + z * uz, py = x * vx + y * vy + z * vz;
+                v.push(new THREE.Vector2(px, py));
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
+            }
+            const area = THREE.ShapeUtils.area(v);
+            if (!(Math.abs(area) > 0)) continue;
+            if (area > 0) outer.push({ v, area, loop, holes: [], box: [minX, minY, maxX, maxY] });
+            else holes.push({ v, area, loop });
+        }
+        for (const h of holes) {
+            const q = h.v[0];
+            /** @type {any} */ let best = null;
+            for (const o of outer) {
+                const b = o.box;
+                if (q.x < b[0] || q.x > b[2] || q.y < b[1] || q.y > b[3]) continue;
+                if (!pointInPolygon2D(q, o.v)) continue;
+                if (!best || o.area < best.area) best = o;
+            }
+            if (best) best.holes.push(h);
+        }
+        for (const o of outer) {
+            const parts = [o, ...o.holes];
+            /** @type {THREE.Vector2[]} */ const V = [];
+            /** @type {number[]} */ const P = [];
+            /** @type {number[]} */ const C = [];
+            for (const part of parts) {
+                for (let i = 0; i < part.v.length; i++) {
+                    V.push(part.v[i]);
+                    P.push(part.loop.pts[i * 3], part.loop.pts[i * 3 + 1], part.loop.pts[i * 3 + 2]);
+                    if (this.col) {
+                        const cs = part.loop.cols;
+                        if (cs) C.push(cs[i * 3], cs[i * 3 + 1], cs[i * 3 + 2]); else C.push(1, 1, 1);
+                    }
+                }
+            }
+            // Copies: triangulateShape drops a closing duplicate in place,
+            // which would shift the index mapping built above.
+            const faces = THREE.ShapeUtils.triangulateShape(o.v.slice(), o.holes.map((h) => h.v.slice()));
+            for (const f of faces) {
+                let a = f[0], b = f[1], c = f[2];
+                const ccw = (V[b].x - V[a].x) * (V[c].y - V[a].y) - (V[b].y - V[a].y) * (V[c].x - V[a].x);
+                if (ccw > 0) { const t = b; b = c; c = t; }
+                for (const i of [a, b, c]) {
+                    this.pos.push(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
+                    if (this.col) this.col.push(C[i * 3], C[i * 3 + 1], C[i * 3 + 2]);
+                }
+            }
+        }
+    }
+
+    /** @returns {THREE.BufferGeometry | null} */
+    toGeometry() {
+        if (!this.pos.length) return null;
+        const g = new THREE.BufferGeometry();
+        const n = this.pos.length / 3;
+        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.pos), 3));
+        const normals = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+            normals[i * 3] = -this.nx; normals[i * 3 + 1] = -this.ny; normals[i * 3 + 2] = -this.nz;
+        }
+        g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        if (this.col) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.col), 3));
+        g.computeBoundingSphere();
+        return g;
+    }
+}
+
+/**
+ * Cap of a convex solid (primitives): the hull of every triangle edge
+ * crossing the plane, exact for a convex polyhedron.
+ * @param {THREE.BufferGeometry} geometry @param {ClipCapBuilder} out
+ */
+function buildConvexClipCap(geometry, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const index = geometry.getIndex();
+    const idx = index ? index.array : null;
+    const nTri = (idx ? idx.length : pos.length / 3) / 3;
+    out.resetPoints();
+    // Vertices on the plane are section points too: a seam vertex at -1e-17
+    // has no edge to its twin at 0, so no crossing would ever reach it.
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const eps = 1e-7 * (geometry.boundingSphere ? geometry.boundingSphere.radius : 1);
+    for (let v = 0; v < pos.length / 3; v++) {
+        if (Math.abs(out.dist(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2])) <= eps) out.addCrossing(pos, null, v, v, 0, -1);
+    }
+    for (let t = 0; t < nTri; t++) {
+        const a = idx ? idx[t * 3] : t * 3;
+        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
+        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
+        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
+        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+        if ((sa >= 0) !== (sb >= 0)) out.addCrossing(pos, null, a, b, sa, sb);
+        if ((sb >= 0) !== (sc >= 0)) out.addCrossing(pos, null, b, c, sb, sc);
+        if ((sc >= 0) !== (sa >= 0)) out.addCrossing(pos, null, c, a, sc, sa);
+    }
+    out.emitConvex();
+}
+
+/**
+ * Swept tool cap. The body between two stations and two profile levels is
+ * close to the convex hull of its four rings, so the section is the union of
+ * those cells' convex sections (coplanar overlaps are harmless on an opaque
+ * body). Only station pairs under the draw range contribute.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {{stations: number, levels: number, sections: number, startCapIndexCount: number, indicesPerRingPair: number}} layout
+ * @param {ClipCapBuilder} out
+ */
+function buildSweptClipCap(geometry, layout, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const colAttr = geometry.getAttribute('color');
+    const col = colAttr ? /** @type {ArrayLike<number>} */ (colAttr.array) : null;
+    const N = layout.stations, L = layout.levels, S = layout.sections;
+    const total = geometry.getIndex().count;
+    const count = Math.min(total, geometry.drawRange.count);
+    if (count <= 0 || N < 1 || L < 2) return;
+    const pairs = Math.max(0, Math.min(N - 1,
+        Math.floor((count - layout.startCapIndexCount) / layout.indicesPerRingPair)));
+    const nRings = (pairs > 0 ? pairs + 1 : 1) * L;
+    // Signed distance per vertex and its range per ring, for the stations in play.
+    const sd = new Float64Array(nRings * S);
+    const rMin = new Float64Array(nRings), rMax = new Float64Array(nRings);
+    for (let r = 0; r < nRings; r++) {
+        let lo = Infinity, hi = -Infinity;
+        for (let s = 0; s < S; s++) {
+            const v = r * S + s;
+            const d = out.dist(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
+            sd[v] = d;
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+        }
+        rMin[r] = lo; rMax[r] = hi;
+    }
+    /** @param {number} a @param {number} b */
+    const edge = (a, b) => {
+        if ((sd[a] >= 0) !== (sd[b] >= 0)) out.addCrossing(pos, col, a, b, sd[a], sd[b]);
+    };
+    /** @param {number[]} rings */
+    const cell = (rings) => {
+        let lo = Infinity, hi = -Infinity;
+        for (const r of rings) {
+            if (rMin[r] < lo) lo = rMin[r];
+            if (rMax[r] > hi) hi = rMax[r];
+        }
+        if (lo >= 0 || hi < 0) return;
+        out.resetPoints();
+        const base = rings.map((r) => r * S);
+        // Ring edges plus same-facet connectors between every ring pair:
+        // the edges of the cell's hull for near-parallel rings.
+        for (let s = 0; s < S; s++) {
+            const s1 = (s + 1) % S;
+            for (const b of base) edge(b + s, b + s1);
+            for (let i = 0; i < base.length; i++) {
+                for (let j = i + 1; j < base.length; j++) edge(base[i] + s, base[j] + s);
+            }
+        }
+        out.emitConvex();
+    };
+    if (pairs === 0) {
+        for (let l = 0; l < L - 1; l++) cell([l, l + 1]);
+        return;
+    }
+    for (let k = 0; k < pairs; k++) {
+        for (let l = 0; l < L - 1; l++) {
+            cell([k * L + l, k * L + l + 1, (k + 1) * L + l, (k + 1) * L + l + 1]);
+        }
+    }
+}
+
+/**
+ * Slice the drawn triangles of a surface made of closed pieces and chain the
+ * crossings into loops. A segment runs along n × N with N the outward vertex
+ * normal, so an outer boundary turns counter-clockwise about +n and a hole
+ * clockwise. Used for the torus primitive.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {ClipCapBuilder} out
+ */
+function buildSlicedClipCap(geometry, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const nAttr = geometry.getAttribute('normal');
+    const nrm = nAttr ? /** @type {ArrayLike<number>} */ (nAttr.array) : null;
+    const cAttr = geometry.getAttribute('color');
+    const col = out.col && cAttr && cAttr.itemSize === 3 ? /** @type {ArrayLike<number>} */ (cAttr.array) : null;
+    const index = geometry.getIndex();
+    const idx = index ? index.array : null;
+    const total = idx ? idx.length : pos.length / 3;
+    const start = Math.max(0, geometry.drawRange.start);
+    const end = Math.min(total, start + geometry.drawRange.count);
+    const t0 = Math.ceil(start / 3), t1 = Math.floor(end / 3);
+    if (t1 <= t0) return;
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const radius = Math.max(geometry.boundingSphere ? geometry.boundingSphere.radius : 1, 1e-9);
+    const quant = radius * 1e-7;
+    const nx = out.nx, ny = out.ny, nz = out.nz;
+
+    // Welded crossing points and directed segments between them.
+    /** @type {Map<string, number>} */ const keyOf = new Map();
+    /** @type {number[]} */ const PX = [];
+    /** @type {number[]} */ const PC = [];
+    /** @type {number[]} */ const segFrom = [];
+    /** @type {number[]} */ const segTo = [];
+    /** @param {number} o */
+    const weld = (o) => {
+        const x = cross[o], y = cross[o + 1], z = cross[o + 2];
+        const key = `${Math.round(x / quant)},${Math.round(y / quant)},${Math.round(z / quant)}`;
+        let id = keyOf.get(key);
+        if (id === undefined) {
+            id = PX.length / 3;
+            keyOf.set(key, id);
+            PX.push(x, y, z);
+            PC.push(cross[o + 3], cross[o + 4], cross[o + 5]);
+        }
+        return id;
+    };
+    const cross = new Float64Array(18);
+    let nc = 0;
+    /** @param {number} a @param {number} b @param {number} sa @param {number} sb */
+    const crossing = (a, b, sa, sb) => {
+        // Canonical endpoint order, so a shared edge (or a duplicated rim
+        // vertex) gives the same bits from both of its triangles.
+        let a3 = a * 3, b3 = b * 3;
+        if (pos[a3] > pos[b3] || (pos[a3] === pos[b3] && (pos[a3 + 1] > pos[b3 + 1]
+            || (pos[a3 + 1] === pos[b3 + 1] && pos[a3 + 2] > pos[b3 + 2])))) {
+            const ti = a3; a3 = b3; b3 = ti;
+            const ts = sa; sa = sb; sb = ts;
+        }
+        const t = sa / (sa - sb);
+        const o = nc * 6;
+        cross[o] = pos[a3] + t * (pos[b3] - pos[a3]);
+        cross[o + 1] = pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]);
+        cross[o + 2] = pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]);
+        if (col) {
+            cross[o + 3] = col[a3] + t * (col[b3] - col[a3]);
+            cross[o + 4] = col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]);
+            cross[o + 5] = col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]);
+        } else {
+            cross[o + 3] = 1; cross[o + 4] = 1; cross[o + 5] = 1;
+        }
+        nc++;
+    };
+    for (let t = t0; t < t1; t++) {
+        const a = idx ? idx[t * 3] : t * 3;
+        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
+        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
+        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
+        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+        const pa = sa >= 0, pb = sb >= 0, pc = sc >= 0;
+        if (pa === pb && pb === pc) continue;
+        nc = 0;
+        if (pa !== pb) crossing(a, b, sa, sb);
+        if (pb !== pc) crossing(b, c, sb, sc);
+        if (pc !== pa) crossing(c, a, sc, sa);
+        if (nc !== 2) continue;
+        const i0 = weld(0), i1 = weld(6);
+        if (i0 === i1) continue;
+        // Outward normal: the vertex normals when present, else the winding.
+        let Nx, Ny, Nz;
+        if (nrm) {
+            Nx = nrm[a * 3] + nrm[b * 3] + nrm[c * 3];
+            Ny = nrm[a * 3 + 1] + nrm[b * 3 + 1] + nrm[c * 3 + 1];
+            Nz = nrm[a * 3 + 2] + nrm[b * 3 + 2] + nrm[c * 3 + 2];
+        } else {
+            const e1x = pos[b * 3] - pos[a * 3], e1y = pos[b * 3 + 1] - pos[a * 3 + 1], e1z = pos[b * 3 + 2] - pos[a * 3 + 2];
+            const e2x = pos[c * 3] - pos[a * 3], e2y = pos[c * 3 + 1] - pos[a * 3 + 1], e2z = pos[c * 3 + 2] - pos[a * 3 + 2];
+            Nx = e1y * e2z - e1z * e2y; Ny = e1z * e2x - e1x * e2z; Nz = e1x * e2y - e1y * e2x;
+        }
+        const mx = ny * Nz - nz * Ny, my = nz * Nx - nx * Nz, mz = nx * Ny - ny * Nx;
+        const dx = cross[6] - cross[0], dy = cross[7] - cross[1], dz = cross[8] - cross[2];
+        if (dx * mx + dy * my + dz * mz >= 0) { segFrom.push(i0); segTo.push(i1); }
+        else { segFrom.push(i1); segTo.push(i0); }
+    }
+    const nSeg = segFrom.length;
+    if (!nSeg) return;
+
+    // Chain: outgoing segment lists per point, walked until the loop closes.
+    const nPts = PX.length / 3;
+    const head = new Int32Array(nPts).fill(-1);
+    const next = new Int32Array(nSeg);
+    for (let s = nSeg - 1; s >= 0; s--) { next[s] = head[segFrom[s]]; head[segFrom[s]] = s; }
+    const used = new Uint8Array(nSeg);
+    /** @type {number[][]} */ const closed = [];
+    /** @type {number[][]} */ const open = [];
+    for (let s0 = 0; s0 < nSeg; s0++) {
+        if (used[s0]) continue;
+        const chain = [segFrom[s0]];
+        let s = s0;
+        let isClosed = false;
+        for (;;) {
+            used[s] = 1;
+            const to = segTo[s];
+            if (to === segFrom[s0]) { isClosed = true; break; }
+            chain.push(to);
+            let n2 = -1;
+            for (let q = head[to]; q >= 0; q = next[q]) if (!used[q]) { n2 = q; break; }
+            if (n2 < 0) break;
+            s = n2;
+        }
+        (isClosed ? closed : open).push(chain);
+    }
+    // A chain broken at a near-coincident point the weld missed: join its end
+    // to the closest chain start within tolerance, then close what is left.
+    const tol2 = (radius * 1e-4) ** 2;
+    /** @param {number} p @param {number} q */
+    const d2 = (p, q) => (PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
+        + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2;
+    let merged = true;
+    while (merged && open.length) {
+        merged = false;
+        for (let i = 0; i < open.length && !merged; i++) {
+            const tail = open[i][open[i].length - 1];
+            let best = -1, bestD = tol2;
+            for (let j = 0; j < open.length; j++) {
+                const d = d2(tail, open[j][0]);
+                if (d <= bestD) { bestD = d; best = j; }
+            }
+            if (best === i) { closed.push(open[i]); open.splice(i, 1); merged = true; }
+            else if (best >= 0) {
+                open[i] = open[i].concat(open[best]);
+                open.splice(best, 1);
+                merged = true;
+            }
+        }
+    }
+    for (const ch of open) closed.push(ch);
+    out.emitLoops(closed.map((ch) => {
+        /** @type {number[]} */ const pts = [];
+        /** @type {number[]} */ const cols = [];
+        for (const p of ch) {
+            pts.push(PX[p * 3], PX[p * 3 + 1], PX[p * 3 + 2]);
+            cols.push(PC[p * 3], PC[p * 3 + 1], PC[p * 3 + 2]);
+        }
+        return { pts, cols: col ? cols : null };
+    }));
+}
+
+/**
+ * Tube clip cap, free of Three.js so the LOD worker runs the same code. A
+ * tube's index buffer is a run of `block`-index bands (nCs * 6), each joining
+ * two rings: ring pairs, revolution cap bands, joint bands and the relocated
+ * end cap alike. A band is close to the convex hull of its two rings, so its
+ * section is the hull of its edge crossings, and the cap is the union of
+ * those fans. A break slot (flat end fans padded with (a, a, a) triangles)
+ * has no volume and is skipped. Every fan faces -n.
+ * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} col
+ * @param {ArrayLike<number>} idx @param {number} end  drawn index count
+ * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
+ * @param {number} block
+ * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+ */
+function sliceTubeClipCap(pos, col, idx, end, planes, block) {
+    const nBlocks = Math.floor(end / block);
+    const sd = new Float64Array(block);
+    /** @type {number[]} */ const P = [];
+    /** @type {number[]} */ const C = [];
+    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    for (const plane of planes) {
+        const nx = plane[0], ny = plane[1], nz = plane[2], c = plane[3];
+        const basis = clipCapBasis(nx, ny, nz);
+        /** @type {number[]} */ const tp = [];
+        /** @type {number[]} */ const tc = [];
+        for (let k = 0; k < nBlocks; k++) {
+            const o = k * block;
+            let lo = Infinity, hi = -Infinity;
+            for (let i = 0; i < block; i++) {
+                const v = idx[o + i] * 3;
+                const d = nx * pos[v] + ny * pos[v + 1] + nz * pos[v + 2] + c;
+                sd[i] = d;
+                if (d < lo) lo = d;
+                if (d > hi) hi = d;
+            }
+            if (lo >= 0 || hi < 0) continue;
+            let breakSlot = false;
+            for (let i = 0; i < block; i += 3) {
+                if (idx[o + i] === idx[o + i + 1] && idx[o + i] === idx[o + i + 2]) { breakSlot = true; break; }
+            }
+            if (breakSlot) continue;
+            P.length = 0; C.length = 0;
+            for (let i = 0; i < block; i += 3) {
+                for (let e = 0; e < 3; e++) {
+                    const ia = i + e, ib = i + (e + 1) % 3;
+                    const sa = sd[ia], sb = sd[ib];
+                    if ((sa >= 0) === (sb >= 0)) continue;
+                    const a = idx[o + ia] * 3, b = idx[o + ib] * 3;
+                    const t = sa / (sa - sb);
+                    P.push(pos[a] + t * (pos[b] - pos[a]), pos[a + 1] + t * (pos[b + 1] - pos[a + 1]),
+                           pos[a + 2] + t * (pos[b + 2] - pos[a + 2]));
+                    if (col) {
+                        C.push(col[a] + t * (col[b] - col[a]), col[a + 1] + t * (col[b + 1] - col[a + 1]),
+                               col[a + 2] + t * (col[b + 2] - col[a + 2]));
+                    }
+                }
+            }
+            const n = P.length / 3;
+            const xs = new Float64Array(n), ys = new Float64Array(n);
+            for (let i = 0; i < n; i++) {
+                const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+                xs[i] = x * basis[0] + y * basis[1] + z * basis[2];
+                ys[i] = x * basis[3] + y * basis[4] + z * basis[5];
+            }
+            const hull = convexHull2D(xs, ys, n);
+            // The hull runs counter-clockwise about +n; reversed it faces -n.
+            for (let h = 1; h < hull.length - 1; h++) {
+                for (let e = 0; e < 3; e++) {
+                    const q = (e === 0 ? hull[0] : e === 1 ? hull[h + 1] : hull[h]) * 3;
+                    tp.push(P[q], P[q + 1], P[q + 2]);
+                    if (col) tc.push(C[q], C[q + 1], C[q + 2]);
+                }
+            }
+        }
+        out.push({ pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
+    }
+    return out;
+}
+
+/**
+ * Cap geometry from flat triangle arrays; null when there is nothing to draw.
+ * @param {Float32Array} pos @param {Float32Array | null} col
+ * @param {number} nx @param {number} ny @param {number} nz
+ * @returns {THREE.BufferGeometry | null}
+ */
+function clipCapGeometry(pos, col, nx, ny, nz) {
+    if (!pos.length) return null;
+    const g = new THREE.BufferGeometry();
+    const n = pos.length / 3;
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const normals = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+        normals[i * 3] = -nx; normals[i * 3 + 1] = -ny; normals[i * 3 + 2] = -nz;
+    }
+    g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    if (col) g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.computeBoundingSphere();
+    return g;
+}
+
+/**
+ * Owns every clip cap: decides per frame which capped solids need a rebuild
+ * (plane, transform, geometry, draw range or colour layout changed), keeps
+ * each cap's material in step with its owner, and removes caps when clipping
+ * or the cap switch goes off. Caps are children of their owner mesh marked
+ * `userData.__clipCap`, never in `_objects`. Tubes over
+ * CLIP_CAP_WORKER_TRIANGLES drawn triangles are sliced on the LOD worker.
+ */
+class ClipCapController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** Global switch; a per-object `userData.clipCap` boolean overrides it. */
+        this.enabled = false;
+        /** @type {any[]} */ this._targets = [];
+        this._targetsGen = -1;
+        this._hasCaps = false;
+        this._inv = new THREE.Matrix4();
+        this._plane = new THREE.Plane();
+        /** Worker requests in flight. */
+        this.pending = 0;
+        /** Worker requests posted so far (test seam). */
+        this.requests = 0;
+        this._reqId = 0;
+        /** Main-thread ms spent on the last worker request and install (bench seam). */
+        this.lastRequestMs = 0;
+        this.lastInstallMs = 0;
+    }
+
+    /** @param {any} mesh */
+    _wants(mesh) {
+        const o = mesh.userData.clipCap;
+        return typeof o === 'boolean' ? o : this.enabled;
+    }
+
+    _collectTargets() {
+        /** @type {any[]} */ const out = [];
+        for (const obj of this.v._objects.values()) {
+            obj.traverse((/** @type {any} */ node) => {
+                if (node.isMesh && node.userData.clipCapKind) out.push(node);
+            });
+        }
+        // A target that left the scene drops its geometry copy on the worker.
+        const kept = new Set(out);
+        for (const mesh of this._targets) {
+            if (kept.has(mesh)) continue;
+            const st = mesh.userData.__clipCapState;
+            if (st && st.inflight) { st.inflight = 0; this.pending--; }
+            this._forgetWorkerCopy(mesh);
+        }
+        this._targets = out;
+        this._targetsGen = this.v._objGeneration;
+    }
+
+    /** Per frame, from _animate. Free while clipping is off and no cap exists. */
+    update() {
+        const v = this.v;
+        const active = v._clipEnabled;
+        if (!active && !this._hasCaps) return;
+        if (this._targetsGen !== v._objGeneration) this._collectTargets();
+        let any = false;
+        const now = performance.now();
+        for (const mesh of this._targets) {
+            if (!active || !mesh.parent || !this._wants(mesh)) { this._remove(mesh); continue; }
+            if (this._updateTarget(mesh, now)) any = true;
+        }
+        this._hasCaps = any || this.pending > 0;
+    }
+
+    /**
+     * True when no worker request is in flight and every capped target's
+     * caps match its current plane, transform and geometry (test seam).
+     */
+    settled() {
+        if (this.pending > 0) return false;
+        if (!this.v._clipEnabled) return true;
+        if (this._targetsGen !== this.v._objGeneration) return false;
+        for (const mesh of this._targets) {
+            if (!mesh.parent || !this._wants(mesh)) continue;
+            const s = this._signature(mesh);
+            if (!s) continue;
+            const st = mesh.userData.__clipCapState;
+            if (!st || !sameSignature(st.sig, s.sig)) return false;
+        }
+        return true;
+    }
+
+    /** @param {any} mesh */
+    _remove(mesh) {
+        const st = mesh.userData.__clipCapState;
+        if (!st) return;
+        for (const cap of st.caps) {
+            if (!cap) continue;
+            mesh.remove(cap);
+            cap.geometry.dispose();
+            cap.material.dispose();
+        }
+        if (st.inflight) { st.inflight = 0; this.pending--; }
+        this._forgetWorkerCopy(mesh);
+        delete mesh.userData.__clipCapState;
+        this.v._shadowDirty = true;
+    }
+
+    /** @param {any} mesh */
+    _forgetWorkerCopy(mesh) {
+        const st = mesh.userData.__clipCapState;
+        if (!st || !st.workerGeomKey) return;
+        st.workerGeomKey = '';
+        if (this.v._lodWorker) this.v._lodWorker.postMessage({ type: 'clipCapDispose', capId: mesh.uuid });
+    }
+
+    /**
+     * Owner material plus the rebuild signature: geometry id and versions,
+     * draw range, colour mode and each plane in the owner's local frame.
+     * Null when the owner must stay open (translucent, wire cage, no positions).
+     * @param {any} mesh
+     */
+    _signature(mesh) {
+        const own = ownMaterials(mesh)[0];
+        // A translucent body or a wire cage shows its inside on purpose.
+        if (!own || own.transparent || own.opacity < 1 || own.wireframe) return null;
+        const geom = mesh.geometry;
+        const posAttr = geom.getAttribute('position');
+        if (!posAttr) return null;
+        const index = geom.getIndex();
+        const colAttr = geom.getAttribute('color');
+        const withColor = !!(colAttr && own.vertexColors);
+        mesh.updateWorldMatrix(true, false);
+        this._inv.copy(mesh.matrixWorld).invert();
+        const planes = this.v._clipPlanes;
+        const sig = [geom.id, posAttr.version, index ? index.version : -1,
+            geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0,
+            withColor ? colAttr.version : -1, planes.length];
+        /** @type {number[][]} */ const local = [];
+        for (const p of planes) {
+            this._plane.copy(p).applyMatrix4(this._inv);
+            const n = this._plane.normal;
+            local.push([n.x, n.y, n.z, this._plane.constant]);
+            sig.push(n.x, n.y, n.z, this._plane.constant);
+        }
+        return { own, sig, local, withColor };
+    }
+
+    /**
+     * @param {any} mesh @param {number} now
+     * @returns {boolean} whether the mesh carries a cap afterwards
+     */
+    _updateTarget(mesh, now) {
+        const s = this._signature(mesh);
+        if (!s) { this._remove(mesh); return false; }
+        const { own, sig, local, withColor } = s;
+        let st = mesh.userData.__clipCapState;
+        if (!st) {
+            st = mesh.userData.__clipCapState = {
+                sig: null, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
+            };
+        }
+        // One request in flight per target: when it lands its signature is
+        // compared again, so the final state always gets built.
+        if (!st.inflight && !sameSignature(st.sig, sig)) {
+            const geom = mesh.geometry;
+            const index = geom.getIndex();
+            const total = index ? index.count : geom.getAttribute('position').count;
+            const drawn = Math.min(total, geom.drawRange.count) / 3;
+            const workerTris = typeof window !== 'undefined' && /** @type {any} */ (window).__clipCapWorkerTriangles != null
+                ? /** @type {any} */ (window).__clipCapWorkerTriangles : CLIP_CAP_WORKER_TRIANGLES;
+            if (mesh.userData.clipCapKind === 'tube' && index && drawn > workerTris && this.v._lodWorker) {
+                this._request(mesh, st, sig, local, withColor);
+            } else {
+                const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
+                if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
+                    const t0 = performance.now();
+                    this._install(mesh, st, this._build(mesh, local, withColor), local);
+                    st.sig = sig;
+                    st.last = now;
+                    st.cost = performance.now() - t0;
+                }
+            }
+        }
+        this._syncMaterials(mesh, st, own, withColor);
+        return st.caps.some(Boolean);
+    }
+
+    /**
+     * Main-thread cap arrays per plane.
+     * @param {any} mesh @param {number[][]} local @param {boolean} withColor
+     * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+     */
+    _build(mesh, local, withColor) {
+        const kind = mesh.userData.clipCapKind;
+        const geom = mesh.geometry;
+        if (kind === 'tube') {
+            const index = geom.getIndex();
+            const colAttr = geom.getAttribute('color');
+            const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+            return sliceTubeClipCap(geom.getAttribute('position').array, withColor ? colAttr.array : null,
+                index.array, end, local, mesh.userData.tubeIndicesPerRingPair);
+        }
+        return local.map(([nx, ny, nz, c]) => {
+            const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
+            if (kind === 'convex') buildConvexClipCap(geom, out);
+            else if (kind === 'swept') buildSweptClipCap(geom, mesh.userData.sweptLayout, out);
+            else if (kind === 'sliced') buildSlicedClipCap(geom, out);
+            return { pos: new Float32Array(out.pos), col: out.col ? new Float32Array(out.col) : null };
+        });
+    }
+
+    /**
+     * Post a slice request to the LOD worker. The geometry is copied (never
+     * the renderer's own buffers) and only when it changed since the last
+     * request, so a plane drag on a static tube posts planes alone.
+     * @param {any} mesh @param {any} st @param {number[]} sig @param {number[][]} local @param {boolean} withColor
+     */
+    _request(mesh, st, sig, local, withColor) {
+        const t0 = performance.now();
+        const geom = mesh.geometry;
+        const posAttr = geom.getAttribute('position');
+        const index = geom.getIndex();
+        const colAttr = geom.getAttribute('color');
+        const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+        // Draw range is left out: a shorter reveal reuses the cached copy.
+        const geomKey = [sig[0], sig[1], sig[2], sig[5], sig[6]].join(':');
+        /** @type {any} */ const msg = {
+            type: 'clipCap', capId: mesh.uuid, reqId: ++this._reqId, geomKey,
+            planes: local, end, block: mesh.userData.tubeIndicesPerRingPair,
+        };
+        /** @type {ArrayBuffer[]} */ const transfer = [];
+        if (st.workerGeomKey !== geomKey || st.workerEnd < end) {
+            msg.positions = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+            msg.indices = /** @type {Uint32Array} */ (index.array).slice(0, end);
+            msg.colors = withColor ? new Float32Array(/** @type {Float32Array} */ (colAttr.array)) : null;
+            transfer.push(msg.positions.buffer, msg.indices.buffer);
+            if (msg.colors) transfer.push(msg.colors.buffer);
+            st.workerGeomKey = geomKey;
+            st.workerEnd = end;
+        }
+        st.inflight = msg.reqId;
+        st.inflightSig = sig;
+        st.inflightLocal = local;
+        this.pending++;
+        this.requests++;
+        this.v._lodWorker.postMessage(msg, transfer);
+        this.lastRequestMs = performance.now() - t0;
+    }
+
+    /**
+     * A slice result from the LOD worker; dropped unless it answers the
+     * target's current request.
+     * @param {any} msg
+     */
+    onWorkerResult(msg) {
+        const mesh = this._targets.find((m) => m.uuid === msg.capId);
+        const st = mesh && mesh.userData.__clipCapState;
+        if (!st || st.inflight !== msg.reqId) return;
+        this.pending--;
+        st.inflight = 0;
+        if (msg.missing) {
+            // The worker lost the geometry copy (terminated): resend next frame.
+            st.workerGeomKey = '';
+            return;
+        }
+        const t0 = performance.now();
+        this._install(mesh, st, msg.caps, st.inflightLocal);
+        st.sig = st.inflightSig;
+        st.last = performance.now();
+        this.lastInstallMs = st.last - t0;
+    }
+
+    /**
+     * Swap in cap meshes from per-plane triangle arrays.
+     * @param {any} mesh @param {any} st
+     * @param {{pos: Float32Array, col: Float32Array | null}[]} results @param {number[][]} local
+     */
+    _install(mesh, st, results, local) {
+        const planes = this.v._clipPlanes;
+        const n = Math.min(planes.length, results.length);
+        for (let i = 0; i < n; i++) {
+            const g = clipCapGeometry(results[i].pos, results[i].col, local[i][0], local[i][1], local[i][2]);
+            let cap = st.caps[i];
+            if (!g) {
+                if (cap) cap.visible = false;
+                continue;
+            }
+            if (!cap) {
+                const mat = new THREE.MeshStandardMaterial({
+                    side: THREE.DoubleSide,
+                    // Coplanar with the cut rim: pull the cap forward a hair.
+                    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+                    fog: false,
+                });
+                cap = new THREE.Mesh(g, mat);
+                cap.userData.__clipCap = true;
+                cap.name = `${mesh.userData.id || mesh.name}::clipcap`;
+                st.caps[i] = cap;
+                mesh.add(cap);
+            } else {
+                cap.geometry.dispose();
+                cap.geometry = g;
+            }
+            cap.visible = true;
+            // Clipped by every plane but its own, which it lies on.
+            const others = planes.filter((/** @type {any} */ _, /** @type {number} */ j) => j !== i);
+            const mat = cap.material;
+            const cur = mat.clippingPlanes;
+            if (!cur || cur.length !== others.length || cur.some((/** @type {any} */ p, /** @type {number} */ j) => p !== others[j])) {
+                mat.clippingPlanes = others;
+                mat.clipShadows = true;
+                mat.needsUpdate = true;
+            }
+        }
+        for (let i = n; i < st.caps.length; i++) {
+            const cap = st.caps[i];
+            if (!cap) continue;
+            mesh.remove(cap);
+            cap.geometry.dispose();
+            cap.material.dispose();
+        }
+        st.caps.length = n;
+        this.v._shadowDirty = true;
+    }
+
+    /** @param {any} mesh @param {any} st @param {any} own @param {boolean} withColor */
+    _syncMaterials(mesh, st, own, withColor) {
+        // The M cycle's wire-only mode wires the cap too, so a cut stays readable.
+        const wire = !!(this.v._shading && this.v._shading.wireframeMode === 1);
+        for (const cap of st.caps) {
+            if (!cap) continue;
+            const mat = cap.material;
+            if (own.color) mat.color.copy(own.color);
+            if (own.roughness !== undefined) mat.roughness = own.roughness;
+            if (own.metalness !== undefined) mat.metalness = own.metalness;
+            const vc = withColor && !!cap.geometry.getAttribute('color');
+            if (mat.vertexColors !== vc) { mat.vertexColors = vc; mat.needsUpdate = true; }
+            mat.wireframe = wire;
+            cap.castShadow = mesh.castShadow;
+            cap.receiveShadow = mesh.receiveShadow;
+        }
+    }
+}
+
+/**
+ * @param {number[] | null} a @param {number[]} b
+ */
+function sameSignature(a, b) {
+    return !!a && a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 // ========== Depth cues (depth perception for flat white line drawings) ==========
@@ -11110,8 +12110,7 @@ function buildGizmoAxisPicker(name, scale) {
     else if (name === 'Z') geo.rotateX(Math.PI / 2);
     const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
     mesh.name = name;
-    // Raycast-only hitbox — three's raycaster ignores `.visible` (same trick
-    // as the axis-control widget's own invisible pick sphere).
+    // Raycast-only hitbox: three's raycaster ignores `.visible`.
     mesh.visible = false;
     return mesh;
 }
@@ -11954,9 +12953,10 @@ class TransformGizmoController {
 // ========== Axis Control (rotary / linear range indicators) ==========
 // A range-display control distinct from the move/rotate TransformControls
 // gizmo above: a line showing an axis's range of motion — an arc, a full
-// circle, a segment, or a window that follows the value — with a small
-// flat-shaded sphere marking the current value. Only the sphere is
-// draggable/hoverable; the line is a visual guide (its own raycast is a
+// circle, a segment, or a window that follows the value — with a short,
+// thicker handle section marking the current value. Only the handle is
+// draggable/hoverable, hit-tested in screen pixels against its projected
+// polyline (issue #284); the line is a visual guide (its own raycast is a
 // no-op). Anchored every frame at a target object's world pivot, oriented so
 // the control's own local +X is that target's chosen local axis in world
 // space (`Quaternion.setFromUnitVectors`, same "derive the world direction
@@ -11972,16 +12972,15 @@ class TransformGizmoController {
 //   linear            segment from `min` to `max` metres along the axis
 //   linear_unlimited  segment from `value - window` to `value + window`,
 //                     recomputed on every value change so it re-centres
-//                     ("moves with the sphere")
+//                     ("moves with the handle")
 //
-// Sphere local position: rotary* -> (0, R cos(value), R sin(value)); linear*
+// Value marker local position: rotary* -> (0, R cos(value), R sin(value)); linear*
 // -> (value, 0, 0). Dragging projects the pointer onto a plane (perpendicular
 // to the axis for rotary; containing the axis and facing the camera for
 // linear, the same construction TransformControlsPlane uses for a
 // single-axis translate) and reports {id, value, phase} back, same shape as
 // the move gizmo's onObjectMove.
 
-const AXIS_CONTROL_SPHERE_RADIUS = 0.1;    // invisible pick-only hitbox, not rendered
 const AXIS_CONTROL_ARC_SEGMENTS = 64;
 const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
 const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
@@ -11991,6 +12990,9 @@ const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 4;  // handle 
 const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.05;   // radians either side of value, rotary handle arc
 const AXIS_CONTROL_HANDLE_ARC_SEGMENTS = 12;
 const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.05;  // world units either side of value, linear handle segment
+// Pick radius margin past the handle's drawn half width, in CSS px; a finger needs more slack than a mouse.
+const AXIS_CONTROL_PICK_MARGIN_PX = 5;
+const AXIS_CONTROL_PICK_MARGIN_TOUCH_PX = 14;
 
 const _acUnitX = new THREE.Vector3(1, 0, 0);
 const _acScratchA = new THREE.Vector3();
@@ -12000,7 +13002,7 @@ const _acPlane = new THREE.Plane();
 const _acQuat = new THREE.Quaternion();
 
 /** One rotary/linear axis-control instance. Built once; `_rebuild()` re-derives
- * line geometry and sphere position from `value`/`min`/`max`. */
+ * line geometry, the handle polyline and the value marker from `value`/`min`/`max`. */
 class AxisControl {
     /** @param {string} id @param {any} opts */
     constructor(id, opts) {
@@ -12015,6 +13017,10 @@ class AxisControl {
         // Set while the radius waits for `bboxSourceId` to be in the scene.
         this.bboxSourceId = opts.radiusPending ? opts.bboxSourceId : null;
         this.window = opts.window != null ? opts.window : AXIS_CONTROL_DEFAULT_WINDOW;
+        /** @type {number|null} CSS px; null derives it from the handle width and pointer type */
+        this.pickRadiusPx = opts.pickRadiusPx != null ? opts.pickRadiusPx : null;
+        /** @type {number[]} handle polyline in the group's local frame, flat xyz */
+        this._handlePoints = [];
         this._hovered = false;
         this._dragging = false;
         this._framePivot = new THREE.Vector3();   // _liveFrame scratch, per control
@@ -12043,7 +13049,7 @@ class AxisControl {
         });
         this.line = new Line2(new LineGeometry(), this.lineMaterial);
         this.line.renderOrder = 900;
-        this.line.raycast = () => {};   // guide only — the sphere is the only pickable part
+        this.line.raycast = () => {};   // guide only, the handle is picked in screen space
 
         // The handle: a short, 3x-thick section of the same line, centred on
         // `value` — a small arc for rotary, a short segment for linear. This
@@ -12057,26 +13063,18 @@ class AxisControl {
         });
         this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
         this.handleLine.renderOrder = 901;
-        this.handleLine.raycast = () => {};   // guide only — the sphere is the only pickable part
+        this.handleLine.raycast = () => {};   // picked by AxisControlManager._handleDistancePx instead
 
-        // The sphere is kept as the pick target (three's raycaster ignores
-        // `.visible`, so it still hit-tests) but is never rendered — the
-        // handle line above is the visible indicator now.
-        this.sphereMaterial = new THREE.MeshStandardMaterial({
-            color: this._baseColor.clone(), flatShading: true, roughness: 0.5, metalness: 0.0,
-            depthTest: false, depthWrite: false, toneMapped: false,
-        });
-        this.sphere = new THREE.Mesh(new THREE.SphereGeometry(AXIS_CONTROL_SPHERE_RADIUS, 12, 8), this.sphereMaterial);
-        this.sphere.renderOrder = 901;
-        this.sphere.userData.axisControlId = id;
-        this.sphere.visible = false;
+        // Unrendered point at `value`, the reference a rotary drag measures its angle from.
+        this.marker = new THREE.Object3D();
+        this.marker.userData.axisControlId = id;
 
-        this.group.add(this.line, this.handleLine, this.sphere);
+        this.group.add(this.line, this.handleLine, this.marker);
         this._rebuild();
     }
 
     /** Re-derive the line geometry (kind-dependent), the handle segment, and
-     * the sphere's local position from the current value/min/max. Cheap
+     * the value marker's local position from the current value/min/max. Cheap
      * (<= ARC_SEGMENTS+1 verts) — called on every value/min/max change, not
      * per frame. */
     _rebuild() {
@@ -12096,7 +13094,7 @@ class AxisControl {
                 const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
                 flat.push(0, R * Math.cos(a), R * Math.sin(a));
             }
-            this.sphere.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
+            this.marker.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
 
             let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_ANGLE;
             let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_ANGLE;
@@ -12109,7 +13107,7 @@ class AxisControl {
             const lo = this.kind === 'linear_unlimited' ? this.value - this.window : this.min;
             const hi = this.kind === 'linear_unlimited' ? this.value + this.window : this.max;
             flat.push(lo, 0, 0, hi, 0, 0);
-            this.sphere.position.set(this.value, 0, 0);
+            this.marker.position.set(this.value, 0, 0);
 
             let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_LENGTH;
             let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_LENGTH;
@@ -12125,6 +13123,7 @@ class AxisControl {
         this.handleLine.geometry = new LineGeometry();
         this.handleLine.geometry.setPositions(handleFlat);
         this.handleLine.computeLineDistances();
+        this._handlePoints = handleFlat;
     }
 
     /** @param {number} value @param {{min?:number, max?:number}} [opts] */
@@ -12162,8 +13161,6 @@ class AxisControl {
         this.lineMaterial.dispose();
         this.handleLine.geometry.dispose();
         this.handleLineMaterial.dispose();
-        this.sphere.geometry.dispose();
-        this.sphereMaterial.dispose();
     }
 }
 
@@ -12187,7 +13184,7 @@ class AxisControlManager {
         this._dragV = new THREE.Vector3();
         this._dragRawAngle = 0;
         this._dragAccumAngle = 0;
-        this._dragValueOffset = 0;   // linear*: grab-point offset, so the sphere doesn't jump to the cursor
+        this._dragValueOffset = 0;   // linear*: grab-point offset, so the handle doesn't jump to the cursor
         this._lastReport = 0;
 
         const dom = viewer._renderer.domElement;
@@ -12203,7 +13200,9 @@ class AxisControlManager {
     }
 
     /** True while a handle is hovered or dragged, so a press or release
-     * there is this widget's gesture rather than a click. @returns {boolean} */
+     * there is this widget's gesture rather than a click. Hover is never set
+     * while a move-gizmo handle is under the pointer, so this cannot block
+     * the gizmo. @returns {boolean} */
     busy() {
         if (this._active) return true;
         for (const c of this.controls.values()) if (c._hovered) return true;
@@ -12256,10 +13255,11 @@ class AxisControlManager {
     /** Update one control's value/min/max (update_axis_control) — distinct
      * from the no-arg `update()` below, which repositions every control at
      * its target's live pivot once per render frame.
-     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
     setValue(id, opts) {
         const c = this.controls.get(id);
         if (!c) return;
+        if (opts.pickRadiusPx != null) c.pickRadiusPx = opts.pickRadiusPx;
         c.setValue(opts.value != null ? opts.value : c.value, opts);
         if (opts.color != null || opts.hoverColor != null) c.setColor(opts.color, opts.hoverColor);
     }
@@ -12316,7 +13316,7 @@ class AxisControlManager {
 
     /** Per-frame: reposition/orient every control at its target's live pivot
      * + axis direction (a moving target — a jog, a drag — carries its
-     * controls with it for free), then keep the hovered/dragging sphere
+     * controls with it for free), then keep the hovered/dragging handle
      * lit. Controls whose target has left the scene just hold their last
      * pose (matches the move gizmo's own "detach on parent loss" being the
      * caller's job, not silently vanishing mid-frame). */
@@ -12349,22 +13349,89 @@ class AxisControlManager {
         return this._ndc;
     }
 
-    /** @param {number} clientX @param {number} clientY @returns {AxisControl|null} */
-    _pickSphere(clientX, clientY) {
-        this._raycaster.setFromCamera(
-            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
-        const spheres = [];
-        const map = new Map();
-        for (const c of this.controls.values()) if (c.group.visible) { spheres.push(c.sphere); map.set(c.sphere, c); }
-        const hits = this._raycaster.intersectObjects(spheres, false);
-        return hits.length ? map.get(hits[0].object) : null;
+    /** Pick radius in CSS px for a control and pointer type.
+     * @param {AxisControl} c @param {string} pointerType @returns {number} */
+    _pickRadiusPx(c, pointerType) {
+        if (c.pickRadiusPx != null) return c.pickRadiusPx;
+        const margin = pointerType === 'touch' ? AXIS_CONTROL_PICK_MARGIN_TOUCH_PX : AXIS_CONTROL_PICK_MARGIN_PX;
+        return AXIS_CONTROL_HANDLE_WIDTH_PX / 2 + margin;
+    }
+
+    /** Screen distance in CSS px from a viewport point to a control's
+     * projected handle polyline; Infinity when no part of it is in view.
+     * A pixel test keeps the hit area the size of the drawn handle at any
+     * zoom and under both projections, where a world-size hitbox did not.
+     * @param {AxisControl} c @param {number} px @param {number} py
+     * @param {DOMRect} rect @returns {number} */
+    _handleDistancePx(c, px, py, rect) {
+        const cam = /** @type {any} */ (this.v._camera);
+        c.group.updateMatrixWorld();
+        const pts = c._handlePoints;
+        let best = Infinity;
+        let prevOk = false, ax = 0, ay = 0;
+        for (let i = 0; i < pts.length; i += 3) {
+            const p = _acScratchA.set(pts[i], pts[i + 1], pts[i + 2]).applyMatrix4(c.group.matrixWorld).project(cam);
+            // Outside the depth range (incl. behind a perspective eye) the projection is meaningless.
+            if (!(p.z >= -1 && p.z <= 1)) { prevOk = false; continue; }
+            const bx = (p.x * 0.5 + 0.5) * rect.width, by = (-p.y * 0.5 + 0.5) * rect.height;
+            let d;
+            if (prevOk) {
+                const dx = bx - ax, dy = by - ay;
+                const len2 = dx * dx + dy * dy;
+                const t = len2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+                d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+            } else {
+                d = Math.hypot(px - bx, py - by);
+            }
+            if (d < best) best = d;
+            prevOk = true; ax = bx; ay = by;
+        }
+        return best;
+    }
+
+    /** The control whose handle is nearest the pointer within its pick
+     * radius, or null. @param {number} clientX @param {number} clientY
+     * @param {string} pointerType @returns {AxisControl|null} */
+    _pickHandle(clientX, clientY, pointerType) {
+        if (!this.controls.size) return null;
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const cam = /** @type {any} */ (this.v._camera);
+        cam.updateMatrixWorld();   // a wheel zoom since the last render leaves matrixWorldInverse stale
+        const px = clientX - rect.left, py = clientY - rect.top;
+        let hit = null, bestD = Infinity;
+        for (const c of this.controls.values()) {
+            if (!c.group.visible) continue;
+            const d = this._handleDistancePx(c, px, py, rect);
+            if (d <= this._pickRadiusPx(c, pointerType) && d < bestD) { hit = c; bestD = d; }
+        }
+        return hit;
+    }
+
+    /** True when a move-gizmo handle (interactive or pinned) is under the
+     * pointer or dragged, so the gizmo keeps the gesture on overlap.
+     * `refresh` re-runs the gizmo's own hover test, for a touch press that
+     * arrives with no hover before it. @param {PointerEvent} e @param {boolean} refresh */
+    _gizmoHandleUnder(e, refresh) {
+        const tg = this.v._transformGizmo;
+        if (!tg || !tg.enabled) return false;
+        for (const g of tg._allGizmos()) {
+            const ctl = /** @type {any} */ (g.control);
+            if (ctl.dragging) return true;
+            if (!ctl.enabled || ctl.object === undefined) continue;
+            if (refresh) ctl.pointerHover(ctl._getPointer(e));
+            if (ctl.axis != null) return true;
+        }
+        return false;
     }
 
     /** @param {PointerEvent} e */
     _pointerDown(e) {
         if (e.button !== 0) return;
-        const hit = this._pickSphere(e.clientX, e.clientY);
+        const hit = this._pickHandle(e.clientX, e.clientY, e.pointerType);
         if (!hit) return;
+        // Left to TransformControls' own pointerdown, which runs after this capture listener.
+        if (this._gizmoHandleUnder(e, true)) return;
         const frame = this._liveFrame(hit);
         if (!frame) return;
         this._active = hit;
@@ -12392,11 +13459,11 @@ class AxisControlManager {
         e.preventDefault();
     }
 
-    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT sphere position
+    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT value marker
      * about its drag axis — the reference `_pointerMove` unwraps deltas
      * against. @param {AxisControl} c @param {THREE.Vector3} pivot @param {THREE.Vector3} axisDir */
     _angleOf(c, pivot, axisDir) {
-        const worldPos = c.sphere.getWorldPosition(_acScratchC);
+        const worldPos = c.marker.getWorldPosition(_acScratchC);
         const rel = worldPos.sub(pivot);
         rel.addScaledVector(axisDir, -rel.dot(axisDir));
         return Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
@@ -12428,8 +13495,9 @@ class AxisControlManager {
     _pointerMove(e) {
         const c = this._active;
         if (!c || !c._dragging) {
-            // Not dragging: plain hover check.
-            const hit = this._pickSphere(e.clientX, e.clientY);
+            // Not dragging: plain hover check. TransformControls' canvas pointermove
+            // has already refreshed its axis before this window listener runs.
+            const hit = this._gizmoHandleUnder(e, false) ? null : this._pickHandle(e.clientX, e.clientY, e.pointerType);
             for (const other of this.controls.values()) other._setHovered(other === hit);
             return;
         }
@@ -12699,6 +13767,10 @@ export class ThreeJSViewer {
         this._clipSlabThickness = 2.0;
         this._clipPosition = 0;
         this._clipDefaults = null;
+        // Section caps on clipped solids (issue #259). URL `clip_caps` > option > off.
+        this._clipCaps = new ClipCapController(this);
+        this._clipCaps.enabled = parseBoolOption(urlParams.get('clip_caps'))
+            ?? parseBoolOption(options.clipCaps) ?? false;
         this._clipSyncFromGizmo = false;
 
         // Scrubbing state
@@ -12942,6 +14014,7 @@ export class ThreeJSViewer {
         this._clipModeSlab = q('.tjsv-clip-mode-slab');
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
         this._clipClose = q('.tjsv-clip-close');
+        this._clipCapsCheck = q('.tjsv-clip-caps');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
         // Toolbar height tracks viewport width: the timeline-row wraps when
@@ -13124,6 +14197,10 @@ export class ThreeJSViewer {
         this._lodWorker = _getLodWorker();
         this._lodWorker.onmessage = /** @param {MessageEvent} e */ (e) => {
             const msg = e.data;
+            if (msg.type === 'clipCapResult') {
+                this._clipCaps.onWorkerResult(msg);
+                return;
+            }
             // 'collapseOnlyResult' is independent of LOD — runs even on tubes
             // without a tubeLOD record. Apply the snapped positions to the
             // mesh's existing geometry and let three.js re-upload them.
@@ -13837,7 +14914,8 @@ export class ThreeJSViewer {
     _applyClipToObject(obj) {
         const planes = this._activeClippingPlanes();
         obj.traverse(/** @param {any} child */ child => {
-            if (!child.material) return;
+            // A clip cap carries every plane but its own (ClipCapController).
+            if (!child.material || child.userData.__clipCap) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
                 mat.clippingPlanes = planes;
@@ -13918,7 +14996,7 @@ export class ThreeJSViewer {
     _updateClipMaterials() {
         this._shadowDirty = true;
         this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.material) return;
+            if (!child.material || child.userData.__clipCap) return;
             if (this._isClipHelper(child)) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
@@ -14467,6 +15545,10 @@ export class ThreeJSViewer {
             const geometry = PRIMITIVES[objData.primitive](params);
             const material = this._createMaterial(params);
             const mesh = new THREE.Mesh(geometry, material);
+            // Convex solids get the hull of their cut edges as a clip cap (issue #259).
+            if (CLIP_CAP_CONVEX_PRIMITIVES.has(objData.primitive)) mesh.userData.clipCapKind = 'convex';
+            else if (objData.primitive === 'torus') mesh.userData.clipCapKind = 'sliced';
+            if (typeof params.clipCap === 'boolean') mesh.userData.clipCap = params.clipCap;
             // A crisper accent over the translucent fill; opt-in, so every
             // other path stays the single Mesh it was.
             if (params.outline && (objData.primitive === 'box' || objData.primitive === 'sphere')) {
@@ -16288,6 +17370,10 @@ export class ThreeJSViewer {
             this._setClipThickness(this._clipSlabThickness + delta);
         });
 
+        // Cap toggle (issue #259)
+        this._clipCapsCheck.checked = this._clipCaps.enabled;
+        this._clipCapsCheck.addEventListener('change', () => this.setClipCaps(this._clipCapsCheck.checked));
+
         // Close button
         this._clipClose.addEventListener('click', () => this._toggleClipPanel());
 
@@ -16826,7 +17912,7 @@ export class ThreeJSViewer {
                     colorObj.traverse(/** @param {any} child */ (child) => {
                         // Composes with set_highlight: the outline child keeps
                         // its own selection colour.
-                        if (!child.material || child.userData.__highlightOutline) return;
+                        if (!child.material || child.userData.__highlightOutline || child.userData.__clipCap) return;
                         // Embedder overlays under the object keep their own colour.
                         if (isUnderOverlay(child)) return;
                         for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(data.color); }
@@ -18075,6 +19161,9 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
+                        // Clip caps hull each drawn ring band (issue #259).
+                        mesh.userData.clipCapKind = 'tube';
+                        if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         // The mesh now owns the texture references; _deleteObject
                         // releases them.
                         if (texKeys) { mesh.userData.tubeTextureKeys = texKeys; texKeys = null; }
@@ -18296,9 +19385,10 @@ export class ThreeJSViewer {
                             }
                         }
                         const hasColors = !!ringColors;
-                        const { geometry } = buildSweptToolGeometry(
+                        const built = buildSweptToolGeometry(
                             stationPos, axisArr, profileArr, sections, ringColors,
                         );
+                        const geometry = built.geometry;
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
                             color: hasColors ? 0xffffff : (data.color ?? 0x9aa0a6),
@@ -18315,6 +19405,14 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isSweptTool = true;
+                        // Clip caps read the ring layout (issue #259).
+                        mesh.userData.clipCapKind = 'swept';
+                        mesh.userData.sweptLayout = {
+                            stations: nStations, levels: built.levels, sections: built.sections,
+                            startCapIndexCount: built.startCapIndexCount,
+                            indicesPerRingPair: built.indicesPerRingPair,
+                        };
+                        if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived
@@ -18545,12 +19643,13 @@ export class ThreeJSViewer {
                     value: data.value, min: data.min, max: data.max, color: data.color,
                     hoverColor: data.hover_color,
                     radius: data.radius, bboxSourceId: data.bbox_source_id, window: data.window,
+                    pickRadiusPx: data.pick_radius_px,
                 });
                 break;
             case 'update_axis_control':
                 this._axisControls.setValue(data.id, {
                     value: data.value, min: data.min, max: data.max,
-                    color: data.color, hoverColor: data.hover_color,
+                    color: data.color, hoverColor: data.hover_color, pickRadiusPx: data.pick_radius_px,
                 });
                 break;
             case 'remove_axis_control':
@@ -18745,6 +19844,9 @@ export class ThreeJSViewer {
                 break;
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
+                break;
+            case 'set_clipping_caps':
+                this.setClipCaps(!!data.enabled);
                 break;
             case 'set_display_quality':
                 this.setDisplayQuality(data.quality);
@@ -19052,6 +20154,9 @@ export class ThreeJSViewer {
 
         // Billboards: re-face the camera after controls have moved it.
         this._updateBillboards();
+
+        // Section caps follow plane, transform and geometry changes (issue #259).
+        this._clipCaps.update();
 
         // Octree-streamed point clouds: budgeted LOD traversal + on-demand
         // node fetches (no-op when no LOD cloud is in the scene).
@@ -19958,6 +21063,22 @@ export class ThreeJSViewer {
     }
 
     /**
+     * Cap the cut of clipped primitives, swept tools and parametric tubes
+     * (issue #259). A per-object `clipCap` boolean on the add message wins
+     * over this switch. Meshes and models always stay open.
+     * @param {boolean} enabled
+     */
+    setClipCaps(enabled) {
+        this._clipCaps.enabled = !!enabled;
+        if (this._clipCapsCheck) this._clipCapsCheck.checked = this._clipCaps.enabled;
+    }
+
+    /** @returns {boolean} whether the global clip-cap switch is on */
+    getClipCaps() {
+        return this._clipCaps.enabled;
+    }
+
+    /**
      * Set the sun (shadow-casting directional light). Fields left out are
      * unchanged. Transient: the Lighting panel persists its own edits, this
      * does not.
@@ -20728,15 +21849,17 @@ export class ThreeJSViewer {
     /** Direct-call JS equivalent of the `add_axis_control` WS message — same
      * effect, for an embedder holding a live `viewer` reference in the same
      * page (no WS round trip needed). `opts`: `{targetId, axis, kind, value,
-     * min, max, color, hoverColor, radius, bboxSourceId, window}` — see the
-     * WS message for the full shape. `hoverColor` is optional; omitting it
-     * auto-derives a lightened variant of `color`. Values are plain
+     * min, max, color, hoverColor, radius, bboxSourceId, window, pickRadiusPx}`,
+     * see the WS message for the full shape. `hoverColor` is optional; omitting it
+     * auto-derives a lightened variant of `color`. `pickRadiusPx` sets the
+     * handle's hit radius in CSS px (default: half the handle width plus 5 px,
+     * or 14 px for touch). Values are plain
      * THREE.js scene units: metres for linear(_unlimited), radians for
      * rotary(_unlimited) — no CSD-unit conversion happens here.
      * @param {string} id @param {any} opts */
     addAxisControl(id, opts) { this._axisControls.add(id, opts); }
 
-    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
     updateAxisControl(id, opts) { this._axisControls.setValue(id, opts); }
 
     /** @param {string} id */

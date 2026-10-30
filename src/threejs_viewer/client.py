@@ -170,6 +170,14 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     return f
 
 
+def _validate_pick_radius_px(value: Optional[float]) -> Optional[float]:
+    """An axis-control pick radius: None (viewer default) or finite and > 0."""
+    value = _validate_finite("pick_radius_px", value)
+    if value is not None and value <= 0:
+        raise ValueError(f"pick_radius_px must be > 0 (got {value!r})")
+    return value
+
+
 def _validate_point3(name: str, value) -> List[float]:
     """A finite ``[x, y, z]`` as floats."""
     try:
@@ -815,6 +823,8 @@ class ViewerClient:
         self._sun_state: Dict[str, Any] = {}
         # Runtime set_display_quality value, re-sent on reconnect.
         self._display_quality_state: Optional[str] = None
+        # Runtime set_clipping_caps value, re-sent on reconnect.
+        self._clip_caps_state: Optional[bool] = None
         # Runtime set_environment_background / set_cubemap values, re-sent on
         # reconnect (the browser remembers the cubemap in localStorage, but a
         # different profile or a cleared one would not).
@@ -1089,6 +1099,17 @@ class ViewerClient:
         if self._sun_state:
             try:
                 websocket.send(json.dumps({"type": "set_sun", **self._sun_state}))
+            except Exception:
+                pass
+
+        # Re-apply the clip-cap switch (set_clipping_caps).
+        if self._clip_caps_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {"type": "set_clipping_caps", "enabled": self._clip_caps_state}
+                    )
+                )
             except Exception:
                 pass
 
@@ -1396,6 +1417,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a box primitive to the scene.
 
@@ -1404,6 +1426,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "width": width,
@@ -1435,6 +1458,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_sphere(
@@ -1457,6 +1481,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a sphere primitive to the scene.
 
@@ -1465,6 +1490,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {"radius": radius, "color": color, "opacity": opacity}
         if roughness is not None:
@@ -1490,6 +1516,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_cylinder(
@@ -1512,6 +1539,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a cylinder primitive to the scene.
 
@@ -1520,6 +1548,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "radiusTop": radius_top,
@@ -1544,6 +1573,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_capsule(
@@ -1565,6 +1595,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene.
 
@@ -1573,6 +1604,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "radius": radius,
@@ -1596,6 +1628,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_grid(
@@ -2919,6 +2952,7 @@ class ViewerClient:
         joins: Optional[str] = None,
         join_tolerance: float = 0.015,
         join_budget: Optional[float] = 0.15,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -3054,6 +3088,8 @@ class ViewerClient:
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
                 from picking (it is then never hit-tested, at zero cost).
+            clip_cap: Override :meth:`set_clipping_caps` for this tube (also
+                accepted by :meth:`add_toolpath`).
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at
@@ -3217,6 +3253,8 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         # The mitered strip at the default tolerance and budget is the
         # viewer's own default, so the header carries the keys only when
         # they differ; a null budget lifts the cap.
@@ -3343,6 +3381,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
 
@@ -3383,6 +3422,7 @@ class ViewerClient:
             metalness, roughness: Standard PBR material properties.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
+            clip_cap: Override :meth:`set_clipping_caps` for this body.
 
         Reveal the swept body progressively along the path with
         :meth:`set_draw_range` or the ``draw_ranges`` animation channel.
@@ -3451,6 +3491,8 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         if parent:
             header["parent"] = parent
         if not visible:
@@ -3752,8 +3794,11 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Internal method to add a primitive."""
+        if clip_cap is not None:
+            params["clipCap"] = bool(clip_cap)
         transform = {}
         if position:
             transform["position"] = position
@@ -4518,6 +4563,27 @@ class ViewerClient:
                 "distance": float(distance),
             }
         )
+
+    def set_clipping_caps(self, enabled: bool = True) -> None:
+        """Cap the cut of clipped solids the viewer builds itself.
+
+        With caps on, a clipping plane or slab closes the cut through
+        primitives (box, sphere, cylinder, capsule), swept tool bodies
+        (:meth:`add_swept_tool`) and parametric tubes
+        (:meth:`add_parametric_tube`, :meth:`add_toolpath`) with a flat face
+        in the object's colour (per-vertex colours are interpolated along the
+        cut), so a solid no longer reads as a hollow shell. Meshes and loaded
+        models stay open, as do translucent and wireframe objects. A
+        per-object ``clip_cap=`` on the add call overrides this switch. Off by
+        default; also toggled by the "Cap cut solids" box in the clipping
+        panel (``C``).
+
+        Recorded and re-sent on reconnect; may be called before a viewer
+        connects.
+        """
+        self._clip_caps_state = bool(enabled)
+        if self._ws is not None:
+            self._send({"type": "set_clipping_caps", "enabled": bool(enabled)})
 
     def show_grid(
         self,
@@ -5323,12 +5389,19 @@ class ViewerClient:
         radius: Optional[float] = None,
         bbox_source_id: Optional[str] = None,
         window: float = 1.0,
+        pick_radius_px: Optional[float] = None,
     ) -> None:
         """Show a rotary or linear range control: a line spanning the axis's
         range of motion with a short, 4x-thicker section of the same line
         marking the current value (a small arc for rotary, a short segment
         for linear). The handle and the guide line always share one colour
-        pair; only the handle's invisible hitbox sphere is draggable/hoverable.
+        pair; only the handle is draggable/hoverable.
+
+        The handle is hit-tested in screen pixels: a press counts when it lands
+        within ``pick_radius_px`` CSS pixels of the drawn handle, so the hit
+        area stays the size of the handle at any zoom. The default is half the
+        handle's width plus 5 px (14 px for a touch press). Where a move-gizmo
+        handle is under the pointer the gizmo takes the press and the hover.
 
         Anchored every render frame at ``target_id``'s live world pivot,
         oriented along its local ``axis`` — a moving target (a jog, a drag)
@@ -5346,7 +5419,7 @@ class ViewerClient:
         - ``"linear"`` — a segment from ``min`` to ``max`` metres along the axis.
         - ``"linear_unlimited"`` — a segment spanning ``value - window`` to
           ``value + window``, which re-centres on every value change so the
-          visible window always follows the sphere; ``min``/``max`` are ignored.
+          visible window always follows the handle; ``min``/``max`` are ignored.
 
         ``radius`` (rotary only) is required unless ``bbox_source_id`` is
         given, in which case it defaults to half the world-space diagonal of
@@ -5357,7 +5430,7 @@ class ViewerClient:
         ``hover_color`` overrides the tint used while hovering/dragging;
         omit it to auto-derive a lightened variant of ``color``.
 
-        Dragging the sphere reports ``{id, value, phase}`` to every callback
+        Dragging the handle reports ``{id, value, phase}`` to every callback
         registered with :meth:`on_axis_control_change`, throttled during the
         drag (``"move"``) with a final unthrottled report on release
         (``"end"``) — same shape as :meth:`on_object_move`. The new value is
@@ -5369,7 +5442,8 @@ class ViewerClient:
         Raises:
             ValueError: For an unknown ``axis`` or ``kind``, a non-finite
                 number, a bounded ``kind`` without ``min``/``max`` or with
-                ``min > max``, or a ``radius``/``window`` that is not above zero.
+                ``min > max``, or a ``radius``/``window``/``pick_radius_px``
+                that is not above zero.
         """
         if axis not in _ALLOWED_AXIS_CONTROL_AXES:
             allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_AXES))
@@ -5391,6 +5465,7 @@ class ViewerClient:
         window = _validate_finite("window", window)
         if window <= 0:
             raise ValueError(f"window must be > 0 (got {window!r})")
+        pick_radius_px = _validate_pick_radius_px(pick_radius_px)
         spec = {
             "type": "add_axis_control",
             "id": id,
@@ -5405,6 +5480,7 @@ class ViewerClient:
             "radius": radius,
             "bbox_source_id": bbox_source_id,
             "window": window,
+            "pick_radius_px": pick_radius_px,
         }
         self._axis_controls[id] = spec
         if self._ws is not None:
@@ -5419,19 +5495,22 @@ class ViewerClient:
         max: Optional[float] = None,
         color: Optional[int] = None,
         hover_color: Optional[int] = None,
+        pick_radius_px: Optional[float] = None,
     ) -> None:
         """Update a control added with :meth:`add_axis_control` — its value,
-        range, and/or colour. Only the given fields change; the rest keep
+        range, colour and/or pick radius. Only the given fields change; the rest keep
         their last value. Passing ``color`` without ``hover_color``
         re-derives the hover tint from the new ``color``.
 
         Raises:
             ValueError: If ``id`` was never added with :meth:`add_axis_control`.
-            ValueError: For a non-finite number, or a resulting ``min > max``.
+            ValueError: For a non-finite number, a resulting ``min > max``, or
+                a ``pick_radius_px`` that is not above zero.
         """
         spec = self._axis_controls.get(id)
         if spec is None:
             raise ValueError(f"no axis control {id!r}")
+        pick_radius_px = _validate_pick_radius_px(pick_radius_px)
         value = _validate_finite("value", value)
         min = _validate_finite("min", min)
         max = _validate_finite("max", max)
@@ -5449,6 +5528,8 @@ class ViewerClient:
             spec["color"] = color
         if hover_color is not None:
             spec["hover_color"] = hover_color
+        if pick_radius_px is not None:
+            spec["pick_radius_px"] = pick_radius_px
         if self._ws is not None:
             self._send(
                 {
@@ -5459,6 +5540,7 @@ class ViewerClient:
                     "max": max,
                     "color": color,
                     "hover_color": hover_color,
+                    "pick_radius_px": pick_radius_px,
                 }
             )
 
