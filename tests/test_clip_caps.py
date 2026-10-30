@@ -423,3 +423,204 @@ def test_swept_tool_clip_cap_false_stays_open(viewer_client, viewer_page):
     settle(viewer_client)
     frames(viewer_page, 3)
     assert _cap_count(viewer_page, "tool") == 0
+
+
+def _wait_object(page, id):
+    page.wait_for_function(
+        "(id) => !!window.threejsViewer.getObject(id)", arg=id, timeout=10_000
+    )
+
+
+# Area of the tube's first ring polygon in the YZ plane (a tube along X).
+_RING0_AREA = """(id) => {
+    const a = window.threejsViewer.getObject(id).geometry.getAttribute('position').array;
+    let s = 0;
+    for (let j = 0; j < 6; j++) {
+        const k = (j + 1) % 6;
+        s += a[j * 3 + 1] * a[k * 3 + 2] - a[k * 3 + 1] * a[j * 3 + 2];
+    }
+    return Math.abs(s) / 2;
+}"""
+
+
+def _line(*corners, step=5.0):
+    """Polyline through `corners` (XY, z=0), sampled every `step`."""
+    pts = [np.asarray(corners[0], dtype=float)]
+    for a, b in zip(corners[:-1], corners[1:]):
+        a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        k = max(1, int(round(np.linalg.norm(b - a) / step)))
+        for i in range(1, k + 1):
+            pts.append(a + (b - a) * i / k)
+    out = np.zeros((len(pts), 3), dtype=np.float32)
+    out[:, :2] = np.array(pts)
+    return out
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("lod", [False, {"threshold": 0}])
+def test_tube_cap_is_the_ring_section(viewer_client, viewer_page, lod):
+    """A straight tube cut across shows one closed loop with the ring's area,
+    also after an LOD worker swaps in a reduced geometry."""
+    page = viewer_page
+    spine = _line((0, 0), (100, 0), step=10)
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "t",
+        spine,
+        np.full(n, 8.0),
+        np.full(n, 3.0),
+        colors=np.full(n, 0x33CC33, dtype=np.uint32),
+        lod=lod,
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=37, show_helper=False)
+    settle(viewer_client)
+    _wait_object(page, "t")
+    if lod:
+        page.wait_for_function(
+            "() => !!window.threejsViewer.getObject('t').userData.tubeLOD.keptIndices",
+            timeout=10_000,
+        )
+        frames(page, 2)
+    _wait_caps(page, "t", 1)
+    ring = page.evaluate(_RING0_AREA, "t")
+    (cap,) = _caps(page, "t")
+    assert cap["dist"][0] < 1e-4
+    assert cap["open"] == 0
+    assert cap["vertexColors"] is True
+    assert cap["area"] == pytest.approx(ring, rel=1e-3)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("joins", [None, "round"])
+def test_tube_cap_along_a_cornered_bead_follows_draw_range(
+    viewer_client, viewer_page, joins
+):
+    """A horizontal cut through a cornered bead (mitred or round joins) is
+    closed, lies on the plane, covers about length x width, and retreats with
+    the draw-range frontier."""
+    page = viewer_page
+    spine = _line((0, 0), (40, 0), (40, 40), (80, 40), (80, 0))
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "t", spine, np.full(n, 8.0), np.full(n, 3.0), lod=False, joins=joins
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.3, show_helper=False)
+    settle(viewer_client)
+    _wait_object(page, "t")
+    _wait_caps(page, "t", 1)
+    (cap,) = _caps(page, "t")
+    assert cap["dist"][0] < 1e-4
+    assert cap["open"] == 0
+    full = _union_area(page, "t", grid=200)
+    assert 0.85 * 160 * 8 < full < 1.15 * 160 * 8
+    viewer_client.set_draw_range("t", 0.5)
+    settle(viewer_client)
+    frames(page, 2)
+    (cap,) = _caps(page, "t")
+    assert cap["dist"][0] < 1e-4
+    assert cap["open"] == 0
+    half = _union_area(page, "t", grid=200)
+    assert 0.35 * full < half < 0.65 * full
+
+
+@pytest.mark.browser
+def test_tube_break_pair_gets_no_cap(viewer_client, viewer_page):
+    """A plane through a travel hop caps the bridging cone of an unbroken
+    tube but nothing on a tube broken there."""
+    page = viewer_page
+    spine = _line((0, 0), (30, 0), (50, 0), (80, 0), step=10)
+    n = len(spine)
+    mask = np.zeros(n, dtype=np.uint8)
+    mask[4] = 1  # break before (50, 0): the 30 -> 50 hop is not stitched
+    w, h = np.full(n, 8.0), np.full(n, 3.0)
+    viewer_client.add_parametric_tube(
+        "broken", spine, w, h, lod=False, break_before=mask
+    )
+    viewer_client.add_parametric_tube(
+        "bridged", spine, w, h, lod=False, position=[0, 20, 0]
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=40, show_helper=False)
+    settle(viewer_client)
+    _wait_object(page, "broken")
+    _wait_caps(page, "bridged", 1)
+    frames(page, 2)
+    assert _caps(page, "broken") == []
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=65, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(page, "broken", 1)
+    assert _caps(page, "broken")[0]["open"] == 0
+
+
+@pytest.mark.browser
+def test_tube_clip_cap_false_and_delete(viewer_client, viewer_page):
+    page = viewer_page
+    spine = _line((0, 0), (100, 0), step=10)
+    n = len(spine)
+    w, h = np.full(n, 8.0), np.full(n, 3.0)
+    viewer_client.add_parametric_tube("open", spine, w, h, lod=False, clip_cap=False)
+    viewer_client.add_parametric_tube("t", spine, w, h, lod=False, position=[0, 20, 0])
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=50, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(page, "t", 1)
+    assert _cap_count(page, "open") == 0
+    viewer_client.delete("t")
+    settle(viewer_client)
+    frames(page, 2)
+    leftover = page.evaluate(
+        "() => { let k = 0; window.threejsViewer._scene.traverse("
+        "(c) => { if (c.userData.__clipCap) k++; }); return k; }"
+    )
+    assert leftover == 0
+
+
+@pytest.mark.browser
+def test_torus_cap_is_an_annulus(viewer_client, viewer_page):
+    """The slicer fills the outer loop and leaves the inner one as a hole."""
+    page = viewer_page
+    viewer_client._send(
+        {
+            "type": "add_object",
+            "id": "ring",
+            "object": {
+                "primitive": "torus",
+                "params": {"radius": 0.5, "tube": 0.2, "color": 0xFF0000},
+            },
+        }
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.01, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(page, "ring", 1)
+    (cap,) = _caps(page, "ring")
+    assert cap["open"] == 0
+    r = math.sqrt(0.2**2 - 0.01**2)
+    annulus = math.pi * ((0.5 + r) ** 2 - (0.5 - r) ** 2)
+    assert cap["area"] == pytest.approx(annulus, rel=0.03)
+    assert _union_area(page, "ring", grid=200) == pytest.approx(annulus, rel=0.04)
+
+
+@pytest.mark.browser
+def test_tube_slab_cut_reads_cap_colour(viewer_client, viewer_page):
+    page = viewer_page
+    viewer_client.set_sun(enabled=False)
+    spine = _line((-20, 0), (20, 0), step=5)
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "t", spine, np.full(n, 8.0), np.full(n, 3.0), lod=False, color=0xFF0000
+    )
+    viewer_client.set_clipping_slab(
+        normal=[0, 0, 1], center=0.0, thickness=0.4, show_helper=False
+    )
+    viewer_client.set_camera(position=[0.01, 0.01, 60], target=[0, 0, 0], up=[0, 1, 0])
+    settle(viewer_client)
+    _wait_object(page, "t")
+    frames(page, 3)
+    assert not _is_red(page.evaluate(_PIXEL_AT, [0, 0, 0.2]))
+    viewer_client.set_clipping_caps(True)
+    settle(viewer_client)
+    _wait_caps(page, "t", 2)
+    assert _is_red(page.evaluate(_PIXEL_AT, [0, 0, 0.2]))

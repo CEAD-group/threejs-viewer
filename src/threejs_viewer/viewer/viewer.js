@@ -8433,13 +8433,16 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
 // `clipCaps` option / `clip_caps` URL param / `set_clipping_caps`, or a
 // per-object `clipCap` override. Meshes and models stay open.
 
-// Above this many drawn triangles a cap rebuild runs at most every
-// CLIP_CAP_THROTTLE_MS (the tube LOD cadence), so a plane drag stays smooth.
+// Above this many drawn triangles, or once a rebuild took longer than
+// CLIP_CAP_SYNC_MS (a long loop is slow to triangulate), a cap rebuild runs at
+// most every CLIP_CAP_THROTTLE_MS (the tube LOD cadence) so a drag stays usable.
 const CLIP_CAP_SYNC_TRIANGLES = 200000;
+const CLIP_CAP_SYNC_MS = 8;
 const CLIP_CAP_THROTTLE_MS = 500;
 // Triangles per bounding box in the tube slicer's plane-straddle prefilter.
 const CLIP_CAP_CHUNK_TRIS = 256;
-// Closed convex primitives; a plane is a sheet and gets no cap.
+// Closed convex primitives; a plane is a sheet and gets no cap. The torus is
+// closed but not convex, so it goes through the triangle slicer.
 const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
 
 /**
@@ -8481,6 +8484,20 @@ function convexHull2D(xs, ys, n) {
     }
     lower.pop(); upper.pop();
     return lower.concat(upper);
+}
+
+/**
+ * Even-odd point-in-polygon test in 2D.
+ * @param {THREE.Vector2} q @param {THREE.Vector2[]} poly
+ */
+function pointInPolygon2D(q, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i], b = poly[j];
+        if ((a.y > q.y) !== (b.y > q.y)
+            && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
 }
 
 /**
@@ -8556,6 +8573,79 @@ class ClipCapBuilder {
     _vertex(i) {
         this.pos.push(this._p[i * 3], this._p[i * 3 + 1], this._p[i * 3 + 2]);
         if (this.col) this.col.push(this._c[i * 3], this._c[i * 3 + 1], this._c[i * 3 + 2]);
+    }
+
+    /**
+     * Triangulate closed loops of points on the plane. Loops running
+     * counter-clockwise about +n are filled; clockwise ones are holes in the
+     * smallest filled loop containing them. Overlapping filled loops (a round
+     * join body inside its bead) each get their own coplanar fan.
+     * @param {{pts: number[], cols: number[] | null}[]} loops
+     */
+    emitLoops(loops) {
+        const [ux, uy, uz, vx, vy, vz] = this.basis;
+        /** @type {{v: THREE.Vector2[], area: number, loop: any, holes: any[], box: number[]}[]} */
+        const outer = [];
+        /** @type {{v: THREE.Vector2[], area: number, loop: any}[]} */
+        const holes = [];
+        for (const loop of loops) {
+            const n = loop.pts.length / 3;
+            if (n < 3) continue;
+            /** @type {THREE.Vector2[]} */ const v = [];
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (let i = 0; i < n; i++) {
+                const x = loop.pts[i * 3], y = loop.pts[i * 3 + 1], z = loop.pts[i * 3 + 2];
+                const px = x * ux + y * uy + z * uz, py = x * vx + y * vy + z * vz;
+                v.push(new THREE.Vector2(px, py));
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
+            }
+            const area = THREE.ShapeUtils.area(v);
+            if (!(Math.abs(area) > 0)) continue;
+            if (area > 0) outer.push({ v, area, loop, holes: [], box: [minX, minY, maxX, maxY] });
+            else holes.push({ v, area, loop });
+        }
+        for (const h of holes) {
+            const q = h.v[0];
+            /** @type {any} */ let best = null;
+            for (const o of outer) {
+                const b = o.box;
+                if (q.x < b[0] || q.x > b[2] || q.y < b[1] || q.y > b[3]) continue;
+                if (!pointInPolygon2D(q, o.v)) continue;
+                if (!best || o.area < best.area) best = o;
+            }
+            if (best) best.holes.push(h);
+        }
+        for (const o of outer) {
+            const parts = [o, ...o.holes];
+            /** @type {THREE.Vector2[]} */ const V = [];
+            /** @type {number[]} */ const P = [];
+            /** @type {number[]} */ const C = [];
+            for (const part of parts) {
+                for (let i = 0; i < part.v.length; i++) {
+                    V.push(part.v[i]);
+                    P.push(part.loop.pts[i * 3], part.loop.pts[i * 3 + 1], part.loop.pts[i * 3 + 2]);
+                    if (this.col) {
+                        const cs = part.loop.cols;
+                        if (cs) C.push(cs[i * 3], cs[i * 3 + 1], cs[i * 3 + 2]); else C.push(1, 1, 1);
+                    }
+                }
+            }
+            // Copies: triangulateShape drops a closing duplicate in place,
+            // which would shift the index mapping built above.
+            const faces = THREE.ShapeUtils.triangulateShape(o.v.slice(), o.holes.map((h) => h.v.slice()));
+            for (const f of faces) {
+                let a = f[0], b = f[1], c = f[2];
+                const ccw = (V[b].x - V[a].x) * (V[c].y - V[a].y) - (V[b].y - V[a].y) * (V[c].x - V[a].x);
+                if (ccw > 0) { const t = b; b = c; c = t; }
+                for (const i of [a, b, c]) {
+                    this.pos.push(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
+                    if (this.col) this.col.push(C[i * 3], C[i * 3 + 1], C[i * 3 + 2]);
+                }
+            }
+        }
     }
 
     /** @returns {THREE.BufferGeometry | null} */
@@ -8678,6 +8768,214 @@ function buildSweptClipCap(geometry, layout, out) {
 }
 
 /**
+ * Per-chunk bounding boxes of a triangle list (CLIP_CAP_CHUNK_TRIS triangles
+ * each), so the slicer skips chunks that do not straddle the plane.
+ * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} idx @param {number} nTri
+ */
+function clipCapChunkBoxes(pos, idx, nTri) {
+    const nChunks = Math.ceil(nTri / CLIP_CAP_CHUNK_TRIS);
+    const boxes = new Float32Array(nChunks * 6);
+    for (let k = 0; k < nChunks; k++) {
+        let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+        const end = Math.min(nTri, (k + 1) * CLIP_CAP_CHUNK_TRIS) * 3;
+        for (let i = k * CLIP_CAP_CHUNK_TRIS * 3; i < end; i++) {
+            const v = (idx ? idx[i] : i) * 3;
+            const x = pos[v], y = pos[v + 1], z = pos[v + 2];
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+            if (z < z0) z0 = z;
+            if (z > z1) z1 = z;
+        }
+        const o = k * 6;
+        boxes[o] = x0; boxes[o + 1] = y0; boxes[o + 2] = z0;
+        boxes[o + 3] = x1; boxes[o + 4] = y1; boxes[o + 5] = z1;
+    }
+    return boxes;
+}
+
+/**
+ * Slice the drawn triangles of a surface made of closed pieces and chain the
+ * crossings into loops. A segment runs along n × N with N the outward vertex
+ * normal, so an outer boundary turns counter-clockwise about +n and a hole
+ * clockwise. Used for parametric tubes, whose drawn index range already
+ * reflects draw range, breaks, round joins, LOD and strand collapse.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {ClipCapBuilder} out
+ * @param {Float32Array | null} boxes  per-chunk boxes from clipCapChunkBoxes
+ */
+function buildSlicedClipCap(geometry, out, boxes) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const nAttr = geometry.getAttribute('normal');
+    const nrm = nAttr ? /** @type {ArrayLike<number>} */ (nAttr.array) : null;
+    const cAttr = geometry.getAttribute('color');
+    const col = out.col && cAttr && cAttr.itemSize === 3 ? /** @type {ArrayLike<number>} */ (cAttr.array) : null;
+    const index = geometry.getIndex();
+    const idx = index ? index.array : null;
+    const total = idx ? idx.length : pos.length / 3;
+    const start = Math.max(0, geometry.drawRange.start);
+    const end = Math.min(total, start + geometry.drawRange.count);
+    const t0 = Math.ceil(start / 3), t1 = Math.floor(end / 3);
+    if (t1 <= t0) return;
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const radius = Math.max(geometry.boundingSphere ? geometry.boundingSphere.radius : 1, 1e-9);
+    const quant = radius * 1e-7;
+    const nx = out.nx, ny = out.ny, nz = out.nz;
+
+    // Welded crossing points and directed segments between them.
+    /** @type {Map<string, number>} */ const keyOf = new Map();
+    /** @type {number[]} */ const PX = [];
+    /** @type {number[]} */ const PC = [];
+    /** @type {number[]} */ const segFrom = [];
+    /** @type {number[]} */ const segTo = [];
+    /** @param {number} o */
+    const weld = (o) => {
+        const x = cross[o], y = cross[o + 1], z = cross[o + 2];
+        const key = `${Math.round(x / quant)},${Math.round(y / quant)},${Math.round(z / quant)}`;
+        let id = keyOf.get(key);
+        if (id === undefined) {
+            id = PX.length / 3;
+            keyOf.set(key, id);
+            PX.push(x, y, z);
+            PC.push(cross[o + 3], cross[o + 4], cross[o + 5]);
+        }
+        return id;
+    };
+    const cross = new Float64Array(18);
+    let nc = 0;
+    /** @param {number} a @param {number} b @param {number} sa @param {number} sb */
+    const crossing = (a, b, sa, sb) => {
+        // Canonical endpoint order, so a shared edge (or a duplicated rim
+        // vertex) gives the same bits from both of its triangles.
+        let a3 = a * 3, b3 = b * 3;
+        if (pos[a3] > pos[b3] || (pos[a3] === pos[b3] && (pos[a3 + 1] > pos[b3 + 1]
+            || (pos[a3 + 1] === pos[b3 + 1] && pos[a3 + 2] > pos[b3 + 2])))) {
+            const ti = a3; a3 = b3; b3 = ti;
+            const ts = sa; sa = sb; sb = ts;
+        }
+        const t = sa / (sa - sb);
+        const o = nc * 6;
+        cross[o] = pos[a3] + t * (pos[b3] - pos[a3]);
+        cross[o + 1] = pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]);
+        cross[o + 2] = pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]);
+        if (col) {
+            cross[o + 3] = col[a3] + t * (col[b3] - col[a3]);
+            cross[o + 4] = col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]);
+            cross[o + 5] = col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]);
+        } else {
+            cross[o + 3] = 1; cross[o + 4] = 1; cross[o + 5] = 1;
+        }
+        nc++;
+    };
+    for (let t = t0; t < t1; t++) {
+        if (boxes && t % CLIP_CAP_CHUNK_TRIS === 0) {
+            const o = (t / CLIP_CAP_CHUNK_TRIS) * 6;
+            if (o < boxes.length) {
+                const cx = (boxes[o] + boxes[o + 3]) / 2, cy = (boxes[o + 1] + boxes[o + 4]) / 2;
+                const cz = (boxes[o + 2] + boxes[o + 5]) / 2;
+                const r = Math.abs(nx) * (boxes[o + 3] - cx) + Math.abs(ny) * (boxes[o + 4] - cy)
+                    + Math.abs(nz) * (boxes[o + 5] - cz);
+                const dc = out.dist(cx, cy, cz);
+                if (dc - r > 0 || dc + r < 0) { t += CLIP_CAP_CHUNK_TRIS - 1; continue; }
+            }
+        }
+        const a = idx ? idx[t * 3] : t * 3;
+        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
+        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
+        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
+        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+        const pa = sa >= 0, pb = sb >= 0, pc = sc >= 0;
+        if (pa === pb && pb === pc) continue;
+        nc = 0;
+        if (pa !== pb) crossing(a, b, sa, sb);
+        if (pb !== pc) crossing(b, c, sb, sc);
+        if (pc !== pa) crossing(c, a, sc, sa);
+        if (nc !== 2) continue;
+        const i0 = weld(0), i1 = weld(6);
+        if (i0 === i1) continue;
+        // Outward normal: the vertex normals when present, else the winding.
+        let Nx, Ny, Nz;
+        if (nrm) {
+            Nx = nrm[a * 3] + nrm[b * 3] + nrm[c * 3];
+            Ny = nrm[a * 3 + 1] + nrm[b * 3 + 1] + nrm[c * 3 + 1];
+            Nz = nrm[a * 3 + 2] + nrm[b * 3 + 2] + nrm[c * 3 + 2];
+        } else {
+            const e1x = pos[b * 3] - pos[a * 3], e1y = pos[b * 3 + 1] - pos[a * 3 + 1], e1z = pos[b * 3 + 2] - pos[a * 3 + 2];
+            const e2x = pos[c * 3] - pos[a * 3], e2y = pos[c * 3 + 1] - pos[a * 3 + 1], e2z = pos[c * 3 + 2] - pos[a * 3 + 2];
+            Nx = e1y * e2z - e1z * e2y; Ny = e1z * e2x - e1x * e2z; Nz = e1x * e2y - e1y * e2x;
+        }
+        const mx = ny * Nz - nz * Ny, my = nz * Nx - nx * Nz, mz = nx * Ny - ny * Nx;
+        const dx = cross[6] - cross[0], dy = cross[7] - cross[1], dz = cross[8] - cross[2];
+        if (dx * mx + dy * my + dz * mz >= 0) { segFrom.push(i0); segTo.push(i1); }
+        else { segFrom.push(i1); segTo.push(i0); }
+    }
+    const nSeg = segFrom.length;
+    if (!nSeg) return;
+
+    // Chain: outgoing segment lists per point, walked until the loop closes.
+    const nPts = PX.length / 3;
+    const head = new Int32Array(nPts).fill(-1);
+    const next = new Int32Array(nSeg);
+    for (let s = nSeg - 1; s >= 0; s--) { next[s] = head[segFrom[s]]; head[segFrom[s]] = s; }
+    const used = new Uint8Array(nSeg);
+    /** @type {number[][]} */ const closed = [];
+    /** @type {number[][]} */ const open = [];
+    for (let s0 = 0; s0 < nSeg; s0++) {
+        if (used[s0]) continue;
+        const chain = [segFrom[s0]];
+        let s = s0;
+        let isClosed = false;
+        for (;;) {
+            used[s] = 1;
+            const to = segTo[s];
+            if (to === segFrom[s0]) { isClosed = true; break; }
+            chain.push(to);
+            let n2 = -1;
+            for (let q = head[to]; q >= 0; q = next[q]) if (!used[q]) { n2 = q; break; }
+            if (n2 < 0) break;
+            s = n2;
+        }
+        (isClosed ? closed : open).push(chain);
+    }
+    // A chain broken at a near-coincident point the weld missed: join its end
+    // to the closest chain start within tolerance, then close what is left.
+    const tol2 = (radius * 1e-4) ** 2;
+    /** @param {number} p @param {number} q */
+    const d2 = (p, q) => (PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
+        + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2;
+    let merged = true;
+    while (merged && open.length) {
+        merged = false;
+        for (let i = 0; i < open.length && !merged; i++) {
+            const tail = open[i][open[i].length - 1];
+            let best = -1, bestD = tol2;
+            for (let j = 0; j < open.length; j++) {
+                const d = d2(tail, open[j][0]);
+                if (d <= bestD) { bestD = d; best = j; }
+            }
+            if (best === i) { closed.push(open[i]); open.splice(i, 1); merged = true; }
+            else if (best >= 0) {
+                open[i] = open[i].concat(open[best]);
+                open.splice(best, 1);
+                merged = true;
+            }
+        }
+    }
+    for (const ch of open) closed.push(ch);
+    out.emitLoops(closed.map((ch) => {
+        /** @type {number[]} */ const pts = [];
+        /** @type {number[]} */ const cols = [];
+        for (const p of ch) {
+            pts.push(PX[p * 3], PX[p * 3 + 1], PX[p * 3 + 2]);
+            cols.push(PC[p * 3], PC[p * 3 + 1], PC[p * 3 + 2]);
+        }
+        return { pts, cols: col ? cols : null };
+    }));
+}
+
+/**
  * Owns every clip cap: decides per frame which capped solids need a rebuild
  * (plane, transform, geometry, draw range or colour layout changed), keeps
  * each cap's material in step with its owner, and removes caps when clipping
@@ -8771,18 +9069,20 @@ class ClipCapController {
         }
         let st = mesh.userData.__clipCapState;
         if (!st) {
-            st = mesh.userData.__clipCapState = { sig: null, caps: [], last: -Infinity };
+            st = mesh.userData.__clipCapState = { sig: null, caps: [], last: -Infinity, cost: 0, geomKey: '', boxes: null, boxKey: '' };
         }
         const same = st.sig && st.sig.length === sig.length
             && st.sig.every((/** @type {number} */ x, /** @type {number} */ i) => x === sig[i]);
         if (!same) {
             const total = index ? index.count : posAttr.count;
             const drawn = Math.min(total, geom.drawRange.count) / 3;
-            const throttled = drawn > CLIP_CAP_SYNC_TRIANGLES && now - st.last < CLIP_CAP_THROTTLE_MS;
-            if (!throttled) {
+            const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
+            if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
+                const t0 = performance.now();
                 this._rebuild(mesh, st, local, withColor);
                 st.sig = sig;
                 st.last = now;
+                st.cost = performance.now() - t0;
             }
         }
         this._syncMaterials(mesh, st, own, withColor);
@@ -8795,12 +9095,28 @@ class ClipCapController {
     _rebuild(mesh, st, local, withColor) {
         const kind = mesh.userData.clipCapKind;
         const geom = mesh.geometry;
+        /** @type {Float32Array | null} */ let boxes = null;
+        if (kind === 'sliced') {
+            // Chunk boxes pay off once the geometry held still between two
+            // rebuilds (a plane drag); while it changes a plain pass is cheaper.
+            const index = geom.getIndex();
+            const key = `${geom.id}:${geom.getAttribute('position').version}:${index ? index.version : -1}`;
+            if (st.boxKey === key) boxes = st.boxes;
+            else if (st.geomKey === key) {
+                const pos = /** @type {ArrayLike<number>} */ (geom.getAttribute('position').array);
+                const idx = index ? index.array : null;
+                st.boxes = boxes = clipCapChunkBoxes(pos, idx, (idx ? idx.length : pos.length / 3) / 3);
+                st.boxKey = key;
+            }
+            st.geomKey = key;
+        }
         const planes = this.v._clipPlanes;
         for (let i = 0; i < planes.length; i++) {
             const [nx, ny, nz, c] = local[i];
             const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
             if (kind === 'convex') buildConvexClipCap(geom, out);
             else if (kind === 'swept') buildSweptClipCap(geom, mesh.userData.sweptLayout, out);
+            else if (kind === 'sliced') buildSlicedClipCap(geom, out, boxes);
             const g = out.toGeometry();
             let cap = st.caps[i];
             if (!g) {
@@ -14854,6 +15170,7 @@ export class ThreeJSViewer {
             const mesh = new THREE.Mesh(geometry, material);
             // Convex solids get the hull of their cut edges as a clip cap (issue #259).
             if (CLIP_CAP_CONVEX_PRIMITIVES.has(objData.primitive)) mesh.userData.clipCapKind = 'convex';
+            else if (objData.primitive === 'torus') mesh.userData.clipCapKind = 'sliced';
             if (typeof params.clipCap === 'boolean') mesh.userData.clipCap = params.clipCap;
             // A crisper accent over the translucent fill; opt-in, so every
             // other path stays the single Mesh it was.
@@ -18467,6 +18784,9 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
+                        // Clip caps slice the drawn triangles (issue #259).
+                        mesh.userData.clipCapKind = 'sliced';
+                        if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         // The mesh now owns the texture references; _deleteObject
                         // releases them.
                         if (texKeys) { mesh.userData.tubeTextureKeys = texKeys; texKeys = null; }

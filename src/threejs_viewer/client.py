@@ -2944,6 +2944,7 @@ class ViewerClient:
         joins: Optional[str] = None,
         join_tolerance: float = 0.015,
         join_budget: Optional[float] = 0.15,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -3079,6 +3080,8 @@ class ViewerClient:
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
                 from picking (it is then never hit-tested, at zero cost).
+            clip_cap: Override :meth:`set_clipping_caps` for this tube (also
+                accepted by :meth:`add_toolpath`).
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at
@@ -3242,6 +3245,8 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         # The mitered strip at the default tolerance and budget is the
         # viewer's own default, so the header carries the keys only when
         # they differ; a null budget lifts the cap.
