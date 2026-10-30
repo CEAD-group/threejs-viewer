@@ -1353,8 +1353,9 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             visible: Initial visibility
-            pickable: When False, click-to-pivot passes through this group
-                and everything under it (issue #215).
+            pickable: When False, click-to-pivot, object clicks and
+                double-click framing pass through this group and everything
+                under it (issues #215, #287).
         """
         msg: dict = {"type": "add_group", "id": id}
         if parent:
@@ -2053,7 +2054,9 @@ class ViewerClient:
                 carries no per-hover cost (the viewer keeps no pick data for
                 it). Picking is still globally gated by
                 :meth:`enable_polyline_picking`; ``pickable`` only narrows
-                *which* objects participate.
+                *which* objects participate. ``False`` also makes
+                click-to-pivot, object clicks and double-click framing pass
+                through the line.
             segments: When ``True``, render disjoint line *segments* instead
                 of one connected polyline: consecutive point pairs
                 ``(0,1), (2,3), ...`` each draw an independent edge
@@ -2065,7 +2068,9 @@ class ViewerClient:
                 renders ``THREE.LineSegments``. Per-vertex ``colors``,
                 ``set_draw_range`` (leading ``frac*N`` points, whole edges)
                 and ``update_polyline_colors`` work as usual. Segment soups
-                have no arc length, so the object is never pickable.
+                have no arc length, so the viewer never arc-length picks
+                them; ``pickable`` still governs click-to-pivot and object
+                clicks.
             position: [x, y, z] position
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
@@ -2083,7 +2088,6 @@ class ViewerClient:
                     f"segments=True needs an even point count "
                     f"(pairs of edge endpoints), got {n_points}"
                 )
-            pickable = False
 
         # Process colors if provided
         color_bytes = b""
@@ -2168,9 +2172,10 @@ class ViewerClient:
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
             visible: Initial visibility
-            pickable: When False, click-to-pivot passes through this mesh
-                (a translucent volume such as a workzone fill), so the
-                pivot lands on what sits behind it (issue #215).
+            pickable: When False, click-to-pivot, object clicks and
+                double-click framing pass through this mesh (a translucent
+                volume such as a workzone fill), so they land on what sits
+                behind it (issues #215, #287).
             depth_write: Overrides the default (depth only when opaque) and
                 survives ``set_opacity``/``set_color``.
             polygon_offset: With ``polygon_offset_units``, separates coplanar
@@ -3053,7 +3058,9 @@ class ViewerClient:
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
-                from picking (it is then never hit-tested, at zero cost).
+                from picking (it is then never hit-tested, at zero cost);
+                click-to-pivot, object clicks and double-click framing then
+                pass through it too.
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at

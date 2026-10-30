@@ -9471,6 +9471,82 @@ def test_object_click_skips_hidden_ancestor(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_object_click_skips_hidden_and_unpickable_descendants(
+    viewer_client, viewer_page
+):
+    """A hidden descendant of a visible group is not hit, so it neither
+    resolves to that group nor occludes the visible child behind it, and a
+    pickable=False subtree is a passthrough as for click-to-pivot (issue #287)."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    viewer_client.add_box(
+        "shell",
+        width=6,
+        height=6,
+        depth=0.5,
+        position=[0, 0, 2],
+        parent="grp",
+        visible=False,
+    )
+    viewer_client.add_group("vol", pickable=False)
+    viewer_client.add_box(
+        "fill", width=2, height=2, depth=0.5, position=[0, 0, 3], parent="vol"
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    hit_at = """([x, y, z]) => { const v = window.threejsViewer;
+      const w = v._renderer.domElement.clientWidth,
+            h = v._renderer.domElement.clientHeight;
+      const r = v._renderer.domElement.getBoundingClientRect();
+      const ndc = v._camera.position.clone().set(x, y, z).project(v._camera);
+      const hit = v._hitTrackedObject(r.left + (ndc.x*0.5+0.5)*w,
+                                      r.top + (-ndc.y*0.5+0.5)*h);
+      return hit && hit.id; }"""
+    # Through the hidden shell and the unpickable fill onto the child.
+    assert viewer_page.evaluate(hit_at, [0, 0, 0]) == "child"
+    # Through only the hidden shell: nothing, not the parent group.
+    assert viewer_page.evaluate(hit_at, [2, 0, 0]) is None
+
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_frame_object_ignores_hidden_and_grid_descendants(viewer_client, viewer_page):
+    """frameObject applies the framing rules of F/Home: a hidden mesh and a
+    parented floor grid under the group leave its fit unchanged, while an
+    object with nothing visible still frames its own extent (issue #287)."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    settle(viewer_client)
+    dist = """(id) => { const v = window.threejsViewer;
+      v.frameObject(v._objects.get(id));
+      return v._camera.position.distanceTo(v._controls.target); }"""
+    before = viewer_page.evaluate(dist, "grp")
+
+    viewer_client.add_box(
+        "shell",
+        width=40,
+        height=40,
+        depth=40,
+        position=[30, 0, 0],
+        parent="grp",
+        visible=False,
+    )
+    viewer_client.add_grid("floor", extent=200, parent="grp")
+    settle(viewer_client)
+    assert viewer_page.evaluate(dist, "grp") == pytest.approx(before, rel=1e-6)
+    # Framing the hidden shell itself falls back to its full box.
+    assert viewer_page.evaluate(dist, "shell") > 10 * before
+
+
+@pytest.mark.browser
 def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
     """A pointercancel between press and release (a cancelled touch or pen)
     clears the pending press, so the later pointerup is not a click."""

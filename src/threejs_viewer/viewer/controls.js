@@ -55,9 +55,11 @@ const POLE_EPS = THREE.MathUtils.degToRad(5); // turntable pitch clamp
 /**
  * True when `obj` and every ancestor are visible and none opts out of picking
  * (`userData.pickable === false`, recorded by the viewer's add handlers).
+ * Shared by click-to-pivot, the viewer's object click / dblclick hit test and
+ * its floor-grid pivot, because three's raycaster ignores `.visible`.
  * @param {import('three').Object3D | null} obj
  */
-function isPivotTarget(obj) {
+function isPickTarget(obj) {
     for (let n = obj; n; n = n.parent) {
         if (n.visible === false || (n.userData && n.userData.pickable === false)) return false;
     }
@@ -342,7 +344,7 @@ class ViewerControls extends THREE.EventDispatcher {
                     // three's raycaster ignores `.visible`, so a mesh under a
                     // hidden ancestor is still returned, and an object sent
                     // with pickable=false is a passthrough for the pivot.
-                    const hit = hits.find((h) => isPivotTarget(h.object));
+                    const hit = hits.find((h) => isPickTarget(h.object));
                     if (hit) {
                         this.target.copy(hit.point);
                         this.dispatchEvent({ type: 'pivot', point: hit.point.clone(), hit: true });
@@ -541,4 +543,4 @@ class ViewerControls extends THREE.EventDispatcher {
     }
 }
 
-export { ViewerControls };
+export { ViewerControls, isPickTarget };

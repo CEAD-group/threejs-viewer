@@ -1,6 +1,6 @@
 // @ts-check
 import * as THREE from 'three';
-import { ViewerControls } from './controls.js';
+import { ViewerControls, isPickTarget } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -19222,12 +19222,7 @@ export class ThreeJSViewer {
         /** @type {THREE.Intersection[]} */
         const hits = [];
         for (const obj of this._objects.values()) {
-            if (!obj || !obj.userData.isGrid) continue;
-            let shown = true;
-            for (let n = obj; n; n = n.parent) {
-                if (n.visible === false || n.userData.pickable === false) { shown = false; break; }
-            }
-            if (!shown) continue;
+            if (!obj || !obj.userData.isGrid || !isPickTarget(obj)) continue;
             THREE.Mesh.prototype.raycast.call(/** @type {THREE.Mesh} */ (obj), raycaster, hits);
         }
         if (hits.length === 0) return null;
@@ -19235,16 +19230,26 @@ export class ThreeJSViewer {
         return hits[0].point.clone();
     }
 
-    /** @param {THREE.Object3D} object */
+    /**
+     * Fit the camera to one object's visible content, with the rules
+     * `_collectFrameableBounds` applies to the whole scene (hidden subtrees,
+     * floor grids and overlays skipped). An object with nothing visible
+     * (hidden itself, or only hidden children) frames its full extent, so an
+     * explicit request still moves the camera.
+     * @param {THREE.Object3D} object
+     */
     frameObject(object) {
-        const bbox = new THREE.Box3();
+        let bbox = new THREE.Box3();
         object.updateWorldMatrix(true, true);
-        bbox.expandByObject(object);
-        // LOD point clouds know their full extent from the hierarchy even
-        // when few (or no) node payloads are streamed in yet.
-        if (object.userData.lodRootBox) {
-            bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
-                .applyMatrix4(object.matrixWorld));
+        this._expandFrameableBounds(bbox, object);
+        if (bbox.isEmpty()) {
+            bbox = new THREE.Box3().expandByObject(object);
+            // LOD point clouds know their full extent from the hierarchy even
+            // when few (or no) node payloads are streamed in yet.
+            if (object.userData.lodRootBox) {
+                bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
+                    .applyMatrix4(object.matrixWorld));
+            }
         }
         this._fitCameraToBox(bbox, 1.5);
     }
@@ -19613,6 +19618,16 @@ export class ThreeJSViewer {
      */
     _collectFrameableBounds() {
         const bbox = new THREE.Box3();
+        this._expandFrameableBounds(bbox, this._scene);
+        return bbox;
+    }
+
+    /**
+     * Union the frameable content of `root`'s subtree into `bbox`: the visit
+     * behind `_collectFrameableBounds` and `frameObject`.
+     * @param {THREE.Box3} bbox @param {THREE.Object3D} root
+     */
+    _expandFrameableBounds(bbox, root) {
         const visit = /** @param {any} child */ (child) => {
             if (!child.visible) return;
             // Embedder overlays are excluded from framing unless opted in.
@@ -19645,8 +19660,7 @@ export class ThreeJSViewer {
             const kids = child.children;
             for (let i = 0; i < kids.length; i++) visit(kids[i]);
         };
-        visit(this._scene);
-        return bbox;
+        visit(root);
     }
 
     // ----- Picking (client-side API) -----
@@ -20271,9 +20285,11 @@ export class ThreeJSViewer {
      * the nearest hit to its top-level tracked object. Shared by the dblclick
      * framing handler and the object-click event so both agree on what "the
      * object under the cursor" is. Unlike `pick()` this includes lines and
-     * point clouds. A tracked object under a hidden ancestor (a child of a
-     * group hidden with set_visibility) is skipped: three's raycaster does
-     * not check visibility, and unrendered content must not report a click.
+     * point clouds. A hit is skipped when the hit node or any ancestor is
+     * hidden or sent with `pickable: false` (`isPickTarget`, the click-to-pivot
+     * rule of issue #215): three's raycaster does not check visibility, so a
+     * hidden descendant of a visible group would otherwise resolve to that
+     * group (issue #287).
      * @param {number} clientX @param {number} clientY
      * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
      */
@@ -20284,12 +20300,7 @@ export class ThreeJSViewer {
         /** @type {Map<THREE.Object3D, string>} */
         const ids = new Map();
         for (const [id, obj] of this._objects) {
-            if (!obj) continue;
-            let shown = true;
-            for (let n = obj; n; n = n.parent) {
-                if (n.visible === false) { shown = false; break; }
-            }
-            if (shown) { candidates.push(obj); ids.set(obj, id); }
+            if (obj && obj.visible) { candidates.push(obj); ids.set(obj, id); }
         }
         if (!candidates.length) return null;
         const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
@@ -20297,6 +20308,7 @@ export class ThreeJSViewer {
             // Parented overlays (issue #254) are inside the candidates but
             // belong to the embedder; a hit on one must not report its parent.
             if (isUnderOverlay(hit.object)) continue;
+            if (!isPickTarget(hit.object)) continue;
             // Walk up to the top-level object the user added (a value of _objects).
             let target = hit.object;
             while (target && !ids.has(target)) target = target.parent;

@@ -135,7 +135,7 @@ def build():
 
     # Strip the local controls.js import from viewer.js (we inline it instead).
     js_content = re.sub(
-        r"^\s*import\s+\{\s*ViewerControls\s*\}\s+from\s+['\"]\./controls\.js['\"];?\s*$\n?",
+        r"^\s*import\s+\{[^}]*\}\s+from\s+['\"]\./controls\.js['\"];?\s*$\n?",
         "",
         js_content,
         count=1,

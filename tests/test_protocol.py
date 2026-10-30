@@ -1491,7 +1491,9 @@ def test_add_polyline_segments_header_and_constraints(client):
     header, payload = client._binary_messages[0]
     assert header["segments"] is True
     assert header["fat"] is True  # segments honors fat (LineSegments2)
-    assert header["pickable"] is False  # edge soups have no arc length
+    # Edge soups have no arc length (the viewer skips arc-length picking), but
+    # stay click and pivot targets unless the caller opts out.
+    assert header["pickable"] is True
     assert header["numPoints"] == 4
     assert len(payload) == 4 * 12
     # the native path is still reachable
@@ -1499,7 +1501,9 @@ def test_add_polyline_segments_header_and_constraints(client):
     native_header, _ = client._binary_messages[1]
     assert native_header["segments"] is True
     assert native_header["fat"] is False
-    assert native_header["pickable"] is False
+    assert native_header["pickable"] is True
+    client.add_polyline("seg_off", pairs, segments=True, pickable=False)
+    assert client._binary_messages[2][0]["pickable"] is False
     # odd point count rejected
     with pytest.raises(ValueError, match="even point count"):
         client.add_polyline("bad", pairs[:3], segments=True)
