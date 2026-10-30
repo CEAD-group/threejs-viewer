@@ -1970,3 +1970,29 @@ def test_set_cubemap_sends_and_records(connected_client):
         with pytest.raises(ValueError):
             client.set_cubemap(bad)
     assert len(client._messages) == 1
+
+
+def test_add_polyline_exact_colors_header(client):
+    pts = np.zeros((4, 3), dtype=np.float32)
+    client.add_polyline("a", pts, colors=np.ones((4, 3)))
+    client.add_polyline("b", pts, colors=np.ones((4, 3)), exact_colors=True)
+    a, b = (h for h, _ in client._binary_messages)
+    # Default payloads stay byte-identical: the key is absent, not False.
+    assert "exactColors" not in a
+    assert b["exactColors"] is True
+    with pytest.raises(ValueError, match="exact_colors"):
+        client.add_polyline("c", pts, exact_colors="yes")
+
+
+def test_update_polyline_colors_exact_colors_header(client):
+    colors = np.ones((4, 3))
+    client.update_polyline_colors("a", colors)
+    client.update_polyline_colors("a", colors, exact_colors=True)
+    client.update_polyline_colors("a", colors, exact_colors=False)
+    keep, on, off = (h for h, _ in client._binary_messages)
+    # None keeps the add-time mode, so nothing is sent.
+    assert "exactColors" not in keep
+    assert on["exactColors"] is True
+    assert off["exactColors"] is False
+    with pytest.raises(ValueError, match="exact_colors"):
+        client.update_polyline_colors("a", colors, exact_colors=1)

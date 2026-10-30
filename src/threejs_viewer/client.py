@@ -2024,6 +2024,7 @@ class ViewerClient:
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
         matrix: Optional[List[float]] = None,
+        exact_colors: bool = False,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -2070,7 +2071,14 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
+            exact_colors: When ``True``, the line renders the colours as given
+                (sRGB, e.g. palette or CSS legend colours): the viewer decodes
+                the bytes from sRGB and skips tone mapping. The default keeps
+                the historical look, where colours come out lighter. Fog and
+                eye-dome lighting still darken the line with depth.
         """
+        if not isinstance(exact_colors, bool):
+            raise ValueError(f"exact_colors must be a bool, got {exact_colors!r}")
         points = np.asarray(points, dtype=np.float32)
         if len(points.shape) == 2:
             n_points = points.shape[0]
@@ -2116,6 +2124,8 @@ class ViewerClient:
         }
         if segments:
             header["segments"] = True
+        if exact_colors:
+            header["exactColors"] = True
         if parent:
             header["parent"] = parent
         if not visible:
@@ -3467,6 +3477,7 @@ class ViewerClient:
         colormap: str = "viridis",
         cmin: Optional[float] = None,
         cmax: Optional[float] = None,
+        exact_colors: Optional[bool] = None,
     ) -> None:
         """Swap per-vertex colors on an existing polyline without rebuilding it.
 
@@ -3481,7 +3492,14 @@ class ViewerClient:
                 Length must match the polyline's vertex count.
             colormap: Colormap name when `colors` is scalar.
             cmin, cmax: Colormap range. Auto-computed from `colors` if None.
+            exact_colors: ``True``/``False`` switches the line's exact-colour
+                mode (see :meth:`add_polyline`); ``None`` keeps the mode the
+                line was added with.
         """
+        if exact_colors is not None and not isinstance(exact_colors, bool):
+            raise ValueError(
+                f"exact_colors must be a bool or None, got {exact_colors!r}"
+            )
         colors = np.asarray(colors)
         if colors.ndim == 1:
             if cmin is None:
@@ -3502,6 +3520,8 @@ class ViewerClient:
             "id": id,
             "numPoints": n_points,
         }
+        if exact_colors is not None:
+            header["exactColors"] = exact_colors
         self._send_binary(header, colors_rgb.tobytes())
 
     def add_toolpath(

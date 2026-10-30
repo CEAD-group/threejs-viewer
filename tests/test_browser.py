@@ -12433,3 +12433,97 @@ def test_set_gizmo_space_holds_across_attaches(viewer_client, viewer_page):
     viewer_page.evaluate("() => window.threejsViewer.setGizmoSpace('screen')")
     assert viewer_page.evaluate(space) == "world"
     assert _wait_until(lambda: any("setGizmoSpace" in w for w in warnings)), warnings
+
+
+_CENTRE_PIXEL_JS = """() => {
+    const v = window.threejsViewer;
+    v._renderer.render(v._scene, v._camera);
+    const gl = v._renderer.getContext();
+    const x = Math.floor(gl.drawingBufferWidth / 2), y = Math.floor(gl.drawingBufferHeight / 2);
+    const px = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return [px[0], px[1], px[2]];
+}"""
+
+
+def _zigzag_fill(rows: int = 3000) -> np.ndarray:
+    # A dense zigzag covers the view centre fully, even for a 1 px native line.
+    y = np.linspace(-1.0, 1.0, rows)
+    x = np.where(np.arange(rows) % 2 == 0, -1.0, 1.0)
+    return np.column_stack([x, y, np.zeros(rows)]).astype(np.float32)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("fat", [True, False])
+def test_polyline_exact_colors_render_the_sent_srgb_bytes(
+    viewer_client, viewer_page, fat
+):
+    """exact_colors=True decodes sRGB bytes and skips tone mapping, so the
+    canvas shows the palette colour itself (issue #291)."""
+    target = np.array([93, 156, 116])
+    pts = _zigzag_fill()
+    rgb = np.tile(target / 255.0, (len(pts), 1))
+    viewer_client.set_camera(position=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0])
+    viewer_client.add_polyline(
+        "line", pts, colors=rgb, fat=fat, line_width=6, exact_colors=True
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    exact = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
+    assert np.abs(exact - target).max() <= 3, exact
+
+    # The update path converts the same way and keeps the add-time mode.
+    viewer_client.update_polyline_colors("line", rgb[:, [1, 0, 2]])
+    settle(viewer_client)
+    swapped = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
+    assert np.abs(swapped - target[[1, 0, 2]]).max() <= 3, swapped
+
+    # Switching the mode off on update restores the plain, lighter look.
+    viewer_client.update_polyline_colors("line", rgb, exact_colors=False)
+    settle(viewer_client)
+    plain = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
+    assert plain.sum() > exact.sum() + 60, (plain, exact)
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer.getObject('line').material.toneMapped"
+    )
+
+    # And back on, from a line that now carries plain colours.
+    viewer_client.update_polyline_colors("line", rgb, exact_colors=True)
+    settle(viewer_client)
+    again = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
+    assert np.abs(again - target).max() <= 3, again
+
+
+@pytest.mark.browser
+def test_polyline_default_colors_unchanged(viewer_client, viewer_page):
+    """Without exact_colors the line keeps the historical /255 + tone-mapped
+    look: lighter than the sent bytes."""
+    target = np.array([93, 156, 116])
+    pts = _zigzag_fill()
+    rgb = np.tile(target / 255.0, (len(pts), 1))
+    viewer_client.set_camera(position=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0])
+    viewer_client.add_polyline("line", pts, colors=rgb, fat=False)
+    settle(viewer_client)
+    frames(viewer_page)
+    plain = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
+    assert (plain > target + 20).all(), plain
+    state = viewer_page.evaluate(
+        "() => { const o = window.threejsViewer.getObject('line');"
+        " return [o.material.toneMapped, o.userData.exactColors ?? null]; }"
+    )
+    assert state == [True, None]
+
+
+@pytest.mark.browser
+def test_polyline_exact_colors_flat_color_is_untone_mapped(viewer_client, viewer_page):
+    """A flat-colour line is already colour-managed by THREE.Color, so
+    exact_colors only has to turn tone mapping off."""
+    pts = _zigzag_fill()
+    viewer_client.set_camera(position=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0])
+    viewer_client.add_polyline(
+        "line", pts, color=0x5D9C74, fat=True, line_width=6, exact_colors=True
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    px = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
+    assert np.abs(px - [93, 156, 116]).max() <= 3, px
