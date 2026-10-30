@@ -8608,6 +8608,76 @@ function buildConvexClipCap(geometry, out) {
 }
 
 /**
+ * Swept tool cap. The body between two stations and two profile levels is
+ * close to the convex hull of its four rings, so the section is the union of
+ * those cells' convex sections (coplanar overlaps are harmless on an opaque
+ * body). Only station pairs under the draw range contribute.
+ * @param {THREE.BufferGeometry} geometry
+ * @param {{stations: number, levels: number, sections: number, startCapIndexCount: number, indicesPerRingPair: number}} layout
+ * @param {ClipCapBuilder} out
+ */
+function buildSweptClipCap(geometry, layout, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const colAttr = geometry.getAttribute('color');
+    const col = colAttr ? /** @type {ArrayLike<number>} */ (colAttr.array) : null;
+    const N = layout.stations, L = layout.levels, S = layout.sections;
+    const total = geometry.getIndex().count;
+    const count = Math.min(total, geometry.drawRange.count);
+    if (count <= 0 || N < 1 || L < 2) return;
+    const pairs = Math.max(0, Math.min(N - 1,
+        Math.floor((count - layout.startCapIndexCount) / layout.indicesPerRingPair)));
+    const nRings = (pairs > 0 ? pairs + 1 : 1) * L;
+    // Signed distance per vertex and its range per ring, for the stations in play.
+    const sd = new Float64Array(nRings * S);
+    const rMin = new Float64Array(nRings), rMax = new Float64Array(nRings);
+    for (let r = 0; r < nRings; r++) {
+        let lo = Infinity, hi = -Infinity;
+        for (let s = 0; s < S; s++) {
+            const v = r * S + s;
+            const d = out.dist(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
+            sd[v] = d;
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+        }
+        rMin[r] = lo; rMax[r] = hi;
+    }
+    /** @param {number} a @param {number} b */
+    const edge = (a, b) => {
+        if ((sd[a] >= 0) !== (sd[b] >= 0)) out.addCrossing(pos, col, a, b, sd[a], sd[b]);
+    };
+    /** @param {number[]} rings */
+    const cell = (rings) => {
+        let lo = Infinity, hi = -Infinity;
+        for (const r of rings) {
+            if (rMin[r] < lo) lo = rMin[r];
+            if (rMax[r] > hi) hi = rMax[r];
+        }
+        if (lo >= 0 || hi < 0) return;
+        out.resetPoints();
+        const base = rings.map((r) => r * S);
+        // Ring edges plus same-facet connectors between every ring pair:
+        // the edges of the cell's hull for near-parallel rings.
+        for (let s = 0; s < S; s++) {
+            const s1 = (s + 1) % S;
+            for (const b of base) edge(b + s, b + s1);
+            for (let i = 0; i < base.length; i++) {
+                for (let j = i + 1; j < base.length; j++) edge(base[i] + s, base[j] + s);
+            }
+        }
+        out.emitConvex();
+    };
+    if (pairs === 0) {
+        for (let l = 0; l < L - 1; l++) cell([l, l + 1]);
+        return;
+    }
+    for (let k = 0; k < pairs; k++) {
+        for (let l = 0; l < L - 1; l++) {
+            cell([k * L + l, k * L + l + 1, (k + 1) * L + l, (k + 1) * L + l + 1]);
+        }
+    }
+}
+
+/**
  * Owns every clip cap: decides per frame which capped solids need a rebuild
  * (plane, transform, geometry, draw range or colour layout changed), keeps
  * each cap's material in step with its owner, and removes caps when clipping
@@ -8730,6 +8800,7 @@ class ClipCapController {
             const [nx, ny, nz, c] = local[i];
             const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
             if (kind === 'convex') buildConvexClipCap(geom, out);
+            else if (kind === 'swept') buildSweptClipCap(geom, mesh.userData.sweptLayout, out);
             const g = out.toGeometry();
             let cap = st.caps[i];
             if (!g) {
@@ -18617,9 +18688,10 @@ export class ThreeJSViewer {
                             }
                         }
                         const hasColors = !!ringColors;
-                        const { geometry } = buildSweptToolGeometry(
+                        const built = buildSweptToolGeometry(
                             stationPos, axisArr, profileArr, sections, ringColors,
                         );
+                        const geometry = built.geometry;
                         const opacity = data.opacity !== undefined ? data.opacity : 1;
                         const material = new THREE.MeshStandardMaterial({
                             color: hasColors ? 0xffffff : (data.color ?? 0x9aa0a6),
@@ -18636,6 +18708,14 @@ export class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isSweptTool = true;
+                        // Clip caps read the ring layout (issue #259).
+                        mesh.userData.clipCapKind = 'swept';
+                        mesh.userData.sweptLayout = {
+                            stations: nStations, levels: built.levels, sections: built.sections,
+                            startCapIndexCount: built.startCapIndexCount,
+                            indicesPerRingPair: built.indicesPerRingPair,
+                        };
+                        if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         mesh.userData.totalIndexCount = geometry.getIndex().count;
                         // Before _deleteObject, which prunes this id's recorded
                         // visibility baseline (a set_scene_visibility that arrived

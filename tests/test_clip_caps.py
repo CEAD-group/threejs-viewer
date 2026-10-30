@@ -2,6 +2,7 @@
 
 import math
 
+import numpy as np
 import pytest
 
 from conftest import frames, settle
@@ -289,3 +290,136 @@ def test_slab_cut_reads_cap_colour_in_both_projections(viewer_client, viewer_pag
         page.evaluate("() => window.threejsViewer._camera.isOrthographicCamera") is True
     )
     assert _is_red(page.evaluate(_PIXEL_AT, [0, 0, 0.2]))
+
+
+# Covered area of the union of every visible cap's triangles on clip plane
+# `plane`, by sampling a grid in the plane: overlapping coplanar fans (swept
+# cells, round joins) would double count in a plain triangle-area sum.
+_CAP_UNION_AREA = """([id, plane, grid]) => {
+    const v = window.threejsViewer;
+    const obj = v.getObject(id);
+    obj.updateWorldMatrix(true, true);
+    const P = v._clipPlanes[plane];
+    const n = [P.normal.x, P.normal.y, P.normal.z];
+    const a = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+    let u = [a[1] * n[2] - a[2] * n[1], a[2] * n[0] - a[0] * n[2], a[0] * n[1] - a[1] * n[0]];
+    const ul = Math.hypot(...u); u = u.map((c) => c / ul);
+    const w = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+    const tris = [];
+    obj.traverse((cap) => {
+        if (!cap.userData.__clipCap || !cap.visible) return;
+        cap.updateWorldMatrix(true, false);
+        const e = cap.matrixWorld.elements;
+        const arr = cap.geometry.getAttribute('position').array;
+        const pts = [];
+        let onPlane = true;
+        for (let i = 0; i < arr.length; i += 3) {
+            const x = arr[i], y = arr[i + 1], z = arr[i + 2];
+            const p = [e[0] * x + e[4] * y + e[8] * z + e[12], e[1] * x + e[5] * y + e[9] * z + e[13],
+                       e[2] * x + e[6] * y + e[10] * z + e[14]];
+            if (Math.abs(n[0] * p[0] + n[1] * p[1] + n[2] * p[2] + P.constant) > 1e-4) onPlane = false;
+            pts.push([p[0] * u[0] + p[1] * u[1] + p[2] * u[2], p[0] * w[0] + p[1] * w[1] + p[2] * w[2]]);
+        }
+        if (!onPlane) return;
+        for (let i = 0; i < pts.length; i += 3) tris.push([pts[i], pts[i + 1], pts[i + 2]]);
+    });
+    if (!tris.length) return 0;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const t of tris) for (const [x, y] of t) {
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+    const dx = (x1 - x0) / grid, dy = (y1 - y0) / grid;
+    const inside = (t, x, y) => {
+        const [[ax, ay], [bx, by], [cx, cy]] = t;
+        const d1 = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+        const d2 = (cx - bx) * (y - by) - (cy - by) * (x - bx);
+        const d3 = (ax - cx) * (y - cy) - (ay - cy) * (x - cx);
+        return (d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0);
+    };
+    let hit = 0;
+    for (let i = 0; i < grid; i++) for (let j = 0; j < grid; j++) {
+        const x = x0 + (i + 0.5) * dx, y = y0 + (j + 0.5) * dy;
+        if (tris.some((t) => inside(t, x, y))) hit++;
+    }
+    return hit * dx * dy;
+}"""
+
+
+def _union_area(page, id, plane=0, grid=160):
+    return page.evaluate(_CAP_UNION_AREA, [id, plane, grid])
+
+
+def _straight_tool(client, id, **kwargs):
+    """A cylinder (r=0.3, h=1, axis +Z) swept along X from -2 to 2."""
+    n = 9
+    positions = np.zeros((n, 3), dtype=np.float32)
+    positions[:, 0] = np.linspace(-2, 2, n)
+    axes = np.tile(np.array([0, 0, 1], dtype=np.float32), (n, 1))
+    profile = np.array([[0, 0.3], [1, 0.3]], dtype=np.float32)
+    client.add_swept_tool(id, positions, axes, profile, sections=16, **kwargs)
+
+
+# 16-gon of circumradius 0.3.
+_DISC16 = 8 * math.sin(2 * math.pi / 16) * 0.09
+
+
+@pytest.mark.browser
+def test_swept_tool_caps_lie_on_plane_and_cover_the_section(viewer_client, viewer_page):
+    page = viewer_page
+    colors = np.full(9, 0x3366CC, dtype=np.uint32)
+    _straight_tool(viewer_client, "tool", colors=colors)
+    viewer_client.set_clipping_caps(True)
+    # Across the path: the swept body's section is the 0.6 x 1 wall.
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.25, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(page, "tool", 1)
+    (cap,) = _caps(page, "tool")
+    assert cap["dist"][0] < 1e-5
+    assert cap["vertexColors"] is True
+    assert _union_area(page, "tool") == pytest.approx(0.6, rel=0.03)
+    # Along the path at mid height: a stadium, 4 long plus the two end discs.
+    viewer_client.set_clipping_plane(
+        normal=[0, 0, -1], distance=-0.5, show_helper=False
+    )
+    settle(viewer_client)
+    frames(page, 2)
+    assert _caps(page, "tool")[0]["dist"][0] < 1e-5
+    assert _union_area(page, "tool") == pytest.approx(4 * 0.6 + _DISC16, rel=0.03)
+
+
+@pytest.mark.browser
+def test_swept_tool_cap_follows_draw_range_and_delete(viewer_client, viewer_page):
+    page = viewer_page
+    _straight_tool(viewer_client, "tool")
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[0, 0, -1], distance=-0.5, show_helper=False
+    )
+    settle(viewer_client)
+    _wait_caps(page, "tool", 1)
+    full = _union_area(page, "tool")
+    viewer_client.set_draw_range("tool", 0.5)
+    settle(viewer_client)
+    frames(page, 2)
+    half = _union_area(page, "tool")
+    # Four of eight station pairs: 2 long plus the end discs.
+    assert half == pytest.approx(2 * 0.6 + _DISC16, rel=0.04)
+    assert half < full
+    # A plane cut beyond the frontier leaves no cap.
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=1.5, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(page, "tool", 0)
+    viewer_client.delete("tool")
+    settle(viewer_client)
+    frames(page, 2)
+    assert page.evaluate("() => window.threejsViewer.getObject('tool')") is None
+
+
+@pytest.mark.browser
+def test_swept_tool_clip_cap_false_stays_open(viewer_client, viewer_page):
+    _straight_tool(viewer_client, "tool", clip_cap=False)
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.25, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    assert _cap_count(viewer_page, "tool") == 0

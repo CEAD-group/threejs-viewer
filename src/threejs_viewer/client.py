@@ -3368,6 +3368,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
 
@@ -3408,6 +3409,7 @@ class ViewerClient:
             metalness, roughness: Standard PBR material properties.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
+            clip_cap: Override :meth:`set_clipping_caps` for this body.
 
         Reveal the swept body progressively along the path with
         :meth:`set_draw_range` or the ``draw_ranges`` animation channel.
@@ -3476,6 +3478,8 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         if parent:
             header["parent"] = parent
         if not visible:
