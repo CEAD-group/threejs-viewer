@@ -11041,8 +11041,7 @@ function buildGizmoAxisPicker(name, scale) {
     else if (name === 'Z') geo.rotateX(Math.PI / 2);
     const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
     mesh.name = name;
-    // Raycast-only hitbox — three's raycaster ignores `.visible` (same trick
-    // as the axis-control widget's own invisible pick sphere).
+    // Raycast-only hitbox: three's raycaster ignores `.visible`.
     mesh.visible = false;
     return mesh;
 }
@@ -11885,9 +11884,10 @@ class TransformGizmoController {
 // ========== Axis Control (rotary / linear range indicators) ==========
 // A range-display control distinct from the move/rotate TransformControls
 // gizmo above: a line showing an axis's range of motion — an arc, a full
-// circle, a segment, or a window that follows the value — with a small
-// flat-shaded sphere marking the current value. Only the sphere is
-// draggable/hoverable; the line is a visual guide (its own raycast is a
+// circle, a segment, or a window that follows the value — with a short,
+// thicker handle section marking the current value. Only the handle is
+// draggable/hoverable, hit-tested in screen pixels against its projected
+// polyline (issue #284); the line is a visual guide (its own raycast is a
 // no-op). Anchored every frame at a target object's world pivot, oriented so
 // the control's own local +X is that target's chosen local axis in world
 // space (`Quaternion.setFromUnitVectors`, same "derive the world direction
@@ -11903,16 +11903,15 @@ class TransformGizmoController {
 //   linear            segment from `min` to `max` metres along the axis
 //   linear_unlimited  segment from `value - window` to `value + window`,
 //                     recomputed on every value change so it re-centres
-//                     ("moves with the sphere")
+//                     ("moves with the handle")
 //
-// Sphere local position: rotary* -> (0, R cos(value), R sin(value)); linear*
+// Value marker local position: rotary* -> (0, R cos(value), R sin(value)); linear*
 // -> (value, 0, 0). Dragging projects the pointer onto a plane (perpendicular
 // to the axis for rotary; containing the axis and facing the camera for
 // linear, the same construction TransformControlsPlane uses for a
 // single-axis translate) and reports {id, value, phase} back, same shape as
 // the move gizmo's onObjectMove.
 
-const AXIS_CONTROL_SPHERE_RADIUS = 0.1;    // invisible pick-only hitbox, not rendered
 const AXIS_CONTROL_ARC_SEGMENTS = 64;
 const AXIS_CONTROL_HOVER_LIGHTEN = 0.28;
 const AXIS_CONTROL_DEFAULT_WINDOW = 1.0;   // metres either side of value, linear_unlimited
@@ -11922,6 +11921,9 @@ const AXIS_CONTROL_HANDLE_WIDTH_PX = AXIS_CONTROL_LINE_WIDTH_PX * 4;  // handle 
 const AXIS_CONTROL_HANDLE_HALF_ANGLE = 0.05;   // radians either side of value, rotary handle arc
 const AXIS_CONTROL_HANDLE_ARC_SEGMENTS = 12;
 const AXIS_CONTROL_HANDLE_HALF_LENGTH = 0.05;  // world units either side of value, linear handle segment
+// Pick radius margin past the handle's drawn half width, in CSS px; a finger needs more slack than a mouse.
+const AXIS_CONTROL_PICK_MARGIN_PX = 5;
+const AXIS_CONTROL_PICK_MARGIN_TOUCH_PX = 14;
 
 const _acUnitX = new THREE.Vector3(1, 0, 0);
 const _acScratchA = new THREE.Vector3();
@@ -11931,7 +11933,7 @@ const _acPlane = new THREE.Plane();
 const _acQuat = new THREE.Quaternion();
 
 /** One rotary/linear axis-control instance. Built once; `_rebuild()` re-derives
- * line geometry and sphere position from `value`/`min`/`max`. */
+ * line geometry, the handle polyline and the value marker from `value`/`min`/`max`. */
 class AxisControl {
     /** @param {string} id @param {any} opts */
     constructor(id, opts) {
@@ -11946,6 +11948,10 @@ class AxisControl {
         // Set while the radius waits for `bboxSourceId` to be in the scene.
         this.bboxSourceId = opts.radiusPending ? opts.bboxSourceId : null;
         this.window = opts.window != null ? opts.window : AXIS_CONTROL_DEFAULT_WINDOW;
+        /** @type {number|null} CSS px; null derives it from the handle width and pointer type */
+        this.pickRadiusPx = opts.pickRadiusPx != null ? opts.pickRadiusPx : null;
+        /** @type {number[]} handle polyline in the group's local frame, flat xyz */
+        this._handlePoints = [];
         this._hovered = false;
         this._dragging = false;
         this._framePivot = new THREE.Vector3();   // _liveFrame scratch, per control
@@ -11974,7 +11980,7 @@ class AxisControl {
         });
         this.line = new Line2(new LineGeometry(), this.lineMaterial);
         this.line.renderOrder = 900;
-        this.line.raycast = () => {};   // guide only — the sphere is the only pickable part
+        this.line.raycast = () => {};   // guide only, the handle is picked in screen space
 
         // The handle: a short, 3x-thick section of the same line, centred on
         // `value` — a small arc for rotary, a short segment for linear. This
@@ -11988,26 +11994,18 @@ class AxisControl {
         });
         this.handleLine = new Line2(new LineGeometry(), this.handleLineMaterial);
         this.handleLine.renderOrder = 901;
-        this.handleLine.raycast = () => {};   // guide only — the sphere is the only pickable part
+        this.handleLine.raycast = () => {};   // picked by AxisControlManager._handleDistancePx instead
 
-        // The sphere is kept as the pick target (three's raycaster ignores
-        // `.visible`, so it still hit-tests) but is never rendered — the
-        // handle line above is the visible indicator now.
-        this.sphereMaterial = new THREE.MeshStandardMaterial({
-            color: this._baseColor.clone(), flatShading: true, roughness: 0.5, metalness: 0.0,
-            depthTest: false, depthWrite: false, toneMapped: false,
-        });
-        this.sphere = new THREE.Mesh(new THREE.SphereGeometry(AXIS_CONTROL_SPHERE_RADIUS, 12, 8), this.sphereMaterial);
-        this.sphere.renderOrder = 901;
-        this.sphere.userData.axisControlId = id;
-        this.sphere.visible = false;
+        // Unrendered point at `value`, the reference a rotary drag measures its angle from.
+        this.marker = new THREE.Object3D();
+        this.marker.userData.axisControlId = id;
 
-        this.group.add(this.line, this.handleLine, this.sphere);
+        this.group.add(this.line, this.handleLine, this.marker);
         this._rebuild();
     }
 
     /** Re-derive the line geometry (kind-dependent), the handle segment, and
-     * the sphere's local position from the current value/min/max. Cheap
+     * the value marker's local position from the current value/min/max. Cheap
      * (<= ARC_SEGMENTS+1 verts) — called on every value/min/max change, not
      * per frame. */
     _rebuild() {
@@ -12027,7 +12025,7 @@ class AxisControl {
                 const a = a0 + (a1 - a0) * (i / AXIS_CONTROL_ARC_SEGMENTS);
                 flat.push(0, R * Math.cos(a), R * Math.sin(a));
             }
-            this.sphere.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
+            this.marker.position.set(0, R * Math.cos(this.value), R * Math.sin(this.value));
 
             let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_ANGLE;
             let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_ANGLE;
@@ -12040,7 +12038,7 @@ class AxisControl {
             const lo = this.kind === 'linear_unlimited' ? this.value - this.window : this.min;
             const hi = this.kind === 'linear_unlimited' ? this.value + this.window : this.max;
             flat.push(lo, 0, 0, hi, 0, 0);
-            this.sphere.position.set(this.value, 0, 0);
+            this.marker.position.set(this.value, 0, 0);
 
             let h0 = this.value - AXIS_CONTROL_HANDLE_HALF_LENGTH;
             let h1 = this.value + AXIS_CONTROL_HANDLE_HALF_LENGTH;
@@ -12056,6 +12054,7 @@ class AxisControl {
         this.handleLine.geometry = new LineGeometry();
         this.handleLine.geometry.setPositions(handleFlat);
         this.handleLine.computeLineDistances();
+        this._handlePoints = handleFlat;
     }
 
     /** @param {number} value @param {{min?:number, max?:number}} [opts] */
@@ -12093,8 +12092,6 @@ class AxisControl {
         this.lineMaterial.dispose();
         this.handleLine.geometry.dispose();
         this.handleLineMaterial.dispose();
-        this.sphere.geometry.dispose();
-        this.sphereMaterial.dispose();
     }
 }
 
@@ -12118,7 +12115,7 @@ class AxisControlManager {
         this._dragV = new THREE.Vector3();
         this._dragRawAngle = 0;
         this._dragAccumAngle = 0;
-        this._dragValueOffset = 0;   // linear*: grab-point offset, so the sphere doesn't jump to the cursor
+        this._dragValueOffset = 0;   // linear*: grab-point offset, so the handle doesn't jump to the cursor
         this._lastReport = 0;
 
         const dom = viewer._renderer.domElement;
@@ -12134,7 +12131,9 @@ class AxisControlManager {
     }
 
     /** True while a handle is hovered or dragged, so a press or release
-     * there is this widget's gesture rather than a click. @returns {boolean} */
+     * there is this widget's gesture rather than a click. Hover is never set
+     * while a move-gizmo handle is under the pointer, so this cannot block
+     * the gizmo. @returns {boolean} */
     busy() {
         if (this._active) return true;
         for (const c of this.controls.values()) if (c._hovered) return true;
@@ -12187,10 +12186,11 @@ class AxisControlManager {
     /** Update one control's value/min/max (update_axis_control) — distinct
      * from the no-arg `update()` below, which repositions every control at
      * its target's live pivot once per render frame.
-     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+     * @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
     setValue(id, opts) {
         const c = this.controls.get(id);
         if (!c) return;
+        if (opts.pickRadiusPx != null) c.pickRadiusPx = opts.pickRadiusPx;
         c.setValue(opts.value != null ? opts.value : c.value, opts);
         if (opts.color != null || opts.hoverColor != null) c.setColor(opts.color, opts.hoverColor);
     }
@@ -12247,7 +12247,7 @@ class AxisControlManager {
 
     /** Per-frame: reposition/orient every control at its target's live pivot
      * + axis direction (a moving target — a jog, a drag — carries its
-     * controls with it for free), then keep the hovered/dragging sphere
+     * controls with it for free), then keep the hovered/dragging handle
      * lit. Controls whose target has left the scene just hold their last
      * pose (matches the move gizmo's own "detach on parent loss" being the
      * caller's job, not silently vanishing mid-frame). */
@@ -12280,22 +12280,89 @@ class AxisControlManager {
         return this._ndc;
     }
 
-    /** @param {number} clientX @param {number} clientY @returns {AxisControl|null} */
-    _pickSphere(clientX, clientY) {
-        this._raycaster.setFromCamera(
-            this._ndcFromClient(clientX, clientY), /** @type {any} */ (this.v._camera));
-        const spheres = [];
-        const map = new Map();
-        for (const c of this.controls.values()) if (c.group.visible) { spheres.push(c.sphere); map.set(c.sphere, c); }
-        const hits = this._raycaster.intersectObjects(spheres, false);
-        return hits.length ? map.get(hits[0].object) : null;
+    /** Pick radius in CSS px for a control and pointer type.
+     * @param {AxisControl} c @param {string} pointerType @returns {number} */
+    _pickRadiusPx(c, pointerType) {
+        if (c.pickRadiusPx != null) return c.pickRadiusPx;
+        const margin = pointerType === 'touch' ? AXIS_CONTROL_PICK_MARGIN_TOUCH_PX : AXIS_CONTROL_PICK_MARGIN_PX;
+        return AXIS_CONTROL_HANDLE_WIDTH_PX / 2 + margin;
+    }
+
+    /** Screen distance in CSS px from a viewport point to a control's
+     * projected handle polyline; Infinity when no part of it is in view.
+     * A pixel test keeps the hit area the size of the drawn handle at any
+     * zoom and under both projections, where a world-size hitbox did not.
+     * @param {AxisControl} c @param {number} px @param {number} py
+     * @param {DOMRect} rect @returns {number} */
+    _handleDistancePx(c, px, py, rect) {
+        const cam = /** @type {any} */ (this.v._camera);
+        c.group.updateMatrixWorld();
+        const pts = c._handlePoints;
+        let best = Infinity;
+        let prevOk = false, ax = 0, ay = 0;
+        for (let i = 0; i < pts.length; i += 3) {
+            const p = _acScratchA.set(pts[i], pts[i + 1], pts[i + 2]).applyMatrix4(c.group.matrixWorld).project(cam);
+            // Outside the depth range (incl. behind a perspective eye) the projection is meaningless.
+            if (!(p.z >= -1 && p.z <= 1)) { prevOk = false; continue; }
+            const bx = (p.x * 0.5 + 0.5) * rect.width, by = (-p.y * 0.5 + 0.5) * rect.height;
+            let d;
+            if (prevOk) {
+                const dx = bx - ax, dy = by - ay;
+                const len2 = dx * dx + dy * dy;
+                const t = len2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+                d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+            } else {
+                d = Math.hypot(px - bx, py - by);
+            }
+            if (d < best) best = d;
+            prevOk = true; ax = bx; ay = by;
+        }
+        return best;
+    }
+
+    /** The control whose handle is nearest the pointer within its pick
+     * radius, or null. @param {number} clientX @param {number} clientY
+     * @param {string} pointerType @returns {AxisControl|null} */
+    _pickHandle(clientX, clientY, pointerType) {
+        if (!this.controls.size) return null;
+        const rect = this.v._renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const cam = /** @type {any} */ (this.v._camera);
+        cam.updateMatrixWorld();   // a wheel zoom since the last render leaves matrixWorldInverse stale
+        const px = clientX - rect.left, py = clientY - rect.top;
+        let hit = null, bestD = Infinity;
+        for (const c of this.controls.values()) {
+            if (!c.group.visible) continue;
+            const d = this._handleDistancePx(c, px, py, rect);
+            if (d <= this._pickRadiusPx(c, pointerType) && d < bestD) { hit = c; bestD = d; }
+        }
+        return hit;
+    }
+
+    /** True when a move-gizmo handle (interactive or pinned) is under the
+     * pointer or dragged, so the gizmo keeps the gesture on overlap.
+     * `refresh` re-runs the gizmo's own hover test, for a touch press that
+     * arrives with no hover before it. @param {PointerEvent} e @param {boolean} refresh */
+    _gizmoHandleUnder(e, refresh) {
+        const tg = this.v._transformGizmo;
+        if (!tg || !tg.enabled) return false;
+        for (const g of tg._allGizmos()) {
+            const ctl = /** @type {any} */ (g.control);
+            if (ctl.dragging) return true;
+            if (!ctl.enabled || ctl.object === undefined) continue;
+            if (refresh) ctl.pointerHover(ctl._getPointer(e));
+            if (ctl.axis != null) return true;
+        }
+        return false;
     }
 
     /** @param {PointerEvent} e */
     _pointerDown(e) {
         if (e.button !== 0) return;
-        const hit = this._pickSphere(e.clientX, e.clientY);
+        const hit = this._pickHandle(e.clientX, e.clientY, e.pointerType);
         if (!hit) return;
+        // Left to TransformControls' own pointerdown, which runs after this capture listener.
+        if (this._gizmoHandleUnder(e, true)) return;
         const frame = this._liveFrame(hit);
         if (!frame) return;
         this._active = hit;
@@ -12323,11 +12390,11 @@ class AxisControlManager {
         e.preventDefault();
     }
 
-    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT sphere position
+    /** Raw (wrapped, ±π) angle of a rotary control's CURRENT value marker
      * about its drag axis — the reference `_pointerMove` unwraps deltas
      * against. @param {AxisControl} c @param {THREE.Vector3} pivot @param {THREE.Vector3} axisDir */
     _angleOf(c, pivot, axisDir) {
-        const worldPos = c.sphere.getWorldPosition(_acScratchC);
+        const worldPos = c.marker.getWorldPosition(_acScratchC);
         const rel = worldPos.sub(pivot);
         rel.addScaledVector(axisDir, -rel.dot(axisDir));
         return Math.atan2(rel.dot(this._dragV), rel.dot(this._dragU));
@@ -12359,8 +12426,9 @@ class AxisControlManager {
     _pointerMove(e) {
         const c = this._active;
         if (!c || !c._dragging) {
-            // Not dragging: plain hover check.
-            const hit = this._pickSphere(e.clientX, e.clientY);
+            // Not dragging: plain hover check. TransformControls' canvas pointermove
+            // has already refreshed its axis before this window listener runs.
+            const hit = this._gizmoHandleUnder(e, false) ? null : this._pickHandle(e.clientX, e.clientY, e.pointerType);
             for (const other of this.controls.values()) other._setHovered(other === hit);
             return;
         }
@@ -18476,12 +18544,13 @@ export class ThreeJSViewer {
                     value: data.value, min: data.min, max: data.max, color: data.color,
                     hoverColor: data.hover_color,
                     radius: data.radius, bboxSourceId: data.bbox_source_id, window: data.window,
+                    pickRadiusPx: data.pick_radius_px,
                 });
                 break;
             case 'update_axis_control':
                 this._axisControls.setValue(data.id, {
                     value: data.value, min: data.min, max: data.max,
-                    color: data.color, hoverColor: data.hover_color,
+                    color: data.color, hoverColor: data.hover_color, pickRadiusPx: data.pick_radius_px,
                 });
                 break;
             case 'remove_axis_control':
@@ -20659,15 +20728,17 @@ export class ThreeJSViewer {
     /** Direct-call JS equivalent of the `add_axis_control` WS message — same
      * effect, for an embedder holding a live `viewer` reference in the same
      * page (no WS round trip needed). `opts`: `{targetId, axis, kind, value,
-     * min, max, color, hoverColor, radius, bboxSourceId, window}` — see the
-     * WS message for the full shape. `hoverColor` is optional; omitting it
-     * auto-derives a lightened variant of `color`. Values are plain
+     * min, max, color, hoverColor, radius, bboxSourceId, window, pickRadiusPx}`,
+     * see the WS message for the full shape. `hoverColor` is optional; omitting it
+     * auto-derives a lightened variant of `color`. `pickRadiusPx` sets the
+     * handle's hit radius in CSS px (default: half the handle width plus 5 px,
+     * or 14 px for touch). Values are plain
      * THREE.js scene units: metres for linear(_unlimited), radians for
      * rotary(_unlimited) — no CSD-unit conversion happens here.
      * @param {string} id @param {any} opts */
     addAxisControl(id, opts) { this._axisControls.add(id, opts); }
 
-    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null}} opts */
+    /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
     updateAxisControl(id, opts) { this._axisControls.setValue(id, opts); }
 
     /** @param {string} id */

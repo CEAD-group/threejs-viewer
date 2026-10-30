@@ -960,16 +960,19 @@ def test_add_axis_control_payload_and_records_for_reconnect():
         "radius": 2.0,
         "bbox_source_id": None,
         "window": 1.0,
+        "pick_radius_px": None,
     }
-    client.update_axis_control("j1", value=1.0, max=4.0)
+    client.update_axis_control("j1", value=1.0, max=4.0, pick_radius_px=9)
     assert client._axis_controls["j1"]["value"] == 1.0
     assert client._axis_controls["j1"]["max"] == 4.0
+    assert client._axis_controls["j1"]["pick_radius_px"] == 9.0
 
     ws = _StubWS()
     client._ws = ws
     client.update_axis_control("j1", value=2.0)
     assert ws.sent[-1]["type"] == "update_axis_control"
     assert ws.sent[-1]["value"] == 2.0
+    assert ws.sent[-1]["pick_radius_px"] is None
     client.clear()
     assert client._axis_controls == {}
 
@@ -985,6 +988,9 @@ def test_add_axis_control_payload_and_records_for_reconnect():
         ({"radius": 0.0}, "radius"),
         ({"window": -1.0}, "window"),
         ({"max": float("inf")}, "max"),
+        ({"pick_radius_px": 0.0}, "pick_radius_px"),
+        ({"pick_radius_px": -3}, "pick_radius_px"),
+        ({"pick_radius_px": float("nan")}, "pick_radius_px"),
     ],
 )
 def test_add_axis_control_validates(kwargs, match):
@@ -1009,7 +1015,10 @@ def test_update_axis_control_validates():
         client.update_axis_control("c", min=5.0)
     with pytest.raises(ValueError, match="value"):
         client.update_axis_control("c", value=float("nan"))
+    with pytest.raises(ValueError, match="pick_radius_px"):
+        client.update_axis_control("c", pick_radius_px=0)
     assert client._axis_controls["c"]["min"] == -1.0
+    assert client._axis_controls["c"]["pick_radius_px"] is None
 
 
 @pytest.mark.parametrize(
