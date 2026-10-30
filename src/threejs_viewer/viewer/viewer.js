@@ -1,6 +1,6 @@
 // @ts-check
 import * as THREE from 'three';
-import { ViewerControls } from './controls.js';
+import { ViewerControls, isPickTarget } from './controls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -104,6 +104,11 @@ const VIEW_HELPER_SIZE_MAX = 512;
 const _viewTweenQuat = new THREE.Quaternion();
 const _viewTweenDir = new THREE.Vector3();
 const _viewTweenUp = new THREE.Vector3();
+// Share of the half-view, on the tighter screen axis, that framed content
+// spans: 0.9 leaves 5% of the view free on each side.
+const FRAME_DEFAULT_FILL = 0.9;
+const _frameTweenPos = new THREE.Vector3();
+const _frameTweenTarget = new THREE.Vector3();
 
 const CLIP_AXIS_NORMALS = {
     'x+': new THREE.Vector3(1, 0, 0),
@@ -283,6 +288,62 @@ function expandBoxSkippingOverlays(box, root) {
     expandBoxByNode(box, root);
     const kids = root.children;
     for (let i = 0; i < kids.length; i++) expandBoxSkippingOverlays(box, kids[i]);
+}
+
+/**
+ * The eight corners of every non-empty box, in world space.
+ * @param {Iterable<THREE.Box3>} boxes
+ * @returns {THREE.Vector3[]}
+ */
+function boxCorners(boxes) {
+    const out = [];
+    for (const b of boxes) {
+        if (!b || b.isEmpty()) continue;
+        for (let i = 0; i < 8; i++) {
+            out.push(new THREE.Vector3(
+                i & 1 ? b.max.x : b.min.x,
+                i & 2 ? b.max.y : b.min.y,
+                i & 4 ? b.max.z : b.min.z));
+        }
+    }
+    return out;
+}
+
+/**
+ * A non-empty Box3 from two `{x,y,z}` / `[x,y,z]` corners, or null with a
+ * warning naming `what`.
+ * @param {any} min @param {any} max @param {string} what
+ * @returns {THREE.Box3 | null}
+ */
+function boxFromMinMax(min, max, what) {
+    const lo = vec3Tuple(min), hi = vec3Tuple(max);
+    if (!lo || !hi) {
+        console.warn(`${what}: min/max must be finite 3-vectors`);
+        return null;
+    }
+    const box = new THREE.Box3(
+        new THREE.Vector3(lo[0], lo[1], lo[2]),
+        new THREE.Vector3(hi[0], hi[1], hi[2]));
+    if (box.isEmpty()) {
+        console.warn(`${what}: empty box (min > max on some axis)`);
+        return null;
+    }
+    return box;
+}
+
+/**
+ * Resolve a framing `fill` from an options object or, for frameBox's old
+ * positional form, a bare margin number (fill = 1 / margin).
+ * @param {any} opts
+ * @returns {{fill: number, animate: boolean}}
+ */
+function frameOptions(opts) {
+    if (typeof opts === 'number') {
+        return { fill: opts > 0 ? Math.min(1 / opts, 1) : FRAME_DEFAULT_FILL, animate: false };
+    }
+    const o = opts || {};
+    const fill = Number.isFinite(o.fill) && o.fill > 0 ? Math.min(o.fill, 1) : FRAME_DEFAULT_FILL;
+    return { fill, animate: o.animate === true };
 }
 
 // Scratch objects for matrix decompose/lerp. Module-scope to avoid per-frame alloc.
@@ -7085,48 +7146,157 @@ class CameraController {
     }
 
     /**
-     * Aim the active camera at `bbox` with `perspMargin` extra distance multiplier
-     * (ortho always uses a 1.2 half-extent padding; perspMargin applies to perspective).
-     * Shared by frameObject / frameAll.
-     * @param {any} bbox
-     * @param {number} perspMargin
+     * Solve the camera pose that frames world `points` along the current view
+     * direction (never changed): the projected extent spans `fill` of the
+     * view on the tighter screen axis, in both projections. Perspective
+     * solves the distance and the lateral shift exactly per screen axis (the
+     * tightest frustum wedge around the points); ortho solves the zoom and
+     * the shift. Returns null for an empty point set.
+     * @param {ArrayLike<THREE.Vector3>} points world-space points
+     * @param {number} fill fraction of the half-view on the tighter axis, (0, 1]
+     * @returns {{position: THREE.Vector3, target: THREE.Vector3, zoom: number | null} | null}
      */
-    fitToBox(bbox, perspMargin) {
+    solveFit(points, fill) {
         const v = this.v;
-        if (bbox.isEmpty()) return;
-        const center = bbox.getCenter(new THREE.Vector3());
-        const size = bbox.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-        v._controls.target.copy(center);
-        const dir = v._camera.position.clone().sub(center);
-        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1).normalize();
-        else dir.normalize();
+        const n = points.length;
+        if (!n) return null;
+        const f = Number.isFinite(fill) && fill > 0 ? Math.min(fill, 1) : FRAME_DEFAULT_FILL;
+        const dir = v._camera.position.clone().sub(v._controls.target);
+        if (dir.lengthSq() < 1e-10) dir.set(1, -1, 1);
+        dir.normalize();
+        // Camera basis as Matrix4.lookAt builds it, so the solve matches the
+        // orientation the final lookAt produces.
+        const right = new THREE.Vector3().crossVectors(v._camera.up, dir);
+        if (right.lengthSq() < 1e-10) {
+            right.crossVectors(Math.abs(dir.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0), dir);
+        }
+        right.normalize();
+        const up = new THREE.Vector3().crossVectors(dir, right);
+        const xs = new Float64Array(n), ys = new Float64Array(n), zs = new Float64Array(n);
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < n; i++) {
+            const p = points[i];
+            xs[i] = p.dot(right); ys[i] = p.dot(up); zs[i] = p.dot(dir);
+            x0 = Math.min(x0, xs[i]); x1 = Math.max(x1, xs[i]);
+            y0 = Math.min(y0, ys[i]); y1 = Math.max(y1, ys[i]);
+            z0 = Math.min(z0, zs[i]); z1 = Math.max(z1, zs[i]);
+        }
+        const span = Math.max(x1 - x0, y1 - y0, z1 - z0);
+        const zMid = (z0 + z1) / 2;
+        const at = (/** @type {number} */ cx, /** @type {number} */ cy, /** @type {number} */ cz) =>
+            new THREE.Vector3().addScaledVector(right, cx).addScaledVector(up, cy).addScaledVector(dir, cz);
+        if (!(span > 1e-9)) {
+            // A single point (or coincident ones): centre it, keep the distance.
+            const dist = v._camera.position.distanceTo(v._controls.target);
+            return { position: at(x0, y0, z0 + dist), target: at(x0, y0, z0), zoom: null };
+        }
         if (v._isOrtho) {
             const w = v.container.clientWidth;
             const h = v.container.clientHeight;
-            // Preserve pre-refactor behavior: if the container isn't laid out
-            // yet (e.g. frameObject called while hidden), fall back to aspect=1
-            // instead of silently no-opping.
+            // A container not laid out yet falls back to aspect 1 rather than no-opping.
             const aspect = (w > 0 && h > 0) ? (w / h) : 1;
-            const halfHeight = Math.max(size.z, size.y) / 2 * 1.2;
-            const halfWidth = Math.max(size.x, size.y) / 2 * 1.2;
-            const fitHalf = Math.max(halfHeight, halfWidth / aspect, 1e-6);
-            v._orthoCamera.zoom = ORTHO_FRUSTUM / fitHalf;
-            v._orthoCamera.updateProjectionMatrix();
-            v._camera.position.copy(center).addScaledVector(dir, maxDim * 2);
-        } else {
-            const vFov = THREE.MathUtils.degToRad(v._perspCamera.fov / 2);
-            const aspect = v._perspCamera.aspect || 1;
-            const hFov = Math.atan(Math.tan(vFov) * aspect);
-            const distV = Math.max(size.y, size.z) / 2 / Math.tan(vFov);
-            const distH = Math.max(size.x, size.y) / 2 / Math.tan(hFov);
-            const dist = Math.max(distV, distH) * perspMargin;
-            v._camera.position.copy(center).addScaledVector(dir, dist);
+            const halfH = Math.max((y1 - y0) / 2, (x1 - x0) / 2 / aspect, 1e-9) / f;
+            const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+            return {
+                position: at(cx, cy, zMid + span * 2),
+                target: at(cx, cy, zMid),
+                zoom: ORTHO_FRUSTUM / halfH,
+            };
         }
-        // ViewerControls never calls camera.lookAt, so explicitly re-orient
-        // to actually frame the object (not just translate along old view ray).
-        v._camera.lookAt(center);
+        const tanV = Math.tan(THREE.MathUtils.degToRad(v._perspCamera.fov / 2));
+        const tanH = tanV * (v._perspCamera.aspect || 1);
+        // Per screen axis with slope k = fill * tan(halfFov), a point fits when
+        // |c - u| <= k * (cz - z); the least cz satisfying both sides of every
+        // point is the apex of the wedge through the two binding points.
+        const wedge = (/** @type {Float64Array} */ us, /** @type {number} */ k) => {
+            let a = -Infinity, b = -Infinity;
+            for (let i = 0; i < n; i++) {
+                a = Math.max(a, zs[i] + us[i] / k);
+                b = Math.max(b, zs[i] - us[i] / k);
+            }
+            return { c: k * (a - b) / 2, cz: (a + b) / 2 };
+        };
+        // The looser axis has slack at the chosen depth: centre it in its feasible interval.
+        const centre = (/** @type {Float64Array} */ us, /** @type {number} */ k, /** @type {number} */ cz) => {
+            let lo = -Infinity, hi = Infinity;
+            for (let i = 0; i < n; i++) {
+                lo = Math.max(lo, us[i] - k * (cz - zs[i]));
+                hi = Math.min(hi, us[i] + k * (cz - zs[i]));
+            }
+            return (lo + hi) / 2;
+        };
+        const kx = f * tanH, ky = f * tanV;
+        const wx = wedge(xs, kx), wy = wedge(ys, ky);
+        // Keep every point a sliver in front of the camera (a flat face-on set).
+        const cz = Math.max(wx.cz, wy.cz, z1 + span * 1e-3);
+        const cx = wx.cz >= wy.cz ? wx.c : centre(xs, kx, cz);
+        const cy = wy.cz > wx.cz ? wy.c : centre(ys, ky, cz);
+        return { position: at(cx, cy, cz), target: at(cx, cy, Math.min(zMid, cz - span * 1e-3)), zoom: null };
+    }
+
+    /**
+     * Frame world `points` (see `solveFit`), jumping or tweening there.
+     * @param {ArrayLike<THREE.Vector3>} points @param {number} fill
+     * @param {boolean} [animate]
+     */
+    fitToPoints(points, fill, animate = false) {
+        const v = this.v;
+        const fit = this.solveFit(points, fill);
+        if (!fit) return;
+        v._viewTween = null;
+        if (animate) {
+            v._frameTween = {
+                start: performance.now(),
+                fromPos: v._camera.position.clone(), toPos: fit.position,
+                fromTarget: v._controls.target.clone(), toTarget: fit.target,
+                fromZoom: v._orthoCamera.zoom, toZoom: fit.zoom,
+            };
+            return;
+        }
+        v._frameTween = null;
+        this.applyFit(fit.position, fit.target, fit.zoom);
+    }
+
+    /**
+     * Write a framing pose. ViewerControls never calls camera.lookAt, so the
+     * camera is re-oriented explicitly (the direction is unchanged by design).
+     * @param {THREE.Vector3} position @param {THREE.Vector3} target
+     * @param {number | null} zoom ortho zoom, or null to leave it
+     */
+    applyFit(position, target, zoom) {
+        const v = this.v;
+        if (zoom != null && v._isOrtho) {
+            v._orthoCamera.zoom = zoom;
+            v._orthoCamera.updateProjectionMatrix();
+        }
+        v._controls.target.copy(target);
+        v._camera.position.copy(position);
+        v._camera.lookAt(target);
         v._controls.update();
+    }
+
+    /** @param {number} now */
+    updateFrameTween(now) {
+        const v = this.v;
+        const tw = v._frameTween;
+        if (!tw) return;
+        const raw = Math.min(Math.max((now - tw.start) / VIEW_TWEEN_MS, 0), 1);
+        const e = raw * raw * (3 - 2 * raw);
+        const zoom = tw.toZoom == null ? null : tw.fromZoom * Math.pow(tw.toZoom / tw.fromZoom, e);
+        this.applyFit(
+            _frameTweenPos.lerpVectors(tw.fromPos, tw.toPos, e),
+            _frameTweenTarget.lerpVectors(tw.fromTarget, tw.toTarget, e),
+            zoom);
+        if (raw >= 1) v._frameTween = null;
+    }
+
+    /**
+     * Frame `boxes` by their eight corners each (see `solveFit`).
+     * @param {Iterable<THREE.Box3>} boxes @param {number} fill
+     * @param {boolean} [animate]
+     */
+    fitToBoxes(boxes, fill, animate = false) {
+        this.fitToPoints(boxCorners(boxes), fill, animate);
     }
 }
 
@@ -14830,6 +15000,8 @@ export class ThreeJSViewer {
         this._orthoAutoEntered = false;
         /** @type {{target: THREE.Vector3, dist: number, startDir: THREE.Vector3, rot: THREE.Quaternion, startUp: THREE.Vector3, endUp: THREE.Vector3, start: number} | null} */
         this._viewTween = null;
+        /** @type {{start: number, fromPos: THREE.Vector3, toPos: THREE.Vector3, fromTarget: THREE.Vector3, toTarget: THREE.Vector3, fromZoom: number, toZoom: number | null} | null} */
+        this._frameTween = null;
         this._viewHelper = new ViewHelper(this._camera, this._renderer.domElement);
         this._viewHelper.center = this._controls.target;
         this._configureViewHelper(this._viewHelper);
@@ -14843,10 +15015,12 @@ export class ThreeJSViewer {
                 e.stopImmediatePropagation();
             } else {
                 this._viewTween = null;
+                this._frameTween = null;
             }
         }, true);
         this._renderer.domElement.addEventListener('wheel', () => {
             this._viewTween = null;
+            this._frameTween = null;
         }, { passive: true, capture: true });
 
         // Hover feedback: highlight the sprite under the cursor + pointer
@@ -18403,7 +18577,12 @@ export class ThreeJSViewer {
                 this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
                 break;
             case 'frame_object':
-                this._withObject(data.id, 'frame_object', (obj) => { this.frameObject(obj); });
+                this._withObject(data.id, 'frame_object', (obj) => {
+                    this.frameObject(obj, { fill: data.fill });
+                });
+                break;
+            case 'frame_points':
+                this.framePoints(data.points, { fill: data.fill });
                 break;
             case 'set_scene_visibility':
                 this._setSceneVisibility(data.visibility);
@@ -20731,6 +20910,7 @@ export class ThreeJSViewer {
 
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
         this._updateViewTween(frameNow);
+        this._camController.updateFrameTween(frameNow);
         if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
@@ -20929,12 +21109,7 @@ export class ThreeJSViewer {
         /** @type {THREE.Intersection[]} */
         const hits = [];
         for (const obj of this._objects.values()) {
-            if (!obj || !obj.userData.isGrid) continue;
-            let shown = true;
-            for (let n = obj; n; n = n.parent) {
-                if (n.visible === false || n.userData.pickable === false) { shown = false; break; }
-            }
-            if (!shown) continue;
+            if (!obj || !obj.userData.isGrid || !isPickTarget(obj)) continue;
             THREE.Mesh.prototype.raycast.call(/** @type {THREE.Mesh} */ (obj), raycaster, hits);
         }
         if (hits.length === 0) return null;
@@ -20942,18 +21117,36 @@ export class ThreeJSViewer {
         return hits[0].point.clone();
     }
 
-    /** @param {THREE.Object3D} object */
-    frameObject(object) {
-        const bbox = new THREE.Box3();
+    /**
+     * Fit the camera to one object, by the world box of each of its visible,
+     * pickable descendant meshes, with the rules `_collectFrameableBounds`
+     * applies to the scene (hidden subtrees, floor grids and overlays
+     * skipped). Without a pickable part it uses every visible part, and with
+     * nothing visible (hidden itself, or only hidden children) its full
+     * extent, so an explicit request still moves the camera. The view
+     * direction is kept.
+     * @param {THREE.Object3D | string} objectOrId tracked id or Object3D
+     * @param {{fill?: number, animate?: boolean}} [opts] `fill` (default 0.9)
+     *   is the share of the view the content spans on the tighter axis
+     */
+    frameObject(objectOrId, opts) {
+        const object = typeof objectOrId === 'string' ? this._objects.get(objectOrId) : objectOrId;
+        if (!object) return;
+        const { fill, animate } = frameOptions(opts);
         object.updateWorldMatrix(true, true);
-        bbox.expandByObject(object);
-        // LOD point clouds know their full extent from the hierarchy even
-        // when few (or no) node payloads are streamed in yet.
-        if (object.userData.lodRootBox) {
-            bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
-                .applyMatrix4(object.matrixWorld));
+        let boxes = this._frameableParts(object, true, true);
+        if (!boxes.length) boxes = this._frameableParts(object, true, false);
+        if (!boxes.length) {
+            const bbox = new THREE.Box3().expandByObject(object);
+            // LOD point clouds know their full extent from the hierarchy even
+            // when few (or no) node payloads are streamed in yet.
+            if (object.userData.lodRootBox) {
+                bbox.union(_lodBoundsBox.copy(object.userData.lodRootBox)
+                    .applyMatrix4(object.matrixWorld));
+            }
+            boxes = [bbox];
         }
-        this._fitCameraToBox(bbox, 1.5);
+        this._camController.fitToBoxes(boxes, fill, animate);
     }
 
     // ========== ViewHelper (corner gizmo) ==========
@@ -21091,6 +21284,7 @@ export class ThreeJSViewer {
         // bubble re-click must snap fresh, not flip). _snapOrthoAxisView
         // re-records the snap right after its setView call.
         this._gizmoAxisView = null;
+        this._frameTween = null;
         if (name === 'home') {
             this._viewTween = null;
             this._controls.cancelInertia();
@@ -21320,8 +21514,51 @@ export class ThreeJSViewer {
      */
     _collectFrameableBounds() {
         const bbox = new THREE.Box3();
+        this._expandFrameableBounds(bbox, this._scene);
+        return bbox;
+    }
+
+    /**
+     * Frameable world boxes under `root`, by the `_expandFrameableBounds`
+     * rules: one per geometry node (`perNode`), or one per child of `root`
+     * (the scene's top-level objects for Home). `pickableOnly` also skips
+     * `userData.pickable === false` subtrees, as clicks and the pivot do.
+     * @param {THREE.Object3D} root @param {boolean} perNode @param {boolean} pickableOnly
+     * @returns {THREE.Box3[]}
+     */
+    _frameableParts(root, perNode, pickableOnly) {
+        /** @type {THREE.Box3[]} */
+        const boxes = [];
+        if (perNode) {
+            this._visitFrameable(root, pickableOnly, (box) => { boxes.push(box); });
+            return boxes;
+        }
+        for (const child of root.children) {
+            const part = new THREE.Box3();
+            this._visitFrameable(child, pickableOnly, (box) => { part.union(box); });
+            if (!part.isEmpty()) boxes.push(part);
+        }
+        return boxes;
+    }
+
+    /**
+     * Union the frameable content of `root`'s subtree into `bbox`: the visit
+     * behind `_collectFrameableBounds` and `frameObject`.
+     * @param {THREE.Box3} bbox @param {THREE.Object3D} root
+     */
+    _expandFrameableBounds(bbox, root) {
+        this._visitFrameable(root, false, (box) => { bbox.union(box); });
+    }
+
+    /**
+     * Walk `root`'s frameable content and hand each node's world box to `emit`.
+     * @param {THREE.Object3D} root @param {boolean} pickableOnly
+     * @param {(box: THREE.Box3) => void} emit
+     */
+    _visitFrameable(root, pickableOnly, emit) {
         const visit = /** @param {any} child */ (child) => {
             if (!child.visible) return;
+            if (pickableOnly && child.userData && child.userData.pickable === false) return;
             // Embedder overlays are excluded from framing unless opted in.
             if (child.userData && child.userData.__overlay &&
                 !child.userData.__overlay.includeInBounds) return;
@@ -21339,21 +21576,21 @@ export class ThreeJSViewer {
                 child.updateWorldMatrix(true, false);
                 // Per node, not recursive: `visit` descends itself and
                 // applies the overlay/grid skips to each child.
-                expandBoxByNode(bbox, child);
+                const box = new THREE.Box3();
+                expandBoxByNode(box, child);
+                if (!box.isEmpty()) emit(box);
             }
             // LOD point clouds: frame the full advertised extent (root
             // octree cube), not just whatever nodes happen to be streamed
             // in right now.
             if (child.userData && child.userData.lodRootBox) {
                 child.updateWorldMatrix(true, false);
-                bbox.union(_lodBoundsBox.copy(child.userData.lodRootBox)
-                    .applyMatrix4(child.matrixWorld));
+                emit(child.userData.lodRootBox.clone().applyMatrix4(child.matrixWorld));
             }
             const kids = child.children;
             for (let i = 0; i < kids.length; i++) visit(kids[i]);
         };
-        visit(this._scene);
-        return bbox;
+        visit(root);
     }
 
     // ----- Picking (client-side API) -----
@@ -21440,26 +21677,55 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Fit the camera to a world-space AABB — `frameObject` for a box (e.g.
-     * auto-focus a just-committed region of interest). Vectors accept
-     * `{x,y,z}` or `[x,y,z]`.
-     * @param {any} min @param {any} max @param {number} [margin] fit margin
-     *   (1 = box exactly fills the view; default 1.5 like frameObject)
+     * Fit the camera to a world-space AABB (`frameObject` for a box, e.g.
+     * auto-focus a just-committed region of interest) by its eight corners,
+     * keeping the view direction. Vectors accept `{x,y,z}` or `[x,y,z]`.
+     * @param {any} min @param {any} max
+     * @param {{fill?: number, animate?: boolean} | number} [opts] options as
+     *   for frameObject; a bare number is the old margin (fill = 1 / margin)
      */
-    frameBox(min, max, margin = 1.5) {
-        const lo = vec3Tuple(min), hi = vec3Tuple(max);
-        if (!lo || !hi) {
-            console.warn('frameBox: min/max must be finite 3-vectors');
-            return;
+    frameBox(min, max, opts) {
+        const box = boxFromMinMax(min, max, 'frameBox');
+        if (!box) return;
+        const { fill, animate } = frameOptions(opts);
+        this._camController.fitToBoxes([box], fill, animate);
+    }
+
+    /**
+     * Fit the camera to several world-space boxes by their eight corners
+     * each, keeping the view direction, so a set of parts along a diagonal is
+     * framed tight instead of by their loose common AABB.
+     * @param {Array<{min: any, max: any}>} boxes
+     * @param {{fill?: number, animate?: boolean}} [opts] as for frameObject
+     */
+    frameBoxes(boxes, opts) {
+        /** @type {THREE.Box3[]} */
+        const out = [];
+        for (const b of boxes || []) {
+            const box = b && boxFromMinMax(b.min, b.max, 'frameBoxes');
+            if (box) out.push(box);
         }
-        const box = new THREE.Box3(
-            new THREE.Vector3(lo[0], lo[1], lo[2]),
-            new THREE.Vector3(hi[0], hi[1], hi[2]));
-        if (box.isEmpty()) {
-            console.warn('frameBox: empty box (min > max on some axis)');
-            return;
+        const { fill, animate } = frameOptions(opts);
+        this._camController.fitToBoxes(out, fill, animate);
+    }
+
+    /**
+     * Fit the camera to world-space points (`{x,y,z}` or `[x,y,z]`), keeping
+     * the view direction; non-finite points are skipped with one warning.
+     * @param {Array<any>} points
+     * @param {{fill?: number, animate?: boolean}} [opts] as for frameObject
+     */
+    framePoints(points, opts) {
+        /** @type {THREE.Vector3[]} */
+        const out = [];
+        let bad = 0;
+        for (const p of points || []) {
+            const t = vec3Tuple(p);
+            if (t) out.push(new THREE.Vector3(t[0], t[1], t[2])); else bad++;
         }
-        this._fitCameraToBox(box, margin);
+        if (bad) console.warn(`framePoints: skipped ${bad} non-finite point(s)`);
+        const { fill, animate } = frameOptions(opts);
+        this._camController.fitToPoints(out, fill, animate);
     }
 
     /**
@@ -21994,9 +22260,11 @@ export class ThreeJSViewer {
      * the nearest hit to its top-level tracked object. Shared by the dblclick
      * framing handler and the object-click event so both agree on what "the
      * object under the cursor" is. Unlike `pick()` this includes lines and
-     * point clouds. A tracked object under a hidden ancestor (a child of a
-     * group hidden with set_visibility) is skipped: three's raycaster does
-     * not check visibility, and unrendered content must not report a click.
+     * point clouds. A hit is skipped when the hit node or any ancestor is
+     * hidden or sent with `pickable: false` (`isPickTarget`, the click-to-pivot
+     * rule of issue #215): three's raycaster does not check visibility, so a
+     * hidden descendant of a visible group would otherwise resolve to that
+     * group (issue #287).
      * @param {number} clientX @param {number} clientY
      * @returns {{object: THREE.Object3D, id: string, point: THREE.Vector3} | null}
      */
@@ -22007,12 +22275,7 @@ export class ThreeJSViewer {
         /** @type {Map<THREE.Object3D, string>} */
         const ids = new Map();
         for (const [id, obj] of this._objects) {
-            if (!obj) continue;
-            let shown = true;
-            for (let n = obj; n; n = n.parent) {
-                if (n.visible === false) { shown = false; break; }
-            }
-            if (shown) { candidates.push(obj); ids.set(obj, id); }
+            if (obj && obj.visible) { candidates.push(obj); ids.set(obj, id); }
         }
         if (!candidates.length) return null;
         const hits = this._objectClickRaycaster.intersectObjects(candidates, true);
@@ -22020,6 +22283,7 @@ export class ThreeJSViewer {
             // Parented overlays (issue #254) are inside the candidates but
             // belong to the embedder; a hit on one must not report its parent.
             if (isUnderOverlay(hit.object)) continue;
+            if (!isPickTarget(hit.object)) continue;
             // Walk up to the top-level object the user added (a value of _objects).
             let target = hit.object;
             while (target && !ids.has(target)) target = target.parent;
@@ -22676,7 +22940,7 @@ export class ThreeJSViewer {
             ? new THREE.Vector3()
             : bbox.getCenter(new THREE.Vector3());
         this._controls.target.copy(target);
-        // Pre-orient along the canonical direction so _fitCameraToBox (which
+        // Pre-orient along the canonical direction so fitToBoxes (which
         // preserves whatever direction the camera is already pointing) puts
         // the camera in the right spot after fitting.
         const isoDir = new THREE.Vector3(1, -1, 1).normalize();
@@ -22690,19 +22954,26 @@ export class ThreeJSViewer {
             this._camera.lookAt(target);
             this._controls.update();
         } else {
-            this._fitCameraToBox(bbox, 1.2);
+            this._camController.fitToBoxes(this._homeParts(bbox), FRAME_DEFAULT_FILL);
         }
     }
 
+    /** Frame the visible content from the current view direction (no reorient). */
     frameAll() {
-        this._fitCameraToBox(this._collectFrameableBounds(), 1.2);
+        const bbox = this._collectFrameableBounds();
+        if (!bbox.isEmpty()) this._camController.fitToBoxes(this._homeParts(bbox), FRAME_DEFAULT_FILL);
     }
 
     /**
-     * @param {THREE.Box3} bbox
-     * @param {number} perspMargin
+     * One box per visible, pickable top-level object, so Home fits the
+     * parts rather than their loose common AABB; `whole` (the
+     * `_collectFrameableBounds` box) when no part is pickable.
+     * @param {THREE.Box3} whole @returns {THREE.Box3[]}
      */
-    _fitCameraToBox(bbox, perspMargin) { this._camController.fitToBox(bbox, perspMargin); }
+    _homeParts(whole) {
+        const parts = this._frameableParts(this._scene, false, true);
+        return parts.length ? parts : [whole];
+    }
 
     // ========== Destroy ==========
 
