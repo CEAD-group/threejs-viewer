@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import numpy as np
 from websockets.sync.server import serve as sync_serve
 
+from . import kinematics
 from .points_lod import (
     DEFAULT_MAX_DEPTH,
     DEFAULT_NODE_CAPACITY,
@@ -899,6 +900,10 @@ class ViewerClient:
         # a reconnect re-declares each one (the viewer resolves them per frame
         # but holds none of them across a fresh WS connection).
         self._clip_bindings: Dict[str, dict] = {}
+        # Kinematic chains and their static poses (set_kinematic_chain /
+        # set_joints), id -> message, replayed on reconnect in that order.
+        self._kinematic_chains: Dict[str, dict] = {}
+        self._joint_poses: Dict[str, dict] = {}
         # Pinned (persistent) gizmos added with add_gizmo — a list of
         # {type:'add_gizmo', id, x, y, z, mode} specs. Independent of the single
         # interactive gizmo above; any number can be active at once, each with its
@@ -1183,6 +1188,14 @@ class ViewerClient:
         # Re-declare clip bindings. Objects are not replayed; the viewer resolves
         # a binding once both ids exist, whenever they arrive.
         for spec in self._clip_bindings.values():
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
+        # Re-declare kinematic chains, then their static poses. Like clip
+        # bindings, a chain poses its objects whenever they arrive.
+        for spec in [*self._kinematic_chains.values(), *self._joint_poses.values()]:
             try:
                 websocket.send(json.dumps(spec))
             except Exception:
@@ -4019,6 +4032,175 @@ class ViewerClient:
         if self._ws is not None:
             self._send({"type": "unbind_clip", "id": id})
 
+    def set_kinematic_chain(
+        self,
+        id: str,
+        description,
+        object_ids: Dict[str, Optional[str]],
+        object_scale: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Declare a kinematic chain whose joint values pose scene objects.
+
+        ``description`` is a ``threejs_viewer.kinematic_chain`` version 1
+        description (a dict, or an object with ``to_dict()``), specified in
+        :mod:`threejs_viewer.kinematics`: ``axes``, ``solved`` and a
+        parent-first list of ``links``, each a row-major 4x4 ``origin`` on its
+        parent and at most one revolute, prismatic, solved or aim joint. Each
+        link's world matrix is ``(parent @ origin) @ motion``; the viewer runs
+        that forward kinematics itself, so an animation needs only the axis
+        values per keyframe (:meth:`Animation.set_joint_data`) and the links
+        stay consistent between keyframes. :func:`threejs_viewer.kinematics.compose`
+        is the reference the viewer's FK is tested against.
+
+        ``object_ids`` maps a link name to the scene object it poses; a link
+        missing from it, or mapped to None, is a frame only. Every key must be
+        a link name, so a renamed link fails here instead of silently posing
+        nothing. ``object_scale`` gives a uniform
+        scale for a link's object, applied on its rotation. The object gets its
+        link's world matrix, or the matrix relative to its parent when it is
+        parented. A posed object ignores a ``transforms`` channel for its id.
+
+        Send it once per cell and again after a tool or device change; a
+        resend keeps the :meth:`set_joints` pose when the axis count is
+        unchanged. Objects may arrive after the chain. Replayed on reconnect;
+        :meth:`clear` drops it.
+
+        Raises:
+            ValueError: For a description that breaks the format (see
+                :func:`threejs_viewer.kinematics.validate`), or an
+                ``object_ids``/``object_scale`` key that is not a link name.
+        """
+        description = kinematics.validate(description)
+        if not isinstance(object_ids, dict):
+            raise ValueError("object_ids must map link names to object ids")
+        names = {link["name"] for link in description["links"]}
+        unknown = (set(object_ids) | set(object_scale or {})) - names
+        if unknown:
+            raise ValueError(f"not links of the description: {sorted(unknown)}")
+        spec = {
+            "type": "set_kinematic_chain",
+            "id": id,
+            "description": description,
+            "object_ids": dict(object_ids),
+        }
+        if object_scale:
+            spec["object_scale"] = {
+                k: _validate_finite(f"object_scale[{k!r}]", v)
+                for k, v in object_scale.items()
+            }
+        pose = self._joint_poses.get(id)
+        if pose is not None and (
+            len(pose["values"]) != len(description["axes"])
+            or len(pose["solved"]) != len(description.get("solved") or [])
+        ):
+            # The viewer drops a pose that no longer fits the chain too.
+            del self._joint_poses[id]
+        self._kinematic_chains[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def remove_kinematic_chain(self, id: str) -> None:
+        """Forget chain ``id``; its objects keep their last pose."""
+        self._kinematic_chains.pop(id, None)
+        self._joint_poses.pop(id, None)
+        if self._ws is not None:
+            self._send({"type": "remove_kinematic_chain", "id": id})
+
+    def set_joints(self, id: str, values, solved=None) -> None:
+        """Pose chain ``id`` from axis values, without an animation.
+
+        ``values`` follows the description's axes order (degrees rotary, metres
+        linear) and ``solved`` its solved links (degrees). The pose is also what
+        the chain returns to after :meth:`unload_animation`, and is replayed on
+        reconnect.
+
+        Raises:
+            ValueError: For an unknown chain, a wrong value count, or a
+                non-finite value.
+        """
+        chain = self._kinematic_chains.get(id)
+        if chain is None:
+            raise ValueError(
+                f"no kinematic chain {id!r}; call set_kinematic_chain first"
+            )
+        desc = chain["description"]
+        values = [_validate_finite("values", v) for v in values]
+        solved = [_validate_finite("solved", v) for v in (solved or [])]
+        if len(values) != len(desc["axes"]):
+            raise ValueError(f"expected {len(desc['axes'])} values, got {len(values)}")
+        if len(solved) != len(desc.get("solved") or []):
+            raise ValueError(
+                f"expected {len(desc.get('solved') or [])} solved values, got {len(solved)}"
+            )
+        spec = {"type": "set_joints", "id": id, "values": values, "solved": solved}
+        self._joint_poses[id] = spec
+        if self._ws is not None:
+            self._send(spec)
+
+    def query_kinematic_chain(
+        self, id: str, values=None, solved=None, timeout: float = 5.0
+    ) -> dict:
+        """Ask the viewer what its forward kinematics computes for chain ``id``.
+
+        This is the check that the viewer's FK agrees with the producer's own
+        (or with :func:`threejs_viewer.kinematics.compose`) on a real
+        description, rather than on fixtures that may age.
+
+        With ``values`` (``(n_poses, n_axes)``, plus ``(n_poses, n_solved)``
+        ``solved`` for descriptions with solved links) the viewer evaluates
+        each pose without moving anything and the result is ``{"names": [...],
+        "world": (n_poses, n_links, 4, 4) float64}``, exact to the viewer's
+        float64 arithmetic. Without ``values`` it reports the current pose:
+        ``"world"`` is ``(1, n_links, 4, 4)`` (None before any pose),
+        ``"posed"``, ``"object_ids"`` (link name to object id) and
+        ``"objects"`` (object id to its actual ``(4, 4)`` world matrix, which
+        also covers the object mapping, ``object_scale`` and parenting, at the
+        float32 precision three.js stores).
+
+        Raises:
+            ValueError: For an unknown chain or a pose with the wrong width.
+            TimeoutError: When the viewer does not answer.
+        """
+        msg = {"type": "query_kinematic_chain", "id": id}
+        if values is not None:
+            q = np.atleast_2d(np.asarray(values, dtype=np.float64))
+            s = (
+                np.zeros((len(q), 0))
+                if solved is None
+                else np.atleast_2d(np.asarray(solved, dtype=np.float64))
+            )
+            if not (np.isfinite(q).all() and np.isfinite(s).all()):
+                raise ValueError("values and solved must be finite")
+            msg["values"] = q.tolist()
+            msg["solved"] = s.tolist()
+        request_id = str(uuid.uuid4())
+        msg["requestId"] = request_id
+        event = threading.Event()
+        self._pending_responses[request_id] = event
+        self._send(msg)
+        if not event.wait(timeout=timeout):
+            self._pending_responses.pop(request_id, None)
+            raise TimeoutError("No response from viewer")
+        response = self._responses.pop(request_id, {})
+        self._pending_responses.pop(request_id, None)
+        if response.get("error"):
+            raise ValueError(response["error"])
+        world = response.get("world")
+        out = {
+            "names": response.get("names", []),
+            "world": None
+            if world is None
+            else np.asarray(world, dtype=np.float64).reshape(len(world), -1, 4, 4),
+        }
+        if values is None:
+            out["posed"] = response.get("posed", False)
+            out["object_ids"] = response.get("object_ids", {})
+            out["objects"] = {
+                k: np.asarray(v, dtype=np.float64).reshape(4, 4)
+                for k, v in response.get("objects", {}).items()
+            }
+        return out
+
     def set_follow_path(self, id: str, times, positions, axes) -> None:
         """Attach a follow-path track: object ``id`` rides the timed 5-axis
         path — per render tick the viewer computes the pose from the REAL
@@ -5732,6 +5914,8 @@ class ViewerClient:
         # Axis controls and clip bindings likewise target now-removed objects.
         self._axis_controls = {}
         self._clip_bindings = {}
+        self._kinematic_chains = {}
+        self._joint_poses = {}
         for cloud_id in list(self._points_lod):
             self._release_points_lod(cloud_id)
         # Flat clouds are gone from the viewer too, so an append after a
