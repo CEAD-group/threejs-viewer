@@ -183,7 +183,7 @@ Binary channels and Frame-based JSON can coexist. A binary channel supersedes th
 - `11_toolpath.py` - Spiral vase toolpath with draw_range animation (parametric tube + nozzle, smooth frontier morphing, viridis colormap, binary animation channels; the bead wears a colour + normal + roughness set from `bead_texture_maker.texture_set`, tinted by the colormap)
 - `12_transparency.py` - Transparency and opacity control (set_opacity, set_color with opacity)
 - `13_material_properties.py` - PBR material properties (roughness/metalness grid on primitives)
-- `14_grouping.py` - Object grouping with animated robot arm (nested parent-child hierarchy, local joint transforms)
+- `14_robot_cell.py` - Robot cell on the kinematic chain API: a primitive-built 6-axis arm on a linear rail (`set_kinematic_chain`, one group per link) does a pick-and-place between two tables, animated by joint-space keyframes (`set_joint_data`, 7 axes at 10 Hz, eased between waypoints); a `visibility` channel hands the part from table to gripper to table, and Python draws the TCP path with `kinematics.compose` at 60 Hz using the viewer's joint-space lerp
 - `15_toolpath_interrupted.py` - Interrupted extrusion with travel moves: per-point width array (0=travel), pill/racetrack path, parametric tube with zero-width segments for natural taper transitions, plasma colormap
 - `16_clipping_plane.py` - Interactive clipping plane with slab mode (nested spheres sliced to reveal internals, single plane + dual-plane slab, programmatic + GUI control)
 - `17_animation_interpolation.py` - HOLD ⇄ LINEAR comparison on a sparse (3 Hz) tumbling-capsules animation. Auto-alternates the two modes on the same `transforms` channel so the lerp/slerp effect is obvious.
