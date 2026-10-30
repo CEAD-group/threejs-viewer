@@ -2520,7 +2520,502 @@ function makeChannelApply(viewer) {
         // No-ops: data is read directly in _applyCameraTracking, not per-object
         camera_target: () => {},
         camera_position: () => {},
+        // Applied after every other channel in _applyFrame (KinematicChainController.applyChannel).
+        joints: () => {},
     };
+}
+
+// ---- Kinematic chains --------------------------------------------------------
+// Forward kinematics over the `threejs_viewer.kinematic_chain` description,
+// version 1. The Python module `threejs_viewer.kinematics` is the spec and its
+// `compose` the reference evaluator. Pure float64 and no three.js, so an
+// embedder can pin it to its own FK in unit tests. The arithmetic repeats the
+// reference step for step, so the two agree to rounding.
+// Matrices are row-major 16-arrays, like the description's `origin`.
+
+/**
+ * @typedef {[number, number, number]} KCVec3
+ * @typedef {{offset: number, terms: Record<string, number>}} KCJointValue
+ * @typedef {{type: 'revolute', axis: KCVec3, point: KCVec3, value: KCJointValue}
+ *         | {type: 'prismatic', axis: KCVec3, value: KCJointValue}
+ *         | {type: 'solved', axis: KCVec3, point: KCVec3, index: number, method?: string}
+ *         | {type: 'aim', axis: KCVec3, point: KCVec3, body: KCVec3, target: {link: string|null, point: KCVec3}}} KCJoint
+ * @typedef {{name: string, parent: string|null, origin: number[][], joint: KCJoint|null}} KCLink
+ * @typedef {{name: string, kind?: string, limits?: Array<number|null>}} KCAxis
+ * @typedef {{format: string, version: number, units?: {length: string, angle: string},
+ *            axes: KCAxis[], solved?: string[], links: KCLink[]}} KinematicDescription
+ */
+
+/**
+ * One link resolved to indices and scalars, so composing a pose allocates nothing.
+ * @typedef {object} KCCompiledLink
+ * @property {number} parent  link index, -1 for the world
+ * @property {Float64Array} origin  row-major 4x4
+ * @property {number} kind  0 fixed, 1 revolute, 2 prismatic, 3 solved, 4 aim
+ * @property {number} x @property {number} y @property {number} z  unit axis (hinge for aim)
+ * @property {number} px @property {number} py @property {number} pz  point on the turn axis
+ * @property {number} offset
+ * @property {Array<[number, number]>} terms  [axis index, factor], in axes order
+ * @property {number} solvedIndex
+ * @property {number} bx @property {number} by @property {number} bz  aim body axis
+ * @property {number} target  aim target link index, -1 for the world
+ * @property {number} tx @property {number} ty @property {number} tz  aim target point
+ */
+
+/**
+ * @typedef {object} KinematicChainCompiled
+ * @property {string[]} names  link names, in description order
+ * @property {KCCompiledLink[]} links
+ * @property {number} nAxes
+ * @property {number} nSolved
+ */
+
+const KC_DEG = Math.PI / 180;
+const KC_FORMAT = 'threejs_viewer.kinematic_chain';
+const KC_KIND = { revolute: 1, prismatic: 2, solved: 3, aim: 4 };
+const KC_IDENTITY = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/**
+ * Resolve a kinematic description to indices, so composing a pose allocates
+ * nothing. Throws on an unsupported version, an unknown joint type, or a link
+ * named before its parent or aim target.
+ * @param {KinematicDescription} desc
+ * @returns {KinematicChainCompiled}
+ */
+function compileKinematicChain(desc) {
+    // Refuse what this port was not written against rather than misread it.
+    if (!desc || desc.format !== KC_FORMAT || desc.version !== 1) {
+        throw new Error(`kinematic description: expected format ${KC_FORMAT} version 1 (got ${desc?.format} version ${desc?.version})`);
+    }
+    if (!Array.isArray(desc.links) || !Array.isArray(desc.axes)) {
+        throw new Error('kinematic description: needs axes and links arrays');
+    }
+    if (desc.units !== undefined && (desc.units.length !== 'm' || desc.units.angle !== 'deg')) {
+        throw new Error(`kinematic description: units must be m and deg (got ${JSON.stringify(desc.units)})`);
+    }
+    const solvedNames = desc.solved || [];
+    /** @type {Map<string, number>} */
+    const linkIndex = new Map();
+    const indexOf = (/** @type {string|null} */ name, /** @type {string} */ what) => {
+        if (name === null || name === undefined) return -1;
+        const i = linkIndex.get(name);
+        if (i === undefined) throw new Error(`${what}: ${name} is not listed before it`);
+        return i;
+    };
+    const links = desc.links.map((link, li) => {
+        const origin = new Float64Array(16);
+        link.origin.forEach((row, r) => row.forEach((v, c) => { origin[4 * r + c] = v; }));
+        /** @type {KCCompiledLink} */
+        const out = {
+            parent: indexOf(link.parent, `link ${link.name} parent`), origin, kind: 0,
+            x: 0, y: 0, z: 0, px: 0, py: 0, pz: 0, offset: 0, terms: [], solvedIndex: -1,
+            bx: 0, by: 0, bz: 0, target: -1, tx: 0, ty: 0, tz: 0,
+        };
+        const j = link.joint;
+        if (j) {
+            if (!(j.type in KC_KIND)) throw new Error(`link ${link.name}: unknown joint type ${j.type}`);
+            out.kind = KC_KIND[j.type];
+            [out.x, out.y, out.z] = j.axis;
+            if (j.type !== 'prismatic') [out.px, out.py, out.pz] = j.point;
+            if (j.type === 'revolute' || j.type === 'prismatic') {
+                out.offset = j.value.offset;
+                desc.axes.forEach((axis, ai) => {
+                    const f = j.value.terms[axis.name];
+                    if (f !== undefined) out.terms.push([ai, f]);
+                });
+                if (out.terms.length !== Object.keys(j.value.terms).length) {
+                    throw new Error(`link ${link.name}: terms name an axis that is not in axes`);
+                }
+            } else if (j.type === 'solved') {
+                if (!(j.index >= 0 && j.index < solvedNames.length)) {
+                    throw new Error(`link ${link.name}: solved index ${j.index} outside the ${solvedNames.length} solved columns`);
+                }
+                out.solvedIndex = j.index;
+            } else {
+                [out.bx, out.by, out.bz] = j.body;
+                out.target = indexOf(j.target.link, `link ${link.name} aim target`);
+                [out.tx, out.ty, out.tz] = j.target.point;
+            }
+        }
+        linkIndex.set(link.name, li);
+        return out;
+    });
+    return { names: desc.links.map((l) => l.name), links, nAxes: desc.axes.length, nSolved: solvedNames.length };
+}
+
+/**
+ * Row-major out = a @ b, summing k in ascending order. `out` must not alias `a` or `b`.
+ * @param {Float64Array} a @param {number} ao @param {Float64Array} b
+ * @param {Float64Array} out @param {number} oo
+ */
+function kcMatmul(a, ao, b, out, oo) {
+    for (let r = 0; r < 4; r++) {
+        const a0 = a[ao + 4 * r], a1 = a[ao + 4 * r + 1], a2 = a[ao + 4 * r + 2], a3 = a[ao + 4 * r + 3];
+        for (let c = 0; c < 4; c++) {
+            out[oo + 4 * r + c] = a0 * b[c] + a1 * b[4 + c] + a2 * b[8 + c] + a3 * b[12 + c];
+        }
+    }
+}
+
+// Scratch for one pose; composing is single-threaded.
+const _kcFrame = new Float64Array(16);
+const _kcMotion = new Float64Array(16);
+
+/**
+ * The reference's turn into _kcMotion: R about (x, y, z) by theta, translation p - R @ p.
+ * @param {KCCompiledLink} l @param {number} theta
+ */
+function kcTurn(l, theta) {
+    const { x, y, z, px, py, pz } = l;
+    const c = Math.cos(theta), s = Math.sin(theta), v = 1.0 - c;
+    const m = _kcMotion;
+    m[0] = c + x * x * v; m[1] = x * y * v - z * s; m[2] = x * z * v + y * s;
+    m[4] = y * x * v + z * s; m[5] = c + y * y * v; m[6] = y * z * v - x * s;
+    m[8] = z * x * v - y * s; m[9] = z * y * v + x * s; m[10] = c + z * z * v;
+    m[3] = px - (m[0] * px + m[1] * py + m[2] * pz);
+    m[7] = py - (m[4] * px + m[5] * py + m[6] * pz);
+    m[11] = pz - (m[8] * px + m[9] * py + m[10] * pz);
+    m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1;
+}
+
+/**
+ * Step 5 of the reference: the hinge angle (radians) laying the body axis onto the target.
+ * @param {KCCompiledLink} l @param {Float64Array} world @param {Float64Array} f
+ */
+function kcAimAngle(l, world, f) {
+    const { px, py, pz, tx, ty, tz } = l;
+    const pivot0 = (f[0] * px + f[1] * py + f[2] * pz) + f[3];
+    const pivot1 = (f[4] * px + f[5] * py + f[6] * pz) + f[7];
+    const pivot2 = (f[8] * px + f[9] * py + f[10] * pz) + f[11];
+    const h = l.target < 0 ? KC_IDENTITY : world, o = l.target < 0 ? 0 : 16 * l.target;
+    const d0 = ((h[o] * tx + h[o + 1] * ty + h[o + 2] * tz) + h[o + 3]) - pivot0;
+    const d1 = ((h[o + 4] * tx + h[o + 5] * ty + h[o + 6] * tz) + h[o + 7]) - pivot1;
+    const d2 = ((h[o + 8] * tx + h[o + 9] * ty + h[o + 10] * tz) + h[o + 11]) - pivot2;
+    // c_vec = F[:3, :3].T @ (target - pivot)
+    const c0 = f[0] * d0 + f[4] * d1 + f[8] * d2;
+    const c1 = f[1] * d0 + f[5] * d1 + f[9] * d2;
+    const c2 = f[2] * d0 + f[6] * d1 + f[10] * d2;
+    const { x: h0, y: h1, z: h2, bx, by, bz } = l;
+    const bh = bx * h0 + by * h1 + bz * h2;
+    const b0 = bx - bh * h0, b1 = by - bh * h1, b2 = bz - bh * h2;
+    const ch = c0 * h0 + c1 * h1 + c2 * h2;
+    const f0 = c0 - ch * h0, f1 = c1 - ch * h1, f2 = c2 - ch * h2;
+    const x0 = b1 * f2 - b2 * f1, x1 = b2 * f0 - b0 * f2, x2 = b0 * f1 - b1 * f0;
+    return Math.atan2(x0 * h0 + x1 * h1 + x2 * h2, f0 * b0 + f1 * b1 + f2 * b2);
+}
+
+/**
+ * World matrix of every link at one pose, 16 row-major entries per link into `out`.
+ * @param {KinematicChainCompiled} c
+ * @param {ArrayLike<number>} axes  in description axes order: degrees rotary, metres linear
+ * @param {ArrayLike<number>} [solved]  in description solved order, degrees
+ * @param {Float64Array} [out]
+ * @returns {Float64Array}
+ */
+function composeKinematicChainInto(c, axes, solved = [], out = new Float64Array(16 * c.names.length)) {
+    const links = c.links;
+    for (let i = 0; i < links.length; i++) {
+        const l = links[i];
+        const o = 16 * i;
+        if (l.parent < 0) _kcFrame.set(l.origin);
+        else kcMatmul(out, 16 * l.parent, l.origin, _kcFrame, 0);
+        if (l.kind === 0) {
+            out.set(_kcFrame, o);
+            continue;
+        }
+        if (l.kind === 2 || l.kind === 1) {
+            let value = l.offset;
+            for (const [ai, factor] of l.terms) value = value + factor * axes[ai];
+            if (l.kind === 2) {
+                _kcMotion.set(KC_IDENTITY);
+                _kcMotion[3] = value * l.x; _kcMotion[7] = value * l.y; _kcMotion[11] = value * l.z;
+            } else {
+                kcTurn(l, value * KC_DEG);
+            }
+        } else if (l.kind === 3) {
+            kcTurn(l, solved[l.solvedIndex] * KC_DEG);
+        } else {
+            kcTurn(l, kcAimAngle(l, out, _kcFrame));
+        }
+        kcMatmul(_kcFrame, 0, _kcMotion, out, o);
+    }
+    return out;
+}
+
+/**
+ * World matrix (row-major Float64Array(16)) per link name at one pose; the
+ * convenience form of compileKinematicChain + composeKinematicChainInto.
+ * @param {KinematicDescription} desc
+ * @param {ArrayLike<number>} axes
+ * @param {ArrayLike<number>} [solved]
+ * @returns {Map<string, Float64Array>}
+ */
+function composeKinematicChain(desc, axes, solved = []) {
+    const c = compileKinematicChain(desc);
+    const out = composeKinematicChainInto(c, axes, solved);
+    return new Map(c.names.map((name, i) => [name, out.subarray(16 * i, 16 * i + 16)]));
+}
+
+/**
+ * @typedef {object} KinematicChainState
+ * @property {string} id
+ * @property {KinematicChainCompiled} c
+ * @property {Array<{link: number, id: string, scale: number}>} targets
+ * @property {Map<string, number>} targetOfObject  object id -> index into targets
+ * @property {Float64Array} out  world matrices of the last pose
+ * @property {Float64Array} q  lerp scratch, axes
+ * @property {Float64Array} s  lerp scratch, solved
+ * @property {boolean} posed  `out` holds a pose that objects should wear
+ * @property {Float64Array | null} staticQ  last set_joints axes
+ * @property {Float64Array | null} staticS  last set_joints solved
+ * @property {boolean} warnedStride
+ */
+
+// Poses tracked objects from joint values: set_kinematic_chain registers a
+// chain, set_joints and the `joints` animation channel pose it. Each posed
+// object gets its link's world matrix, made local when the object is parented.
+class KinematicChainController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this._viewer = viewer;
+        /** @type {Map<string, KinematicChainState>} */
+        this._chains = new Map();
+        /** @type {Map<string, Array<KinematicChainState>>} object id -> chains posing it */
+        this._byObject = new Map();
+        this._world = new THREE.Matrix4();
+        this._parent = new THREE.Matrix4();
+    }
+
+    /**
+     * Register or replace chain `id`. A replaced chain keeps its set_joints pose
+     * when the axis and solved counts still match. Throws on a bad description,
+     * a missing object_ids, or an object_ids/object_scale key that is no link.
+     * @param {string} id
+     * @param {{description: KinematicDescription, object_ids: Record<string, string|null>,
+     *          object_scale?: Record<string, number>}} spec
+     */
+    set(id, spec) {
+        const c = compileKinematicChain(spec.description);
+        const ids = spec.object_ids;
+        const scale = spec.object_scale || {};
+        if (!ids || typeof ids !== 'object') {
+            throw new Error(`kinematic chain '${id}': object_ids (link name -> object id) is required`);
+        }
+        const linkNames = new Set(c.names);
+        for (const key of [...Object.keys(ids), ...Object.keys(scale)]) {
+            if (!linkNames.has(key)) throw new Error(`kinematic chain '${id}': ${key} is not a link of the description`);
+        }
+        /** @type {KinematicChainState['targets']} */
+        const targets = [];
+        /** @type {Map<string, number>} */
+        const targetOfObject = new Map();
+        c.names.forEach((name, link) => {
+            const objId = ids[name];
+            if (!objId) return;
+            if (targetOfObject.has(objId)) {
+                console.warn(`kinematic chain '${id}': object '${objId}' is mapped to more than one link; using the first`);
+                return;
+            }
+            targetOfObject.set(objId, targets.length);
+            targets.push({ link, id: objId, scale: scale[name] ?? 1 });
+        });
+        const prev = this._chains.get(id);
+        const keep = prev && prev.c.nAxes === c.nAxes && prev.c.nSolved === c.nSolved;
+        /** @type {KinematicChainState} */
+        const chain = {
+            id, c, targets, targetOfObject,
+            out: new Float64Array(16 * c.names.length),
+            q: new Float64Array(c.nAxes), s: new Float64Array(c.nSolved),
+            posed: false,
+            staticQ: keep ? prev.staticQ : null, staticS: keep ? prev.staticS : null,
+            warnedStride: false,
+        };
+        this._chains.set(id, chain);
+        this._reindex();
+        if (chain.staticQ) this.pose(chain, chain.staticQ, chain.staticS);
+    }
+
+    /** @param {string} id */
+    remove(id) {
+        if (this._chains.delete(id)) this._reindex();
+    }
+
+    clear() {
+        this._chains.clear();
+        this._byObject.clear();
+    }
+
+    /** @param {string} id */
+    has(id) { return this._chains.has(id); }
+
+    /**
+     * Static pose (also the pose unload_animation returns to). Throws on a
+     * wrong value count or a non-finite value.
+     * @param {string} id @param {ArrayLike<number>} values @param {ArrayLike<number>} [solved]
+     * @returns {boolean} false for an unknown chain
+     */
+    setJoints(id, values, solved) {
+        const chain = this._chains.get(id);
+        if (!chain) return false;
+        const q = Float64Array.from(values || []);
+        const s = Float64Array.from(solved || []);
+        if (q.length !== chain.c.nAxes || s.length !== chain.c.nSolved) {
+            throw new Error(`set_joints '${id}': expected ${chain.c.nAxes} values and ${chain.c.nSolved} solved, got ${q.length} and ${s.length}`);
+        }
+        if (!arrayFinite(q) || !arrayFinite(s)) throw new Error(`set_joints '${id}': values must be finite`);
+        chain.staticQ = q;
+        chain.staticS = s;
+        this.pose(chain, q, s);
+        return true;
+    }
+
+    /**
+     * Compose `chain` at (q, s) and write every mapped object that exists.
+     * @param {KinematicChainState} chain @param {ArrayLike<number>} q @param {ArrayLike<number> | null} s
+     */
+    pose(chain, q, s) {
+        composeKinematicChainInto(chain.c, q, s || [], chain.out);
+        chain.posed = true;
+        for (const t of chain.targets) this._write(chain, t);
+        const v = this._viewer;
+        v._sceneBoundsDirty = true;
+        v._shadowDirty = true;
+    }
+
+    /**
+     * The `joints` channel: one row of `stride` values per chain in `ch.ids`,
+     * axes then solved, lerped in joint space between keyframes.
+     * @param {BinaryChannel} ch @param {number} base @param {number | null} baseNext @param {number} t
+     */
+    applyChannel(ch, base, baseNext, t) {
+        const interp = shouldInterpChannel(ch, baseNext, t);
+        const data = ch.data;
+        for (let i = 0; i < ch.ids.length; i++) {
+            const chain = this._chains.get(ch.ids[i]);
+            if (!chain) continue;
+            const nq = chain.c.nAxes, ns = chain.c.nSolved;
+            if (nq + ns > ch.stride) {
+                if (!chain.warnedStride) {
+                    chain.warnedStride = true;
+                    console.warn(`joints channel: stride ${ch.stride} is shorter than chain '${chain.id}' needs (${nq} axes + ${ns} solved); not posing it`);
+                }
+                continue;
+            }
+            const a = base + i * ch.stride;
+            const b = interp ? /** @type {number} */ (baseNext) + i * ch.stride : a;
+            for (let j = 0; j < nq; j++) chain.q[j] = data[a + j] + (data[b + j] - data[a + j]) * t;
+            for (let j = 0; j < ns; j++) chain.s[j] = data[a + nq + j] + (data[b + nq + j] - data[a + nq + j]) * t;
+            this.pose(chain, chain.q, chain.s);
+        }
+    }
+
+    /**
+     * The `query_kinematic_chain` reply. With `values` (one row per pose) it
+     * evaluates the FK at those poses without moving anything; without, it
+     * reports the current pose and each posed object's actual world matrix.
+     * Matrices are row-major 16-arrays; JSON carries the float64 values exactly.
+     * @param {string} id @param {number[][] | undefined} values @param {number[][] | undefined} solved
+     */
+    query(id, values, solved) {
+        const chain = this._chains.get(id);
+        if (!chain) return { error: `no kinematic chain '${id}'` };
+        const c = chain.c;
+        const split = (/** @type {Float64Array} */ out) =>
+            c.names.map((_, i) => Array.from(out.subarray(16 * i, 16 * i + 16)));
+        if (values) {
+            const out = new Float64Array(16 * c.names.length);
+            const world = [];
+            for (let k = 0; k < values.length; k++) {
+                const q = values[k] || [], s = (solved && solved[k]) || [];
+                if (q.length !== c.nAxes || s.length !== c.nSolved) {
+                    return { error: `pose ${k}: expected ${c.nAxes} values and ${c.nSolved} solved, got ${q.length} and ${s.length}` };
+                }
+                composeKinematicChainInto(c, q, s, out);
+                world.push(split(out));
+            }
+            return { names: c.names, world };
+        }
+        /** @type {Record<string, number[]>} */
+        const objects = {};
+        for (const t of chain.targets) {
+            const obj = this._viewer._objects.get(t.id);
+            if (!obj) continue;
+            obj.updateWorldMatrix(true, false);
+            const e = obj.matrixWorld.elements;
+            objects[t.id] = [0, 1, 2, 3].flatMap((r) => [0, 1, 2, 3].map((col) => e[4 * col + r]));
+        }
+        return {
+            names: c.names,
+            posed: chain.posed,
+            world: chain.posed ? [split(chain.out)] : null,
+            object_ids: Object.fromEntries(chain.targets.map((t) => [c.names[t.link], t.id])),
+            objects,
+        };
+    }
+
+    /** A newly registered object wears the current pose of every chain mapping it. @param {string} id */
+    onRegister(id) {
+        const chains = this._byObject.get(id);
+        if (!chains) return;
+        for (const chain of chains) {
+            if (chain.posed) this._write(chain, chain.targets[/** @type {number} */ (chain.targetOfObject.get(id))]);
+        }
+    }
+
+    /** unload_animation restored every matrixAutoUpdate; return to the static poses. */
+    onUnloadAnimation() {
+        for (const chain of this._chains.values()) {
+            if (chain.staticQ) this.pose(chain, chain.staticQ, chain.staticS);
+            else chain.posed = false;
+        }
+    }
+
+    _reindex() {
+        this._byObject.clear();
+        for (const chain of this._chains.values()) {
+            for (const objId of chain.targetOfObject.keys()) {
+                const list = this._byObject.get(objId);
+                if (list) list.push(chain); else this._byObject.set(objId, [chain]);
+            }
+        }
+    }
+
+    /**
+     * Row-major link world (times the object scale on the rotation) into `m`.
+     * @param {KinematicChainState} chain @param {{link: number, scale: number}} t @param {THREE.Matrix4} m
+     */
+    _linkMatrix(chain, t, m) {
+        const o = chain.out, b = 16 * t.link, k = t.scale;
+        m.set(
+            o[b] * k, o[b + 1] * k, o[b + 2] * k, o[b + 3],
+            o[b + 4] * k, o[b + 5] * k, o[b + 6] * k, o[b + 7],
+            o[b + 8] * k, o[b + 9] * k, o[b + 10] * k, o[b + 11],
+            0, 0, 0, 1,
+        );
+        return m;
+    }
+
+    /** @param {KinematicChainState} chain @param {{link: number, id: string, scale: number}} t */
+    _write(chain, t) {
+        const v = this._viewer;
+        const obj = v._objects.get(t.id);
+        if (!obj) return;
+        const m = this._linkMatrix(chain, t, this._world);
+        const parent = obj.parent;
+        if (parent && parent !== v._scene) {
+            // A parent posed by this chain may not have its new matrixWorld yet.
+            const pi = parent.userData.id !== undefined ? chain.targetOfObject.get(parent.userData.id) : undefined;
+            if (pi !== undefined && v._objects.get(parent.userData.id) === parent) {
+                this._linkMatrix(chain, chain.targets[pi], this._parent);
+            } else {
+                parent.updateWorldMatrix(true, false);
+                this._parent.copy(parent.matrixWorld);
+            }
+            m.premultiply(this._parent.invert());
+        }
+        obj.matrixAutoUpdate = false;
+        setObjectMatrix4Checked(obj, m, 'kinematic chain');
+    }
 }
 
 // ---- Point-cloud time-window filter ----------------------------------------
@@ -15403,6 +15898,8 @@ class ThreeJSViewer {
         // a delete/re-add of either id (same id = same logical object).
         /** @type {Map<string, {source: {id:string, channel:string, from:number, to:number}}>} */
         this._clipBindings = new Map();
+        // set_kinematic_chain / set_joints / the `joints` channel.
+        this._kinematics = new KinematicChainController(this);
         this._objGeneration = 0;
         this._mixerGeneration = 0;
         this._pendingFetches = 0;
@@ -17168,6 +17665,7 @@ class ThreeJSViewer {
         // must pin matrixAutoUpdate off and pose the new object now, not
         // only on the next animation tick.
         if (this._followPaths.has(id)) this._applyFollowPaths();
+        this._kinematics.onRegister(id);
         const waiting = this._pendingReparent.get(id);
         if (waiting) {
             this._pendingReparent.delete(id);
@@ -18323,6 +18821,7 @@ class ThreeJSViewer {
         this._followPaths.clear();
         this._pendingReparent.clear();
         this._clipBindings.clear();
+        this._kinematics.clear();
         // The pick marker lives in the scene (not in _objects), so a clear
         // would otherwise leave it floating over the now-deleted line.
         if (this._polylinePick) this._polylinePick.clearHover();
@@ -18517,6 +19016,7 @@ class ThreeJSViewer {
     _unloadAnimation(restoreVisibility = true) {
         this._animGeneration++;
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
+        this._kinematics.onUnloadAnimation();
         if (restoreVisibility) {
             for (const [id, baselineVisible] of this._baselineVisibility) {
                 const obj = this._objects.get(id);
@@ -18568,6 +19068,13 @@ class ThreeJSViewer {
                     const baseNext = hasNext ? (frameIndex + 1) * nObj * ch.stride : null;
                     applyFn(ch, ch.refs, base, baseNext, hasNext ? t : 0);
                 }
+            }
+            // After the loop, so a chain overrides a transforms channel on the same id.
+            const joints = this._animation.channels.joints;
+            if (joints) {
+                const nObj = joints.ids.length;
+                this._kinematics.applyChannel(joints, frameIndex * nObj * joints.stride,
+                    hasNext ? (frameIndex + 1) * nObj * joints.stride : null, hasNext ? t : 0);
             }
         }
 
@@ -21427,6 +21934,32 @@ class ThreeJSViewer {
             case 'unbind_clip':
                 this._bindClip(data.id, null);
                 break;
+            case 'set_kinematic_chain':
+                try {
+                    this._kinematics.set(data.id, data);
+                } catch (e) {
+                    console.error(`set_kinematic_chain '${data.id}':`, e);
+                }
+                break;
+            case 'remove_kinematic_chain':
+                this._kinematics.remove(data.id);
+                break;
+            case 'query_kinematic_chain':
+                return this._reply({
+                    type: 'kinematic_chain_response',
+                    requestId: data.requestId,
+                    id: data.id,
+                    ...this._kinematics.query(data.id, data.values, data.solved),
+                });
+            case 'set_joints':
+                try {
+                    if (!this._kinematics.setJoints(data.id, data.values, data.solved)) {
+                        console.warn(`set_joints: no kinematic chain '${data.id}'`);
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+                break;
             case 'set_follow_path': {
                 this._onFetchStart();
                 const capturedScene = this._sceneGeneration;
@@ -23712,6 +24245,37 @@ class ThreeJSViewer {
 
     /** @param {string} id */
     unbindClip(id) { this._bindClip(id, null); }
+
+    /**
+     * Direct-call JS equivalent of `set_kinematic_chain`: register (or replace)
+     * chain `id`. `description` is a `threejs_viewer.kinematic_chain` version 1
+     * description, `object_ids` (required) maps link names to the tracked
+     * objects they pose and `object_scale` a link name to a uniform scale on its
+     * object. Throws on a bad description or a key that names no link.
+     * @param {string} id
+     * @param {{description: KinematicDescription, object_ids: Record<string, string|null>,
+     *          object_scale?: Record<string, number>}} spec
+     */
+    setKinematicChain(id, spec) { this._kinematics.set(id, spec); }
+
+    /** @param {string} id */
+    removeKinematicChain(id) { this._kinematics.remove(id); }
+
+    /**
+     * Pose chain `id` from axis values (description axes order, degrees rotary,
+     * metres linear) and solved angles (degrees). Returns false for an unknown
+     * chain; throws on a wrong value count or a non-finite value.
+     * @param {string} id @param {ArrayLike<number>} values @param {ArrayLike<number>} [solved]
+     * @returns {boolean}
+     */
+    setJoints(id, values, solved) { return this._kinematics.setJoints(id, values, solved); }
+
+    /**
+     * JS twin of `query_kinematic_chain`: FK world matrices (row-major) at the
+     * given poses, or the current pose and posed objects' world matrices.
+     * @param {string} id @param {number[][]} [values] @param {number[][]} [solved]
+     */
+    queryKinematicChain(id, values, solved) { return this._kinematics.query(id, values, solved); }
 
     /**
      * Pin a persistent move/rotate gizmo to an object — by id or `Object3D` — with

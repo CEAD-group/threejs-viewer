@@ -158,9 +158,9 @@ def build():
         flags=re.MULTILINE,
     )
 
-    # Remove the 'export' keyword from 'export class ThreeJSViewer'
+    # Drop the 'export' keyword from ThreeJSViewer and the exported free functions.
     js_inlined = re.sub(
-        r"^export class ", "class ", js_content, count=1, flags=re.MULTILINE
+        r"^export (class|function) ", r"\1 ", js_content, flags=re.MULTILINE
     )
 
     # Prepend controls.js source so ViewerControls is in scope when ThreeJSViewer runs.
