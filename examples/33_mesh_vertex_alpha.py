@@ -50,5 +50,5 @@ v.add_mesh(
 )
 
 v.set_view("iso", animate=False)
-v.frame_points(positions + [0, 0, 1])
+v.frame_points(positions[::97] + [0, 0, 1], fill=1.0)
 v.wait_for_assets()

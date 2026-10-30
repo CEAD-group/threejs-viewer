@@ -15,6 +15,8 @@ rotation is divided out. See 34_billboard_modes.py for the full option space.
 Run: uv run python examples/32_billboard.py
 """
 
+from itertools import product
+
 import numpy as np
 
 from threejs_viewer import Animation, viewer
@@ -62,5 +64,6 @@ anim.set_frame_times(times)
 anim.set_transform_data(["spinner"], m.transpose(0, 2, 1).reshape(-1, 1, 16))
 v.load_animation(anim)
 
-v.set_camera(position=[0, -9, 5], target=[0, 2, 1.2])
+v.set_view("iso", animate=False)
+v.frame_points(list(product([-4, 4], [-1.5, 7], [-0.5, 3])), fill=1.0)
 v.wait_for_assets()

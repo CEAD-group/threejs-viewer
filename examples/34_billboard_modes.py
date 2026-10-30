@@ -16,6 +16,8 @@ donuts make roll and spin visible. Orbit and compare the rows:
 Run: uv run python examples/34_billboard_modes.py
 """
 
+from itertools import product
+
 import numpy as np
 
 from threejs_viewer import Animation, viewer
@@ -67,7 +69,6 @@ DONUTS = [
 v = viewer()
 v.clear()
 v.unload_animation()
-v.add_grid("floor", cell_size=1.0, extent=60.0, fade_start=0.4)
 for id, color, pos, _, tilt, options in DONUTS:
     checkered_torus(v, id, color, position=pos, rotation=[tilt, 0, 0])
     v.set_billboard(id, **{"face": "+z", **options})
@@ -97,5 +98,6 @@ anim.set_transform_data(
 )
 v.load_animation(anim)
 
-v.set_camera(position=[0, -24, 4], target=[0, 0, 0.5])
+v.set_view("front", animate=False)
+v.frame_points(list(product([-7.5, 7.5], [-1, 1], [-8, 8.2])), fill=1.0)
 v.wait_for_assets()

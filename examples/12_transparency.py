@@ -12,6 +12,8 @@ import math
 import urllib.request
 from pathlib import Path
 
+from itertools import product
+
 import numpy as np
 
 from threejs_viewer import Animation, viewer
@@ -70,5 +72,6 @@ animation.add_marker(0.0, "Opaque", color=0x00FF00)
 animation.add_marker(duration / 2, "Translucent", color=0x0088FF)
 v.load_animation(animation)
 
-v.set_camera(position=[0, -6, 3], target=[0, 0, 0.8])
+v.set_view("iso", animate=False)
+v.frame_points(list(product([-2.5, 2.5], [-1.5, 2.3], [-0.3, 1.8])), fill=1.0)
 v.wait_for_assets()

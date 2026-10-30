@@ -10,6 +10,8 @@ Run: uv run python examples/08_glb_models.py
 import urllib.request
 from pathlib import Path
 
+from itertools import product
+
 from threejs_viewer import viewer
 
 KHRONOS = (
@@ -42,5 +44,6 @@ v.add_model_binary(
     y_up=True,
 )
 
-v.set_camera(position=[0, -6, 4], target=[0, 0, 0.6])
+v.set_view("iso", animate=False)
+v.frame_points(list(product([-2.4, 2.0], [-0.5, 0.5], [0, 2.0])), fill=1.0)
 v.wait_for_assets()

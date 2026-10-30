@@ -11,6 +11,8 @@ Run: uv run python examples/09_animated_glb.py
 import urllib.request
 from pathlib import Path
 
+from itertools import product
+
 import numpy as np
 
 from threejs_viewer import Animation, viewer
@@ -39,7 +41,7 @@ v.add_model_binary(
     download("AnimatedMorphCube"),
     "glb",
     position=[0, 0, 1],
-    scale=[0.5] * 3,
+    scale=[1.0] * 3,
     y_up=True,
 )
 v.add_model_binary("avocado", download("Avocado"), "glb", y_up=True)
@@ -61,5 +63,6 @@ animation.set_clip_time_data(
 )
 v.load_animation(animation)
 
-v.set_camera(position=[0, -7, 5], target=[0, 0, 0.8])
+v.set_view("iso", animate=False)
+v.frame_points(list(product([-3.3, 3.3], [-3.3, 3.3], [-0.5, 2])), fill=1.0)
 v.wait_for_assets()
