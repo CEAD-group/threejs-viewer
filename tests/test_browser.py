@@ -2651,10 +2651,11 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
             return { x: t.x, y: t.y, z: t.z };
         }"""
     )
-    # Visible box center is the origin; allow a small slack for floating point.
-    assert abs(target["x"]) < 1e-3, target
-    assert abs(target["y"]) < 1e-3, target
-    assert abs(target["z"]) < 1e-3, target
+    # Visible box center is the origin; the perspective fit may shift the
+    # target sideways within the box (#287), never toward the hidden one.
+    assert abs(target["x"]) < 0.02, target
+    assert abs(target["y"]) < 0.02, target
+    assert abs(target["z"]) < 0.02, target
 
     # resetView: same expectation — orbit target snaps to the visible content.
     target = viewer_page.evaluate(
@@ -2665,9 +2666,9 @@ def test_reset_view_skips_invisible_objects(viewer_client, viewer_page):
             return { x: t.x, y: t.y, z: t.z };
         }"""
     )
-    assert abs(target["x"]) < 1e-3, target
-    assert abs(target["y"]) < 1e-3, target
-    assert abs(target["z"]) < 1e-3, target
+    assert abs(target["x"]) < 0.02, target
+    assert abs(target["y"]) < 0.02, target
+    assert abs(target["z"]) < 0.02, target
 
     # Re-show the hidden box: framing should now include it.
     viewer_client.set_visible("far", True)
@@ -6450,7 +6451,9 @@ def test_embedder_camera_pose_and_frame_box(viewer_client, viewer_page):
         " return [t.x, t.y, t.z];"
         "}"
     )
-    assert target == pytest.approx([12.0, 12.0, 12.0], abs=1e-4)
+    # The perspective fit shifts the target sideways on the view axis so the
+    # projected corners fill the view evenly; it stays inside the box (#287).
+    assert target == pytest.approx([12.0, 12.0, 12.0], abs=0.5)
 
     # invalid input degrades to a warning, never throws
     assert viewer_page.evaluate(
@@ -9621,6 +9624,199 @@ def test_object_click_skips_hidden_ancestor(viewer_client, viewer_page):
     viewer_page.mouse.click(proj["x"], proj["y"])
     assert _wait_until(lambda: len(clicks) >= 2)
     assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_object_click_skips_hidden_and_unpickable_descendants(
+    viewer_client, viewer_page
+):
+    """A hidden descendant of a visible group is not hit, so it neither
+    resolves to that group nor occludes the visible child behind it, and a
+    pickable=False subtree is a passthrough as for click-to-pivot (issue #287)."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    viewer_client.add_box(
+        "shell",
+        width=6,
+        height=6,
+        depth=0.5,
+        position=[0, 0, 2],
+        parent="grp",
+        visible=False,
+    )
+    viewer_client.add_group("vol", pickable=False)
+    viewer_client.add_box(
+        "fill", width=2, height=2, depth=0.5, position=[0, 0, 3], parent="vol"
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(_GIZMO_TOPDOWN)
+    frames(viewer_page, 2)
+    hit_at = """([x, y, z]) => { const v = window.threejsViewer;
+      const w = v._renderer.domElement.clientWidth,
+            h = v._renderer.domElement.clientHeight;
+      const r = v._renderer.domElement.getBoundingClientRect();
+      const ndc = v._camera.position.clone().set(x, y, z).project(v._camera);
+      const hit = v._hitTrackedObject(r.left + (ndc.x*0.5+0.5)*w,
+                                      r.top + (-ndc.y*0.5+0.5)*h);
+      return hit && hit.id; }"""
+    # Through the hidden shell and the unpickable fill onto the child.
+    assert viewer_page.evaluate(hit_at, [0, 0, 0]) == "child"
+    # Through only the hidden shell: nothing, not the parent group.
+    assert viewer_page.evaluate(hit_at, [2, 0, 0]) is None
+
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    proj = viewer_page.evaluate(_GIZMO_PROJECT_ORIGIN)
+    viewer_page.mouse.click(proj["x"], proj["y"])
+    assert _wait_until(lambda: bool(clicks))
+    assert clicks[-1]["id"] == "child"
+
+
+@pytest.mark.browser
+def test_frame_object_ignores_hidden_and_grid_descendants(viewer_client, viewer_page):
+    """frameObject applies the framing rules of F/Home: a hidden mesh and a
+    parented floor grid under the group leave its fit unchanged, while an
+    object with nothing visible still frames its own extent (issue #287)."""
+    viewer_client.add_group("grp")
+    viewer_client.add_box("child", parent="grp")
+    settle(viewer_client)
+    dist = """(id) => { const v = window.threejsViewer;
+      v.frameObject(v._objects.get(id));
+      return v._camera.position.distanceTo(v._controls.target); }"""
+    before = viewer_page.evaluate(dist, "grp")
+
+    viewer_client.add_box(
+        "shell",
+        width=40,
+        height=40,
+        depth=40,
+        position=[30, 0, 0],
+        parent="grp",
+        visible=False,
+    )
+    viewer_client.add_grid("floor", extent=200, parent="grp")
+    settle(viewer_client)
+    assert viewer_page.evaluate(dist, "grp") == pytest.approx(before, rel=1e-6)
+    # Framing the hidden shell itself falls back to its full box.
+    assert viewer_page.evaluate(dist, "shell") > 10 * before
+
+
+# Shared page helpers for the framing tests: set an oblique pose, run a framing
+# call, and measure the projected NDC extent of a point set and the view direction.
+_FRAME_HELPERS = """() => {
+  const v = window.threejsViewer;
+  window.__frame = {
+    pose(ortho, pos = [7, -3, 4], up = [0, 0, 1]) {
+      if (v._isOrtho !== ortho) v._switchCamera(ortho);
+      v._camera.up.set(...up);
+      v._camera.position.set(...pos);
+      v._controls.target.set(0, 0, 0);
+      v._camera.lookAt(0, 0, 0);
+      v._controls.update();
+    },
+    dir() {
+      return v._camera.position.clone().sub(v._controls.target).normalize().toArray();
+    },
+    dist() { return v._camera.position.distanceTo(v._controls.target); },
+    ndc(boxes) {
+      v._camera.updateMatrixWorld(true);
+      let mx = 0, my = 0;
+      for (const [min, max] of boxes) for (let i = 0; i < 8; i++) {
+        const n = v._camera.position.clone().set(
+          i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]
+        ).project(v._camera);
+        mx = Math.max(mx, Math.abs(n.x)); my = Math.max(my, Math.abs(n.y));
+      }
+      return [mx, my];
+    },
+  };
+}"""
+
+_BOX = [[-1, -0.5, -2], [3, 0.5, 1]]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_frame_fill_is_the_same_in_both_projections(viewer_client, viewer_page, ortho):
+    """`fill` is the share of the half-view the projected corners span on the
+    tighter axis, identical in perspective and ortho; a bare frameBox number
+    is the old margin, fill = 1 / margin; the default is 0.9 (issue #287)."""
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    for opts, want in (
+        ({"fill": 0.8}, 0.8),
+        ({}, 0.9),
+        (1.25, 0.8),
+        ({"fill": 1}, 1.0),
+    ):
+        got = viewer_page.evaluate(
+            "([ortho, box, opts]) => { const f = window.__frame; f.pose(ortho);"
+            " window.threejsViewer.frameBox(box[0], box[1], opts);"
+            " return f.ndc([box]); }",
+            [ortho, _BOX, opts],
+        )
+        assert max(got) == pytest.approx(want, rel=0.01)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_framing_keeps_view_direction(viewer_client, viewer_page, ortho):
+    """Every framing call except Home keeps the view direction, including a
+    straight-down view framed twice, which must stay exactly top-down."""
+    viewer_client.add_box("a", position=[2, 1, 0])
+    viewer_client.add_box("b", width=3, position=[-4, 2, 1])
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    calls = [
+        "v.frameObject('a')",
+        "v.frameObject(v.getObject('b'), {fill: 0.5})",
+        "v.frameBox([0,0,0], [1,2,3])",
+        "v.frameBoxes([{min:[0,0,0], max:[1,1,1]}, {min:[5,5,5], max:[6,7,8]}])",
+        "v.framePoints([[0,0,0], [4,-2,1], {x: 1, y: 5, z: -3}])",
+        "v.frameAll()",
+    ]
+    for call in calls:
+        before, after = viewer_page.evaluate(
+            "([ortho, call]) => { const f = window.__frame, v = window.threejsViewer;"
+            " f.pose(ortho); const d0 = f.dir(); eval(call); return [d0, f.dir()]; }",
+            [ortho, call],
+        )
+        assert after == pytest.approx(before, abs=1e-9), call
+    top = viewer_page.evaluate(
+        "(ortho) => { const f = window.__frame, v = window.threejsViewer;"
+        " f.pose(ortho, [0, 0, 10], [0, 1, 0]);"
+        " v.framePoints([[-3,-1,0], [5,2,1]]); v.framePoints([[-3,-1,0], [5,2,1]]);"
+        " return f.dir(); }",
+        ortho,
+    )
+    assert top == [0, 0, 1]
+
+
+@pytest.mark.browser
+def test_home_fits_diagonal_parts_tighter_than_one_world_box(
+    viewer_client, viewer_page
+):
+    """Home frames one box per top-level object, so a long diagonal rail of
+    parts sits closer than its common AABB would put it, while every part
+    still fits inside the default fill."""
+    rail = []
+    for i in range(4):
+        c = [i * 1.0, i * 4.0, i * 3.0]  # diagonal on screen from Home
+        viewer_client.add_box(f"rail{i}", width=1, height=1, depth=1, position=c)
+        rail.append([[x - 0.5 for x in c], [x + 0.5 for x in c]])
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    parts, ndc, whole = viewer_page.evaluate(
+        "(rail) => { const f = window.__frame, v = window.threejsViewer;"
+        " v.resetView(); const d = f.dist(); const n = f.ndc(rail);"
+        " v.frameBox([-0.5, -0.5, -0.5], [3.5, 12.5, 9.5]);"
+        " return [d, n, f.dist()]; }",
+        rail,
+    )
+    assert max(ndc) == pytest.approx(0.9, rel=0.01)
+    assert parts < 0.9 * whole
 
 
 @pytest.mark.browser

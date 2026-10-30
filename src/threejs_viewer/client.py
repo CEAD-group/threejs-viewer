@@ -1387,8 +1387,9 @@ class ViewerClient:
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
             visible: Initial visibility
-            pickable: When False, click-to-pivot passes through this group
-                and everything under it (issue #215).
+            pickable: When False, click-to-pivot, object clicks and
+                double-click framing pass through this group and everything
+                under it (issues #215, #287).
         """
         msg: dict = {"type": "add_group", "id": id}
         if parent:
@@ -2099,7 +2100,9 @@ class ViewerClient:
                 carries no per-hover cost (the viewer keeps no pick data for
                 it). Picking is still globally gated by
                 :meth:`enable_polyline_picking`; ``pickable`` only narrows
-                *which* objects participate.
+                *which* objects participate. ``False`` also makes
+                click-to-pivot, object clicks and double-click framing pass
+                through the line.
             segments: When ``True``, render disjoint line *segments* instead
                 of one connected polyline: consecutive point pairs
                 ``(0,1), (2,3), ...`` each draw an independent edge
@@ -2111,7 +2114,9 @@ class ViewerClient:
                 renders ``THREE.LineSegments``. Per-vertex ``colors``,
                 ``set_draw_range`` (leading ``frac*N`` points, whole edges)
                 and ``update_polyline_colors`` work as usual. Segment soups
-                have no arc length, so the object is never pickable.
+                have no arc length, so the viewer never arc-length picks
+                them; ``pickable`` still governs click-to-pivot and object
+                clicks.
             position: [x, y, z] position
             rotation: [x, y, z] Euler rotation in radians
             scale: [x, y, z] scale
@@ -2129,7 +2134,6 @@ class ViewerClient:
                     f"segments=True needs an even point count "
                     f"(pairs of edge endpoints), got {n_points}"
                 )
-            pickable = False
 
         # Process colors if provided
         color_bytes = b""
@@ -2214,9 +2218,10 @@ class ViewerClient:
             scale: [x, y, z] scale
             matrix: Column-major 4x4 transform matrix (overrides position/rotation/scale)
             visible: Initial visibility
-            pickable: When False, click-to-pivot passes through this mesh
-                (a translucent volume such as a workzone fill), so the
-                pivot lands on what sits behind it (issue #215).
+            pickable: When False, click-to-pivot, object clicks and
+                double-click framing pass through this mesh (a translucent
+                volume such as a workzone fill), so they land on what sits
+                behind it (issues #215, #287).
             depth_write: Overrides the default (depth only when opaque) and
                 survives ``set_opacity``/``set_color``.
             polygon_offset: With ``polygon_offset_units``, separates coplanar
@@ -3100,7 +3105,9 @@ class ViewerClient:
                 ``enable_polyline_picking`` / ``on_polyline_pick``) — a click
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
-                from picking (it is then never hit-tested, at zero cost).
+                from picking (it is then never hit-tested, at zero cost);
+                click-to-pivot, object clicks and double-click framing then
+                pass through it too.
             clip_cap: Override :meth:`set_clipping_caps` for this tube (also
                 accepted by :meth:`add_toolpath`).
             bias_index_offset / bias_index_total: Deposition-order bias ramp
@@ -4285,10 +4292,51 @@ class ViewerClient:
         """Set how much of a polyline or mesh is visible (0.0 = nothing, 1.0 = all)."""
         self._send({"type": "set_draw_range", "id": id, "value": float(value)})
 
-    def frame_object(self, id: str) -> None:
-        """Fit the camera to an object's bounding box (the programmatic
-        equivalent of double-clicking it in the viewer)."""
-        self._send({"type": "frame_object", "id": id})
+    @staticmethod
+    def _check_fill(fill: Optional[float]) -> Optional[float]:
+        if fill is None:
+            return None
+        fill = float(fill)
+        if not (math.isfinite(fill) and 0.0 < fill <= 1.0):
+            raise ValueError(f"fill must be in (0, 1], got {fill!r}")
+        return fill
+
+    def frame_object(self, id: str, fill: Optional[float] = None) -> None:
+        """Fit the camera to an object (the programmatic equivalent of
+        double-clicking it in the viewer), by the world box of each visible
+        descendant mesh, keeping the view direction.
+
+        Args:
+            id: Object id.
+            fill: Share of the view, on the tighter screen axis, that the
+                object spans, in (0, 1]. ``None`` uses the viewer default
+                0.9 (5% free on each side).
+        """
+        msg: dict = {"type": "frame_object", "id": id}
+        fill = self._check_fill(fill)
+        if fill is not None:
+            msg["fill"] = fill
+        self._send(msg)
+
+    def frame_points(self, points, fill: Optional[float] = None) -> None:
+        """Fit the camera to world-space points, keeping the view direction.
+
+        Args:
+            points: ``(N, 3)`` array-like of finite coordinates, N >= 1.
+            fill: As for :meth:`frame_object`.
+        """
+        pts = np.asarray(points, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) == 0:
+            raise ValueError(
+                f"points must have shape (N, 3) with N >= 1, got {pts.shape}"
+            )
+        if not np.isfinite(pts).all():
+            raise ValueError("points must be finite")
+        msg: dict = {"type": "frame_points", "points": pts.tolist()}
+        fill = self._check_fill(fill)
+        if fill is not None:
+            msg["fill"] = fill
+        self._send(msg)
 
     def set_view(self, name: str, animate: bool = True) -> None:
         """Snap the camera to a pre-defined view.
