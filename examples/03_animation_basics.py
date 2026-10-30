@@ -1,156 +1,54 @@
 """
-Animation Basics Demo
+Animation basics
 
-Demonstrates the looping animation mode with pre-computed frames.
-Creates a simple solar system with orbiting planets.
+Looping, pre-computed animation: a sun with four planets and a moon. The moon
+is a child of the earth group, so it only animates its local orbit offset.
+Orbit periods divide the duration, so the loop is seamless.
 
 Run: uv run python examples/03_animation_basics.py
 """
 
-import math
-
+import numpy as np
 
 from threejs_viewer import Animation, viewer
 
-
-def make_transform_matrix(position, rotation_z=0, scale=1.0):
-    """Create a 4x4 transform matrix (column-major for Three.js)."""
-    c, s = math.cos(rotation_z), math.sin(rotation_z)
-
-    # Column-major order
-    return [
-        scale * c,
-        scale * s,
-        0,
-        0,
-        -scale * s,
-        scale * c,
-        0,
-        0,
-        0,
-        0,
-        scale,
-        0,
-        position[0],
-        position[1],
-        position[2],
-        1,
-    ]
-
+DURATION, FPS = 14.0, 20
+# id -> (orbit radius, period); the moon orbits inside the earth group
+ORBITS = {
+    "mercury": (2.0, 2.0),
+    "venus": (3.0, 3.5),
+    "earth_system": (4.5, 7.0),
+    "mars": (6.0, 14.0),
+    "moon": (0.6, 0.7),
+}
 
 v = viewer()
 v.clear()
-
-# Create the sun (stationary)
-v.add_sphere(
-    "sun", radius=1.0, color=0xFFDD00, position=[0, 0, 0], roughness=0.3, metalness=0.8
-)
-
-# Create planets
-planets = [
-    {
-        "id": "mercury",
-        "radius": 0.15,
-        "color": 0x888888,
-        "orbit_radius": 2.0,
-        "period": 2.0,
-        "roughness": 0.6,
-        "metalness": 0.4,
-    },
-    {
-        "id": "venus",
-        "radius": 0.25,
-        "color": 0xFFAA55,
-        "orbit_radius": 3.0,
-        "period": 3.5,
-        "roughness": 0.8,
-        "metalness": 0.1,
-    },
-    {
-        "id": "mars",
-        "radius": 0.2,
-        "color": 0xFF4422,
-        "orbit_radius": 6.0,
-        "period": 7.0,
-        "roughness": 0.9,
-        "metalness": 0.05,
-    },
-]
-
-for planet in planets:
-    v.add_sphere(
-        planet["id"],
-        radius=planet["radius"],
-        color=planet["color"],
-        roughness=planet["roughness"],
-        metalness=planet["metalness"],
-    )
-
-# Earth system group — earth and moon are both children.
-# Animating the group moves both; moon only needs its local orbit offset.
+v.add_grid("floor", cell_size=1.0, extent=30, center_color=0x888888)
+v.add_sphere("sun", radius=1.0, color=0xFFDD00, roughness=0.3, metalness=0.8)
+v.add_sphere("mercury", radius=0.15, color=0x888888, roughness=0.6, metalness=0.4)
+v.add_sphere("venus", radius=0.25, color=0xFFAA55, roughness=0.8, metalness=0.1)
+v.add_sphere("mars", radius=0.2, color=0xFF4422, roughness=0.9, metalness=0.05)
 v.add_group("earth_system")
-v.add_sphere(
-    "earth",
-    radius=0.3,
-    color=0x4488FF,
-    roughness=0.5,
-    metalness=0.2,
-    parent="earth_system",
-)
-v.add_sphere(
-    "moon",
-    radius=0.08,
-    color=0xCCCCCC,
-    roughness=0.9,
-    metalness=0.0,
-    parent="earth_system",
-)
+v.add_sphere("earth", radius=0.3, color=0x4488FF, parent="earth_system")
+v.add_sphere("moon", radius=0.08, color=0xCCCCCC, parent="earth_system")
 
-# Create animation frames
-duration = 10.0  # seconds
-# Sparse keyframes — Animation's default linear interpolation smooths them
-# out to 60 fps in the browser, so 10 Hz keyframes look identical to 30 Hz
-# but send 3× less data.
-fps = 10
-n_frames = int(duration * fps)
+# Circular orbits as (frames, objects, 16) column-major translation matrices
+ids = list(ORBITS)
+times = np.arange(int(DURATION * FPS) + 1) / FPS
+radius, period = np.array(list(ORBITS.values())).T
+angle = 2 * np.pi * times[:, None] / period
+data = np.zeros((len(times), len(ids), 16), dtype=np.float32)
+data[..., [0, 5, 10, 15]] = 1
+data[..., 12] = radius * np.cos(angle)
+data[..., 13] = radius * np.sin(angle)
 
 animation = Animation(loop=True)
+animation.set_frame_times(times)
+animation.set_transform_data(ids, data)
+animation.add_marker(0.0, "Start", color=0x00FF00)
+animation.add_marker(DURATION / 2, "Halfway", color=0xFFFF00)
 
-for i in range(n_frames):
-    t = i / fps
-    transforms = {}
-
-    # Sun stays still (but we include it for completeness)
-    transforms["sun"] = make_transform_matrix([0, 0, 0])
-
-    # Animate each planet
-    for planet in planets:
-        angle = 2 * math.pi * t / planet["period"]
-        x = planet["orbit_radius"] * math.cos(angle)
-        y = planet["orbit_radius"] * math.sin(angle)
-        transforms[planet["id"]] = make_transform_matrix([x, y, 0])
-
-    # Earth system group — moves earth + moon together
-    earth_angle = 2 * math.pi * t / 5.0
-    earth_x = 4.5 * math.cos(earth_angle)
-    earth_y = 4.5 * math.sin(earth_angle)
-    transforms["earth_system"] = make_transform_matrix([earth_x, earth_y, 0])
-    # (earth sphere has no separate transform — it sits at origin within the group)
-
-    # Moon only needs its LOCAL orbit offset — the group handles the rest
-    moon_angle = 2 * math.pi * t / 0.8  # Fast orbit around earth
-    moon_x = 0.6 * math.cos(moon_angle)
-    moon_y = 0.6 * math.sin(moon_angle)
-    transforms["moon"] = make_transform_matrix([moon_x, moon_y, 0])
-
-    animation.add_frame(time=t, transforms=transforms)
-
-# Add timeline markers for notable events
-animation.add_marker(0.0, "Animation start", color=0x00FF00)
-animation.add_marker(5.0, "Halfway point", color=0xFFFF00)
-
-# Load the animation
 v.load_animation(animation)
-
-print(f"Animation loaded: {animation.n_frames} frames, {animation.duration:.1f}s")
+v.set_camera(position=[0, -11, 12], target=[0, 0, 0])
 v.wait_for_assets()
