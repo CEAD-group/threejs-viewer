@@ -1974,3 +1974,27 @@ def test_set_cubemap_sends_and_records(connected_client):
         with pytest.raises(ValueError):
             client.set_cubemap(bad)
     assert len(client._messages) == 1
+
+
+def test_frame_object_and_frame_points_fill(client):
+    client.frame_object("a")
+    assert client._messages[-1] == {"type": "frame_object", "id": "a"}
+    client.frame_object("a", fill=0.5)
+    assert client._messages[-1]["fill"] == 0.5
+    client.frame_object("a", fill=1)
+    assert client._messages[-1]["fill"] == 1.0
+    for bad in (0, -0.1, 1.01, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="fill"):
+            client.frame_object("a", fill=bad)
+    client.frame_points([[0, 0, 0], [1, 2, 3]], fill=0.7)
+    assert client._messages[-1] == {
+        "type": "frame_points",
+        "points": [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]],
+        "fill": 0.7,
+    }
+    with pytest.raises(ValueError, match="shape"):
+        client.frame_points([])
+    with pytest.raises(ValueError, match="finite"):
+        client.frame_points([[0, 0, float("nan")]])
+    with pytest.raises(ValueError, match="fill"):
+        client.frame_points([[0, 0, 0]], fill=2)
