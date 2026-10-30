@@ -815,6 +815,8 @@ class ViewerClient:
         self._sun_state: Dict[str, Any] = {}
         # Runtime set_display_quality value, re-sent on reconnect.
         self._display_quality_state: Optional[str] = None
+        # Runtime set_clipping_caps value, re-sent on reconnect.
+        self._clip_caps_state: Optional[bool] = None
         # Runtime set_environment_background / set_cubemap values, re-sent on
         # reconnect (the browser remembers the cubemap in localStorage, but a
         # different profile or a cleared one would not).
@@ -1089,6 +1091,17 @@ class ViewerClient:
         if self._sun_state:
             try:
                 websocket.send(json.dumps({"type": "set_sun", **self._sun_state}))
+            except Exception:
+                pass
+
+        # Re-apply the clip-cap switch (set_clipping_caps).
+        if self._clip_caps_state is not None:
+            try:
+                websocket.send(
+                    json.dumps(
+                        {"type": "set_clipping_caps", "enabled": self._clip_caps_state}
+                    )
+                )
             except Exception:
                 pass
 
@@ -1396,6 +1409,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a box primitive to the scene.
 
@@ -1404,6 +1418,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "width": width,
@@ -1435,6 +1450,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_sphere(
@@ -1457,6 +1473,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a sphere primitive to the scene.
 
@@ -1465,6 +1482,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {"radius": radius, "color": color, "opacity": opacity}
         if roughness is not None:
@@ -1490,6 +1508,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_cylinder(
@@ -1512,6 +1531,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a cylinder primitive to the scene.
 
@@ -1520,6 +1540,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "radiusTop": radius_top,
@@ -1544,6 +1565,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_capsule(
@@ -1565,6 +1587,7 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a capsule (pill) primitive to the scene.
 
@@ -1573,6 +1596,7 @@ class ViewerClient:
         ``depth_write`` overrides the default (depth only when opaque) and then
         survives ``set_opacity``/``set_color``. ``polygon_offset`` (with
         ``polygon_offset_units``) separates coplanar overlays.
+        ``clip_cap`` overrides :meth:`set_clipping_caps` for this object.
         """
         params = {
             "radius": radius,
@@ -1596,6 +1620,7 @@ class ViewerClient:
             scale,
             parent,
             visible=visible,
+            clip_cap=clip_cap,
         )
 
     def add_grid(
@@ -2919,6 +2944,7 @@ class ViewerClient:
         joins: Optional[str] = None,
         join_tolerance: float = 0.015,
         join_budget: Optional[float] = 0.15,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -3054,6 +3080,8 @@ class ViewerClient:
                 resolves a point on its full-resolution spine and reports
                 ``kind="tube"``. Pass ``pickable=False`` to exclude this tube
                 from picking (it is then never hit-tested, at zero cost).
+            clip_cap: Override :meth:`set_clipping_caps` for this tube (also
+                accepted by :meth:`add_toolpath`).
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at
@@ -3217,6 +3245,8 @@ class ViewerClient:
             "roughness": roughness,
             "pickable": bool(pickable),
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         # The mitered strip at the default tolerance and budget is the
         # viewer's own default, so the header carries the keys only when
         # they differ; a null budget lifts the cap.
@@ -3343,6 +3373,7 @@ class ViewerClient:
         scale: Optional[list] = None,
         matrix: Optional[list] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Add a swept *oriented* tool-body tube for 5-axis toolpaths.
 
@@ -3383,6 +3414,7 @@ class ViewerClient:
             metalness, roughness: Standard PBR material properties.
             parent: Optional parent group id.
             position/rotation/scale/matrix: Optional local transform.
+            clip_cap: Override :meth:`set_clipping_caps` for this body.
 
         Reveal the swept body progressively along the path with
         :meth:`set_draw_range` or the ``draw_ranges`` animation channel.
@@ -3451,6 +3483,8 @@ class ViewerClient:
             "metalness": metalness,
             "roughness": roughness,
         }
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         if parent:
             header["parent"] = parent
         if not visible:
@@ -3752,8 +3786,11 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         parent: Optional[str] = None,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """Internal method to add a primitive."""
+        if clip_cap is not None:
+            params["clipCap"] = bool(clip_cap)
         transform = {}
         if position:
             transform["position"] = position
@@ -4503,6 +4540,27 @@ class ViewerClient:
                 "distance": float(distance),
             }
         )
+
+    def set_clipping_caps(self, enabled: bool = True) -> None:
+        """Cap the cut of clipped solids the viewer builds itself.
+
+        With caps on, a clipping plane or slab closes the cut through
+        primitives (box, sphere, cylinder, capsule), swept tool bodies
+        (:meth:`add_swept_tool`) and parametric tubes
+        (:meth:`add_parametric_tube`, :meth:`add_toolpath`) with a flat face
+        in the object's colour (per-vertex colours are interpolated along the
+        cut), so a solid no longer reads as a hollow shell. Meshes and loaded
+        models stay open, as do translucent and wireframe objects. A
+        per-object ``clip_cap=`` on the add call overrides this switch. Off by
+        default; also toggled by the "Cap cut solids" box in the clipping
+        panel (``C``).
+
+        Recorded and re-sent on reconnect; may be called before a viewer
+        connects.
+        """
+        self._clip_caps_state = bool(enabled)
+        if self._ws is not None:
+            self._send({"type": "set_clipping_caps", "enabled": bool(enabled)})
 
     def show_grid(
         self,
