@@ -170,6 +170,14 @@ def _validate_finite(name: str, value: Optional[float]) -> Optional[float]:
     return f
 
 
+def _validate_pick_radius_px(value: Optional[float]) -> Optional[float]:
+    """An axis-control pick radius: None (viewer default) or finite and > 0."""
+    value = _validate_finite("pick_radius_px", value)
+    if value is not None and value <= 0:
+        raise ValueError(f"pick_radius_px must be > 0 (got {value!r})")
+    return value
+
+
 def _validate_point3(name: str, value) -> List[float]:
     """A finite ``[x, y, z]`` as floats."""
     try:
@@ -5366,12 +5374,19 @@ class ViewerClient:
         radius: Optional[float] = None,
         bbox_source_id: Optional[str] = None,
         window: float = 1.0,
+        pick_radius_px: Optional[float] = None,
     ) -> None:
         """Show a rotary or linear range control: a line spanning the axis's
         range of motion with a short, 4x-thicker section of the same line
         marking the current value (a small arc for rotary, a short segment
         for linear). The handle and the guide line always share one colour
-        pair; only the handle's invisible hitbox sphere is draggable/hoverable.
+        pair; only the handle is draggable/hoverable.
+
+        The handle is hit-tested in screen pixels: a press counts when it lands
+        within ``pick_radius_px`` CSS pixels of the drawn handle, so the hit
+        area stays the size of the handle at any zoom. The default is half the
+        handle's width plus 5 px (14 px for a touch press). Where a move-gizmo
+        handle is under the pointer the gizmo takes the press and the hover.
 
         Anchored every render frame at ``target_id``'s live world pivot,
         oriented along its local ``axis`` — a moving target (a jog, a drag)
@@ -5389,7 +5404,7 @@ class ViewerClient:
         - ``"linear"`` — a segment from ``min`` to ``max`` metres along the axis.
         - ``"linear_unlimited"`` — a segment spanning ``value - window`` to
           ``value + window``, which re-centres on every value change so the
-          visible window always follows the sphere; ``min``/``max`` are ignored.
+          visible window always follows the handle; ``min``/``max`` are ignored.
 
         ``radius`` (rotary only) is required unless ``bbox_source_id`` is
         given, in which case it defaults to half the world-space diagonal of
@@ -5400,7 +5415,7 @@ class ViewerClient:
         ``hover_color`` overrides the tint used while hovering/dragging;
         omit it to auto-derive a lightened variant of ``color``.
 
-        Dragging the sphere reports ``{id, value, phase}`` to every callback
+        Dragging the handle reports ``{id, value, phase}`` to every callback
         registered with :meth:`on_axis_control_change`, throttled during the
         drag (``"move"``) with a final unthrottled report on release
         (``"end"``) — same shape as :meth:`on_object_move`. The new value is
@@ -5412,7 +5427,8 @@ class ViewerClient:
         Raises:
             ValueError: For an unknown ``axis`` or ``kind``, a non-finite
                 number, a bounded ``kind`` without ``min``/``max`` or with
-                ``min > max``, or a ``radius``/``window`` that is not above zero.
+                ``min > max``, or a ``radius``/``window``/``pick_radius_px``
+                that is not above zero.
         """
         if axis not in _ALLOWED_AXIS_CONTROL_AXES:
             allowed = ", ".join(sorted(_ALLOWED_AXIS_CONTROL_AXES))
@@ -5434,6 +5450,7 @@ class ViewerClient:
         window = _validate_finite("window", window)
         if window <= 0:
             raise ValueError(f"window must be > 0 (got {window!r})")
+        pick_radius_px = _validate_pick_radius_px(pick_radius_px)
         spec = {
             "type": "add_axis_control",
             "id": id,
@@ -5448,6 +5465,7 @@ class ViewerClient:
             "radius": radius,
             "bbox_source_id": bbox_source_id,
             "window": window,
+            "pick_radius_px": pick_radius_px,
         }
         self._axis_controls[id] = spec
         if self._ws is not None:
@@ -5462,19 +5480,22 @@ class ViewerClient:
         max: Optional[float] = None,
         color: Optional[int] = None,
         hover_color: Optional[int] = None,
+        pick_radius_px: Optional[float] = None,
     ) -> None:
         """Update a control added with :meth:`add_axis_control` — its value,
-        range, and/or colour. Only the given fields change; the rest keep
+        range, colour and/or pick radius. Only the given fields change; the rest keep
         their last value. Passing ``color`` without ``hover_color``
         re-derives the hover tint from the new ``color``.
 
         Raises:
             ValueError: If ``id`` was never added with :meth:`add_axis_control`.
-            ValueError: For a non-finite number, or a resulting ``min > max``.
+            ValueError: For a non-finite number, a resulting ``min > max``, or
+                a ``pick_radius_px`` that is not above zero.
         """
         spec = self._axis_controls.get(id)
         if spec is None:
             raise ValueError(f"no axis control {id!r}")
+        pick_radius_px = _validate_pick_radius_px(pick_radius_px)
         value = _validate_finite("value", value)
         min = _validate_finite("min", min)
         max = _validate_finite("max", max)
@@ -5492,6 +5513,8 @@ class ViewerClient:
             spec["color"] = color
         if hover_color is not None:
             spec["hover_color"] = hover_color
+        if pick_radius_px is not None:
+            spec["pick_radius_px"] = pick_radius_px
         if self._ws is not None:
             self._send(
                 {
@@ -5502,6 +5525,7 @@ class ViewerClient:
                     "max": max,
                     "color": color,
                     "hover_color": hover_color,
+                    "pick_radius_px": pick_radius_px,
                 }
             )
 
