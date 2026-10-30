@@ -3475,7 +3475,7 @@ def test_environment_map_url_param_starts_disabled(page):
 
 @pytest.mark.browser
 def test_environment_map_falls_back_to_module_static_dir(page, tmp_path):
-    """An embedder serving the viewer/ source dir (ribweaver) that passes
+    """An embedder serving the viewer/ source dir that passes
     cubemapData in a non-HDR shape (base64 of the retired static/*.jpg, now a
     404 body) still gets the env map: the viewer loads the default
     static/cubemaps/ set next to viewer.js instead, and offers every set listed
@@ -8523,7 +8523,7 @@ def test_orbit_pivot_skips_hidden_ancestors_and_unpickable(viewer_client, viewer
         dtype=np.uint32,
     )
     viewer_client.add_box("robot", width=0.5, height=0.5, depth=0.5)
-    # ribweaver layout: the fill is a child of the group but registered
+    # Embedder layout: the fill is a child of the group but registered
     # under its own id, so it is a raycast root of its own.
     viewer_client.add_group("wz_hidden")
     viewer_client.add_mesh("fill_hidden", cube, tris, opacity=0.2, parent="wz_hidden")
@@ -11956,8 +11956,8 @@ def test_annotation_colours_ignore_tone_mapping_and_exposure(
 
 
 @pytest.mark.browser
-def test_animation_controls_ribweaver_look_and_keys(viewer_client, viewer_page):
-    """The animation toolbar wears ribweaver's step-button and range look
+def test_animation_controls_downstream_look_and_keys(viewer_client, viewer_page):
+    """The animation toolbar wears an embedding app's step-button and range look
     (20 px buttons with an svg icon, 4 px track, 11 px thumb) and the keyboard
     shortcuts still drive playback after the markup change."""
     viewer_client.add_box("spinner")

@@ -4,7 +4,7 @@ parametric_tube.
 Run: uv run python repro_min.py
 
 Self-contained 100-spine-point bead (130x smaller than the original
-ribweaver dump tube_8f5bba97). Scaled 100x from the source so it sits
+downstream dump tube_8f5bba97). Scaled 100x from the source so it sits
 comfortably in the viewport. Reproduces the closed-polygon "diamond
 fan" artifact even though no travel move, no zero-width segment, and
 no layer transition is in the slice -- the trigger is purely local.

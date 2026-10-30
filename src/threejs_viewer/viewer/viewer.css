@@ -7,7 +7,7 @@
 .threejs-viewer canvas { display: block; }
 
 /* ---- Design tokens ----
-   Defaults follow ribweaver's overlay palette so the menus read as one UI
+   Defaults follow an embedding app's overlay palette so the menus read as one UI
    there; an embedder overrides by setting the same variables on the
    container. */
 .threejs-viewer {
@@ -39,7 +39,7 @@
 }
 
 /* ---- Menus ----
-   ribweaver's rail, verbatim: each menu is a vertical tab folded against the
+   an embedding app's rail, verbatim: each menu is a vertical tab folded against the
    right edge; clicking it slides the body out. Tabs stack top to bottom
    (MenuController._layoutRail measures each tab). */
 .threejs-viewer .tjsv-rail {
@@ -337,7 +337,7 @@
 .threejs-viewer .transport-buttons button,
 .threejs-viewer .speed-control button,
 .threejs-viewer .loop-toggle {
-    /* ribweaver's .step-btn */
+    /* a downstream .step-btn */
     flex: 0 0 auto;
     width: 20px;
     height: 20px;
@@ -896,7 +896,7 @@
     z-index: 10;
 }
 
-/* Range sliders, ribweaver's base.css look (4 px track, 11 px round thumb). */
+/* Range sliders, a downstream stylesheet's look (4 px track, 11 px round thumb). */
 .threejs-viewer input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
