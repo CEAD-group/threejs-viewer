@@ -8,6 +8,8 @@ Orbit periods divide the duration, so the loop is seamless.
 Run: uv run python examples/03_animation_basics.py
 """
 
+from itertools import product
+
 import numpy as np
 
 from threejs_viewer import Animation, viewer
@@ -50,5 +52,6 @@ animation.add_marker(0.0, "Start", color=0x00FF00)
 animation.add_marker(DURATION / 2, "Halfway", color=0xFFFF00)
 
 v.load_animation(animation)
-v.set_camera(position=[0, -11, 12], target=[0, 0, 0])
+v.set_camera(position=[0, -5, 14], target=[0, 0, 0])  # view direction
+v.frame_points(list(product([-6.2, 6.2], [-6.2, 6.2], [0])), fill=0.85)
 v.wait_for_assets()

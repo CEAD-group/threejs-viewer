@@ -8,6 +8,7 @@ loop, so the pre-computed animation repeats seamlessly.
 Run: uv run python examples/04_flying_teapots.py
 """
 
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -59,5 +60,6 @@ animation.add_marker(0.0, "Start", color=0x00FF00)
 animation.add_marker(DURATION / 2, "Half-cycle", color=0xFFFF00)
 
 v.load_animation(animation)
-v.set_camera(position=[0, -21, 15], target=[0, 0, 2])
+v.set_camera(position=[0, -21, 15], target=[0, 0, 2])  # view direction
+v.frame_points(list(product([-6.8, 6.8], [-6.8, 6.8], [0, 4.5])), fill=0.85)
 v.wait_for_assets()

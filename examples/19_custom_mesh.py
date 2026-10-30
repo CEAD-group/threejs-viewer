@@ -64,5 +64,6 @@ anim.set_frame_times(np.linspace(0, 8.0, frames))
 anim.set_draw_range_data(["terrain"], np.linspace(0, 1, frames)[:, None])
 v.load_animation(anim)
 
-v.set_camera(position=[0, -24, 16], target=[0, 0, 1.5])
+v.set_camera(position=[0, -24, 16], target=[0, 0, 1.5])  # view direction
+v.frame_points(positions, fill=0.85)
 v.wait_for_assets()

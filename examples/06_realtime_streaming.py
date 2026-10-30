@@ -12,6 +12,7 @@ Run: uv run python examples/06_realtime_streaming.py
 import colorsys
 import math
 import time
+from itertools import product
 
 from threejs_viewer import viewer
 
@@ -39,7 +40,8 @@ for i in range(GRID):
         spheres[f"sphere_{i}_{j}"] = (x, y, (i + j) * 0.3, 1.5 + 0.1 * (i + j))
 
 v.add_box("center_box", width=1, height=1, depth=1, position=[0, 0, 2], roughness=0.15)
-v.set_camera(position=[0, -16, 12], target=[0, 0, 0.8])
+v.set_camera(position=[0, -16, 12], target=[0, 0, 0.8])  # view direction
+v.frame_points(list(product([-6.4, 6.4], [-6.4, 6.4], [0, 3])), fill=0.85)
 
 print(f"Streaming {len(spheres)} spheres at ~{FPS} fps. Ctrl+C to stop.")
 start = time.time()

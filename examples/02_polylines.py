@@ -44,5 +44,6 @@ t = np.linspace(0, 2 * np.pi, 100)
 circle = np.column_stack([3 * np.cos(t), 3 * np.sin(t), np.full_like(t, 5)])
 v.add_polyline("circle_white", circle, color=0xFFFFFF, line_width=2)
 
-v.set_camera(position=[3, -14, 9], target=[0, 0, 2.5])
+v.set_camera(position=[3, -14, 9], target=[0, 0, 2.5])  # view direction
+v.frame_points(np.vstack([helix, spiral, lissajous, circle]), fill=0.85)
 v.wait_for_assets()

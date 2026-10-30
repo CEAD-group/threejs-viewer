@@ -17,6 +17,7 @@ Run: uv run python examples/17_animation_interpolation.py
 
 import colorsys
 import time
+from itertools import product
 
 import numpy as np
 
@@ -65,7 +66,8 @@ def build_animation(mode: str) -> Animation:
 
 
 animations = {mode: build_animation(mode) for mode in ("hold", "linear")}
-v.set_camera(position=[0, -9, 6], target=[0, 0, 1.2])
+v.set_camera(position=[0, -9, 6], target=[0, 0, 1.2])  # view direction
+v.frame_points(list(product([-3.3, 3.3], [-2.3, 2.3], [0, 2.4])), fill=0.85)
 v.wait_for_assets(disconnect=False)  # keep the socket open for the loop below
 
 print("Alternating HOLD (choppy) and LINEAR (smooth). Ctrl+C to stop.")

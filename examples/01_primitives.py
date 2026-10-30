@@ -8,6 +8,7 @@ Run: uv run python examples/01_primitives.py
 """
 
 import math
+from itertools import product
 
 from threejs_viewer import viewer
 
@@ -60,5 +61,6 @@ for i, (x, y) in enumerate([(-4, -4), (-4, 4), (4, -4), (4, 4)]):
         parent="pillars",
     )
 
-v.set_camera(position=[7, -9, 6], target=[0, 0, 0.5])
+v.set_camera(position=[7, -9, 6], target=[0, 0, 0.5])  # view direction
+v.frame_points(list(product([-4.4, 4.4], [-4.4, 4.4], [0, 2])), fill=0.85)
 v.wait_for_assets()

@@ -8,6 +8,7 @@ Run: uv run python examples/13_material_properties.py
 """
 
 import math
+from itertools import product
 
 from threejs_viewer import viewer
 
@@ -59,5 +60,6 @@ v.add_cylinder(
     rotation=[math.pi / 2, 0, 0],
 )
 
-v.set_camera(position=[3, -9, 12], target=[1, 3, 0])
+v.set_camera(position=[3, -9, 12], target=[1, 3, 0])  # view direction
+v.frame_points(list(product([-3.2, 6.5], [-0.5, 6.5], [0, 1.5])), fill=0.85)
 v.wait_for_assets()

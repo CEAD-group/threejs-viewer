@@ -96,5 +96,6 @@ animation.add_marker(duration / 2, "1/2 cycle", color=0xFFFF00)
 animation.add_marker(3 * duration / 4, "3/4 cycle", color=0xFF8800)
 
 v.load_animation(animation)
-v.set_camera(position=[0, -16, 12], target=[0, 0, 3.5])
+v.set_camera(position=[0, -16, 12], target=[0, 0, 3.5])  # view direction
+v.frame_points(curve_points, fill=0.7)
 v.wait_for_assets()
