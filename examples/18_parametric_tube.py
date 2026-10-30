@@ -76,7 +76,8 @@ v.load_animation(anim)
 v.add_grid(
     "floor", cell_size=1.0, extent=30.0, center_color=0x888888, position=[0, 0, -0.2]
 )
-v.set_camera(position=[6, -7, 5], target=[0, 0, 2])
+v.set_view("iso", animate=False)
+v.frame_points(spine, fill=0.7)
 print("Switching color mode in 4 s. Ctrl+C to quit.")
 try:
     time.sleep(4.0)

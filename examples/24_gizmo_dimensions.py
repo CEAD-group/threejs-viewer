@@ -12,6 +12,8 @@ Run: uv run python examples/24_gizmo_dimensions.py   (Ctrl+C to quit)
 
 import time
 
+import numpy as np
+
 from threejs_viewer import viewer
 
 RAIL, TILE, CUBE = 0x4A90E2, 0x43C873, 0xEF8A3A
@@ -44,7 +46,11 @@ def on_move(m):
 # Register after pinning so no extra click-select gizmo is drawn.
 v.enable_move_gizmo(translate_snap=0.5, rotate_snap_deg=15, click_select=False)
 v.on_object_move(on_move)
-v.set_camera(position=[0, -11, 8], target=[0, 0, 0.8])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-4.5, -3, 0], [4.5, 3, 2.5]))).reshape(3, -1).T,
+    fill=0.85,
+)
 
 print("Drag the blocks. Ctrl+C to quit.")
 try:

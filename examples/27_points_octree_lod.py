@@ -71,7 +71,11 @@ anim.set_frame_times(frame_times)
 anim.set_point_time_data(["field"], frame_times.reshape(n_frames, 1))
 v.load_animation(anim)
 
-v.set_camera(position=[0, -45, 25], target=[0, 0, 0])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip(positions.min(0), positions.max(0)))).reshape(3, -1).T,
+    fill=0.85,
+)
 print(
     f"{N:,} points, octree built in {build_s:.1f}s. Zoom in to stream detail; Ctrl+C to quit."
 )

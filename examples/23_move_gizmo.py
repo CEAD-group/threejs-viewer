@@ -11,6 +11,8 @@ Run: uv run python examples/23_move_gizmo.py   (Ctrl+C to quit)
 
 import time
 
+import numpy as np
+
 from threejs_viewer import viewer
 
 v = viewer()
@@ -19,7 +21,10 @@ v.add_grid("floor", cell_size=1.0, extent=20.0, center_color=0x888888)
 v.add_box("red", color=0xEF5468, position=[-3, 0, 0.5])
 v.add_sphere("green", radius=0.6, color=0x43C873, position=[0, 0, 0.6])
 v.add_box("blue", color=0x4A90E2, position=[3, 0, 0.5])
-v.set_camera(position=[2, -9, 6], target=[0, 0, 0.5])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-4, -1, 0], [4, 1, 1.2]))).reshape(3, -1).T, fill=0.85
+)
 
 
 def on_move(m):

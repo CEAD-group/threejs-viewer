@@ -56,7 +56,10 @@ v.add_points(
 v.add_grid(
     "floor", cell_size=1.0, extent=30.0, center_color=0x888888, position=[0, 0, -2.5]
 )
-v.set_camera(position=[10, -12, 8], target=[0, 0, 0])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-4, -4, -2], [4, 4, 2]))).reshape(3, -1).T, fill=0.85
+)
 total = CHUNK
 
 try:

@@ -140,7 +140,10 @@ v.add_parametric_tube(
     metalness=0.0,
 )
 
-v.set_camera(position=[420, -250, 330], target=[110, 100, 20])
+v.set_view("iso", animate=False)
+v.frame_points(
+    spine[(spine[:, 0] < 70) & (spine[:, 1] < 70)], fill=0.9
+)  # zoom on a corner so the texture reads
 
 # Print the part: one keyframe per toolpath point, paced by distance.
 travelled = np.concatenate(

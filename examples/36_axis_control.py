@@ -14,6 +14,8 @@ Run: uv run python examples/36_axis_control.py   (Ctrl+C to quit)
 import math
 import time
 
+import numpy as np
+
 from threejs_viewer import viewer
 
 RED, GREEN, BLUE = (0xAE4346, 0xC74E52), (0x5D9C74, 0x6DB587), (0x4369A2, 0x4D7ABD)
@@ -68,7 +70,11 @@ def on_change(m):
 
 
 v.on_axis_control_change(on_change)
-v.set_camera(position=[0, -10, 6], target=[0, 0.5, 1])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-5, -1.5, 0], [5, 3.5, 2.5]))).reshape(3, -1).T,
+    fill=0.85,
+)
 
 print("Drag a handle. Ctrl+C to quit.")
 try:

@@ -67,5 +67,8 @@ v.add_parametric_tube(
 v.add_grid(
     "floor", cell_size=1.0, extent=20.0, center_color=0x888888, position=[0, 0, -0.3]
 )
-v.set_camera(position=[0, -12, 9], target=[0, 0, 0])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-4, -5, -0.5], [4, 5, 0.5]))).reshape(3, -1).T, fill=0.85
+)
 v.wait_for_assets()

@@ -72,7 +72,11 @@ v.add_parametric_tube(
     np.full(400, 0.3, dtype=np.float32),
     color=COLORS["bead"],
 )
-v.set_camera(position=[0, -22, 14], target=[0, 0, 2.5])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-10, -6.5, 0], [10, 6.5, 9]))).reshape(3, -1).T,
+    fill=0.95,
+)
 
 count = 0
 

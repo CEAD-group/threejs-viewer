@@ -140,5 +140,6 @@ animation.add_marker(tp.duration / 2, "50%", color=0xFFFF00)
 
 v.load_animation(animation)
 
-v.set_camera(position=[30, -50, 40], target=[0, 0, 2])
+v.set_view("iso", animate=False)
+v.frame_points(tp.points, fill=0.7)
 v.wait_for_assets()

@@ -100,7 +100,7 @@ v.clear()
 v.add_grid("floor", cell_size=1.0, extent=20.0, center_color=0x888888)
 
 # Generate toolpath
-duration = 600.0
+duration = 30.0
 
 tp = Toolpath.from_points(
     spiral_vase(),
@@ -179,5 +179,9 @@ animation.add_marker(duration * 0.99, "Done", color=0xFF0000)
 
 v.load_animation(animation)
 
-v.set_camera(position=[9, -11, 9], target=[0, 0, 3.5])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip(tp.points.min(0), tp.points.max(0)))).reshape(3, -1).T,
+    fill=0.8,
+)
 v.wait_for_assets()

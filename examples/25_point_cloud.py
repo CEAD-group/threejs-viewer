@@ -64,5 +64,9 @@ anim.set_frame_times(frame_times)
 anim.set_draw_range_data(["cut_surface"], draw_fracs.reshape(n_frames, 1))
 v.load_animation(anim)
 
-v.set_camera(position=[7, -9, 6], target=[0, 0, -0.5])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip(positions.min(0), positions.max(0)))).reshape(3, -1).T,
+    fill=0.8,
+)
 v.wait_for_assets()

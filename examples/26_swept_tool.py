@@ -79,5 +79,8 @@ anim.set_draw_range_data(
 v.load_animation(anim)
 
 v.add_grid("floor", cell_size=1.0, extent=40.0, center_color=0x888888)
-v.set_camera(position=[11, -17, 10], target=[0, 0, 1])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-8, -3, -1], [8, 3, 7]))).reshape(3, -1).T, fill=0.8
+)
 v.wait_for_assets()

@@ -13,6 +13,8 @@ import math
 import random
 import time
 
+import numpy as np
+
 from threejs_viewer import ViewerClient
 
 COLORS = [0x3388FF, 0xFF8833, 0x44CC66, 0xCC44AA, 0xEEEE44]
@@ -23,7 +25,10 @@ client.connect()
 client.add_grid("grid", cell_size=1.0, extent=30.0, center_color=0x888888)
 for i in range(5):
     client.add_box(f"box_{i}", 1, 1, 1, color=COLORS[i], position=[2.0 * i - 4, 0, 0.5])
-client.set_camera(position=[5, -9, 7], target=[0, 0.5, 0.5])
+client.set_view("iso", animate=False)
+client.frame_points(
+    np.array(np.meshgrid(*zip([-5, -1, 0], [5, 3.5, 1]))).reshape(3, -1).T, fill=0.8
+)
 client.add_sphere("marker", 0.4, color=0xFFFFFF, position=[0, 3, 0.4])
 
 client.add_menu(

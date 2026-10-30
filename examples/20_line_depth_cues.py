@@ -86,5 +86,8 @@ for sx in (-1, 1):
 # pressing D then Shift+D). The browser keeps this after the Python process exits.
 v.set_depth_cue(fog=True, edl=True)
 
-v.set_camera(position=[15, -18, 9], target=[0, 0, 0])
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip(points.min(0), points.max(0)))).reshape(3, -1).T, fill=0.8
+)
 v.wait_for_assets()

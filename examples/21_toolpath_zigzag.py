@@ -92,5 +92,6 @@ v.add_parametric_tube(
     metalness=0.1,
 )
 
-v.set_camera(position=[3, -10, 18], target=[3, -2, 0])
+v.set_view("iso", animate=False)
+v.frame_points(np.vstack([retrace, infill]), fill=0.8)
 v.wait_for_assets()
