@@ -1,24 +1,13 @@
 """
-Parametric Tube — variable-cross-section bead visualization
+Variable-cross-section bead with ``add_parametric_tube``.
 
-Demonstrates ``parametric_tube``: a client-built extruded tube whose
-cross-section width and height vary along the spine. The viewer receives
-only the spine polyline plus per-point width/height/color arrays and
-builds the triangles locally, so a 5000-point bead uploads in ~200 KB
-instead of the ~1 MB a baked mesh would cost.
+The viewer receives only the spine plus per-point width, height and colour arrays and
+builds the chamfered-hexagon tube itself, so a 2500-point bead uploads in a few KB.
+A ``draw_ranges`` animation grows it with smooth frontier-ring morphing while a capsule
+tracks the tip. After 4 s the colouring switches from height to width with
+``update_parametric_tube_colors``, with no geometry rebuild.
 
-Highlights:
-- Variable width/height along the path (neck narrows, belly swells).
-- Chamfered hexagonal cross-section (45° chamfers, 6 vertices per ring).
-- Draw-range animation with smooth frontier-ring morphing — the tube
-  grows pixel-smoothly instead of snapping ring-by-ring.
-- A capsule parented to an animated group acts as a nozzle-tip
-  indicator, showing where material is currently being deposited.
-- After 4 seconds, ``update_parametric_tube_colors`` swaps the bead's
-  color map from layer-height gradient to width gradient without
-  rebuilding any geometry.
-
-Run: uv run python examples/18_parametric_tube.py
+Run: uv run python examples/18_parametric_tube.py   (Ctrl+C to quit)
 """
 
 import math
@@ -26,7 +15,7 @@ import time
 
 import numpy as np
 
-from threejs_viewer import Animation, viewer
+from threejs_viewer import Animation, Toolpath, viewer
 
 
 def make_spiral(n=2500, turns=14, radius=1.8, height=4.0):
@@ -37,18 +26,6 @@ def make_spiral(n=2500, turns=14, radius=1.8, height=4.0):
     y = r * np.sin(angle)
     z = t * height
     return np.column_stack([x, y, z]).astype(np.float32), t
-
-
-def turbo_rgb(values):
-    """Cheap turbo-ish colormap: values in [0, 1] → uint32 0x00RRGGBB."""
-    v = np.clip(values, 0.0, 1.0)
-    r = np.clip(1.5 - abs(4 * v - 3), 0, 1)
-    g = np.clip(1.5 - abs(4 * v - 2), 0, 1)
-    b = np.clip(1.5 - abs(4 * v - 1), 0, 1)
-    ri = (r * 255).astype(np.uint32)
-    gi = (g * 255).astype(np.uint32)
-    bi = (b * 255).astype(np.uint32)
-    return (ri << 16) | (gi << 8) | bi
 
 
 v = viewer()
@@ -64,11 +41,9 @@ heights = 0.13 + 0.12 * np.sin(t * math.pi * 12)
 widths = np.maximum(widths, 1e-3).astype(np.float32)
 heights = np.maximum(heights, 1e-3).astype(np.float32)
 
-# Initial colormap: paint each ring by normalized layer height (z).
-z_frac = (spine[:, 2] - spine[:, 2].min()) / (
-    spine[:, 2].max() - spine[:, 2].min() + 1e-9
-)
-layer_colors = turbo_rgb(z_frac)
+# Colour rings by height; Toolpath.colorize maps scalars through a library colormap.
+tp = Toolpath.from_points(spine, widths, heights)
+layer_colors = tp.colorize(spine[:, 2], "turbo").packed_colors
 
 v.add_parametric_tube(
     "bead",
@@ -78,6 +53,8 @@ v.add_parametric_tube(
     colors=layer_colors,
 )
 
+
+v.add_capsule("nozzle", radius=0.12, length=0.3, color=0xFFFFFF)
 
 # --- Animation: reveal the tube with draw_range while the nozzle group
 # follows the spine tip. ---
@@ -96,13 +73,18 @@ anim.set_transform_data(["nozzle"], nozzle_transforms.reshape(n_frames, 1, 16))
 anim.set_draw_range_data(["bead"], draw_fracs.reshape(n_frames, 1))
 v.load_animation(anim)
 
-print("Playing bead animation. Switching color mode in 4 s...")
-time.sleep(4.0)
-
-# --- Color swap: recolor by local width without touching geometry. ---
-width_frac = (widths - widths.min()) / (widths.max() - widths.min() + 1e-9)
-v.update_parametric_tube_colors("bead", turbo_rgb(width_frac))
-
-print("Colors now encode bead width. Close the viewer window to exit.")
-while True:
-    time.sleep(1.0)
+v.add_grid(
+    "floor", cell_size=1.0, extent=30.0, center_color=0x888888, position=[0, 0, -0.2]
+)
+v.set_view("iso", animate=False)
+v.frame_points(spine, fill=0.7)
+print("Switching color mode in 4 s. Ctrl+C to quit.")
+try:
+    time.sleep(4.0)
+    v.update_parametric_tube_colors("bead", tp.colorize(widths, "turbo").packed_colors)
+    while True:
+        time.sleep(1.0)
+except KeyboardInterrupt:
+    pass
+finally:
+    v.disconnect()

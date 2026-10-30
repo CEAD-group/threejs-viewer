@@ -1,16 +1,10 @@
 """
-Toolpath Visualization — draw_range + Bead demo
+Spiral vase toolpath with a textured bead and an animated nozzle.
 
-Generates a spiral vase toolpath with animated draw_range and a nozzle
-following the tip.  Uses ``add_toolpath`` which renders the bead as a
-parametric tube (client-side geometry, smooth frontier morphing).  The bead
-wears an extruded-plastic texture set (colour, normal and roughness maps from
-``tools/bead_texture_maker``) that repeats along the path; the viridis colouring
-tints it.
-
-The animation uses one keyframe per spine point with linear interpolation,
-so even a 10k-point toolpath plays back smoothly at 60 fps without
-pre-computing hundreds of thousands of frames.
+``add_toolpath`` renders the bead as a parametric tube built in the browser, wearing the
+colour, normal and roughness maps from ``tools/bead_texture_maker`` (tinted by the
+viridis colouring). One keyframe per spine point with linear interpolation drives
+``draw_ranges`` and the nozzle, so a million-point path plays smoothly at 60 fps.
 
 Run: uv run python examples/11_toolpath.py
 """
@@ -103,14 +97,10 @@ def spiral_vase(
 
 v = viewer()
 v.clear()
-
-# Ground plane
-v.add_box(
-    "ground", width=8, height=8, depth=0.02, color=0x333333, position=[0, 0, -0.01]
-)
+v.add_grid("floor", cell_size=1.0, extent=20.0, center_color=0x888888)
 
 # Generate toolpath
-duration = 600.0
+duration = 30.0
 
 tp = Toolpath.from_points(
     spiral_vase(),
@@ -189,8 +179,9 @@ animation.add_marker(duration * 0.99, "Done", color=0xFF0000)
 
 v.load_animation(animation)
 
-print(f"Toolpath: {len(tp)} points/keyframes, {duration:.0f}s duration")
-print("Bead + nozzle — linear interpolation gives smooth 60 fps playback.")
-print("Waiting for browser to finish loading assets...")
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip(tp.points.min(0), tp.points.max(0)))).reshape(3, -1).T,
+    fill=0.8,
+)
 v.wait_for_assets()
-print("Assets loaded — server closed.")
