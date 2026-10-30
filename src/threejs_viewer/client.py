@@ -4186,14 +4186,19 @@ class ViewerClient:
                 ``prefix`` naming the viewer objects it shows/hides
                 (``checked`` defaults to ``True``); ``select`` and
                 ``segmented`` take ``options`` (a list of values or of
-                ``{"value", "label"}`` dicts) and ``value``.
+                ``{"value", "label"}`` dicts) and ``value``. A ``label``
+                with ``collapsible=True`` heads a foldable section: the rows
+                after it, up to the next ``divider`` or collapsible label,
+                hide while it is folded (``collapsed``, default ``False``).
+                A fold toggle is reported as a ``"label"`` action whose
+                ``value`` is the new collapsed state.
             label: The tab text. Every menu is a vertical tab folded against
                 the viewer's right edge; clicking it slides the body out.
             mode: ``"dropdown"`` (default: starts folded, an outside click
                 folds it back) or ``"panel"`` (starts open and stays open
                 across outside clicks, for a legend).
-            storage_key: Persist toggle/eye/select/segmented values in the
-                browser's localStorage under this key.
+            storage_key: Persist toggle/eye/select/segmented values and
+                section fold state in the browser's localStorage under this key.
             title: Tooltip on the tab.
             body_width: CSS width of the body (default ``"190px"``).
 
@@ -4249,6 +4254,13 @@ class ViewerClient:
                 out[key] = item[key]
         if "bind_key" in item:
             out["bindKey"] = bool(item["bind_key"])
+        for key in ("collapsible", "collapsed"):
+            if key in item:
+                if kind != "label":
+                    raise ValueError(f"{key!r} applies to 'label' items only: {item!r}")
+                if not isinstance(item[key], bool):
+                    raise ValueError(f"{key!r} must be a bool (got {item[key]!r})")
+                out[key] = item[key]
         if "options" in item:
             out["options"] = [
                 o if isinstance(o, dict) else {"value": o} for o in item["options"]
@@ -4260,7 +4272,7 @@ class ViewerClient:
 
         Accepts the item keys of :meth:`add_menu` (``label``, ``state``,
         ``checked``, ``value``, ``options``, ``disabled``, ``hidden``,
-        ``hint``). The stored menu is updated too, so a reconnect replays the
+        ``hint``, ``collapsed``). The stored menu is updated too, so a reconnect replays the
         patched state.
         """
         msg = self._menus.get(menu)
@@ -4270,6 +4282,9 @@ class ViewerClient:
             patch["options"] = [
                 o if isinstance(o, dict) else {"value": o} for o in patch["options"]
             ]
+        for key in ("collapsible", "collapsed"):
+            if key in patch and not isinstance(patch[key], bool):
+                raise ValueError(f"{key!r} must be a bool (got {patch[key]!r})")
         for it in msg["menu"]["items"]:
             if it.get("id") == item:
                 it.update(patch)

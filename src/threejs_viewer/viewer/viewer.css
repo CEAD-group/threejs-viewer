@@ -120,6 +120,9 @@
     padding: 6px 26px 8px 8px;
     color: var(--tjsv-text);
     font-size: 12px;
+    /* A touch scroll that reaches the end of the body must not chain to the page. */
+    overscroll-behavior: contain;
+    touch-action: pan-y;
 }
 .threejs-viewer .tjsv-menu-status {
     color: var(--tjsv-text-dim);
@@ -146,6 +149,26 @@
     color: var(--tjsv-text-dim);
     margin: 6px 0 2px;
 }
+.threejs-viewer .tjsv-menu-section {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 0;
+    cursor: pointer;
+    user-select: none;
+}
+.threejs-viewer .tjsv-menu-section:hover { color: var(--tjsv-text); }
+.threejs-viewer .tjsv-menu-section:focus { outline: none; }
+.threejs-viewer .tjsv-menu-section:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
+.threejs-viewer .tjsv-menu-chevron {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    transition: transform 0.15s;
+}
+.threejs-viewer .tjsv-menu-section.collapsed .tjsv-menu-chevron { transform: rotate(-90deg); }
 .threejs-viewer .tjsv-menu-divider { height: 1px; background: var(--tjsv-border); margin: 6px 0; }
 .threejs-viewer .tjsv-menu-custom { margin: 2px 0; }
 
