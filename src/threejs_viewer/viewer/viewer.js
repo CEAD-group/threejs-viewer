@@ -132,6 +132,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {Object<string, string>} [cubemapData]       Map of face name (px/nx/py/ny/pz/nz) -> gzip+base64 Radiance HDR (omit to load static/cubemaps/paul-lobe-haus/*.hdr next to the module)
  * @property {Object<string, {format: string, faces: Object<string, string>}>} [cubemaps]  Named cubemap sets (format hdr/png/jpg, faces gzip+base64) offered in the Lighting panel's picker; URL `cubemap` / localStorage pick one
  * @property {boolean} [environmentBackground]           Show the environment cubemap as the scene background (default false; URL `env_background` wins)
+ * @property {boolean} [clipCaps]                      Cap the cut of clipped primitives, swept tools and tubes (default false; URL `clip_caps` wins)
  * @property {number} [toneMappingExposure]               Tone-mapping exposure (default 1.0)
  * @property {number} [environmentIntensity]              Scene environment intensity (default 2.0)
  * @property {boolean} [environmentMap]                   Enable the IBL environment map / cube reflections (default true; false is uglier but faster)
@@ -1726,6 +1727,8 @@ function applyOpacity(obj, opacity) {
         // Same for a primitive's `outline`: an accent that follows the fill's
         // opacity dissolves. set_color and set_visibility still reach it.
         if (child.userData.__primitiveOutline) return;
+        // A clip cap follows its owner's colour and hides while it is translucent.
+        if (child.userData.__clipCap) return;
         // Embedder overlays mounted under this object keep their own look.
         if (isUnderOverlay(child)) return;
         for (const mat of ownMaterials(child)) {
@@ -1969,7 +1972,7 @@ function applyHighlight(obj, enabled, opts = {}) {
         // overlays (share the parent's geometry — a duplicate outline), and
         // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
-            || child.userData.__highlightOutline) return;
+            || child.userData.__highlightOutline || child.userData.__clipCap) return;
         // An embedder overlay riding the object is not part of the selection.
         if (isUnderOverlay(child)) return;
         const style = resolveHighlightStyle(child, wantStyle);
@@ -7366,6 +7369,8 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165) — wireframing
         // one would draw the whole extruded shell as a wire cage.
         if (obj.userData.__highlightOutline) return;
+        // Clip caps follow the wire-only mode from ClipCapController.
+        if (obj.userData.__clipCap) return;
         if (!obj.material) return;
         for (const m of wornAndOwnMaterials(obj)) this._applyWireframeToMaterial(m);
         let overlay = obj.userData.wireframeOverlay;
@@ -7583,7 +7588,7 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165): a material swap
         // would turn the outline into a solid shell. Same for primitive outlines.
         return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
-            || ud.__highlightOutline || ud.__primitiveOutline)
+            || ud.__highlightOutline || ud.__primitiveOutline || ud.__clipCap)
             && !isUnderOverlay(obj);
     }
 
@@ -8253,7 +8258,7 @@ class ModelCache {
 // @param {Float32Array} profileArr  (M*2) (height_along_axis, radius) rows
 // @param {number} sections          cross-section facets per ring (>= 3)
 // @param {Float32Array|null} ringColors  (N*3) per-station RGB in 0..1, or null
-// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number}}
+// @returns {{geometry: THREE.BufferGeometry, ringPairCount: number, indicesPerRingPair: number, capIndexCount: number, levels: number, sections: number, startCapIndexCount: number}}
 function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringColors) {
     const N = stationPos.length / 3;
     const M = profileArr.length / 2;
@@ -8412,7 +8417,379 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeVertexNormals();
     geometry.setDrawRange(0, indices.length);
-    return { geometry, ringPairCount, indicesPerRingPair, capIndexCount };
+    return {
+        geometry, ringPairCount, indicesPerRingPair, capIndexCount,
+        levels: L, sections, startCapIndexCount: capBandsPerEnd + cap0Fan,
+    };
+}
+
+// ========== Clip caps (issue #259) ==========
+//
+// Analytic section caps for solids the viewer builds itself: primitives (the
+// convex hull of the triangle-edge crossings), swept tool bodies (a union of
+// convex station-pair cells) and parametric tubes (the drawn triangles sliced
+// and chained into loops). Each cap is a child mesh of its owner, built in the
+// owner's local frame and clipped only by the other slab plane. Opt-in:
+// `clipCaps` option / `clip_caps` URL param / `set_clipping_caps`, or a
+// per-object `clipCap` override. Meshes and models stay open.
+
+// Above this many drawn triangles a cap rebuild runs at most every
+// CLIP_CAP_THROTTLE_MS (the tube LOD cadence), so a plane drag stays smooth.
+const CLIP_CAP_SYNC_TRIANGLES = 200000;
+const CLIP_CAP_THROTTLE_MS = 500;
+// Triangles per bounding box in the tube slicer's plane-straddle prefilter.
+const CLIP_CAP_CHUNK_TRIS = 256;
+// Closed convex primitives; a plane is a sheet and gets no cap.
+const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
+
+/**
+ * Unit basis (u, v) of a plane with unit normal n, u × v = n.
+ * @param {number} nx @param {number} ny @param {number} nz
+ * @returns {number[]} [ux, uy, uz, vx, vy, vz]
+ */
+function clipCapBasis(nx, ny, nz) {
+    // a × n with a the axis least aligned with n.
+    let ux, uy, uz;
+    if (Math.abs(nx) < 0.9) { ux = 0; uy = nz; uz = -ny; } else { ux = -nz; uy = 0; uz = nx; }
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    return [ux, uy, uz, ny * uz - nz * uy, nz * ux - nx * uz, nx * uy - ny * ux];
+}
+
+/**
+ * Indices of the 2D convex hull of the points, counter-clockwise
+ * (Andrew's monotone chain; duplicates and collinear points dropped).
+ * @param {ArrayLike<number>} xs @param {ArrayLike<number>} ys @param {number} n
+ * @returns {number[]}
+ */
+function convexHull2D(xs, ys, n) {
+    /** @type {number[]} */ const order = [];
+    for (let i = 0; i < n; i++) order.push(i);
+    order.sort((a, b) => (xs[a] - xs[b]) || (ys[a] - ys[b]));
+    /** @param {number} o @param {number} a @param {number} b */
+    const cross = (o, a, b) => (xs[a] - xs[o]) * (ys[b] - ys[o]) - (ys[a] - ys[o]) * (xs[b] - xs[o]);
+    /** @type {number[]} */ const lower = [];
+    for (const i of order) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], i) <= 0) lower.pop();
+        lower.push(i);
+    }
+    /** @type {number[]} */ const upper = [];
+    for (let k = order.length - 1; k >= 0; k--) {
+        const i = order[k];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], i) <= 0) upper.pop();
+        upper.push(i);
+    }
+    lower.pop(); upper.pop();
+    return lower.concat(upper);
+}
+
+/**
+ * Accumulates cap triangles (local positions, optional colours) for one
+ * plane. Every triangle is wound so its face normal is -n: the cut face as
+ * seen from the removed side.
+ */
+class ClipCapBuilder {
+    /**
+     * @param {number} nx @param {number} ny @param {number} nz @param {number} c
+     *   the plane in the owner's local frame (kept side n·x + c >= 0)
+     * @param {boolean} withColor
+     */
+    constructor(nx, ny, nz, c, withColor) {
+        this.nx = nx; this.ny = ny; this.nz = nz; this.c = c;
+        this.basis = clipCapBasis(nx, ny, nz);
+        /** @type {number[]} */ this.pos = [];
+        /** @type {number[] | null} */ this.col = withColor ? [] : null;
+        /** @type {number[]} scratch crossing points of one convex cell */
+        this._p = [];
+        /** @type {number[]} */ this._c = [];
+    }
+
+    /** @param {number} x @param {number} y @param {number} z */
+    dist(x, y, z) { return this.nx * x + this.ny * y + this.nz * z + this.c; }
+
+    resetPoints() { this._p.length = 0; this._c.length = 0; }
+
+    /**
+     * Add the crossing of edge a→b (signed distances on opposite sides).
+     * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} col
+     * @param {number} a @param {number} b @param {number} sa @param {number} sb
+     */
+    addCrossing(pos, col, a, b, sa, sb) {
+        const t = sa / (sa - sb);
+        const a3 = a * 3, b3 = b * 3;
+        this._p.push(pos[a3] + t * (pos[b3] - pos[a3]),
+                     pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]),
+                     pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]));
+        if (!this.col) return;
+        if (col) {
+            this._c.push(col[a3] + t * (col[b3] - col[a3]),
+                         col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]),
+                         col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]));
+        } else {
+            this._c.push(1, 1, 1);
+        }
+    }
+
+    /** Fan the convex hull of the scratch points; returns the triangle count. */
+    emitConvex() {
+        const p = this._p, n = p.length / 3;
+        if (n < 3) return 0;
+        const [ux, uy, uz, vx, vy, vz] = this.basis;
+        const xs = new Float64Array(n), ys = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
+            xs[i] = x * ux + y * uy + z * uz;
+            ys[i] = x * vx + y * vy + z * vz;
+        }
+        const hull = convexHull2D(xs, ys, n);
+        if (hull.length < 3) return 0;
+        // The hull runs counter-clockwise about +n; reversed it faces -n.
+        for (let k = 1; k < hull.length - 1; k++) {
+            this._vertex(hull[0]);
+            this._vertex(hull[k + 1]);
+            this._vertex(hull[k]);
+        }
+        return hull.length - 2;
+    }
+
+    /** @param {number} i */
+    _vertex(i) {
+        this.pos.push(this._p[i * 3], this._p[i * 3 + 1], this._p[i * 3 + 2]);
+        if (this.col) this.col.push(this._c[i * 3], this._c[i * 3 + 1], this._c[i * 3 + 2]);
+    }
+
+    /** @returns {THREE.BufferGeometry | null} */
+    toGeometry() {
+        if (!this.pos.length) return null;
+        const g = new THREE.BufferGeometry();
+        const n = this.pos.length / 3;
+        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.pos), 3));
+        const normals = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+            normals[i * 3] = -this.nx; normals[i * 3 + 1] = -this.ny; normals[i * 3 + 2] = -this.nz;
+        }
+        g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        if (this.col) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.col), 3));
+        g.computeBoundingSphere();
+        return g;
+    }
+}
+
+/**
+ * Cap of a convex solid (primitives): the hull of every triangle edge
+ * crossing the plane, exact for a convex polyhedron.
+ * @param {THREE.BufferGeometry} geometry @param {ClipCapBuilder} out
+ */
+function buildConvexClipCap(geometry, out) {
+    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
+    const index = geometry.getIndex();
+    const idx = index ? index.array : null;
+    const nTri = (idx ? idx.length : pos.length / 3) / 3;
+    out.resetPoints();
+    // Vertices on the plane are section points too: a seam vertex at -1e-17
+    // has no edge to its twin at 0, so no crossing would ever reach it.
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const eps = 1e-7 * (geometry.boundingSphere ? geometry.boundingSphere.radius : 1);
+    for (let v = 0; v < pos.length / 3; v++) {
+        if (Math.abs(out.dist(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2])) <= eps) out.addCrossing(pos, null, v, v, 0, -1);
+    }
+    for (let t = 0; t < nTri; t++) {
+        const a = idx ? idx[t * 3] : t * 3;
+        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
+        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
+        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
+        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+        if ((sa >= 0) !== (sb >= 0)) out.addCrossing(pos, null, a, b, sa, sb);
+        if ((sb >= 0) !== (sc >= 0)) out.addCrossing(pos, null, b, c, sb, sc);
+        if ((sc >= 0) !== (sa >= 0)) out.addCrossing(pos, null, c, a, sc, sa);
+    }
+    out.emitConvex();
+}
+
+/**
+ * Owns every clip cap: decides per frame which capped solids need a rebuild
+ * (plane, transform, geometry, draw range or colour layout changed), keeps
+ * each cap's material in step with its owner, and removes caps when clipping
+ * or the cap switch goes off. Caps are children of their owner mesh marked
+ * `userData.__clipCap`, never in `_objects`.
+ */
+class ClipCapController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** Global switch; a per-object `userData.clipCap` boolean overrides it. */
+        this.enabled = false;
+        /** @type {any[]} */ this._targets = [];
+        this._targetsGen = -1;
+        this._hasCaps = false;
+        this._inv = new THREE.Matrix4();
+        this._plane = new THREE.Plane();
+    }
+
+    /** @param {any} mesh */
+    _wants(mesh) {
+        const o = mesh.userData.clipCap;
+        return typeof o === 'boolean' ? o : this.enabled;
+    }
+
+    _collectTargets() {
+        /** @type {any[]} */ const out = [];
+        for (const obj of this.v._objects.values()) {
+            obj.traverse((/** @type {any} */ node) => {
+                if (node.isMesh && node.userData.clipCapKind) out.push(node);
+            });
+        }
+        this._targets = out;
+        this._targetsGen = this.v._objGeneration;
+    }
+
+    /** Per frame, from _animate. Free while clipping is off and no cap exists. */
+    update() {
+        const v = this.v;
+        const active = v._clipEnabled;
+        if (!active && !this._hasCaps) return;
+        if (this._targetsGen !== v._objGeneration) this._collectTargets();
+        let any = false;
+        const now = performance.now();
+        for (const mesh of this._targets) {
+            if (!active || !mesh.parent || !this._wants(mesh)) { this._remove(mesh); continue; }
+            if (this._updateTarget(mesh, now)) any = true;
+        }
+        this._hasCaps = any;
+    }
+
+    /** @param {any} mesh */
+    _remove(mesh) {
+        const st = mesh.userData.__clipCapState;
+        if (!st) return;
+        for (const cap of st.caps) {
+            if (!cap) continue;
+            mesh.remove(cap);
+            cap.geometry.dispose();
+            cap.material.dispose();
+        }
+        delete mesh.userData.__clipCapState;
+        this.v._shadowDirty = true;
+    }
+
+    /**
+     * @param {any} mesh @param {number} now
+     * @returns {boolean} whether the mesh carries a cap afterwards
+     */
+    _updateTarget(mesh, now) {
+        const own = ownMaterials(mesh)[0];
+        // A translucent body or a wire cage shows its inside on purpose.
+        if (!own || own.transparent || own.opacity < 1 || own.wireframe) { this._remove(mesh); return false; }
+        const geom = mesh.geometry;
+        const posAttr = geom.getAttribute('position');
+        if (!posAttr) { this._remove(mesh); return false; }
+        const index = geom.getIndex();
+        const colAttr = geom.getAttribute('color');
+        const withColor = !!(colAttr && own.vertexColors);
+        mesh.updateWorldMatrix(true, false);
+        this._inv.copy(mesh.matrixWorld).invert();
+        const planes = this.v._clipPlanes;
+        const sig = [geom.id, posAttr.version, index ? index.version : -1,
+            geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0, planes.length];
+        /** @type {number[][]} */ const local = [];
+        for (const p of planes) {
+            this._plane.copy(p).applyMatrix4(this._inv);
+            const n = this._plane.normal;
+            local.push([n.x, n.y, n.z, this._plane.constant]);
+            sig.push(n.x, n.y, n.z, this._plane.constant);
+        }
+        let st = mesh.userData.__clipCapState;
+        if (!st) {
+            st = mesh.userData.__clipCapState = { sig: null, caps: [], last: -Infinity };
+        }
+        const same = st.sig && st.sig.length === sig.length
+            && st.sig.every((/** @type {number} */ x, /** @type {number} */ i) => x === sig[i]);
+        if (!same) {
+            const total = index ? index.count : posAttr.count;
+            const drawn = Math.min(total, geom.drawRange.count) / 3;
+            const throttled = drawn > CLIP_CAP_SYNC_TRIANGLES && now - st.last < CLIP_CAP_THROTTLE_MS;
+            if (!throttled) {
+                this._rebuild(mesh, st, local, withColor);
+                st.sig = sig;
+                st.last = now;
+            }
+        }
+        this._syncMaterials(mesh, st, own, withColor);
+        return st.caps.some(Boolean);
+    }
+
+    /**
+     * @param {any} mesh @param {any} st @param {number[][]} local @param {boolean} withColor
+     */
+    _rebuild(mesh, st, local, withColor) {
+        const kind = mesh.userData.clipCapKind;
+        const geom = mesh.geometry;
+        const planes = this.v._clipPlanes;
+        for (let i = 0; i < planes.length; i++) {
+            const [nx, ny, nz, c] = local[i];
+            const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
+            if (kind === 'convex') buildConvexClipCap(geom, out);
+            const g = out.toGeometry();
+            let cap = st.caps[i];
+            if (!g) {
+                if (cap) cap.visible = false;
+                continue;
+            }
+            if (!cap) {
+                const mat = new THREE.MeshStandardMaterial({
+                    side: THREE.DoubleSide,
+                    // Coplanar with the cut rim: pull the cap forward a hair.
+                    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+                    fog: false,
+                });
+                cap = new THREE.Mesh(g, mat);
+                cap.userData.__clipCap = true;
+                cap.name = `${mesh.userData.id || mesh.name}::clipcap`;
+                st.caps[i] = cap;
+                mesh.add(cap);
+            } else {
+                cap.geometry.dispose();
+                cap.geometry = g;
+            }
+            cap.visible = true;
+            // Clipped by every plane but its own, which it lies on.
+            const others = planes.filter((/** @type {any} */ _, /** @type {number} */ j) => j !== i);
+            const mat = cap.material;
+            const cur = mat.clippingPlanes;
+            if (!cur || cur.length !== others.length || cur.some((/** @type {any} */ p, /** @type {number} */ j) => p !== others[j])) {
+                mat.clippingPlanes = others;
+                mat.clipShadows = true;
+                mat.needsUpdate = true;
+            }
+        }
+        for (let i = planes.length; i < st.caps.length; i++) {
+            const cap = st.caps[i];
+            if (!cap) continue;
+            mesh.remove(cap);
+            cap.geometry.dispose();
+            cap.material.dispose();
+        }
+        st.caps.length = planes.length;
+        this.v._shadowDirty = true;
+    }
+
+    /** @param {any} mesh @param {any} st @param {any} own @param {boolean} withColor */
+    _syncMaterials(mesh, st, own, withColor) {
+        // The M cycle's wire-only mode wires the cap too, so a cut stays readable.
+        const wire = !!(this.v._shading && this.v._shading.wireframeMode === 1);
+        for (const cap of st.caps) {
+            if (!cap) continue;
+            const mat = cap.material;
+            if (own.color) mat.color.copy(own.color);
+            if (own.roughness !== undefined) mat.roughness = own.roughness;
+            if (own.metalness !== undefined) mat.metalness = own.metalness;
+            if (mat.vertexColors !== withColor) { mat.vertexColors = withColor; mat.needsUpdate = true; }
+            mat.wireframe = wire;
+            cap.castShadow = mesh.castShadow;
+            cap.receiveShadow = mesh.receiveShadow;
+        }
+    }
 }
 
 // ========== Depth cues (depth perception for flat white line drawings) ==========
@@ -12630,6 +13007,10 @@ export class ThreeJSViewer {
         this._clipSlabThickness = 2.0;
         this._clipPosition = 0;
         this._clipDefaults = null;
+        // Section caps on clipped solids (issue #259). URL `clip_caps` > option > off.
+        this._clipCaps = new ClipCapController(this);
+        this._clipCaps.enabled = parseBoolOption(urlParams.get('clip_caps'))
+            ?? parseBoolOption(options.clipCaps) ?? false;
         this._clipSyncFromGizmo = false;
 
         // Scrubbing state
@@ -12873,6 +13254,7 @@ export class ThreeJSViewer {
         this._clipModeSlab = q('.tjsv-clip-mode-slab');
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
         this._clipClose = q('.tjsv-clip-close');
+        this._clipCapsCheck = q('.tjsv-clip-caps');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
         // Toolbar height tracks viewport width: the timeline-row wraps when
@@ -13768,7 +14150,8 @@ export class ThreeJSViewer {
     _applyClipToObject(obj) {
         const planes = this._activeClippingPlanes();
         obj.traverse(/** @param {any} child */ child => {
-            if (!child.material) return;
+            // A clip cap carries every plane but its own (ClipCapController).
+            if (!child.material || child.userData.__clipCap) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
                 mat.clippingPlanes = planes;
@@ -13849,7 +14232,7 @@ export class ThreeJSViewer {
     _updateClipMaterials() {
         this._shadowDirty = true;
         this._scene.traverse(/** @param {any} child */ child => {
-            if (!child.material) return;
+            if (!child.material || child.userData.__clipCap) return;
             if (this._isClipHelper(child)) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
@@ -14398,6 +14781,9 @@ export class ThreeJSViewer {
             const geometry = PRIMITIVES[objData.primitive](params);
             const material = this._createMaterial(params);
             const mesh = new THREE.Mesh(geometry, material);
+            // Convex solids get the hull of their cut edges as a clip cap (issue #259).
+            if (CLIP_CAP_CONVEX_PRIMITIVES.has(objData.primitive)) mesh.userData.clipCapKind = 'convex';
+            if (typeof params.clipCap === 'boolean') mesh.userData.clipCap = params.clipCap;
             // A crisper accent over the translucent fill; opt-in, so every
             // other path stays the single Mesh it was.
             if (params.outline && (objData.primitive === 'box' || objData.primitive === 'sphere')) {
@@ -16219,6 +16605,10 @@ export class ThreeJSViewer {
             this._setClipThickness(this._clipSlabThickness + delta);
         });
 
+        // Cap toggle (issue #259)
+        this._clipCapsCheck.checked = this._clipCaps.enabled;
+        this._clipCapsCheck.addEventListener('change', () => this.setClipCaps(this._clipCapsCheck.checked));
+
         // Close button
         this._clipClose.addEventListener('click', () => this._toggleClipPanel());
 
@@ -16757,7 +17147,7 @@ export class ThreeJSViewer {
                     colorObj.traverse(/** @param {any} child */ (child) => {
                         // Composes with set_highlight: the outline child keeps
                         // its own selection colour.
-                        if (!child.material || child.userData.__highlightOutline) return;
+                        if (!child.material || child.userData.__highlightOutline || child.userData.__clipCap) return;
                         // Embedder overlays under the object keep their own colour.
                         if (isUnderOverlay(child)) return;
                         for (const mat of ownMaterials(child)) { if (mat.color) mat.color.setHex(data.color); }
@@ -18677,6 +19067,9 @@ export class ThreeJSViewer {
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
                 break;
+            case 'set_clipping_caps':
+                this.setClipCaps(!!data.enabled);
+                break;
             case 'set_display_quality':
                 this.setDisplayQuality(data.quality);
                 break;
@@ -18983,6 +19376,9 @@ export class ThreeJSViewer {
 
         // Billboards: re-face the camera after controls have moved it.
         this._updateBillboards();
+
+        // Section caps follow plane, transform and geometry changes (issue #259).
+        this._clipCaps.update();
 
         // Octree-streamed point clouds: budgeted LOD traversal + on-demand
         // node fetches (no-op when no LOD cloud is in the scene).
@@ -19886,6 +20282,22 @@ export class ThreeJSViewer {
         this.el.style.setProperty('--tjsv-background', css);
         this._applyBackground();
         this._dimensions?.relabel();   // label plates wear the background colour
+    }
+
+    /**
+     * Cap the cut of clipped primitives, swept tools and parametric tubes
+     * (issue #259). A per-object `clipCap` boolean on the add message wins
+     * over this switch. Meshes and models always stay open.
+     * @param {boolean} enabled
+     */
+    setClipCaps(enabled) {
+        this._clipCaps.enabled = !!enabled;
+        if (this._clipCapsCheck) this._clipCapsCheck.checked = this._clipCaps.enabled;
+    }
+
+    /** @returns {boolean} whether the global clip-cap switch is on */
+    getClipCaps() {
+        return this._clipCaps.enabled;
     }
 
     /**

@@ -1257,3 +1257,43 @@ def test_dimension_tool_events_reach_callbacks():
     client._dispatch_dimension_event({"type": "dimension_tool_cancelled"})
     assert events[0]["event"] == "created" and events[0]["direction"] == "X"
     assert events[1] == {"event": "cancelled"}
+
+
+def test_set_clipping_caps_records_and_sends_when_connected():
+    """set_clipping_caps records the switch and sends it once a viewer is
+    connected (issue #259)."""
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.set_clipping_caps(True)
+    assert sent == []  # no viewer yet: recorded only
+    assert client._clip_caps_state is True
+    client._ws = object()
+    client.set_clipping_caps(False)
+    assert sent == [{"type": "set_clipping_caps", "enabled": False}]
+    assert client._clip_caps_state is False
+
+
+def test_reconnect_replays_clipping_caps(bound_client):
+    bound_client.set_clipping_caps(True)
+    with ws_connect(f"ws://127.0.0.1:{bound_client.port}", open_timeout=5) as ws:
+        while True:
+            msg = json.loads(ws.recv(timeout=5))
+            if msg["type"] == "set_clipping_caps":
+                break
+    assert msg == {"type": "set_clipping_caps", "enabled": True}
+
+
+def test_primitive_clip_cap_override_rides_params():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_box("b", clip_cap=False)
+    client.add_sphere("s", clip_cap=True)
+    client.add_cylinder("c")
+    client.add_capsule("p", clip_cap=True)
+    params = [m["object"]["params"] for m in sent]
+    assert params[0]["clipCap"] is False
+    assert params[1]["clipCap"] is True
+    assert "clipCap" not in params[2]
+    assert params[3]["clipCap"] is True
