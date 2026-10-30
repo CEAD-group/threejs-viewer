@@ -6190,6 +6190,13 @@ ${tubeUVPeriod.toString()}
 
 ${writeTubeUVs.toString()}
 
+// Clip cap slicer for tubes (issue #259), shared with the main thread.
+${clipCapBasis.toString()}
+
+${convexHull2D.toString()}
+
+${sliceTubeClipCap.toString()}
+
 
 // ---- Geometry build (plain math, no Three.js) ----
 
@@ -6202,9 +6209,35 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMa
 // ---- Per-tube state cache ----
 const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints, epsilonDivisor }
 const _rdpCache = new Map(); // tubeId -> { chunkDists, chunkIndices }
+const _clipCapGeoms = new Map(); // cap id -> { key, pos, col, idx }
 
 self.onmessage = function(e) {
     const msg = e.data;
+
+    // 'clipCap': slice a tube's drawn bands by the clip planes. The geometry
+    // copy is cached per cap id and only resent when it changed.
+    if (msg.type === 'clipCap') {
+        if (msg.positions) {
+            _clipCapGeoms.set(msg.capId, { key: msg.geomKey, pos: msg.positions, col: msg.colors, idx: msg.indices });
+        }
+        const g = _clipCapGeoms.get(msg.capId);
+        if (!g || g.key !== msg.geomKey) {
+            self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, missing: true });
+            return;
+        }
+        const caps = sliceTubeClipCap(g.pos, g.col, g.idx, Math.min(msg.end, g.idx.length), msg.planes, msg.block);
+        const transfer = [];
+        for (const c of caps) {
+            transfer.push(c.pos.buffer);
+            if (c.col) transfer.push(c.col.buffer);
+        }
+        self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, caps }, transfer);
+        return;
+    }
+    if (msg.type === 'clipCapDispose') {
+        _clipCapGeoms.delete(msg.capId);
+        return;
+    }
 
     // 'init': register original arrays for a tube
     if (msg.type === 'init') {
@@ -10132,20 +10165,21 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
 //
 // Analytic section caps for solids the viewer builds itself: primitives (the
 // convex hull of the triangle-edge crossings), swept tool bodies (a union of
-// convex station-pair cells) and parametric tubes (the drawn triangles sliced
-// and chained into loops). Each cap is a child mesh of its owner, built in the
+// convex station-pair cells), parametric tubes (a union of convex hulls, one
+// per drawn ring band, sliced on the LOD worker when large) and the torus (the
+// drawn triangles sliced and chained into loops). Each cap is a child mesh of its owner, built in the
 // owner's local frame and clipped only by the other slab plane. Opt-in:
 // `clipCaps` option / `clip_caps` URL param / `set_clipping_caps`, or a
 // per-object `clipCap` override. Meshes and models stay open.
 
-// Above this many drawn triangles, or once a rebuild took longer than
-// CLIP_CAP_SYNC_MS (a long loop is slow to triangulate), a cap rebuild runs at
-// most every CLIP_CAP_THROTTLE_MS (the tube LOD cadence) so a drag stays usable.
+// On the main thread, above this many drawn triangles or once a rebuild took
+// longer than CLIP_CAP_SYNC_MS, a cap rebuild runs at most every
+// CLIP_CAP_THROTTLE_MS (the tube LOD cadence) so a drag stays usable.
 const CLIP_CAP_SYNC_TRIANGLES = 200000;
 const CLIP_CAP_SYNC_MS = 8;
 const CLIP_CAP_THROTTLE_MS = 500;
-// Triangles per bounding box in the tube slicer's plane-straddle prefilter.
-const CLIP_CAP_CHUNK_TRIS = 256;
+// Tubes drawing more triangles than this are sliced on the LOD worker.
+const CLIP_CAP_WORKER_TRIANGLES = 20000;
 // Closed convex primitives; a plane is a sheet and gets no cap. The torus is
 // closed but not convex, so it goes through the triangle slicer.
 const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
@@ -10473,44 +10507,14 @@ function buildSweptClipCap(geometry, layout, out) {
 }
 
 /**
- * Per-chunk bounding boxes of a triangle list (CLIP_CAP_CHUNK_TRIS triangles
- * each), so the slicer skips chunks that do not straddle the plane.
- * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} idx @param {number} nTri
- */
-function clipCapChunkBoxes(pos, idx, nTri) {
-    const nChunks = Math.ceil(nTri / CLIP_CAP_CHUNK_TRIS);
-    const boxes = new Float32Array(nChunks * 6);
-    for (let k = 0; k < nChunks; k++) {
-        let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
-        const end = Math.min(nTri, (k + 1) * CLIP_CAP_CHUNK_TRIS) * 3;
-        for (let i = k * CLIP_CAP_CHUNK_TRIS * 3; i < end; i++) {
-            const v = (idx ? idx[i] : i) * 3;
-            const x = pos[v], y = pos[v + 1], z = pos[v + 2];
-            if (x < x0) x0 = x;
-            if (x > x1) x1 = x;
-            if (y < y0) y0 = y;
-            if (y > y1) y1 = y;
-            if (z < z0) z0 = z;
-            if (z > z1) z1 = z;
-        }
-        const o = k * 6;
-        boxes[o] = x0; boxes[o + 1] = y0; boxes[o + 2] = z0;
-        boxes[o + 3] = x1; boxes[o + 4] = y1; boxes[o + 5] = z1;
-    }
-    return boxes;
-}
-
-/**
  * Slice the drawn triangles of a surface made of closed pieces and chain the
  * crossings into loops. A segment runs along n × N with N the outward vertex
  * normal, so an outer boundary turns counter-clockwise about +n and a hole
- * clockwise. Used for parametric tubes, whose drawn index range already
- * reflects draw range, breaks, round joins, LOD and strand collapse.
+ * clockwise. Used for the torus primitive.
  * @param {THREE.BufferGeometry} geometry
  * @param {ClipCapBuilder} out
- * @param {Float32Array | null} boxes  per-chunk boxes from clipCapChunkBoxes
  */
-function buildSlicedClipCap(geometry, out, boxes) {
+function buildSlicedClipCap(geometry, out) {
     const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
     const nAttr = geometry.getAttribute('normal');
     const nrm = nAttr ? /** @type {ArrayLike<number>} */ (nAttr.array) : null;
@@ -10574,17 +10578,6 @@ function buildSlicedClipCap(geometry, out, boxes) {
         nc++;
     };
     for (let t = t0; t < t1; t++) {
-        if (boxes && t % CLIP_CAP_CHUNK_TRIS === 0) {
-            const o = (t / CLIP_CAP_CHUNK_TRIS) * 6;
-            if (o < boxes.length) {
-                const cx = (boxes[o] + boxes[o + 3]) / 2, cy = (boxes[o + 1] + boxes[o + 4]) / 2;
-                const cz = (boxes[o + 2] + boxes[o + 5]) / 2;
-                const r = Math.abs(nx) * (boxes[o + 3] - cx) + Math.abs(ny) * (boxes[o + 4] - cy)
-                    + Math.abs(nz) * (boxes[o + 5] - cz);
-                const dc = out.dist(cx, cy, cz);
-                if (dc - r > 0 || dc + r < 0) { t += CLIP_CAP_CHUNK_TRIS - 1; continue; }
-            }
-        }
         const a = idx ? idx[t * 3] : t * 3;
         const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
         const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
@@ -10681,11 +10674,112 @@ function buildSlicedClipCap(geometry, out, boxes) {
 }
 
 /**
+ * Tube clip cap, free of Three.js so the LOD worker runs the same code. A
+ * tube's index buffer is a run of `block`-index bands (nCs * 6), each joining
+ * two rings: ring pairs, revolution cap bands, joint bands and the relocated
+ * end cap alike. A band is close to the convex hull of its two rings, so its
+ * section is the hull of its edge crossings, and the cap is the union of
+ * those fans. A break slot (flat end fans padded with (a, a, a) triangles)
+ * has no volume and is skipped. Every fan faces -n.
+ * @param {ArrayLike<number>} pos @param {ArrayLike<number> | null} col
+ * @param {ArrayLike<number>} idx @param {number} end  drawn index count
+ * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
+ * @param {number} block
+ * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+ */
+function sliceTubeClipCap(pos, col, idx, end, planes, block) {
+    const nBlocks = Math.floor(end / block);
+    const sd = new Float64Array(block);
+    /** @type {number[]} */ const P = [];
+    /** @type {number[]} */ const C = [];
+    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    for (const plane of planes) {
+        const nx = plane[0], ny = plane[1], nz = plane[2], c = plane[3];
+        const basis = clipCapBasis(nx, ny, nz);
+        /** @type {number[]} */ const tp = [];
+        /** @type {number[]} */ const tc = [];
+        for (let k = 0; k < nBlocks; k++) {
+            const o = k * block;
+            let lo = Infinity, hi = -Infinity;
+            for (let i = 0; i < block; i++) {
+                const v = idx[o + i] * 3;
+                const d = nx * pos[v] + ny * pos[v + 1] + nz * pos[v + 2] + c;
+                sd[i] = d;
+                if (d < lo) lo = d;
+                if (d > hi) hi = d;
+            }
+            if (lo >= 0 || hi < 0) continue;
+            let breakSlot = false;
+            for (let i = 0; i < block; i += 3) {
+                if (idx[o + i] === idx[o + i + 1] && idx[o + i] === idx[o + i + 2]) { breakSlot = true; break; }
+            }
+            if (breakSlot) continue;
+            P.length = 0; C.length = 0;
+            for (let i = 0; i < block; i += 3) {
+                for (let e = 0; e < 3; e++) {
+                    const ia = i + e, ib = i + (e + 1) % 3;
+                    const sa = sd[ia], sb = sd[ib];
+                    if ((sa >= 0) === (sb >= 0)) continue;
+                    const a = idx[o + ia] * 3, b = idx[o + ib] * 3;
+                    const t = sa / (sa - sb);
+                    P.push(pos[a] + t * (pos[b] - pos[a]), pos[a + 1] + t * (pos[b + 1] - pos[a + 1]),
+                           pos[a + 2] + t * (pos[b + 2] - pos[a + 2]));
+                    if (col) {
+                        C.push(col[a] + t * (col[b] - col[a]), col[a + 1] + t * (col[b + 1] - col[a + 1]),
+                               col[a + 2] + t * (col[b + 2] - col[a + 2]));
+                    }
+                }
+            }
+            const n = P.length / 3;
+            const xs = new Float64Array(n), ys = new Float64Array(n);
+            for (let i = 0; i < n; i++) {
+                const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+                xs[i] = x * basis[0] + y * basis[1] + z * basis[2];
+                ys[i] = x * basis[3] + y * basis[4] + z * basis[5];
+            }
+            const hull = convexHull2D(xs, ys, n);
+            // The hull runs counter-clockwise about +n; reversed it faces -n.
+            for (let h = 1; h < hull.length - 1; h++) {
+                for (let e = 0; e < 3; e++) {
+                    const q = (e === 0 ? hull[0] : e === 1 ? hull[h + 1] : hull[h]) * 3;
+                    tp.push(P[q], P[q + 1], P[q + 2]);
+                    if (col) tc.push(C[q], C[q + 1], C[q + 2]);
+                }
+            }
+        }
+        out.push({ pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
+    }
+    return out;
+}
+
+/**
+ * Cap geometry from flat triangle arrays; null when there is nothing to draw.
+ * @param {Float32Array} pos @param {Float32Array | null} col
+ * @param {number} nx @param {number} ny @param {number} nz
+ * @returns {THREE.BufferGeometry | null}
+ */
+function clipCapGeometry(pos, col, nx, ny, nz) {
+    if (!pos.length) return null;
+    const g = new THREE.BufferGeometry();
+    const n = pos.length / 3;
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const normals = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+        normals[i * 3] = -nx; normals[i * 3 + 1] = -ny; normals[i * 3 + 2] = -nz;
+    }
+    g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    if (col) g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.computeBoundingSphere();
+    return g;
+}
+
+/**
  * Owns every clip cap: decides per frame which capped solids need a rebuild
  * (plane, transform, geometry, draw range or colour layout changed), keeps
  * each cap's material in step with its owner, and removes caps when clipping
  * or the cap switch goes off. Caps are children of their owner mesh marked
- * `userData.__clipCap`, never in `_objects`.
+ * `userData.__clipCap`, never in `_objects`. Tubes over
+ * CLIP_CAP_WORKER_TRIANGLES drawn triangles are sliced on the LOD worker.
  */
 class ClipCapController {
     /** @param {any} viewer */
@@ -10698,6 +10792,14 @@ class ClipCapController {
         this._hasCaps = false;
         this._inv = new THREE.Matrix4();
         this._plane = new THREE.Plane();
+        /** Worker requests in flight. */
+        this.pending = 0;
+        /** Worker requests posted so far (test seam). */
+        this.requests = 0;
+        this._reqId = 0;
+        /** Main-thread ms spent on the last worker request and install (bench seam). */
+        this.lastRequestMs = 0;
+        this.lastInstallMs = 0;
     }
 
     /** @param {any} mesh */
@@ -10712,6 +10814,14 @@ class ClipCapController {
             obj.traverse((/** @type {any} */ node) => {
                 if (node.isMesh && node.userData.clipCapKind) out.push(node);
             });
+        }
+        // A target that left the scene drops its geometry copy on the worker.
+        const kept = new Set(out);
+        for (const mesh of this._targets) {
+            if (kept.has(mesh)) continue;
+            const st = mesh.userData.__clipCapState;
+            if (st && st.inflight) { st.inflight = 0; this.pending--; }
+            this._forgetWorkerCopy(mesh);
         }
         this._targets = out;
         this._targetsGen = this.v._objGeneration;
@@ -10729,7 +10839,25 @@ class ClipCapController {
             if (!active || !mesh.parent || !this._wants(mesh)) { this._remove(mesh); continue; }
             if (this._updateTarget(mesh, now)) any = true;
         }
-        this._hasCaps = any;
+        this._hasCaps = any || this.pending > 0;
+    }
+
+    /**
+     * True when no worker request is in flight and every capped target's
+     * caps match its current plane, transform and geometry (test seam).
+     */
+    settled() {
+        if (this.pending > 0) return false;
+        if (!this.v._clipEnabled) return true;
+        if (this._targetsGen !== this.v._objGeneration) return false;
+        for (const mesh of this._targets) {
+            if (!mesh.parent || !this._wants(mesh)) continue;
+            const s = this._signature(mesh);
+            if (!s) continue;
+            const st = mesh.userData.__clipCapState;
+            if (!st || !sameSignature(st.sig, s.sig)) return false;
+        }
+        return true;
     }
 
     /** @param {any} mesh */
@@ -10742,21 +10870,33 @@ class ClipCapController {
             cap.geometry.dispose();
             cap.material.dispose();
         }
+        if (st.inflight) { st.inflight = 0; this.pending--; }
+        this._forgetWorkerCopy(mesh);
         delete mesh.userData.__clipCapState;
         this.v._shadowDirty = true;
     }
 
+    /** @param {any} mesh */
+    _forgetWorkerCopy(mesh) {
+        const st = mesh.userData.__clipCapState;
+        if (!st || !st.workerGeomKey) return;
+        st.workerGeomKey = '';
+        if (this.v._lodWorker) this.v._lodWorker.postMessage({ type: 'clipCapDispose', capId: mesh.uuid });
+    }
+
     /**
-     * @param {any} mesh @param {number} now
-     * @returns {boolean} whether the mesh carries a cap afterwards
+     * Owner material plus the rebuild signature: geometry id and versions,
+     * draw range, colour mode and each plane in the owner's local frame.
+     * Null when the owner must stay open (translucent, wire cage, no positions).
+     * @param {any} mesh
      */
-    _updateTarget(mesh, now) {
+    _signature(mesh) {
         const own = ownMaterials(mesh)[0];
         // A translucent body or a wire cage shows its inside on purpose.
-        if (!own || own.transparent || own.opacity < 1 || own.wireframe) { this._remove(mesh); return false; }
+        if (!own || own.transparent || own.opacity < 1 || own.wireframe) return null;
         const geom = mesh.geometry;
         const posAttr = geom.getAttribute('position');
-        if (!posAttr) { this._remove(mesh); return false; }
+        if (!posAttr) return null;
         const index = geom.getIndex();
         const colAttr = geom.getAttribute('color');
         const withColor = !!(colAttr && own.vertexColors);
@@ -10764,7 +10904,8 @@ class ClipCapController {
         this._inv.copy(mesh.matrixWorld).invert();
         const planes = this.v._clipPlanes;
         const sig = [geom.id, posAttr.version, index ? index.version : -1,
-            geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0, planes.length];
+            geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0,
+            withColor ? colAttr.version : -1, planes.length];
         /** @type {number[][]} */ const local = [];
         for (const p of planes) {
             this._plane.copy(p).applyMatrix4(this._inv);
@@ -10772,22 +10913,43 @@ class ClipCapController {
             local.push([n.x, n.y, n.z, this._plane.constant]);
             sig.push(n.x, n.y, n.z, this._plane.constant);
         }
+        return { own, sig, local, withColor };
+    }
+
+    /**
+     * @param {any} mesh @param {number} now
+     * @returns {boolean} whether the mesh carries a cap afterwards
+     */
+    _updateTarget(mesh, now) {
+        const s = this._signature(mesh);
+        if (!s) { this._remove(mesh); return false; }
+        const { own, sig, local, withColor } = s;
         let st = mesh.userData.__clipCapState;
         if (!st) {
-            st = mesh.userData.__clipCapState = { sig: null, caps: [], last: -Infinity, cost: 0, geomKey: '', boxes: null, boxKey: '' };
+            st = mesh.userData.__clipCapState = {
+                sig: null, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
+            };
         }
-        const same = st.sig && st.sig.length === sig.length
-            && st.sig.every((/** @type {number} */ x, /** @type {number} */ i) => x === sig[i]);
-        if (!same) {
-            const total = index ? index.count : posAttr.count;
+        // One request in flight per target: when it lands its signature is
+        // compared again, so the final state always gets built.
+        if (!st.inflight && !sameSignature(st.sig, sig)) {
+            const geom = mesh.geometry;
+            const index = geom.getIndex();
+            const total = index ? index.count : geom.getAttribute('position').count;
             const drawn = Math.min(total, geom.drawRange.count) / 3;
-            const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
-            if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
-                const t0 = performance.now();
-                this._rebuild(mesh, st, local, withColor);
-                st.sig = sig;
-                st.last = now;
-                st.cost = performance.now() - t0;
+            const workerTris = typeof window !== 'undefined' && /** @type {any} */ (window).__clipCapWorkerTriangles != null
+                ? /** @type {any} */ (window).__clipCapWorkerTriangles : CLIP_CAP_WORKER_TRIANGLES;
+            if (mesh.userData.clipCapKind === 'tube' && index && drawn > workerTris && this.v._lodWorker) {
+                this._request(mesh, st, sig, local, withColor);
+            } else {
+                const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
+                if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
+                    const t0 = performance.now();
+                    this._install(mesh, st, this._build(mesh, local, withColor), local);
+                    st.sig = sig;
+                    st.last = now;
+                    st.cost = performance.now() - t0;
+                }
             }
         }
         this._syncMaterials(mesh, st, own, withColor);
@@ -10795,34 +10957,100 @@ class ClipCapController {
     }
 
     /**
-     * @param {any} mesh @param {any} st @param {number[][]} local @param {boolean} withColor
+     * Main-thread cap arrays per plane.
+     * @param {any} mesh @param {number[][]} local @param {boolean} withColor
+     * @returns {{pos: Float32Array, col: Float32Array | null}[]}
      */
-    _rebuild(mesh, st, local, withColor) {
+    _build(mesh, local, withColor) {
         const kind = mesh.userData.clipCapKind;
         const geom = mesh.geometry;
-        /** @type {Float32Array | null} */ let boxes = null;
-        if (kind === 'sliced') {
-            // Chunk boxes pay off once the geometry held still between two
-            // rebuilds (a plane drag); while it changes a plain pass is cheaper.
+        if (kind === 'tube') {
             const index = geom.getIndex();
-            const key = `${geom.id}:${geom.getAttribute('position').version}:${index ? index.version : -1}`;
-            if (st.boxKey === key) boxes = st.boxes;
-            else if (st.geomKey === key) {
-                const pos = /** @type {ArrayLike<number>} */ (geom.getAttribute('position').array);
-                const idx = index ? index.array : null;
-                st.boxes = boxes = clipCapChunkBoxes(pos, idx, (idx ? idx.length : pos.length / 3) / 3);
-                st.boxKey = key;
-            }
-            st.geomKey = key;
+            const colAttr = geom.getAttribute('color');
+            const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+            return sliceTubeClipCap(geom.getAttribute('position').array, withColor ? colAttr.array : null,
+                index.array, end, local, mesh.userData.tubeIndicesPerRingPair);
         }
-        const planes = this.v._clipPlanes;
-        for (let i = 0; i < planes.length; i++) {
-            const [nx, ny, nz, c] = local[i];
+        return local.map(([nx, ny, nz, c]) => {
             const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
             if (kind === 'convex') buildConvexClipCap(geom, out);
             else if (kind === 'swept') buildSweptClipCap(geom, mesh.userData.sweptLayout, out);
-            else if (kind === 'sliced') buildSlicedClipCap(geom, out, boxes);
-            const g = out.toGeometry();
+            else if (kind === 'sliced') buildSlicedClipCap(geom, out);
+            return { pos: new Float32Array(out.pos), col: out.col ? new Float32Array(out.col) : null };
+        });
+    }
+
+    /**
+     * Post a slice request to the LOD worker. The geometry is copied (never
+     * the renderer's own buffers) and only when it changed since the last
+     * request, so a plane drag on a static tube posts planes alone.
+     * @param {any} mesh @param {any} st @param {number[]} sig @param {number[][]} local @param {boolean} withColor
+     */
+    _request(mesh, st, sig, local, withColor) {
+        const t0 = performance.now();
+        const geom = mesh.geometry;
+        const posAttr = geom.getAttribute('position');
+        const index = geom.getIndex();
+        const colAttr = geom.getAttribute('color');
+        const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+        // Draw range is left out: a shorter reveal reuses the cached copy.
+        const geomKey = [sig[0], sig[1], sig[2], sig[5], sig[6]].join(':');
+        /** @type {any} */ const msg = {
+            type: 'clipCap', capId: mesh.uuid, reqId: ++this._reqId, geomKey,
+            planes: local, end, block: mesh.userData.tubeIndicesPerRingPair,
+        };
+        /** @type {ArrayBuffer[]} */ const transfer = [];
+        if (st.workerGeomKey !== geomKey || st.workerEnd < end) {
+            msg.positions = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+            msg.indices = /** @type {Uint32Array} */ (index.array).slice(0, end);
+            msg.colors = withColor ? new Float32Array(/** @type {Float32Array} */ (colAttr.array)) : null;
+            transfer.push(msg.positions.buffer, msg.indices.buffer);
+            if (msg.colors) transfer.push(msg.colors.buffer);
+            st.workerGeomKey = geomKey;
+            st.workerEnd = end;
+        }
+        st.inflight = msg.reqId;
+        st.inflightSig = sig;
+        st.inflightLocal = local;
+        this.pending++;
+        this.requests++;
+        this.v._lodWorker.postMessage(msg, transfer);
+        this.lastRequestMs = performance.now() - t0;
+    }
+
+    /**
+     * A slice result from the LOD worker; dropped unless it answers the
+     * target's current request.
+     * @param {any} msg
+     */
+    onWorkerResult(msg) {
+        const mesh = this._targets.find((m) => m.uuid === msg.capId);
+        const st = mesh && mesh.userData.__clipCapState;
+        if (!st || st.inflight !== msg.reqId) return;
+        this.pending--;
+        st.inflight = 0;
+        if (msg.missing) {
+            // The worker lost the geometry copy (terminated): resend next frame.
+            st.workerGeomKey = '';
+            return;
+        }
+        const t0 = performance.now();
+        this._install(mesh, st, msg.caps, st.inflightLocal);
+        st.sig = st.inflightSig;
+        st.last = performance.now();
+        this.lastInstallMs = st.last - t0;
+    }
+
+    /**
+     * Swap in cap meshes from per-plane triangle arrays.
+     * @param {any} mesh @param {any} st
+     * @param {{pos: Float32Array, col: Float32Array | null}[]} results @param {number[][]} local
+     */
+    _install(mesh, st, results, local) {
+        const planes = this.v._clipPlanes;
+        const n = Math.min(planes.length, results.length);
+        for (let i = 0; i < n; i++) {
+            const g = clipCapGeometry(results[i].pos, results[i].col, local[i][0], local[i][1], local[i][2]);
             let cap = st.caps[i];
             if (!g) {
                 if (cap) cap.visible = false;
@@ -10855,14 +11083,14 @@ class ClipCapController {
                 mat.needsUpdate = true;
             }
         }
-        for (let i = planes.length; i < st.caps.length; i++) {
+        for (let i = n; i < st.caps.length; i++) {
             const cap = st.caps[i];
             if (!cap) continue;
             mesh.remove(cap);
             cap.geometry.dispose();
             cap.material.dispose();
         }
-        st.caps.length = planes.length;
+        st.caps.length = n;
         this.v._shadowDirty = true;
     }
 
@@ -10876,12 +11104,20 @@ class ClipCapController {
             if (own.color) mat.color.copy(own.color);
             if (own.roughness !== undefined) mat.roughness = own.roughness;
             if (own.metalness !== undefined) mat.metalness = own.metalness;
-            if (mat.vertexColors !== withColor) { mat.vertexColors = withColor; mat.needsUpdate = true; }
+            const vc = withColor && !!cap.geometry.getAttribute('color');
+            if (mat.vertexColors !== vc) { mat.vertexColors = vc; mat.needsUpdate = true; }
             mat.wireframe = wire;
             cap.castShadow = mesh.castShadow;
             cap.receiveShadow = mesh.receiveShadow;
         }
     }
+}
+
+/**
+ * @param {number[] | null} a @param {number[]} b
+ */
+function sameSignature(a, b) {
+    return !!a && a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 // ========== Depth cues (depth perception for flat white line drawings) ==========
@@ -15529,6 +15765,10 @@ class ThreeJSViewer {
         this._lodWorker = _getLodWorker();
         this._lodWorker.onmessage = /** @param {MessageEvent} e */ (e) => {
             const msg = e.data;
+            if (msg.type === 'clipCapResult') {
+                this._clipCaps.onWorkerResult(msg);
+                return;
+            }
             // 'collapseOnlyResult' is independent of LOD — runs even on tubes
             // without a tubeLOD record. Apply the snapped positions to the
             // mesh's existing geometry and let three.js re-upload them.
@@ -20489,8 +20729,8 @@ class ThreeJSViewer {
                         mesh.name = data.id;
                         mesh.userData.id = data.id;
                         mesh.userData.isParametricTube = true;
-                        // Clip caps slice the drawn triangles (issue #259).
-                        mesh.userData.clipCapKind = 'sliced';
+                        // Clip caps hull each drawn ring band (issue #259).
+                        mesh.userData.clipCapKind = 'tube';
                         if (typeof data.clipCap === 'boolean') mesh.userData.clipCap = data.clipCap;
                         // The mesh now owns the texture references; _deleteObject
                         // releases them.

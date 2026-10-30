@@ -70,12 +70,29 @@ def _caps(page, id):
 
 def _wait_caps(page, id, n):
     page.wait_for_function(
-        "([id, n]) => { const o = window.threejsViewer.getObject(id); if (!o) return false;"
+        "([id, n]) => { const v = window.threejsViewer; const o = v.getObject(id);"
+        " if (!o || !v._clipCaps.settled()) return false;"
         " let k = 0; o.traverse((c) => { if (c.userData.__clipCap && c.visible) k++; });"
         " return k === n; }",
         arg=[id, n],
         timeout=10_000,
     )
+
+
+def _wait_settled(page):
+    """Wait until no worker slice is in flight and every cap is current."""
+    page.wait_for_function(
+        "() => window.threejsViewer._clipCaps.settled()", timeout=10_000
+    )
+
+
+def _use_worker(page, on):
+    """Send every tube cap to the LOD worker (on) or keep small ones local."""
+    page.evaluate("(on) => { window.__clipCapWorkerTriangles = on ? 0 : null; }", on)
+
+
+def _worker_requests(page):
+    return page.evaluate("() => window.threejsViewer._clipCaps.requests")
 
 
 def _key(page, key):
@@ -457,11 +474,13 @@ def _line(*corners, step=5.0):
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize("worker", [False, True])
 @pytest.mark.parametrize("lod", [False, {"threshold": 0}])
-def test_tube_cap_is_the_ring_section(viewer_client, viewer_page, lod):
+def test_tube_cap_is_the_ring_section(viewer_client, viewer_page, lod, worker):
     """A straight tube cut across shows one closed loop with the ring's area,
     also after an LOD worker swaps in a reduced geometry."""
     page = viewer_page
+    _use_worker(page, worker)
     spine = _line((0, 0), (100, 0), step=10)
     n = len(spine)
     viewer_client.add_parametric_tube(
@@ -489,17 +508,20 @@ def test_tube_cap_is_the_ring_section(viewer_client, viewer_page, lod):
     assert cap["open"] == 0
     assert cap["vertexColors"] is True
     assert cap["area"] == pytest.approx(ring, rel=1e-3)
+    assert (_worker_requests(page) > 0) is worker
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize("worker", [False, True])
 @pytest.mark.parametrize("joins", [None, "round"])
 def test_tube_cap_along_a_cornered_bead_follows_draw_range(
-    viewer_client, viewer_page, joins
+    viewer_client, viewer_page, joins, worker
 ):
     """A horizontal cut through a cornered bead (mitred or round joins) is
     closed, lies on the plane, covers about length x width, and retreats with
     the draw-range frontier."""
     page = viewer_page
+    _use_worker(page, worker)
     spine = _line((0, 0), (40, 0), (40, 40), (80, 40), (80, 0))
     n = len(spine)
     viewer_client.add_parametric_tube(
@@ -518,6 +540,7 @@ def test_tube_cap_along_a_cornered_bead_follows_draw_range(
     viewer_client.set_draw_range("t", 0.5)
     settle(viewer_client)
     frames(page, 2)
+    _wait_settled(page)
     (cap,) = _caps(page, "t")
     assert cap["dist"][0] < 1e-4
     assert cap["open"] == 0
@@ -526,10 +549,12 @@ def test_tube_cap_along_a_cornered_bead_follows_draw_range(
 
 
 @pytest.mark.browser
-def test_tube_break_pair_gets_no_cap(viewer_client, viewer_page):
+@pytest.mark.parametrize("worker", [False, True])
+def test_tube_break_pair_gets_no_cap(viewer_client, viewer_page, worker):
     """A plane through a travel hop caps the bridging cone of an unbroken
     tube but nothing on a tube broken there."""
     page = viewer_page
+    _use_worker(page, worker)
     spine = _line((0, 0), (30, 0), (50, 0), (80, 0), step=10)
     n = len(spine)
     mask = np.zeros(n, dtype=np.uint8)
@@ -546,7 +571,7 @@ def test_tube_break_pair_gets_no_cap(viewer_client, viewer_page):
     settle(viewer_client)
     _wait_object(page, "broken")
     _wait_caps(page, "bridged", 1)
-    frames(page, 2)
+    _wait_settled(page)
     assert _caps(page, "broken") == []
     viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=65, show_helper=False)
     settle(viewer_client)
@@ -624,3 +649,34 @@ def test_tube_slab_cut_reads_cap_colour(viewer_client, viewer_page):
     settle(viewer_client)
     _wait_caps(page, "t", 2)
     assert _is_red(page.evaluate(_PIXEL_AT, [0, 0, 0.2]))
+
+
+@pytest.mark.browser
+def test_tube_worker_cap_lands_on_the_last_plane(viewer_client, viewer_page):
+    """Plane moves sent faster than the worker answers drop the stale slices
+    and the cap ends on the final plane; a delete mid-flight leaves nothing."""
+    page = viewer_page
+    _use_worker(page, True)
+    spine = _line((0, 0), (100, 0), step=1)
+    n = len(spine)
+    viewer_client.add_parametric_tube(
+        "t", spine, np.full(n, 8.0), np.full(n, 3.0), lod=False
+    )
+    viewer_client.set_clipping_caps(True)
+    settle(viewer_client)
+    _wait_object(page, "t")
+    for d in (10, 20, 30, 40, 55):
+        viewer_client.set_clipping_plane(
+            normal=[1, 0, 0], distance=d, show_helper=False
+        )
+        frames(page, 1)
+    settle(viewer_client)
+    _wait_caps(page, "t", 1)
+    (cap,) = _caps(page, "t")
+    assert cap["dist"][0] < 1e-4
+    assert _worker_requests(page) >= 2
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=70, show_helper=False)
+    viewer_client.delete("t")
+    settle(viewer_client)
+    _wait_settled(page)
+    assert page.evaluate("() => window.threejsViewer._clipCaps.pending") == 0
