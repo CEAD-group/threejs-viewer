@@ -236,28 +236,34 @@
         .threejs-viewer .tjsv-menu-mark svg { width: 15px; height: 15px; display: block; }
         .threejs-viewer .tjsv-menu-item.active .tjsv-menu-mark { color: var(--tjsv-primary-hi); }
         /* Pill mark (default toggle) */
+        /* Thumb larger than the pill, overhanging it by the same 2px at both ends. */
         .threejs-viewer .tjsv-toggle-track {
             position: relative;
             flex: 0 0 auto;
+            box-sizing: border-box;
             width: 26px;
-            height: 15px;
-            border-radius: 8px;
+            height: 12px;
+            margin: 0 2px;
+            border-radius: 6px;
             background: var(--tjsv-panel-3);
             border: 1px solid var(--tjsv-border);
             transition: background 0.15s ease, border-color 0.15s ease;
         }
         .threejs-viewer .tjsv-toggle-thumb {
             position: absolute;
-            top: 1.5px;
-            left: 1.5px;
-            width: 11px;
-            height: 11px;
+            top: 50%;
+            left: -3px;
+            width: 16px;
+            height: 16px;
+            box-sizing: border-box;
             border-radius: 50%;
             background: var(--tjsv-text-dim);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+            transform: translate(0, -50%);
             transition: transform 0.15s ease, background 0.15s ease;
         }
         .threejs-viewer .tjsv-menu-item.active .tjsv-toggle-track { background: var(--tjsv-primary); border-color: var(--tjsv-primary); }
-        .threejs-viewer .tjsv-menu-item.active .tjsv-toggle-thumb { transform: translateX(11px); background: #fff; }
+        .threejs-viewer .tjsv-menu-item.active .tjsv-toggle-thumb { transform: translate(14px, -50%); background: #fff; }
         .threejs-viewer .tjsv-menu-item.disabled .tjsv-toggle-track { opacity: 0.4; }
 
         /* Actions (np-action): a full-width button */
