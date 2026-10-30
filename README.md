@@ -59,7 +59,7 @@ threejs-viewer open
 
 ## Gallery
 
-Every image comes from a script in [examples/](examples/); the file name is given under each one.
+Every image comes from a script in [examples/](examples/); the file name is given under each one. `tools/record_readme_media.py` re-records them.
 
 ### Toolpaths and beads
 
@@ -67,17 +67,19 @@ Every image comes from a script in [examples/](examples/); the file name is give
 |---|---|
 | ![Textured bead, close-up of a corner](docs/media/bead_texture_corner.png) | ![Textured printed part](docs/media/bead_texture_hero.png) |
 | Colour + normal + roughness maps follow the bead around every corner. `37_bead_texture.py` | The same part: one continuous 8 x 3 mm bead, 14 layers, overhanging round side. `37_bead_texture.py` |
-| ![Spiral vase printed by a draw_range animation](docs/media/toolpath_vase.gif) | ![Interrupted toolpath with travel moves](docs/media/toolpath_interrupted.png) |
-| A spiral vase bead revealed by a `draw_ranges` channel, viridis colours tinting the texture. `11_toolpath.py` | Travel moves taper the bead to zero width. `15_toolpath_interrupted.py` |
-| ![Tube break mask](docs/media/tube_breaks.png) | ![5-axis swept tool body](docs/media/swept_tool.gif) |
-| Bottom: one spine bridging three rings with stray cones. Top: the same spine with `break_before`, three capped strips. `28_tube_breaks.py` | A tilting tool lofted along a contact path, coloured by reorientation rate. `26_swept_tool.py` |
+| ![Six vases printed from a 1.2M-point toolpath](docs/media/million_point_toolpath.gif) | ![Spiral vase printed by a draw_range animation](docs/media/toolpath_vase.gif) |
+| Six spiral vases from one 1.2M-point toolpath with tube LOD, round joins, travel hops and a nozzle on `set_follow_path`, coloured by wall lean. `40_million_point_toolpath.py` | A spiral vase bead revealed by a `draw_ranges` channel, viridis colours tinting the texture. `11_toolpath.py` |
+| ![Interrupted toolpath with travel moves](docs/media/toolpath_interrupted.png) | ![Tube break mask](docs/media/tube_breaks.png) |
+| Travel moves taper the bead to zero width. `15_toolpath_interrupted.py` | Front: one spine bridging three rings with stray cones. Back: the same spine with `break_before`, three capped strips. `28_tube_breaks.py` |
+| ![5-axis swept tool body](docs/media/swept_tool.gif) | |
+| A tilting tool lofted along a contact path, coloured by reorientation rate. `26_swept_tool.py` | |
 
 ### Point clouds
 
 | | |
 |---|---|
 | ![Deviation point cloud](docs/media/point_cloud.png) | ![draw_range sweep over a point cloud](docs/media/point_cloud_sweep.gif) |
-| 160k-point machined surface coloured by signed deviation, one draw call. `25_point_cloud.py` | The same cloud revealed along the toolpath by `draw_ranges`. `25_point_cloud.py` |
+| A million-point machined surface coloured by signed deviation, one draw call. `25_point_cloud.py` | The same cloud revealed along the toolpath by `draw_ranges`. `25_point_cloud.py` |
 | ![Octree LOD with birth and removal times](docs/media/points_octree_lod.gif) | ![Live point stream](docs/media/live_points_stream.gif) |
 | Octree LOD streaming node detail on demand while a build front adds points and an erosion front removes them, out of buffer order. `27_points_octree_lod.py` | `append_points` growing a cloud a few thousand points at a time, only the new points cross the wire. `30_live_points_stream.py` |
 
@@ -86,31 +88,33 @@ Every image comes from a script in [examples/](examples/); the file name is give
 | | |
 |---|---|
 | ![Fog and eye-dome lighting on a dense polyline](docs/media/depth_cues.png) | ![Polyline picking](docs/media/polyline_picking.png) |
-| A 12k-point native polyline under distance fog + eye-dome lighting (`D` / `Shift+D`). `20_line_depth_cues.py` | Hovering a line or bead glides a marker to the closest point and reads out the arc-length fraction; a click reaches Python. `22_polyline_picking.py` |
+| A million-point native polyline under distance fog + eye-dome lighting (`D` / `Shift+D`). `20_line_depth_cues.py` | Hovering a line or bead glides a marker to the closest point and reads out the arc-length fraction; a click reaches Python. `22_polyline_picking.py` |
 
 ### Models and animation
 
 | | |
 |---|---|
+| ![Robot cell posed by forward kinematics](docs/media/robot_cell.gif) | ![600 primitives streamed at 60 fps](docs/media/stress_test.gif) |
+| A 6-axis arm on a rail doing a pick-and-place, posed in the viewer from joint-space keyframes with `set_kinematic_chain`. `14_robot_cell.py` | 600 primitives racing along a million-point torus knot, every pose sent from Python in one `batch_update` per frame. `07_stress_test.py` |
+| ![Animation stress test](docs/media/animation_stress.gif) | ![Flying teapots](docs/media/flying_teapots.gif) |
+| The same scene pre-computed as one `Animation`: 600 objects x 1800 frames in binary `transforms` and `colors` channels. `10_animation_stress_test.py` | A ring of OBJ teapots on a seamless looping animation. `04_flying_teapots.py` |
 | ![GLB models with PBR materials](docs/media/glb_models.png) | ![PBR material sampler](docs/media/materials_sampler.png) |
 | DamagedHelmet and Avocado with the built-in HDR environment. `08_glb_models.py` | Thirty labelled PBR materials from one glTF (clearcoat, sheen, anisotropy, IOR). `31_watch_gltf.py` |
-| ![Robot arm with nested groups](docs/media/robot_arm.gif) | ![Animation stress test](docs/media/animation_stress.gif) |
-| Nested parent-child groups animated with local joint transforms. `14_grouping.py` | 520 followers on a torus-knot tube driven by binary `transforms` channels. `10_animation_stress_test.py` |
-| ![Flying teapots](docs/media/flying_teapots.gif) | ![Billboards](docs/media/billboards.png) |
-| Utah teapots on a looping animation. `04_flying_teapots.py` | Checkered donuts in every `set_billboard` mode, kept facing the camera. `34_billboard_modes.py` |
+| ![Billboards](docs/media/billboards.png) | |
+| Checkered donuts in every `set_billboard` mode, kept facing the camera. `34_billboard_modes.py` | |
 
 ### Interaction and scene furniture
 
 | | |
 |---|---|
+| ![Click-to-inspect with dimensions](docs/media/cad_inspection.png) | ![Section caps](docs/media/section_caps.png) |
+| Clicking a part outlines it, frames it and adds its dimensions, all from a Python `on_object_click` callback. `39_cad_inspection.py` | A clipping slab with `set_clipping_caps(True)`: primitives, a printed wall and a swept tool body cut as solids. `16_section_caps.py` |
 | ![Pinned move gizmos](docs/media/gizmos.png) | ![Axis-control range widgets](docs/media/axis_controls.png) |
 | Six pinned gizmos: 1-, 2- and 3-DOF, in world and local space; drags report back to Python. `24_gizmo_dimensions.py` | Rotary and linear range widgets anchored to their target objects. `36_axis_control.py` |
-| ![Dimension annotations](docs/media/annotations.png) | ![Clipping slab](docs/media/clipping_plane.png) |
-| Linear dimensions, a diagonal and labelled points on a box. `add_dimension` / `add_point_annotation` | A dual-plane clipping slab through nested spheres, with the `C` panel and gizmos. `16_clipping_plane.py` |
-| ![Shader floor grid](docs/media/floor_grid.png) | ![Client-defined menu](docs/media/client_menu.png) |
-| An anti-aliased, distance-faded floor grid with screen-space-stable line width. `29_floor_grid.py` | A Python-defined menu on the right rail: eyes, toggles, selects and shortcuts round-trip to Python. `35_client_menu.py` |
-| ![Lighting panel](docs/media/lighting_panel.png) | |
-| The `E` panel: tone mapping, exposure, environment map, ambient and sun. | |
+| ![Dimension annotations](docs/media/annotations.png) | ![Shader floor grid](docs/media/floor_grid.png) |
+| Linear dimensions, a diagonal and labelled points on a box. `add_dimension` / `add_point_annotation` | An anti-aliased, distance-faded floor grid with screen-space-stable line width. `29_floor_grid.py` |
+| ![Client-defined menu](docs/media/client_menu.png) | ![Lighting panel](docs/media/lighting_panel.png) |
+| A Python-defined menu on the right rail: eyes, toggles, selects and shortcuts round-trip to Python. `35_client_menu.py` | The `E` panel: tone mapping, exposure, environment map, ambient and sun. |
 
 ## Usage
 

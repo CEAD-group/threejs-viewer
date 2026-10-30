@@ -302,7 +302,7 @@ def orient(pos, nrm, tris):
 
 def pacman_cylinder():
     """Return (positions (N,3) f32, normals (N,3) f32, indices (M,) u32)."""
-    top, bot = HEIGHT / 2, -HEIGHT / 2  # centre at z=0 like the original cubes
+    top, bot = HEIGHT, 0.0  # standing on the z=0 floor
     start = np.radians(WEDGE_DEG)
     ncol = int(round(SEGMENTS * (360.0 - WEDGE_DEG) / 360.0)) + 1
     ang = np.linspace(start, 2 * np.pi, ncol)  # open sweep, both ends kept
@@ -477,7 +477,7 @@ def main() -> None:
             nodes.append(
                 {
                     "mesh": glyph_mesh[key, mat],
-                    "translation": [x, y_top, -HEIGHT / 2],
+                    "translation": [x, y_top, 0.0],
                     "scale": [p, p, 1.0],
                 }
             )
