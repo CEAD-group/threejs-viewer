@@ -31,7 +31,7 @@ def download(name):
 
 
 CLIP_DURATION = 3.0  # length of the cube's embedded clip, in seconds
-ORBIT_RADIUS, AVOCADO_SCALE = 3.0, 20.0
+ORBIT_RADIUS, AVOCADO_SCALE = 2.6, 30.0
 
 v = viewer()
 v.clear()
@@ -41,7 +41,7 @@ v.add_model_binary(
     download("AnimatedMorphCube"),
     "glb",
     position=[0, 0, 1],
-    scale=[1.0] * 3,
+    scale=[1.2] * 3,
     y_up=True,
 )
 v.add_model_binary("avocado", download("Avocado"), "glb", y_up=True)
@@ -65,5 +65,5 @@ v.load_animation(animation)
 
 v.wait_for_assets(disconnect=False)
 v.set_view("iso", animate=False)
-v.frame_points(list(product([-3.5, 3.5], [-3.5, 3.5], [0, 2.5])), fill=0.85)
+v.frame_points(list(product([-2.8, 2.8], [-2.8, 2.8], [0, 2.6])), fill=0.95)
 v.disconnect()
