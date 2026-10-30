@@ -1,167 +1,86 @@
 """
-Rotary and linear axis-control range widgets: a line showing an axis's range
-of motion with a short, thicker handle segment marking the current value —
-and, in this example, actually driving the box it's attached to.
+Axis-control range widgets that drive the boxes they are attached to.
 
-Four boxes, one per `kind`:
+One box per ``kind``: rotary (arc 0-180 degrees about X), rotary_unlimited (full
+circle about Z, keeps turning past +-180), linear (-1..3 along Y) and linear_unlimited
+(a 2 m window along Z that re-centres as you drag). Drag a handle: its value comes back
+to Python, which writes it onto the box. Each control targets a static mount group and
+the box is a child of it, because the widget re-anchors on its target every frame and
+would double-count updates if attached to the box it drives.
 
-  * **box_1 — rotary**: an arc from 0 to 180 degrees, radius 1. Rotates
-    box_1 about X; starts at 45 degrees.
-  * **box_2 — rotary_unlimited**: a full circle, radius 1. Rotates box_2
-    about Z; drag past +-180 degrees and it keeps turning instead of
-    snapping back.
-  * **box_3 — linear**: a segment from -1 to 3 metres along Y. Translates
-    box_3 along Y.
-  * **box_4 — linear_unlimited**: a 2 m window centred on the current value,
-    along Z — the window re-centres as you drag, always keeping +-1 m of
-    travel visible in either direction. Translates box_4 along Z; starts
-    1 m up.
-
-Each control is attached to a static "mount" group rather than to the box
-itself, and the box is a *child* of that mount: dragging reports a value
-back to Python, which writes it straight onto the box's local
-position/rotation on the control's axis. The mount never moves, so the
-control's own frame stays put too — attaching a control directly to the
-object it also drives would double-count every update, since the widget
-re-anchors on its target's live pose every frame. Only the handle's hitbox
-is draggable (and highlights on hover); the line is a guide.
-
-Run: uv run python examples/36_axis_control.py
-(then drag a handle in the browser; Ctrl+C to quit)
+Run: uv run python examples/36_axis_control.py   (Ctrl+C to quit)
 """
 
-import logging
 import math
 import time
 
+import numpy as np
+
 from threejs_viewer import viewer
 
-log = logging.getLogger("axis-control")
-log.setLevel(logging.INFO)
-_handler = logging.StreamHandler()
-_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)-5s [%(name)s] %(message)s", "%H:%M:%S")
-)
-log.addHandler(_handler)
-log.propagate = False
+RED, GREEN, BLUE = (0xAE4346, 0xC74E52), (0x5D9C74, 0x6DB587), (0x4369A2, 0x4D7ABD)
+rad = math.radians
 
+# name, axis, kind, start value, (color, hover color), extra kwargs
+SPECS = [
+    ("rotary", "x", "rotary", rad(45), RED, dict(min=0.0, max=rad(180), radius=1.0)),
+    ("round", "z", "rotary_unlimited", rad(45), BLUE, dict(radius=1.0)),
+    ("slide", "y", "linear", 0.0, GREEN, dict(min=-1.0, max=3.0)),
+    ("window", "z", "linear_unlimited", 1.0, BLUE, {}),
+]
 
 v = viewer()
 v.clear()
-v.unload_animation()
-v.show_grid(True)
-
-RED = 0xAE4346
-RED_HOVER = 0xC74E52
-GREEN = 0x5D9C74
-GREEN_HOVER = 0x6DB587
-BLUE = 0x4369A2
-BLUE_HOVER = 0x4D7ABD
-
-# id -> which axis component of the child box's local position/rotation an
-# axis-control value drives.
-AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
-CONTROLS = {
-    "axis_control_1": {"box": "box_1", "axis": "x", "rotary": True},
-    "axis_control_2": {"box": "box_2", "axis": "z", "rotary": True},
-    "axis_control_3": {"box": "box_3", "axis": "y", "rotary": False},
-    "axis_control_4": {"box": "box_4", "axis": "z", "rotary": False},
-}
-
-for i in range(4):
-    mount_id = f"mount_{i + 1}"
-    v.add_group(mount_id, position=[(i - 1.5) * 2.5, 0, 0.5])
-    v.add_box(
-        f"box_{i + 1}",
-        width=1.0,
-        height=1.0,
-        depth=1.0,
-        color=0xE0E0E0,
-        roughness=0.5,
-        parent=mount_id,
-    )
-
-v.add_axis_control(
-    "axis_control_1",
-    target_id="mount_1",
-    axis="x",
-    kind="rotary",
-    value=math.radians(45),
-    min=math.radians(0),
-    max=math.radians(180),
-    color=RED,
-    hover_color=RED_HOVER,
-    radius=1.0,
-)
-v.add_axis_control(
-    "axis_control_2",
-    target_id="mount_2",
-    axis="z",
-    kind="rotary_unlimited",
-    value=math.radians(45),
-    color=BLUE,
-    hover_color=BLUE_HOVER,
-    radius=1.0,
-)
-v.add_axis_control(
-    "axis_control_3",
-    target_id="mount_3",
-    axis="y",
-    kind="linear",
-    value=0.0,
-    min=-1.0,
-    max=3.0,
-    color=GREEN,
-    hover_color=GREEN_HOVER,
-)
-v.add_axis_control(
-    "axis_control_4",
-    target_id="mount_4",
-    axis="z",
-    kind="linear_unlimited",
-    value=1.0,
-    color=BLUE,
-    hover_color=BLUE_HOVER,
-)
+v.add_grid("floor", cell_size=1.0, extent=30.0, center_color=0x888888)
 
 
-def apply_axis_value(control_id: str, value: float) -> None:
-    """Write a control's value onto its box's local rotation (rotary) or
-    position (linear), on the control's own axis component only."""
-    spec = CONTROLS[control_id]
-    idx = AXIS_INDEX[spec["axis"]]
+def drive(name, axis, kind, value):
+    """Write a control's value onto its box's local rotation or position."""
     vec = [0.0, 0.0, 0.0]
-    vec[idx] = value
-    key = "rotation" if spec["rotary"] else "position"
-    v.batch_update({spec["box"]: {key: vec}})
+    vec["xyz".index(axis)] = value
+    key = "rotation" if "rotary" in kind else "position"
+    v.batch_update({f"box_{name}": {key: vec}})
 
 
-# Pose each box to match its control's starting value.
-for control_id in CONTROLS:
-    initial_value = {
-        "axis_control_1": math.radians(45),
-        "axis_control_2": math.radians(45),
-        "axis_control_3": 0.0,
-        "axis_control_4": 1.0,
-    }[control_id]
-    apply_axis_value(control_id, initial_value)
+for i, (name, axis, kind, start, (color, hover), extra) in enumerate(SPECS):
+    v.add_group(f"mount_{name}", position=[(i - 1.5) * 3.0, 0, 0.5])
+    v.add_box(
+        f"box_{name}", 1, 1, 1, color=0xE0E0E0, roughness=0.5, parent=f"mount_{name}"
+    )
+    v.add_axis_control(
+        f"ctl_{name}",
+        target_id=f"mount_{name}",
+        axis=axis,
+        kind=kind,
+        value=start,
+        color=color,
+        hover_color=hover,
+        **extra,
+    )
+    drive(name, axis, kind, start)
+
+by_id = {f"ctl_{s[0]}": s for s in SPECS}
 
 
 def on_change(m):
-    """Drive the box transform from a dragged axis control's value, and log
-    it (browser -> Python)."""
-    apply_axis_value(m["id"], m["value"])
-    log.info("%-16s %-4s value=%.3f", m["id"], m["phase"], m["value"])
+    name, axis, kind, *_ = by_id[m["id"]]
+    drive(name, axis, kind, m["value"])
+    if m["phase"] == "end":
+        print(f"{m['id']}: {m['value']:.3f}")
 
 
 v.on_axis_control_change(on_change)
+v.set_view("iso", animate=False)
+v.frame_points(
+    np.array(np.meshgrid(*zip([-5, -1.5, 0], [5, 3.5, 2.5]))).reshape(3, -1).T,
+    fill=0.85,
+)
 
-print(__doc__)
-
+print("Drag a handle. Ctrl+C to quit.")
 try:
     while True:
         time.sleep(0.5)
 except KeyboardInterrupt:
-    print("\nDone.")
+    pass
 finally:
     v.disconnect()

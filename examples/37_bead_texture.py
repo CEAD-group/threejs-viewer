@@ -1,28 +1,11 @@
 """
-Bead texture on a printed part — an extruded-plastic look on a real toolpath
+Bead texture on a printed part: one continuous 8 x 3 mm bead, 14 layers.
 
-A low, wide part printed in one continuous bead (8 x 3 mm, 14 layers), the
-kind of shape large-format extrusion makes:
-
-- the outline is a 200 mm square with one round side: three straight walls
-  with two rounded corners, and a bulging arc in place of the fourth,
-- the wall is a single bead; inside it a zig-zag rib crosses back and forth
-  between two opposite walls and runs a short way along each one it meets,
-  so there are never more than two beads side by side,
-- every turn is rounded: the nozzle never makes a sharp corner,
-- the round side overhangs: it leans outward steeply at the bed and
-  straightens up toward the top, so the step between stacked beads changes
-  with height, and the zig-zag follows it.
-
-Layers alternate wall-then-rib and rib-then-wall (the rib reversed), so each
-layer ends where the next begins and the whole part is one unbroken bead.
-
-The bead wears the texture set from ``tools/bead_texture_maker``: colour, normal
-and roughness maps repeating every 25 mm along the path
-(``add_parametric_tube(texture=, normal_map=, roughness_map=)``). The
-streaks run along the bead and the top is wiped smoother by the nozzle.
-A draw-range animation prints the part; the image is laid down in place
-as the frontier advances.
+A 200 mm square with one overhanging round side, a single-bead wall and a zig-zag rib
+between two opposite walls, with every turn filleted. Layers alternate wall-then-rib and
+rib-then-wall so the part is one unbroken bead. The bead wears the colour, normal and
+roughness maps from ``tools/bead_texture_maker``, repeating every 25 mm along the path,
+and a ``draw_ranges`` animation prints it.
 
 Run: uv run python examples/37_bead_texture.py
 """
@@ -157,6 +140,11 @@ v.add_parametric_tube(
     metalness=0.0,
 )
 
+v.set_view("iso", animate=False)
+v.frame_points(
+    spine[(spine[:, 0] < 70) & (spine[:, 1] < 70)], fill=0.9
+)  # zoom on a corner so the texture reads
+
 # Print the part: one keyframe per toolpath point, paced by distance.
 travelled = np.concatenate(
     [[0.0], np.cumsum(np.linalg.norm(np.diff(spine, axis=0), axis=1))]
@@ -166,8 +154,4 @@ anim.set_frame_times((travelled / travelled[-1] * PRINT_SECONDS).astype(np.float
 anim.set_draw_range_data(["bead"], np.linspace(0.0, 1.0, n).reshape(-1, 1))
 v.load_animation(anim)
 
-print(
-    f"{n} toolpath points, {travelled[-1] / 1000:.1f} m of bead, "
-    f"texture repeating every {TILE_MM:g} mm."
-)
 v.wait_for_assets()

@@ -1,12 +1,9 @@
 """
 Lissajous Curves Explorer
 
-Visualizes beautiful 3D Lissajous curves with animated parameters.
-A sphere traces the curve in real-time with a fading ghost trail.
-
-Demonstrates binary animation channels:
-- transforms: position for tracer + trail spheres (float32, stride 16)
-- opacity: trail fades from fully opaque to invisible (float32)
+A sphere traces a 3D Lissajous curve with a fading ghost trail, driven by two
+binary animation channels: transforms (tracer and trail positions) and opacity
+(the trail fades out).
 
 Run: uv run python examples/05_lissajous_curves.py
 """
@@ -29,17 +26,7 @@ def lissajous_3d(t, a, b, c, delta_x=0, delta_y=0, scale=3):
 v = viewer()
 v.clear()
 
-# Ground plane
-v.add_box(
-    "ground",
-    width=10,
-    height=10,
-    depth=0.02,
-    color=0x333333,
-    position=[0, 0, -0.01],
-    roughness=0.9,
-    metalness=0.0,
-)
+v.add_grid("floor", cell_size=1.0, extent=30, center_color=0x888888)
 
 # Curve parameters (interesting ratios create beautiful patterns)
 A, B, C = 3, 4, 5
@@ -68,12 +55,9 @@ for i in range(N_TRAIL):
         f"trail_{i}", radius=0.12, color=0xFF8888, roughness=0.15, metalness=0.7
     )
 
-# Pre-compute animation with binary channels.
-# Sparse keyframes — Animation's default linear interpolation smooths the
-# tracer path out to 60 fps in the browser, so 10 Hz keyframes look identical
-# to 60 Hz keyframes but cut the transform buffer 6x.
+# Sparse 20 Hz keyframes; linear interpolation smooths them to the display rate
 duration = 10.0
-fps = 10
+fps = 20
 n_frames = int(duration * fps)
 n_objects = 1 + N_TRAIL  # tracer + trail spheres
 object_ids = ["tracer"] + [f"trail_{i}" for i in range(N_TRAIL)]
@@ -91,21 +75,13 @@ positions = lissajous_3d(t_all.ravel(), A, B, C, DELTA_X, DELTA_Y, SCALE).reshap
     n_frames, n_objects, 3
 )
 
-# Build transform matrices: identity with translation
+# Identity matrices with the position in the translation slots (column-major)
 all_transforms = np.zeros((n_frames, n_objects, 16), dtype=np.float32)
-all_transforms[:, :, 0] = 1.0  # scale x
-all_transforms[:, :, 5] = 1.0  # scale y
-all_transforms[:, :, 10] = 1.0  # scale z
-all_transforms[:, :, 15] = 1.0  # w
-all_transforms[:, :, 12] = positions[:, :, 0]  # tx
-all_transforms[:, :, 13] = positions[:, :, 1]  # ty
-all_transforms[:, :, 14] = positions[:, :, 2]  # tz
+all_transforms[..., [0, 5, 10, 15]] = 1.0
+all_transforms[..., 12:15] = positions
 
 # Opacity: tracer=1.0, trail fades linearly to 0
-trail_opacity = np.linspace(
-    1.0, 0.0, N_TRAIL + 1, endpoint=False
-)  # [1.0, 0.875, ..., 0.125]
-# Same opacity every frame — broadcast to (n_frames, n_objects)
+trail_opacity = np.linspace(1.0, 0.0, N_TRAIL + 1, endpoint=False)
 all_opacity = np.broadcast_to(trail_opacity, (n_frames, n_objects)).astype(np.float32)
 
 # Build animation
@@ -120,6 +96,6 @@ animation.add_marker(duration / 2, "1/2 cycle", color=0xFFFF00)
 animation.add_marker(3 * duration / 4, "3/4 cycle", color=0xFF8800)
 
 v.load_animation(animation)
-
-print(f"Lissajous curve ({A}:{B}:{C}), {animation.n_frames} frames at {fps} fps")
+v.set_camera(position=[0, -16, 12], target=[0, 0, 3.5])  # view direction
+v.frame_points(curve_points, fill=0.7)
 v.wait_for_assets()
