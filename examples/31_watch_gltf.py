@@ -87,7 +87,7 @@ try:
                 if st["live"]:
                     v.delete(st["live"])
                 if st["live"] is None:
-                    v.frame_object(new_id)
+                    v.frame_object(new_id, fill=0.8)
                 st["live"] = new_id
                 print(f"Reloaded {new_id} at {time.strftime('%H:%M:%S')}")
             except Exception as exc:

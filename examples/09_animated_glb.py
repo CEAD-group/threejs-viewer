@@ -63,6 +63,7 @@ animation.set_clip_time_data(
 )
 v.load_animation(animation)
 
+v.wait_for_assets(disconnect=False)
 v.set_view("iso", animate=False)
-v.frame_points(list(product([-3.3, 3.3], [-3.3, 3.3], [-0.5, 2])), fill=1.0)
-v.wait_for_assets()
+v.frame_points(list(product([-3.5, 3.5], [-3.5, 3.5], [0, 2.5])), fill=0.85)
+v.disconnect()

@@ -38,7 +38,7 @@ for i, color in enumerate([0xE24A4A, 0x4AE24A, 0x4A90D9]):
     )  # fmt: skip
 
 # A billboard under a rotating parent: the group spins, the billboard does not
-v.add_group("spinner", position=[0, 5, 0])
+v.add_group("spinner", position=[0, 0, 4.2])
 v.add_box("arm", width=4, height=0.2, depth=0.2, color=0x888888, parent="spinner")
 v.add_billboard(
     "spinner_tag",
@@ -58,12 +58,13 @@ m[:, 0, 0], m[:, 0, 1], m[:, 1, 0], m[:, 1, 1] = (
     np.sin(angle),
     np.cos(angle),
 )
-m[:, 1, 3] = 5
+m[:, 2, 3] = 4.2
 anim = Animation(loop=True)
 anim.set_frame_times(times)
 anim.set_transform_data(["spinner"], m.transpose(0, 2, 1).reshape(-1, 1, 16))
 v.load_animation(anim)
 
+v.wait_for_assets(disconnect=False)
 v.set_view("iso", animate=False)
-v.frame_points(list(product([-4, 4], [-1.5, 7], [-0.5, 3])), fill=1.0)
-v.wait_for_assets()
+v.frame_points(list(product([-3.7, 3.7], [-2, 2], [0, 5.2])), fill=0.9)
+v.disconnect()

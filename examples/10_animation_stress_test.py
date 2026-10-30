@@ -90,5 +90,5 @@ for k, name in enumerate(["Start", "Quarter", "Halfway", "Three quarters"]):
     animation.add_marker(k * DURATION / 4, name)
 
 v.load_animation(animation)
-v.frame_points(points[::1000], fill=1.0)
+v.frame_points(points[::1000], fill=0.85)
 v.wait_for_assets()

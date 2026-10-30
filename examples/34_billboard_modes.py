@@ -99,5 +99,5 @@ anim.set_transform_data(
 v.load_animation(anim)
 
 v.set_view("front", animate=False)
-v.frame_points(list(product([-7.5, 7.5], [-1, 1], [-8, 8.2])), fill=1.0)
+v.frame_points(list(product([-7.3, 7.3], [-1, 1], [-8, 8.2])), fill=0.9)
 v.wait_for_assets()

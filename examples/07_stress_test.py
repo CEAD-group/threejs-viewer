@@ -54,7 +54,7 @@ for i, fid in enumerate(ids):
             fid, radius_top=0, radius_bottom=size / 2, height=2 * size, color=color
         )
 
-v.frame_points(points[::1000], fill=1.0)
+v.frame_points(points[::1000], fill=0.85)
 v.wait_for_assets(disconnect=False)
 
 offsets = rng.integers(0, N_POINTS, N_FOLLOWERS)

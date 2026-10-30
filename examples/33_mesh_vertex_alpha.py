@@ -3,11 +3,13 @@ Mesh Vertex Alpha
 
 `add_mesh` with per-vertex RGBA colors: pass an (N, 4) float array in [0, 1]
 to `colors`. Here the RGB forms a gradient across the plane and the alpha
-falls from opaque at the centre to transparent at the edge, over an orange
-box and a floor grid so the transparency is visible.
+falls from opaque at the centre to transparent at the edge, over orange
+spheres and a floor grid so the transparency is visible.
 
 Run: uv run python examples/33_mesh_vertex_alpha.py
 """
+
+from itertools import product
 
 import numpy as np
 
@@ -31,24 +33,31 @@ indices = np.stack(
 # R along X, G along Y; alpha falls off radially
 alpha = np.clip(1 - (np.hypot(x, y) / (SIZE / 2)) ** 1.5, 0, 1)
 colors = np.column_stack(
-    [x / SIZE + 0.5, y / SIZE + 0.5, np.full_like(x, 0.8), alpha]
+    [
+        0.15 + 0.5 * (x / SIZE + 0.5),
+        0.15 + 0.5 * (y / SIZE + 0.5),
+        np.full_like(x, 0.6),
+        alpha,
+    ]
 ).astype(np.float32)
 
 v = viewer()
 v.clear()
 v.add_grid("floor", cell_size=1.0, extent=40.0, fade_start=0.4)
-v.add_box("box", width=4, height=4, depth=1, color=0xFF5500, position=[0, 0, 0.5])
+# Spheres under the plane: the ones near the edge show through, the centre one is hidden
+for i, (sx, sy) in enumerate([(0, 0), (-3, -2.5), (3, 2.5), (3, -2.5), (-3, 2.5)]):
+    v.add_sphere(f"ball{i}", radius=0.7, color=0xFF5500, position=[sx, sy, 0.7])
 v.add_mesh(
     "plane",
     positions=positions,
     indices=indices.ravel(),
     normals=np.tile([0, 0, 1], (len(x), 1)).astype(np.float32),
     colors=colors,
-    roughness=0.3,
-    metalness=0.1,
-    position=[0, 0, 1.05],
+    roughness=0.9,
+    metalness=0.0,
+    position=[0, 0, 1.6],
 )
 
 v.set_view("iso", animate=False)
-v.frame_points(positions[::97] + [0, 0, 1], fill=1.0)
+v.frame_points(list(product([-4, 4], [-4, 4], [0, 1.7])), fill=0.9)
 v.wait_for_assets()
