@@ -1,35 +1,17 @@
 """
-Billboard Modes — checkered donuts in every configuration
+Billboard Modes
 
-`set_billboard` makes *any* object orient itself toward the viewer, every
-frame. Every mode is one composition:
+`set_billboard` makes any object face the viewer every frame:
+R_final = R_aim · R_own, where R_own is the object's own rotation (here a spin
+driven by a transforms channel), applied first in its local frame. Checkered
+donuts make roll and spin visible. Orbit and compare the rows:
 
-    R_final = R_aim · R_own
-
-`R_own` is the object's own rotation (what you set, or what an animation
-channel is driving). It acts **first, in the object's local frame** — which is
-why the spinning donut below keeps spinning about its own axle while that axle
-points at you: a spin about an axis leaves that axis fixed, so it never fights
-the aim.
-
-The donuts are checkered on purpose. A plain torus is rotationally symmetric,
-so you cannot see roll or spin on one; the checker pattern breaks the symmetry
-and makes every degree of freedom visible.
-
-Orbit the camera and watch each row react:
-
-  1. MODES     camera / world_up / aim / hinge, spread along X so the
-               difference shows: `camera` keeps every donut parallel to the
-               screen, `aim` turns each one toward where you actually are.
-               Every donut here spins at its own rate, so the two 3-DOF modes
-               give themselves away — they override the spin and hang still.
-  2. WHEEL     `aim` plus its own spin — the headline case, and the fastest.
-  3. FACE      the same mode with face="+z" / "+y" / "+x": axes are read in the
-               donut's own frame, so a different part of it points at you.
-  4. PIVOT     rotation origin at the centre vs out on the rim: the rim donut
-               swings about that point instead of turning in place.
-  5. HINGE     1 DOF. hinge_world=None keeps the hinge wherever the donut's own
-               rotation put it; hinge_world=[0,0,1] pins it upright.
+  z=7.0   MODES  camera | world_up | aim | hinge. Only `aim` keeps the spin;
+          the 3-DOF modes ignore it, a world-pinned hinge absorbs it.
+  z=3.6   WHEEL  aim plus its own spin: the axle tracks you, the donut turns.
+  z=0.6   FACE   face="+z" | "+y" | "+x", axes are read in the donut's frame.
+  z=-2.6  PIVOT  rotate about the centre | about a point on the rim.
+  z=-5.8  HINGE  free hinge (own rotation aims it) | pinned to world +Z.
 
 Run: uv run python examples/34_billboard_modes.py
 """
@@ -38,214 +20,82 @@ import numpy as np
 
 from threejs_viewer import Animation, viewer
 
-R_MAJOR = 0.70
-R_MINOR = 0.28
-RIM = R_MAJOR + R_MINOR
+R_MAJOR, R_MINOR = 0.70, 0.28
 
 
-def checkered_torus(v, id, color_a, color_b, nu=72, nv=36, checks=(12, 6), **kwargs):
-    """Add a donut whose surface is a hard-edged checker.
-
-    The hole axis is local +Z. Each check is emitted as its own four vertices
-    so the colours meet at a crisp edge instead of blending across a shared
-    vertex; normals stay analytic, so the shading is still smooth.
-    """
-    u = np.linspace(0, 2 * np.pi, nu + 1)
-    w = np.linspace(0, 2 * np.pi, nv + 1)
-    uu, ww = np.meshgrid(u, w, indexing="ij")
-
+def checkered_torus(v, id, dark, light=0xE8E8E8, nu=72, nv=36, **kwargs):
+    """Donut with a hard-edged 12x6 checker (hole axis +Z), four own vertices per quad."""
+    uu, ww = np.meshgrid(
+        *[np.linspace(0, 2 * np.pi, n + 1) for n in (nu, nv)], indexing="ij"
+    )
     ring = R_MAJOR + R_MINOR * np.cos(ww)
-    grid = np.stack(
-        [ring * np.cos(uu), ring * np.sin(uu), R_MINOR * np.sin(ww)], axis=-1
-    )
-    normals = np.stack(
-        [np.cos(ww) * np.cos(uu), np.cos(ww) * np.sin(uu), np.sin(ww)], axis=-1
-    )
-
-    # Four corners per quad -> (nu, nv, 4, 3), so no vertex is shared.
+    grid = np.stack([ring * np.cos(uu), ring * np.sin(uu), R_MINOR * np.sin(ww)], -1)
+    nrm = np.stack([np.cos(ww) * np.cos(uu), np.cos(ww) * np.sin(uu), np.sin(ww)], -1)
     corners = [(0, 0), (1, 0), (1, 1), (0, 1)]
-    positions = np.stack([grid[a:, b:][:nu, :nv] for a, b in corners], axis=2)
-    quad_normals = np.stack([normals[a:, b:][:nu, :nv] for a, b in corners], axis=2)
-
-    cu, cv = checks
-    i = np.arange(nu)[:, None]
-    j = np.arange(nv)[None, :]
-    dark = ((i // cu) + (j // cv)) % 2 == 0
-    palette = np.array(
-        [
-            [
-                (color_b >> 16 & 255) / 255,
-                (color_b >> 8 & 255) / 255,
-                (color_b & 255) / 255,
-            ],
-            [
-                (color_a >> 16 & 255) / 255,
-                (color_a >> 8 & 255) / 255,
-                (color_a & 255) / 255,
-            ],
-        ],
-        dtype=np.float32,
-    )
-    colors = np.repeat(palette[dark.astype(int)][:, :, None, :], 4, axis=2)
-
-    quads = np.arange(nu * nv)[:, None] * 4
-    indices = (quads + np.array([0, 1, 2, 0, 2, 3])).ravel().astype(np.uint32)
-
+    quad = lambda a: np.stack([a[i:, j:][:nu, :nv] for i, j in corners], axis=2)  # noqa: E731
+    rgb = lambda c: np.array([c >> 16 & 255, c >> 8 & 255, c & 255]) / 255  # noqa: E731
+    is_dark = ((np.arange(nu)[:, None] // 12) + (np.arange(nv)[None, :] // 6)) % 2 == 0
+    colors = np.where(is_dark[..., None, None], rgb(dark), rgb(light))
+    colors = np.broadcast_to(colors, (nu, nv, 4, 3))
+    idx = (np.arange(nu * nv)[:, None] * 4 + [0, 1, 2, 0, 2, 3]).ravel()
     v.add_mesh(
-        id,
-        positions.reshape(-1, 3).astype(np.float32),
-        indices,
-        normals=quad_normals.reshape(-1, 3).astype(np.float32),
-        colors=colors.reshape(-1, 3),
-        roughness=0.45,
-        metalness=0.1,
-        **kwargs,
-    )
+        id, quad(grid).reshape(-1, 3).astype(np.float32), idx.astype(np.uint32),
+        normals=quad(nrm).reshape(-1, 3).astype(np.float32),
+        colors=colors.reshape(-1, 3).astype(np.float32),
+        roughness=0.45, metalness=0.1, **kwargs,
+    )  # fmt: skip
 
+
+BLUE, GOLD, GREEN, PURPLE, RED = 0x2E6FB7, 0xB4600A, 0x2C8C56, 0x8C3BA0, 0xC0392B
+UPRIGHT = dict(hinge="+y", hinge_world=[0, 0, 1])
+# id, colour, position, spin turns per loop, mounting tilt about X, set_billboard options
+DONUTS = [
+    ("mode_camera", BLUE, [-6.3, 0, 7], 0.30, 0, dict(mode="camera")),
+    ("mode_world_up", BLUE, [-2.1, 0, 7], 0.45, 0, dict(mode="world_up")),
+    ("mode_aim", BLUE, [2.1, 0, 7], 0.60, 0, dict(mode="aim")),
+    ("mode_hinge", BLUE, [6.3, 0, 7], 0.75, 0, dict(mode="hinge", **UPRIGHT)),
+    ("wheel", GOLD, [0, 0, 3.6], 1.60, 0, dict(mode="aim")),
+    ("face_z", GREEN, [-2.6, 0, 0.6], 0.50, 0, dict(mode="aim", face="+z")),
+    ("face_y", GREEN, [0, 0, 0.6], 0.85, 0, dict(mode="aim", face="+y")),
+    ("face_x", GREEN, [2.6, 0, 0.6], 1.20, 0, dict(mode="aim", face="+x")),
+    ("pivot_centre", PURPLE, [-2, 0, -2.6], 0.40, 0, dict(mode="aim", pivot=[0, 0, 0])),
+    ("pivot_rim", PURPLE, [2, 0, -2.6], 0.40, 0, dict(mode="aim", pivot=[R_MAJOR + R_MINOR, 0, 0])),
+    ("hinge_own", RED, [-2, 0, -5.8], 0.35, 0.52, dict(mode="hinge", hinge="+y")),
+    ("hinge_world", RED, [2, 0, -5.8], 0.35, 0.52, dict(mode="hinge", **UPRIGHT)),
+]  # fmt: skip
 
 v = viewer()
 v.clear()
 v.unload_animation()
-
 v.add_grid("floor", cell_size=1.0, extent=60.0, fade_start=0.4)
+for id, color, pos, _, tilt, options in DONUTS:
+    checkered_torus(v, id, color, position=pos, rotation=[tilt, 0, 0])
+    v.set_billboard(id, **{"face": "+z", **options})
 
-
-# Every donut gets its own spin, each at a different rate (turns per 6 s loop).
-# That is the point of the demo: the spin IS the object's own rotation, so you
-# can read straight off the scene what each mode does with it.
-#
-# Which donuts keep turning tells you what each mode does with that rotation:
-#   aim       keeps it as the roll                        -> turns
-#   camera    3 DOF, pose fully determined by the camera  -> ignores it
-#   world_up  3 DOF, same                                 -> ignores it
-#   hinge + hinge_world   aligning the hinge and then solving the spin leaves
-#             no freedom at all, so the own rotation is absorbed exactly -> still
-#   hinge, free hinge     the own rotation is what decides where the hinge
-#             points, so it does show                     -> turns
-# The still ones are not stuck: they still track you as you orbit. (All of this
-# is measured with tmp/probe_spin.py, not assumed.)
-def donut(id, dark, pos, turns, tilt=0.0, **billboard):
-    return dict(id=id, dark=dark, pos=pos, turns=turns, tilt=tilt, bb=billboard)
-
-
-BLUE, GOLD, GREEN, PURPLE, RED = 0x2E6FB7, 0xB4600A, 0x2C8C56, 0x8C3BA0, 0xC0392B
-
-DONUTS = [
-    # 1. MODES — spread wide so `camera` (which stays parallel to the view
-    #    plane) separates visibly from `aim` (which turns toward where you are).
-    donut("mode_camera", BLUE, [-6.3, 0, 7.0], 0.30, mode="camera", face="+z"),
-    donut("mode_world_up", BLUE, [-2.1, 0, 7.0], 0.45, mode="world_up", face="+z"),
-    donut("mode_aim", BLUE, [2.1, 0, 7.0], 0.60, mode="aim", face="+z"),
-    donut(
-        "mode_hinge",
-        BLUE,
-        [6.3, 0, 7.0],
-        0.75,
-        mode="hinge",
-        face="+z",
-        hinge="+y",
-        hinge_world=[0, 0, 1],
-    ),
-    # 2. WHEEL — the headline case, and the fastest.
-    donut("wheel", GOLD, [0, 0, 3.6], 1.60, mode="aim", face="+z"),
-    # 3. FACE AXIS — same mode, different axis of the donut's OWN frame.
-    donut("face_z", GREEN, [-2.6, 0, 0.6], 0.50, mode="aim", face="+z"),
-    donut("face_y", GREEN, [0.0, 0, 0.6], 0.85, mode="aim", face="+y"),
-    donut("face_x", GREEN, [2.6, 0, 0.6], 1.20, mode="aim", face="+x"),
-    # 4. PIVOT — rotation origin at the centre vs out on the rim. Same rate, so
-    #    the only difference you see is what each one turns *about*.
-    donut(
-        "pivot_centre",
-        PURPLE,
-        [-2.0, 0, -2.6],
-        0.40,
-        mode="aim",
-        face="+z",
-        pivot=[0, 0, 0],
-    ),
-    donut(
-        "pivot_rim",
-        PURPLE,
-        [2.0, 0, -2.6],
-        0.40,
-        mode="aim",
-        face="+z",
-        pivot=[RIM, 0, 0],
-    ),
-    # 5. HINGE — 1 DOF, hinge free vs pinned to world +Z.
-    donut(
-        "hinge_own",
-        RED,
-        [-2.0, 0, -5.8],
-        0.35,
-        tilt=0.52,
-        mode="hinge",
-        face="+z",
-        hinge="+y",
-    ),
-    donut(
-        "hinge_world",
-        RED,
-        [2.0, 0, -5.8],
-        0.35,
-        tilt=0.52,
-        mode="hinge",
-        face="+z",
-        hinge="+y",
-        hinge_world=[0, 0, 1],
-    ),
-]
-
-for d in DONUTS:
-    checkered_torus(
-        v, d["id"], 0xE8E8E8, d["dark"], position=d["pos"], rotation=[d["tilt"], 0, 0]
-    )
-    v.set_billboard(d["id"], **d["bb"])
-
-# --- The spins, as one binary transforms channel -------------------------
-# This is also the path that pins matrixAutoUpdate off and writes obj.matrix
-# directly, which a billboard has to compose with rather than overwrite.
+# Spins as one transforms channel: the animation writes obj.matrix directly,
+# which a billboard has to compose with rather than overwrite.
+ids, _, pos, turns, tilt, _ = zip(*DONUTS)
 n_frames, duration = 181, 6.0
-times = np.linspace(0.0, duration, n_frames)
-ids = [d["id"] for d in DONUTS]
-spin = np.zeros((n_frames, len(ids), 16), dtype=np.float32)
-for i, t in enumerate(times):
-    for k, d in enumerate(DONUTS):
-        a = 2 * np.pi * d["turns"] * t / duration
-        c, s_ = np.cos(a), np.sin(a)
-        spin_r = np.array([[c, -s_, 0], [s_, c, 0], [0, 0, 1]])
-        ct, st = np.cos(d["tilt"]), np.sin(d["tilt"])
-        tilt_x = np.array([[1, 0, 0], [0, ct, -st], [0, st, ct]])
-        m = np.eye(4)
-        # Tilt is the pose the donut is mounted at; the spin happens about its
-        # own axis inside that mount, so it multiplies on the right.
-        m[:3, :3] = tilt_x @ spin_r
-        m[:3, 3] = d["pos"]
-        spin[i, k] = m.T.flatten()
-
-anim = Animation(frames=[])
-anim.set_frame_times(times)
-anim.set_transform_data(ids, spin)
-v.load_animation(anim, loop=True)
-
-print("Checkered donuts, one row per option. Every donut spins at its own rate,")
-print("so you can see what each mode does with the donut's own rotation.")
-print("  z=7.0  MODES  camera | world_up | aim | hinge  (left to right)")
-print("         Only `aim` keeps the spin. camera/world_up are 3 DOF and ignore")
-print("         it; hinge (pinned to world +Z) absorbs it exactly. Orbit and all")
-print("         four still track you — they are not stuck.")
-print("  z=3.6  WHEEL  aim + its own spin: the axle tracks you, the donut turns.")
-print("  z=0.6  FACE   face=+z | +y | +x — the axis is read in the donut's own frame.")
-print(
-    "  z=-2.6 PIVOT  centre (turns in place) | rim (swings about a point on its edge)."
+times = np.linspace(0, duration, n_frames)
+a = 2 * np.pi * np.array(turns) * times[:, None] / duration  # (F, K)
+c, s, z, o = np.cos(a), np.sin(a), np.zeros_like(a), np.ones_like(a)
+spin = np.stack([c, -s, z, s, c, z, z, z, o], -1).reshape(*a.shape, 3, 3)
+ct, st = np.cos(tilt), np.sin(tilt)
+tilt_x = np.stack(
+    [np.ones_like(ct), 0 * ct, 0 * ct, 0 * ct, ct, -st, 0 * ct, st, ct], -1
 )
-print("  z=-5.8 HINGE  hinge free (own rotation aims the hinge, so it turns)")
-print("                | pinned to world +Z (own rotation fully absorbed).")
+m = np.zeros((*a.shape, 4, 4))
+m[..., :3, :3] = (
+    tilt_x.reshape(-1, 3, 3) @ spin
+)  # tilt is the mount, spin is about the donut's own axis
+m[..., :3, 3] = pos
+m[..., 3, 3] = 1
+anim = Animation(loop=True)
+anim.set_frame_times(times)
+anim.set_transform_data(
+    list(ids), m.transpose(0, 1, 3, 2).reshape(n_frames, -1, 16).astype(np.float32)
+)
+v.load_animation(anim)
 
-# The whole animation goes over in one push: `wait_for_assets` blocks until
-# the browser has fetched the binary channel, then shuts the server down. From
-# there the browser plays it on its own clock — this script does not need to
-# stay connected, and the scene survives it exiting.
+v.set_camera(position=[0, -24, 4], target=[0, 0, 0.5])
 v.wait_for_assets()
-print()
-print("Sent. Python is done — the browser keeps animating on its own.")

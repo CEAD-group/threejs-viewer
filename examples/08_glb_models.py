@@ -1,8 +1,8 @@
 """
 GLB Models with PBR Materials
 
-Downloads sample GLB models from the Khronos glTF-Sample-Assets repository
-to showcase PBR material rendering (metalness, roughness, normal maps, emissive).
+Downloads two sample models from the Khronos glTF-Sample-Assets repository
+(metalness, roughness, normal maps, emissive) and places them on a floor grid.
 
 Run: uv run python examples/08_glb_models.py
 """
@@ -12,54 +12,35 @@ from pathlib import Path
 
 from threejs_viewer import viewer
 
-CACHE_DIR = Path(__file__).parent / "tmp"
-
-MODELS = {
-    "helmet": {
-        "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb",
-        "scale": 1.0,
-        "position": [-2, 0, 1],
-    },
-    "avocado": {
-        "url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb",
-        "scale": 30.0,
-        "position": [2, 0, 0],
-    },
-}
+KHRONOS = (
+    "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models"
+)
 
 
-def download_model(name: str, url: str) -> Path:
-    """Download a GLB file if not already cached."""
-    CACHE_DIR.mkdir(exist_ok=True)
-    path = CACHE_DIR / f"{name}.glb"
-    if path.exists():
-        print(f"  {name}: cached")
-        return path
-    print(f"  {name}: downloading...")
-    urllib.request.urlretrieve(url, path)
-    print(f"  {name}: {path.stat().st_size / 1024:.0f} KB")
+def download(name):
+    path = Path.home() / ".cache" / "threejs-viewer" / f"{name}.glb"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(f"{KHRONOS}/{name}/glTF-Binary/{name}.glb", path)
     return path
 
 
-print("Downloading GLB models...")
-model_paths = {name: download_model(name, info["url"]) for name, info in MODELS.items()}
-
 v = viewer()
 v.clear()
+v.add_grid("floor", cell_size=0.5, extent=30.0, fade_start=0.3)
 
-for name, info in MODELS.items():
-    s = info["scale"]
-    x, y, z = info["position"]
-    v.add_model_binary(name, model_paths[name], format="glb", y_up=True)
-    # Column-major 4x4 identity with scale and translation
-    # fmt: off
-    v.set_matrix(name, [
-        s, 0, 0, 0,
-        0, s, 0, 0,
-        0, 0, s, 0,
-        x, y, z, 1,
-    ])
-    # fmt: on
+# y_up=True converts glTF's Y-up to the viewer's Z-up; the avocado is ~7 cm, so scale it up
+v.add_model_binary(
+    "helmet", download("DamagedHelmet"), "glb", position=[-1.5, 0, 1], y_up=True
+)
+v.add_model_binary(
+    "avocado",
+    download("Avocado"),
+    "glb",
+    position=[1.5, 0, 0],
+    scale=[30] * 3,
+    y_up=True,
+)
 
-print("Models loaded.")
+v.set_camera(position=[0, -6, 4], target=[0, 0, 0.6])
 v.wait_for_assets()

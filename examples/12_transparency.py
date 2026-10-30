@@ -1,13 +1,9 @@
 """
 Transparency Demo
 
-Loads a GLB model and pulses its opacity using the binary opacity animation
-channel. Also shows primitives with initial opacity.
-
-Demonstrates:
-- opacity parameter on primitives (add_sphere, add_box, add_cylinder)
-- set_opacity() for one-shot opacity changes
-- Binary opacity animation channel for smooth pulsing
+Pulses the opacity of a GLB model and three translucent primitives with the
+binary opacity animation channel. Primitives take an initial `opacity=`,
+`set_opacity()` changes it one-shot.
 
 Run: uv run python examples/12_transparency.py
 """
@@ -20,98 +16,59 @@ import numpy as np
 
 from threejs_viewer import Animation, viewer
 
-CACHE_DIR = Path(__file__).parent / "tmp"
-MODEL_URL = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
+KHRONOS = (
+    "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models"
+)
 
 
-def download_model() -> Path:
-    """Download the DamagedHelmet GLB if not already cached."""
-    CACHE_DIR.mkdir(exist_ok=True)
-    path = CACHE_DIR / "helmet.glb"
-    if path.exists():
-        print("  helmet: cached")
-        return path
-    print("  helmet: downloading...")
-    urllib.request.urlretrieve(MODEL_URL, path)
-    print(f"  helmet: {path.stat().st_size / 1024:.0f} KB")
+def download(name):
+    path = Path.home() / ".cache" / "threejs-viewer" / f"{name}.glb"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(f"{KHRONOS}/{name}/glTF-Binary/{name}.glb", path)
     return path
 
 
-print("Downloading GLB model...")
-helmet_path = download_model()
-
 v = viewer()
 v.clear()
+v.add_grid("floor", cell_size=0.5, extent=30.0, fade_start=0.3)
 
-# Ground plane
-v.add_box(
-    "ground", width=10, height=10, depth=0.02, color=0x333333, position=[0, 0, -0.01]
+v.add_model_binary(
+    "helmet", download("DamagedHelmet"), "glb", position=[0, 0, 1], y_up=True
 )
-
-# Load GLB model — y_up=True corrects glTF Y-up to Z-up viewer convention
-v.add_model_binary("helmet", helmet_path, format="glb", position=[0, 0, 1], y_up=True)
-
-# Primitives with initial opacity
-v.add_sphere(
-    "ghost_sphere", radius=0.5, color=0x4488FF, opacity=0.4, position=[-2, 0, 0.5]
-)
+v.add_sphere("sphere", radius=0.5, color=0x4488FF, opacity=0.4, position=[-2, 0, 0.5])
 v.add_box(
-    "ghost_box",
+    "box",
     width=0.8,
     height=0.8,
     depth=0.8,
     color=0xFF4444,
     opacity=0.4,
-    position=[2, 0, 0.5],
+    position=[2, 0, 0.4],
 )
 v.add_cylinder(
-    "ghost_cyl",
-    radius_top=0.3,
-    radius_bottom=0.3,
-    height=1,
-    color=0x44FF44,
-    opacity=0.4,
-    position=[0, -2, 0.5],
-    rotation=[math.pi / 2, 0, 0],
-)
+    "cylinder", radius_top=0.3, radius_bottom=0.3, height=1, color=0x44FF44, opacity=0.4,
+    position=[0, 2, 0.5], rotation=[math.pi / 2, 0, 0],
+)  # fmt: skip
+v.set_opacity("helmet", 0.5)  # one-shot; the animation takes over once it plays
 
-# One-shot opacity change (before animation takes over)
-v.set_opacity("helmet", 0.5)
-
-# Animate: pulse helmet opacity + keep primitives at varying opacity
-duration = 6.0
-fps = 60
-n_frames = int(duration * fps)
-frame_times = np.arange(n_frames) / fps
-
-# Helmet: smooth pulse between 0.2 and 1.0
-t_norm = frame_times / duration
-helmet_opacity = 0.6 + 0.4 * np.cos(2 * math.pi * t_norm)
-
-# Primitives: staggered sine waves
-sphere_opacity = 0.3 + 0.7 * np.abs(np.sin(2 * math.pi * t_norm))
-box_opacity = 0.3 + 0.7 * np.abs(np.sin(2 * math.pi * t_norm + math.pi / 3))
-cyl_opacity = 0.3 + 0.7 * np.abs(np.sin(2 * math.pi * t_norm + 2 * math.pi / 3))
-
-object_ids = ["helmet", "ghost_sphere", "ghost_box", "ghost_cyl"]
-all_opacity = np.column_stack(
-    [
-        helmet_opacity,
-        sphere_opacity,
-        box_opacity,
-        cyl_opacity,
-    ]
+# One column per object: the helmet pulses, the primitives are phase-shifted
+duration, fps = 6.0, 60
+times = np.arange(int(duration * fps)) / fps
+phase = 2 * np.pi * times / duration
+opacity = np.column_stack(
+    [0.6 + 0.4 * np.cos(phase)]
+    + [0.3 + 0.7 * np.abs(np.sin(phase + k * np.pi / 3)) for k in range(3)]
 ).astype(np.float32)
 
-# Opacity-only animation — no transforms needed, objects stay where they were placed
 animation = Animation(loop=True)
-animation.set_frame_times(frame_times)
-animation.add_channel("opacity", object_ids, all_opacity, dtype="float32")
-
+animation.set_frame_times(times)
+animation.add_channel(
+    "opacity", ["helmet", "sphere", "box", "cylinder"], opacity, dtype="float32"
+)
 animation.add_marker(0.0, "Opaque", color=0x00FF00)
 animation.add_marker(duration / 2, "Translucent", color=0x0088FF)
-
 v.load_animation(animation)
 
-print(f"Pulsing opacity: {n_frames} frames at {fps} fps")
+v.set_camera(position=[0, -6, 3], target=[0, 0, 0.8])
 v.wait_for_assets()

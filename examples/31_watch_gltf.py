@@ -1,234 +1,101 @@
 """
-Watch a GLTF file and live-reload it in the viewer.
+Watch glTF files and live-reload them in the viewer.
 
-On each save of the source .gltf file:
-1) Convert to .glb using gltf-transform.
-2) Write the .glb into examples/tmp/.
-3) Stage-load a new model revision, then remove older revisions.
+On each save of a source .gltf, convert it to .glb with gltf-transform
+(global install, else `npx @gltf-transform/cli`), stage-load the new revision
+under a fresh id, wait for it to land, then delete the older revision so the
+scene never goes blank.
 
-Usage:
-    uv run python examples/31_watch_gltf.py path/to/model.gltf
-    uv run python examples/31_watch_gltf.py name name2   # -> name/name.gltf, name2/name2.gltf
+Each argument is a .gltf file, or a directory `name` meaning `name/name.gltf`
+(one folder per asset, as Blender exports). Several can be watched at once.
 
-Each argument is either a .gltf file or a directory ``name`` holding
-``name/name.gltf`` (the Blender export convention of one folder per asset).
-Several can be watched at once; each gets its own viewer id (the file stem).
-
-Optional setup (if gltf-transform is not already available):
-    npm install -g @gltf-transform/cli
+Run: uv run python examples/31_watch_gltf.py examples/tools/materials/materials.gltf
+     (Ctrl+C to stop; --scale, --position and --y-up place the models)
 """
-
-from __future__ import annotations
 
 import argparse
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 from threejs_viewer import viewer
 
-TMP_DIR = Path(__file__).parent / "tmp"
 
-
-def _matrix_from_scale_and_position(scale: float, position: list[float]) -> list[float]:
-    x, y, z = position
-    # Column-major 4x4 matrix.
-    return [
-        scale,
-        0,
-        0,
-        0,
-        0,
-        scale,
-        0,
-        0,
-        0,
-        0,
-        scale,
-        0,
-        x,
-        y,
-        z,
-        1,
-    ]
-
-
-def _convert_gltf_to_glb(src_gltf: Path, dst_glb: Path) -> None:
-    commands: list[list[str]] = []
-    gltf_transform_exe = shutil.which("gltf-transform") or shutil.which(
-        "gltf-transform.cmd"
+def convert(src: Path, dst: Path) -> None:
+    exe = shutil.which("gltf-transform")
+    cmd = (
+        [exe] if exe else [shutil.which("npx") or "npx", "--yes", "@gltf-transform/cli"]
     )
-    npx_exe = shutil.which("npx") or shutil.which("npx.cmd")
-
-    if gltf_transform_exe:
-        commands.append([gltf_transform_exe, "copy", str(src_gltf), str(dst_glb)])
-    if npx_exe:
-        commands.append(
-            [
-                npx_exe,
-                "--yes",
-                "@gltf-transform/cli",
-                "copy",
-                str(src_gltf),
-                str(dst_glb),
-            ]
-        )
-
-    if not commands:
-        raise RuntimeError(
-            "Could not find gltf-transform or npx. Install @gltf-transform/cli first."
-        )
-
-    last_error: str | None = None
-    for cmd in commands:
-        try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=str(src_gltf.parent),
-            )
-            return
-        except subprocess.CalledProcessError as exc:
-            last_error = exc.stderr.strip() or exc.stdout.strip() or str(exc)
-        except OSError as exc:
-            last_error = str(exc)
-
-    raise RuntimeError(f"gltf-transform conversion failed: {last_error}")
+    result = subprocess.run(
+        [*cmd, "copy", str(src), str(dst)],
+        capture_output=True,
+        text=True,
+        cwd=src.parent,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
-def _stage_model_revision(
-    v,
-    model_id: str,
-    revision: int,
-    glb_path: Path,
-    *,
-    scale: float,
-    position: list[float],
-    y_up: bool,
-) -> str:
-    rev_id = f"{model_id}__rev_{revision:06d}"
-    v.add_model_binary(rev_id, glb_path, format="glb", y_up=y_up)
-    v.set_matrix(rev_id, _matrix_from_scale_and_position(scale, position))
-    return rev_id
-
-
-def _resolve_gltf(arg: Path) -> Path:
-    """Accept ``foo.gltf`` or a directory ``foo`` meaning ``foo/foo.gltf``."""
+def resolve(arg: Path) -> Path:
     p = arg.expanduser().resolve()
-    if p.is_dir():
-        p = p / f"{p.name}.gltf"
-    if p.suffix.lower() != ".gltf":
-        raise ValueError(f"Expected a .gltf file or a directory, got: {arg}")
-    if not p.exists():
-        raise FileNotFoundError(f"Source GLTF not found: {p}")
-    return p
+    return p / f"{p.name}.gltf" if p.is_dir() else p
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Watch a .gltf file, convert it to .glb on save, and reload it in threejs-viewer."
-        )
-    )
-    parser.add_argument(
-        "gltf",
-        type=Path,
-        nargs="+",
-        help="Source .gltf file(s), or directory NAME meaning NAME/NAME.gltf",
-    )
-    parser.add_argument(
-        "--poll",
-        type=float,
-        default=0.5,
-        help="Polling interval in seconds (default: 0.5)",
-    )
-    parser.add_argument(
-        "--scale",
-        type=float,
-        default=1.0,
-        help="Uniform model scale (default: 1.0)",
-    )
-    parser.add_argument(
-        "--position",
-        type=float,
-        nargs=3,
-        default=[0.0, 0.0, 0.0],
-        metavar=("X", "Y", "Z"),
-        help="Model position (default: 0 0 0)",
-    )
-    parser.add_argument(
-        "--y-up",
-        action="store_true",
-        help="Apply glTF Y-up to viewer Z-up correction",
-    )
-    args = parser.parse_args()
+parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+parser.add_argument("gltf", type=Path, nargs="+", help=".gltf file or directory NAME")
+parser.add_argument("--poll", type=float, default=0.5, help="poll interval in seconds")
+parser.add_argument("--scale", type=float, default=1.0)
+parser.add_argument(
+    "--position", type=float, nargs=3, default=[0, 0, 0], metavar=("X", "Y", "Z")
+)
+parser.add_argument("--y-up", action="store_true", help="convert glTF Y-up to Z-up")
+args = parser.parse_args()
 
-    sources = [_resolve_gltf(a) for a in args.gltf]
-    TMP_DIR.mkdir(exist_ok=True)
+sources = [resolve(a) for a in args.gltf]
+for src in sources:
+    if src.suffix.lower() != ".gltf" or not src.exists():
+        parser.error(f"not a .gltf file: {src}")
 
-    v = viewer()
+out_dir = Path(tempfile.mkdtemp(prefix="watch_gltf_"))
+v = viewer()
+v.clear()
+v.add_grid("floor", cell_size=1.0, extent=60.0, fade_start=0.4)
 
-    # Per-source state: output .glb, last seen mtime, revision counter, live id.
-    state: dict[Path, dict] = {
-        src: {"glb": TMP_DIR / f"{src.stem}.glb", "mtime": None, "rev": 0, "live": None}
-        for src in sources
-    }
+# Per source: last seen mtime, revision counter and the id currently shown
+state = {src: {"mtime": None, "rev": 0, "live": None} for src in sources}
+print("Watching", ", ".join(str(s) for s in sources), "(Ctrl+C to stop)")
 
-    for src, st in state.items():
-        print(f"Watching: {src}  ->  {st['glb']}")
-    print("Press Ctrl+C to stop.")
-
+try:
     while True:
         for src, st in state.items():
-            try:
-                mtime_ns = src.stat().st_mtime_ns
-            except FileNotFoundError:
-                if st["mtime"] is not None:
-                    print(
-                        f"{src.name}: source file missing. Waiting for it to reappear..."
-                    )
-                    st["mtime"] = None
+            mtime = src.stat().st_mtime_ns if src.exists() else None
+            if mtime is None or mtime == st["mtime"]:
                 continue
-            if mtime_ns == st["mtime"]:
-                continue
-            st["mtime"] = mtime_ns
+            st["mtime"] = mtime
             try:
-                _convert_gltf_to_glb(src, st["glb"])
+                glb = out_dir / f"{src.stem}.glb"
+                convert(src, glb)
                 st["rev"] += 1
-                new_id = _stage_model_revision(
-                    v,
-                    src.stem,
-                    st["rev"],
-                    st["glb"],
-                    scale=args.scale,
-                    position=args.position,
-                    y_up=args.y_up,
-                )
-
-                # Ensure the staged model has finished loading before we
-                # remove the previous revision, so the scene never goes blank.
+                new_id = f"{src.stem}__rev_{st['rev']:06d}"
+                v.add_model_binary(
+                    new_id, glb, "glb", position=args.position,
+                    scale=[args.scale] * 3, y_up=args.y_up,
+                )  # fmt: skip
                 v.wait_for_assets(disconnect=False)
-                if st["live"] is not None:
+                if st["live"]:
                     v.delete(st["live"])
+                if st["live"] is None:
+                    v.frame_object(new_id)
                 st["live"] = new_id
-                print(
-                    f"Reloaded {new_id} at {time.strftime('%H:%M:%S')} "
-                    f"({st['glb'].stat().st_size / 1024:.0f} KB)"
-                )
+                print(f"Reloaded {new_id} at {time.strftime('%H:%M:%S')}")
             except Exception as exc:
-                # Forget the mtime so the next poll retries without another save
-                # (transient errors: npx cold start, half-written file, ...).
-                st["mtime"] = None
+                st["mtime"] = (
+                    None  # retry next poll (half-written file, npx cold start)
+                )
                 print(f"{src.name}: reload failed: {exc}")
-
         time.sleep(args.poll)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nStopped.")
+except KeyboardInterrupt:
+    v.disconnect()
+    shutil.rmtree(out_dir, ignore_errors=True)
