@@ -1,46 +1,21 @@
 """
-Swept 5-axis tool body (shank/holder) — add_swept_tool
+Swept 5-axis tool body with ``add_swept_tool``.
 
-The cutting *tip* swept volume is covered by add_parametric_tube (a tube of the
-tool radius along the contact path). What that can't show is the **tool body**:
-the shank/holder extending from the cutting point **along the tool axis**, which
-on a 5-axis machine is generally NOT the path tangent.
-
-``add_swept_tool`` lofts a surface-of-revolution profile about the per-station
-*tool axis* and sweeps it along the path — visualizing the swept shank as the
-tool tilts. Here the body is coloured by **reorientation rate** (the 5-axis
-"wrist speed": angle between consecutive tool axes per unit travel) — red where
-the rotary axes swing fastest. A draw_range animation advances the tool along
-the path.
+A ball-nose tool profile is lofted about the per-station tool axis (which is not the
+path tangent) and swept along the contact path, showing the shank as the tool tilts.
+Colour is the reorientation rate (tool-axis swing per unit travel, turbo: red is
+fastest). A ``draw_ranges`` animation advances the tool along the path.
 
 Run: uv run python examples/26_swept_tool.py
 """
 
 import numpy as np
 
-from threejs_viewer import Animation, viewer
-
-
-def heatmap(t):
-    """Map t in [0,1] to packed 0x00RRGGBB: blue -> cyan -> green -> yellow -> red."""
-    stops = np.array(
-        [
-            [0.00, 0x22, 0x44, 0xFF],
-            [0.25, 0x22, 0xCC, 0xCC],
-            [0.50, 0x44, 0xCC, 0x44],
-            [0.75, 0xFF, 0xCC, 0x22],
-            [1.00, 0xFF, 0x33, 0x33],
-        ]
-    )
-    r = np.interp(t, stops[:, 0], stops[:, 1]).astype(np.uint32)
-    g = np.interp(t, stops[:, 0], stops[:, 2]).astype(np.uint32)
-    b = np.interp(t, stops[:, 0], stops[:, 3]).astype(np.uint32)
-    return (r << 16) | (g << 8) | b
+from threejs_viewer import Animation, Toolpath, viewer
 
 
 v = viewer()
 v.clear()
-v.unload_animation()
 
 # --- A 5-axis contact path with a tilting tool axis ---
 N = 240
@@ -73,7 +48,11 @@ dist = np.linalg.norm(np.diff(positions, axis=0), axis=1)
 rate = np.zeros(N, dtype=np.float32)
 rate[1:] = np.degrees(np.arccos(dot)) / np.maximum(dist, 1e-6)
 rate_n = rate / (np.percentile(rate, 98) + 1e-9)
-colors = heatmap(np.clip(rate_n, 0, 1))
+colors = (
+    Toolpath.from_points(positions, 0.1, 0.1)
+    .colorize(np.clip(rate_n, 0, 1), "turbo")
+    .packed_colors
+)
 
 v.add_swept_tool(
     "shank",
@@ -99,7 +78,6 @@ anim.set_draw_range_data(
 )
 v.load_animation(anim)
 
-print(f"Swept 5-axis tool body: {N} stations, ball+shank profile.")
-print("Coloured by reorientation rate (blue calm -> red fast wrist motion).")
-print("draw_range advances the tool along the path.")
+v.add_grid("floor", cell_size=1.0, extent=40.0, center_color=0x888888)
+v.set_camera(position=[11, -17, 10], target=[0, 0, 1])
 v.wait_for_assets()

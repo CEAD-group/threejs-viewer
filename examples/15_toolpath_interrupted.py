@@ -1,13 +1,10 @@
 """
-Toolpath with interrupted extrusion — variable width + travel moves
+Interrupted extrusion: variable width, travel moves and G-code-style input.
 
-Demonstrates:
-- make_pill_toolpath: G-code-style [x_mm, y_mm, z_mm, E_cc, F_mm_per_min]
-  (cumulative extrusion in cc, feedrate in mm/min)
-- Toolpath.from_gcode: detects extrusion from dE > 0, computes time from F
-- Toolpath.colorize: perceptual colormap along arc-length (plasma)
-- Parametric tube with zero-width segments for travel moves (bead collapses
-  to a point at travel/cap locations, creating natural taper transitions)
+``Toolpath.from_gcode`` takes ``[x, y, z, E_cc, F_mm_per_min]`` rows, detects extrusion
+from dE > 0 and times each move from its feedrate. Travel points become zero-width rings
+that taper the bead to a point, and ``travel="line"`` draws the hops as thin lines
+revealed in step with the beads by the same ``draw_ranges`` animation.
 
 Run: uv run python examples/15_toolpath_interrupted.py
 """
@@ -94,17 +91,11 @@ raw = make_pill_toolpath()
 tp = Toolpath.from_gcode(raw, BEAD_WIDTH, BEAD_HEIGHT)
 tp.colorize("plasma")
 
-print(f"Raw toolpath: {len(raw)} points, {raw[-1, 3]:.4f} cc total extrusion")
-print(f"Toolpath:     {len(tp)} points")
-print(f"Duration:     {tp.duration:.1f} s")
-
 # --- Scene ---
 v = viewer()
 v.clear()
 
-v.add_box(
-    "ground", width=80, height=50, depth=0.2, color=0x222222, position=[0, 0, -0.1]
-)
+v.add_grid("floor", cell_size=5.0, extent=200.0, center_color=0x888888)
 
 # travel="line" also draws the travel hops (the thin lines every slicer
 # preview shows) as one line-segments object, revealed in lockstep with the
@@ -149,8 +140,5 @@ animation.add_marker(tp.duration / 2, "50%", color=0xFFFF00)
 
 v.load_animation(animation)
 
-print(f"Animation: {n_frames} keyframes, {tp.duration:.1f} s")
-print("Bottom straight is travel (no bead); all other segments extrude.")
-print("Waiting for browser to finish loading assets...")
+v.set_camera(position=[30, -50, 40], target=[0, 0, 2])
 v.wait_for_assets()
-print("Assets loaded — server closed.")

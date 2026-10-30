@@ -1,9 +1,10 @@
 """Client-defined menu: the viewer draws it, this script owns the contents.
 
-Adds a "Demo" dropdown next to the viewer's own options menu with one of each
-item type, grouped in two foldable sections. Interactions come back to Python through ``on_menu_action`` and
-are applied to the scene from here (browser -> Python -> browser), so the
-viewer never needs to know what "Recolour" means.
+Adds a "Demo" tab on the viewer's right-edge rail; clicking it slides out a panel with
+one of each item type in two foldable sections. Interactions return to Python through
+``on_menu_action`` and are applied to the scene from here (browser -> Python ->
+browser), so the viewer never needs to know what "Recolour" means. G recolours and K
+toggles the spin.
 
 Run:  uv run python examples/35_client_menu.py
 """
@@ -19,9 +20,10 @@ SIZES = {"small": 0.5, "medium": 1.0, "large": 1.6}
 
 client = ViewerClient(toolbar=True)
 client.connect()
-client.add_grid("grid")
+client.add_grid("grid", cell_size=1.0, extent=30.0, center_color=0x888888)
 for i in range(5):
     client.add_box(f"box_{i}", 1, 1, 1, color=COLORS[i], position=[2.0 * i - 4, 0, 0.5])
+client.set_camera(position=[5, -9, 7], target=[0, 0.5, 0.5])
 client.add_sphere("marker", 0.4, color=0xFFFFFF, position=[0, 3, 0.4])
 
 client.add_menu(
@@ -107,9 +109,7 @@ def on_action(action):
 
 client.on_menu_action(on_action)
 
-print(
-    "Open the Demo menu in the viewer (top-right). G recolours, K toggles the spin. Ctrl+C to stop."
-)
+print("Open the Demo tab on the right edge. G recolours, K spins. Ctrl+C to stop.")
 t0 = time.time()
 try:
     while True:
@@ -129,3 +129,5 @@ try:
         time.sleep(1 / 30)
 except KeyboardInterrupt:
     pass
+finally:
+    client.disconnect()

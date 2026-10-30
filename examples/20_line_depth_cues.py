@@ -1,39 +1,12 @@
 """
-Depth cues for a flat line drawing — fog + eye-dome lighting.
+Depth cues for a flat line drawing: distance fog plus eye-dome lighting (EDL).
 
-When a toolpath is too complex to extrude as a shaded bead you fall back to a
-flat polyline, which loses every depth cue: a single line through a tangled,
-self-overlapping path reads as a flat ball of yarn. This example draws exactly
-that — a tall ripply spiral-vase toolpath as one polyline — and restores depth
-with the combination that works best for dense bundles: distance **fog** plus
-screen-space **eye-dome lighting** (EDL).
-
-  * Fog dims distant windings toward black (classic CAD depth cueing), so the
-    eye reads the front-to-back ordering of the bundle as a whole.
-  * EDL darkens each fragment that sits behind its screen-space neighbours,
-    sculpting local crossings into legible 3D.
-
-Both cues are **scoped to polylines only**. The scene also has a solid build
-platform + corner clamps (meshes) as spatial reference, and they render exactly
-the same with the cues on or off — fog never dims them, EDL never darkens them,
-and the dark background stays the same colour. Toggle the cues to confirm: only
-the toolpath line changes. (This is what makes the cues usable in a real machine
-view, where the cell and fixtures must stay legible while the line gets depth.)
-
-Two implementation notes:
-
-  * **Native line (`fat=False`)** — at a million points the fat-line renderer
-    (`Line2`, one instanced quad per segment) gets heavy. ``add_polyline(...,
-    fat=False)`` draws a native ``THREE.Line`` instead: one vertex per point,
-    one draw call, ~1px wide. Fog and EDL need no line width, so the only cost
-    is fixed 1px lines — a good trade for million-point toolpaths.
-  * **Rainbow colour** — a ``turbo`` colormap runs along the path (start →
-    end) so colour encodes print progression; the viewer interpolates it along
-    each segment. (Per-vertex colour works the same on native and fat lines.)
-
-The viewer opens with ``set_depth_cue(fog=True, edl=True)`` already applied — no
-keys needed. Press **D** to toggle fog and **Shift+D** to toggle EDL, to compare
-each cue on its own.
+A million-point spiral-vase toolpath is drawn as one native polyline (``fat=False``,
+one draw call, ~1 px wide) coloured with the turbo colormap along the path. A dense
+self-overlapping line reads as a flat ball of yarn; fog dims distant windings and EDL
+darkens fragments behind their neighbours. Both cues apply to polylines only, so the
+build plate and clamps stay unchanged. The scene opens with both on; press D to toggle
+fog and Shift+D to toggle EDL.
 
 Run: uv run python examples/20_line_depth_cues.py
 """
@@ -74,7 +47,6 @@ def vase_toolpath(n_points=N_POINTS, n_turns=N_TURNS, height=HEIGHT):
 
 v = viewer()
 v.clear()
-v.unload_animation()
 
 points, progress = vase_toolpath()
 # Rainbow along the toolpath (turbo colormap, start → end), drawn as a native
@@ -114,10 +86,5 @@ for sx in (-1, 1):
 # pressing D then Shift+D). The browser keeps this after the Python process exits.
 v.set_depth_cue(fog=True, edl=True)
 
-print(__doc__)
-print(f"Loaded a {len(points):,}-point rainbow toolpath (native line, fog + EDL)")
-print("plus a steel build platform + clamps that the cues leave untouched.")
-print("Focus the viewer and press F to frame it. D toggles fog, Shift+D toggles EDL.")
-
-# Block until the browser has fetched the polyline, then disconnect cleanly.
+v.set_camera(position=[15, -18, 9], target=[0, 0, 0])
 v.wait_for_assets()

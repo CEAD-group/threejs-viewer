@@ -1,35 +1,14 @@
 """
-Octree LOD point cloud + time-window scrubbing (issue #79)
+Octree LOD point cloud with per-point lifetimes, streamed on demand.
 
-Demonstrates ``add_points(lod=...)`` and per-point time windows together on
-one abstract cloud, with the point count trivially tunable:
+``add_points(lod=True)`` builds an octree in Python; the browser fetches node payloads
+as you zoom, under a ~1.5M-point budget, so the full cloud never has to fit in one draw
+call. Each point has a [birth, removal) lifetime: a build front sweeps across the
+wavy sheet and an erosion front follows it, while a bedrock band never erodes. The
+animation slider scrubs this field time. Nodes are served by this process, so keep it
+running (Ctrl+C to quit). The cloud is empty at t=0 and fills as the animation plays.
 
-    uv run python examples/27_points_octree_lod.py            # 2M points
-    uv run python examples/27_points_octree_lod.py 10000000   # 10M points
-
-What happens:
-
-- Python builds a Potree-style additive sampled octree over the cloud (a
-  seeded, time-stratified pseudo-random sample per node) and the browser
-  streams node payloads **on demand**: a ~1.5M-point budget of the
-  biggest-on-screen nodes is drawn each frame, refined as you zoom in and
-  coarsened (and LRU-evicted) as you zoom out. Zoom into the wave sheet to
-  watch detail stream in; the full cloud never has to fit in one draw call.
-- Every point carries a [birth, removal) lifetime: a build front sweeps
-  diagonally across the sheet (points appear), an erosion front follows a
-  few seconds behind (points disappear), and a band of "bedrock" points
-  near the base is never removed (NaN removal). **Drag the animation
-  slider** to scrub the field time — points appear and disappear out of
-  buffer order, at every LOD, because the filter runs per point in the
-  vertex shader and each octree node's sample is stratified over time.
-
-Note the script stays running: LOD nodes stream from this Python process
-on demand, so exiting it freezes refinement at whatever is already loaded
-(the standard trade-off of the streamed tier). Ctrl+C to quit. At t=0
-nothing has been built yet — the cloud appears as the animation plays
-(it autoplays) or when you drag the slider forward.
-
-Run: uv run python examples/27_points_octree_lod.py [n_points]
+Run: uv run python examples/27_points_octree_lod.py [n_points]   (default 2M)
 """
 
 import sys
@@ -92,17 +71,15 @@ anim.set_frame_times(frame_times)
 anim.set_point_time_data(["field"], frame_times.reshape(n_frames, 1))
 v.load_animation(anim)
 
-print(f"{N:,} points -> octree built + registered in {build_s:.1f}s.")
-print("Zoom in/out: node detail streams on demand under a ~1.5M-point budget.")
-print("Drag the time slider: the build front adds points, the erosion front")
-print("removes them (out of buffer order), bedrock near the base persists.")
-print("Press F in the viewer to frame the cloud.")
-print("Tune the count: uv run python examples/27_points_octree_lod.py 10000000")
-print()
-print("Serving LOD nodes from this process — leave it running (Ctrl+C to quit).")
+v.set_camera(position=[0, -45, 25], target=[0, 0, 0])
+print(
+    f"{N:,} points, octree built in {build_s:.1f}s. Zoom in to stream detail; Ctrl+C to quit."
+)
 v.wait_for_assets(disconnect=False)
 try:
     while True:
         time.sleep(1.0)
 except KeyboardInterrupt:
     pass
+finally:
+    v.disconnect()

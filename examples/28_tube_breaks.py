@@ -1,38 +1,16 @@
 """
-Parametric Tube Breaks — split one tube at interior discontinuities
+Split one tube at interior discontinuities with ``add_parametric_tube(break_before=...)``.
 
-Demonstrates ``add_parametric_tube(break_before=...)`` (issue #107): a single
-tube whose spine visits several *separate* parts with rapid travel hops between
-them. Without a break mask the extruded ribbon stitches straight across each
-hop, drawing a stray cone through empty space where no material was deposited.
-The break mask cuts the ribbon at those hops so each part renders as its own
-disconnected strip, and both open ends of every break get a flat cap so the
-strips read as solid.
-
-``break_before`` is an (N,) bool/uint8 mask: a non-zero entry at index ``i``
-breaks the ribbon *before* spine point ``i``. Here we mark the first point of
-each new part (the landing point of a travel hop).
-
-The scene shows two tubes side by side: the left one bridged (no mask), the
-right one broken + capped (same spine + mask). Breaks also survive LOD.
+One spine visits three separate rings with travel hops between them. Without a mask
+(front row) the ribbon bridges each hop with a stray cone. With ``break_before`` set
+on the first point of each new part (back row) it renders as three flat-capped strips.
 
 Run: uv run python examples/28_tube_breaks.py
 """
 
-import time
-
 import numpy as np
 
-from threejs_viewer import viewer
-
-
-def turbo_rgb(values):
-    """values in [0, 1] → uint32 0x00RRGGBB (cheap turbo-ish ramp)."""
-    v = np.clip(values, 0.0, 1.0)
-    r = (np.clip(1.5 - abs(4 * v - 3), 0, 1) * 255).astype(np.uint32)
-    g = (np.clip(1.5 - abs(4 * v - 2), 0, 1) * 255).astype(np.uint32)
-    b = (np.clip(1.5 - abs(4 * v - 1), 0, 1) * 255).astype(np.uint32)
-    return (r << 16) | (g << 8) | b
+from threejs_viewer import Toolpath, viewer
 
 
 def arc(cx, cy, radius, a0, a1, n):
@@ -55,7 +33,7 @@ n = spine.shape[0]
 
 widths = np.full(n, 0.32, dtype=np.float32)
 heights = np.full(n, 0.32, dtype=np.float32)
-colors = turbo_rgb(np.linspace(0, 1, n).astype(np.float32))
+colors = Toolpath.from_points(spine, widths, heights).colorize("turbo").packed_colors
 
 # Break before the first point of parts 2 and 3 (indices 60 and 120).
 break_before = np.zeros(n, dtype=bool)
@@ -86,9 +64,8 @@ v.add_parametric_tube(
     lod=False,
 )
 
+v.add_grid(
+    "floor", cell_size=1.0, extent=20.0, center_color=0x888888, position=[0, 0, -0.3]
+)
+v.set_camera(position=[0, -12, 9], target=[0, 0, 0])
 v.wait_for_assets()
-print("Top row: break_before splits the tube at each travel hop (capped ends).")
-print("Bottom row: no mask — stray cones bridge the hops.")
-print("Close the viewer window to exit.")
-while True:
-    time.sleep(1.0)

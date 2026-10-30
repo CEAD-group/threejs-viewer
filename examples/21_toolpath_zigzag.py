@@ -1,35 +1,17 @@
 """
-Zigzag toolpath — twist artifact on hairpin turns (regression test)
+Zigzag toolpaths with 180 degree hairpin turns (frame-continuity regression scene).
 
-A serpentine infill path (parallel lines connected by 180° hairpins) is
-pathological for the current constant-up frame derivation in
-``add_parametric_tube``: when the tangent reverses at a hairpin, the
-width axis ``U = V x T`` also reverses, so adjacent rings point their
-cross-section vertices at opposite physical points. The quad between
-them twists into a figure-eight and you get self-intersecting faces at
-every hairpin.
-
-Two beads are drawn:
-
-1. ``retrace`` — two horizontally-stacked passes (z=0 forward, z=dz back)
-   joined by a short C-shape turnaround that extends past the end point
-   so the tangent stays horizontal through the hairpin. Two intermediate
-   "return loop" points sit side-by-side with opposite tangents, giving
-   a clean 180 deg reversal at a single ring pair.
-2. ``infill`` — a classic zigzag pattern with six parallel passes.
-
-Rotate around the hairpin: with the bug present, the bead pinches and
-flips inside-out where the tangent reverses. After the frame-continuity
-fix, quads stay flat and the tube surface is continuous.
+Two beads whose tangent reverses abruptly: ``retrace`` goes forward, turns through a
+C-shaped end and comes back above itself, and ``infill`` is a six-pass serpentine.
+Orbit around the hairpins: the bead should stay a continuous, flat surface instead of
+pinching and flipping inside out. Colours ramp along the path to show ring order.
 
 Run: uv run python examples/21_toolpath_zigzag.py
 """
 
-import time
-
 import numpy as np
 
-from threejs_viewer import viewer
+from threejs_viewer import Toolpath, viewer
 
 
 def make_retrace(n=60, length=6.0, dz=0.35, x_over=1.0):
@@ -74,27 +56,11 @@ def make_infill(n_passes=6, pass_length=8.0, spacing=0.9, n_per_pass=40):
     return np.concatenate(points, axis=0).astype(np.float32)
 
 
-def ramp_colors(n, start=0xFF5533, end=0x3377FF):
-    """Linear RGB ramp so you can see ring order along the path."""
-    sr, sg, sb = (start >> 16) & 0xFF, (start >> 8) & 0xFF, start & 0xFF
-    er, eg, eb = (end >> 16) & 0xFF, (end >> 8) & 0xFF, end & 0xFF
-    t = np.linspace(0, 1, n)
-    r = (sr + (er - sr) * t).astype(np.uint32)
-    g = (sg + (eg - sg) * t).astype(np.uint32)
-    b = (sb + (eb - sb) * t).astype(np.uint32)
-    return (r << 16) | (g << 8) | b
-
-
 v = viewer()
 v.clear()
 
-v.add_box(
-    "ground",
-    width=14,
-    height=12,
-    depth=0.04,
-    color=0x222222,
-    position=[3.0, 0, -0.05],
+v.add_grid(
+    "floor", cell_size=1.0, extent=40.0, center_color=0x888888, position=[0, 0, -0.3]
 )
 
 # --- Case 1: retrace on top of itself ---
@@ -107,7 +73,7 @@ v.add_parametric_tube(
     spine=retrace,
     widths=w_r,
     heights=h_r,
-    colors=ramp_colors(len(retrace)),
+    colors=Toolpath.from_points(retrace, w_r, h_r).colorize("plasma").packed_colors,
     roughness=0.4,
     metalness=0.1,
 )
@@ -121,19 +87,10 @@ v.add_parametric_tube(
     spine=infill,
     widths=w_i,
     heights=h_i,
-    colors=ramp_colors(len(infill)),
+    colors=Toolpath.from_points(infill, w_i, h_i).colorize("plasma").packed_colors,
     roughness=0.4,
     metalness=0.1,
 )
 
-print(f"retrace: {len(retrace)} pts (one hairpin at x=end)")
-print(f"infill:  {len(infill)} pts ({6 - 1} hairpins between passes)")
-print("Rotate around the hairpin turns — with the bug, each turn shows")
-print("a self-crossing twist where the bead collapses and flips inside-out.")
-print("Press Ctrl+C to exit.")
-
-try:
-    while True:
-        time.sleep(1.0)
-except KeyboardInterrupt:
-    pass
+v.set_camera(position=[3, -10, 18], target=[3, -2, 0])
+v.wait_for_assets()
