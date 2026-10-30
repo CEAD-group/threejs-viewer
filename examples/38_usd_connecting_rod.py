@@ -9,7 +9,7 @@ Dimensions are in millimetres; the grid cells are 10 mm.
 Requires the usd_brep package in this environment.
 
 Usage:
-    uv run python examples/39_usd_connecting_rod.py
+    uv run python examples/38_usd_connecting_rod.py
 """
 
 import math

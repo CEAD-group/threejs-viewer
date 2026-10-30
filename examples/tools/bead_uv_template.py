@@ -17,7 +17,7 @@ and a climbing leg, with the section ramping wider and taller. The ends are
 left open. Coordinates are written Y-up, which Blender's OBJ importer
 converts by default, so the beads lie in the XY plane with Z up.
 
-Run: uv run python examples/bead_uv_template.py [--length 25] [-o beads.obj]
+Run: uv run python examples/tools/bead_uv_template.py [--length 25] [-o beads.obj]
 """
 
 import argparse

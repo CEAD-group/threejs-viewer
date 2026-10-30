@@ -25,8 +25,8 @@ Main options:
   --smoothness   how flat the surface is (0 heavy ripple .. 1 no relief);
                  this scales the height, normal and shading detail
 
-Run: uv run python examples/bead_texture_maker.py --color "#3a3d42" --show
-     uv run python examples/bead_texture_maker.py --no-fibers --smoothness 0.9
+Run: uv run python examples/tools/bead_texture_maker.py --color "#3a3d42" --show
+     uv run python examples/tools/bead_texture_maker.py --no-fibers --smoothness 0.9
          --roughness 0.25 --color "#c8452c" -o glossy_red
 
 Use the result:

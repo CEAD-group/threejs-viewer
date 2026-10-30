@@ -21,7 +21,7 @@ RIGHT  — Python reference: a chamfered-hex tube mesh built locally
 
 The middle and right tubes should match at every collapsed corner.
 
-Run: uv run python examples/21_tube_corner_zfight.py
+Run: uv run python bench/tube_lab/corner_zfight_reference.py
 """
 
 import time

@@ -66,7 +66,7 @@ Every image comes from a script in [examples/](examples/); the file name is give
 | | |
 |---|---|
 | ![Textured bead, close-up of a corner](docs/media/bead_texture_corner.png) | ![Textured printed part](docs/media/bead_texture_hero.png) |
-| Colour + normal + roughness maps follow the bead around every corner. `38_bead_texture.py` | The same part: one continuous 8 x 3 mm bead, 14 layers, overhanging round side. `38_bead_texture.py` |
+| Colour + normal + roughness maps follow the bead around every corner. `37_bead_texture.py` | The same part: one continuous 8 x 3 mm bead, 14 layers, overhanging round side. `37_bead_texture.py` |
 | ![Spiral vase printed by a draw_range animation](docs/media/toolpath_vase.gif) | ![Interrupted toolpath with travel moves](docs/media/toolpath_interrupted.png) |
 | A spiral vase bead revealed by a `draw_ranges` channel, viridis colours tinting the texture. `11_toolpath.py` | Travel moves taper the bead to zero width. `15_toolpath_interrupted.py` |
 | ![Tube break mask](docs/media/tube_breaks.png) | ![5-axis swept tool body](docs/media/swept_tool.gif) |
@@ -136,7 +136,7 @@ tp.colorize(per_point_rgb)
 v.add_toolpath("bead", tp)
 
 # Bead texture: colour + normal + roughness maps wrapped around the bead,
-# repeated every `texture_length` units of path (examples/bead_texture_maker.py
+# repeated every `texture_length` units of path (examples/tools/bead_texture_maker.py
 # generates a tiling extruded-plastic set)
 v.add_toolpath("bead", tp, texture="bead_color.png", normal_map="bead_normal.png",
                roughness_map="bead_roughness.png", texture_length=25.0, roughness=1.0)
@@ -159,7 +159,7 @@ v.add_usda("part.usda")
 v.add_usda("part.usda", id="part")
 ```
 
-`examples/39_usd_connecting_rod.py` models an engine connecting rod and shows it on a floor grid.
+`examples/38_usd_connecting_rod.py` models an engine connecting rod and shows it on a floor grid.
 
 ![Connecting rod modelled with usd_brep booleans](docs/media/usd_connecting_rod.png)
 

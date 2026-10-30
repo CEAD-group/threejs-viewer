@@ -17,18 +17,18 @@ kind of shape large-format extrusion makes:
 Layers alternate wall-then-rib and rib-then-wall (the rib reversed), so each
 layer ends where the next begins and the whole part is one unbroken bead.
 
-The bead wears the texture set from ``bead_texture_maker``: colour, normal
+The bead wears the texture set from ``tools/bead_texture_maker``: colour, normal
 and roughness maps repeating every 25 mm along the path
 (``add_parametric_tube(texture=, normal_map=, roughness_map=)``). The
 streaks run along the bead and the top is wiped smoother by the nozzle.
 A draw-range animation prints the part; the image is laid down in place
 as the frontier advances.
 
-Run: uv run python examples/38_bead_texture.py
+Run: uv run python examples/37_bead_texture.py
 """
 
 import numpy as np
-from bead_texture_maker import texture_set
+from tools.bead_texture_maker import texture_set
 
 from threejs_viewer import Animation, viewer
 

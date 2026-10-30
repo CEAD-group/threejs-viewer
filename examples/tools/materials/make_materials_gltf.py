@@ -35,7 +35,7 @@ mapping are carried over unchanged.
 The material definitions are read from the existing materials.gltf, so this
 script only replaces the geometry and layout:
 
-    uv run python examples/materials/make_materials_gltf.py
+    uv run python examples/tools/materials/make_materials_gltf.py
 """
 
 from __future__ import annotations
@@ -496,7 +496,7 @@ def main() -> None:
     gltf = {
         "asset": {
             "version": "2.0",
-            "generator": "threejs-viewer examples/materials/make_materials_gltf.py",
+            "generator": "threejs-viewer examples/tools/materials/make_materials_gltf.py",
             "copyright": old["asset"].get("copyright", ""),
         },
         "extensionsUsed": old.get("extensionsUsed", []),

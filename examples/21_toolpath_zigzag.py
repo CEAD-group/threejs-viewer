@@ -22,7 +22,7 @@ Rotate around the hairpin: with the bug present, the bead pinches and
 flips inside-out where the tangent reverses. After the frame-continuity
 fix, quads stay flat and the tube surface is continuous.
 
-Run: uv run python examples/20_toolpath_zigzag.py
+Run: uv run python examples/21_toolpath_zigzag.py
 """
 
 import time
