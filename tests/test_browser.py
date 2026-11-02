@@ -4270,6 +4270,40 @@ def test_polyline_picking_occlusion_can_be_turned_back_on(viewer_client, viewer_
 
 
 @pytest.mark.browser
+def test_polyline_hover_cursor_does_not_flicker(viewer_client, viewer_page):
+    """Hovering along a pickable line keeps the crosshair: the view gimbal's
+    per-move hover handler used to reset the cursor on every pointer move,
+    which alternated with picking's crosshair at frame rate."""
+    viewer_client.enable_polyline_picking()
+    pts = np.array([[-2, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("ln", pts, line_width=6)
+    viewer_client.set_camera(position=[0, -8, 0], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    x0, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [-1.0, 0.0, 0.0])
+    x1, _ = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [1.0, 0.0, 0.0])
+    viewer_page.mouse.move(x0, y)
+    frames(viewer_page, 3)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getCanvas().style.cursor")
+        == "crosshair"
+    )
+    viewer_page.evaluate(
+        """() => {
+          const c = window.threejsViewer.getCanvas();
+          window.__cursors = [];
+          new MutationObserver(() => window.__cursors.push(c.style.cursor))
+            .observe(c, {attributes: true, attributeFilter: ['style']});
+        }"""
+    )
+    viewer_page.mouse.move(x1, y, steps=30)
+    frames(viewer_page, 3)
+    cursors = viewer_page.evaluate("() => window.__cursors")
+    assert "" not in cursors, cursors
+
+
+@pytest.mark.browser
 def test_polyline_pick_js_hook(viewer_client, viewer_page):
     """A client-side JS hook (``viewer.onPolylinePick`` / ``onPolylineHover``)
     receives picks directly in the browser — no Python round-trip — and
