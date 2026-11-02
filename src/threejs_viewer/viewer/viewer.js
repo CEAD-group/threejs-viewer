@@ -18257,10 +18257,6 @@ export class ThreeJSViewer {
                     }
                     return;
                 }
-                if (e.code === 'KeyH') {
-                    this._setClipHelperVisible(!this._clipHelperVisible);
-                    return;
-                }
                 {
                     const step = e.shiftKey ? 0.5 : 0.05;
                     switch (e.code) {
