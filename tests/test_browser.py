@@ -2812,6 +2812,48 @@ def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_update_polyline_colors_superseded_fetch_does_not_repaint(
+    viewer_client, viewer_page
+):
+    """Two quick recolours whose fetches finish out of order end on the newer
+    colours: the older fetch is held back in the page so it would land last,
+    and it is discarded quietly instead (issue #312)."""
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline(
+        "pl_race", pts, colors=np.array([[1, 0, 0]] * 3, dtype=np.float32)
+    )
+    settle(viewer_client)
+    # The first blob fetch waits 800 ms, later ones 50 ms.
+    viewer_page.evaluate(
+        """() => {
+            const orig = window.fetch.bind(window);
+            window.__origFetch = orig;
+            let n = 0;
+            window.fetch = (url, opts) => new Promise((resolve, reject) => {
+                const wait = n++ === 0 ? 800 : 50;
+                setTimeout(() => orig(url, opts).then(resolve, reject), wait);
+            });
+        }"""
+    )
+    try:
+        viewer_client.update_polyline_colors(
+            "pl_race", np.array([[0, 1, 0]] * 3, dtype=np.float32)
+        )
+        viewer_client.update_polyline_colors(
+            "pl_race", np.array([[0, 0, 1]] * 3, dtype=np.float32)
+        )
+        settle(viewer_client)
+        time.sleep(1.0)  # past the held-back fetch, in case it were still applied
+        c = _read_polyline_first_color(viewer_page, "pl_race")
+    finally:
+        viewer_page.evaluate("() => { window.fetch = window.__origFetch; }")
+    assert c["b"] > 0.99 and c["g"] < 0.01 and c["r"] < 0.01, c
+    assert [m for m in messages if m[0] == "error"] == [], messages
+
+
+@pytest.mark.browser
 def test_update_polyline_colors_flips_material_when_no_initial_colors(
     viewer_client, viewer_page
 ):

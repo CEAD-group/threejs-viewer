@@ -19526,10 +19526,19 @@ export class ThreeJSViewer {
                         console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
                         return;
                     }
+                    // A newer colour message supersedes this one: bump the
+                    // token and abort the earlier request (as for tubes).
+                    const colorToken = (target.userData.lineColorToken || 0) + 1;
+                    target.userData.lineColorToken = colorToken;
+                    if (target.userData.__lineColorFetch) {
+                        target.userData.__lineColorFetch.abort();
+                        target.userData.__lineColorFetch = null;
+                    }
                     this._onFetchStart();
                     const capturedScene = this._sceneGeneration;
                     const loadToken = this._loadTokenOf(data.id);
                     const abortCtl = this._trackFetch(data.id);
+                    target.userData.__lineColorFetch = abortCtl;
                     (async () => {
                         let fetched = false;
                         try {
@@ -19544,6 +19553,10 @@ export class ThreeJSViewer {
                             const obj = this._objects.get(data.id);
                             if (!obj || !obj.userData.isPolyline) {
                                 console.warn(`update_polyline_colors: '${data.id}' is not a polyline`);
+                                return;
+                            }
+                            if (obj.userData.lineColorToken !== colorToken) {
+                                console.log(`Discarding superseded polyline color fetch for '${data.id}'`);
                                 return;
                             }
                             const numPoints = data.numPoints;
@@ -19596,6 +19609,10 @@ export class ThreeJSViewer {
                                 { id: data.id, token: fetched ? undefined : loadToken,
                                   scene: capturedScene, fetchStage: !fetched });
                         } finally {
+                            const obj = this._objects.get(data.id);
+                            if (obj && obj.userData.__lineColorFetch === abortCtl) {
+                                obj.userData.__lineColorFetch = null;
+                            }
                             this._untrackFetch(data.id, abortCtl);
                             this._onFetchEnd();
                         }
