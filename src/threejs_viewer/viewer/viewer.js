@@ -14714,6 +14714,7 @@ export class ThreeJSViewer {
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
         this._clipClose = q('.tjsv-clip-close');
         this._clipCapsCheck = q('.tjsv-clip-caps');
+        this._clipShowPlaneCheck = q('.tjsv-clip-show-plane');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
         // Toolbar height tracks viewport width: the timeline-row wraps when
@@ -15715,12 +15716,26 @@ export class ThreeJSViewer {
                 mat.needsUpdate = true;
             }
         });
-        this._clipAnchor.visible = this._clipEnabled && this._clipHelperVisible;
-        const showGizmo = this._clipEnabled && this._clipHelperVisible;
-        this._clipGizmo.enabled = showGizmo;
-        this._clipGizmoHelper.visible = showGizmo;
-        this._clipMoveGizmo.enabled = showGizmo;
-        this._clipMoveGizmoHelper.visible = showGizmo;
+        this._syncClipHelperVisibility();
+    }
+
+    // The drawn plane and its gizmos show while clipping is on and the helper
+    // is wanted; hiding them leaves the cut itself untouched.
+    _syncClipHelperVisibility() {
+        const show = this._clipEnabled && this._clipHelperVisible;
+        this._clipAnchor.visible = show;
+        this._clipGizmo.enabled = show;
+        this._clipGizmoHelper.visible = show;
+        this._clipMoveGizmo.enabled = show;
+        this._clipMoveGizmoHelper.visible = show;
+        this._clipShowPlaneCheck.checked = this._clipHelperVisible;
+    }
+
+    /** Show or hide the clip plane disc and its gizmos without changing the cut.
+     * @param {boolean} visible */
+    _setClipHelperVisible(visible) {
+        this._clipHelperVisible = !!visible;
+        this._syncClipHelperVisibility();
     }
 
     _toggleClipPanel() {
@@ -18086,6 +18101,8 @@ export class ThreeJSViewer {
         // Cap toggle (issue #259)
         this._clipCapsCheck.checked = this._clipCaps.enabled;
         this._clipCapsCheck.addEventListener('change', () => this.setClipCaps(this._clipCapsCheck.checked));
+        this._clipShowPlaneCheck.checked = this._clipHelperVisible;
+        this._clipShowPlaneCheck.addEventListener('change', () => this._setClipHelperVisible(this._clipShowPlaneCheck.checked));
 
         // Close button
         this._clipClose.addEventListener('click', () => this._toggleClipPanel());
@@ -18156,7 +18173,9 @@ export class ThreeJSViewer {
 
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
-            if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT') return;
+            // A focused checkbox (Show plane, Cap cut solids) must not swallow the shortcuts.
+            const t = /** @type {HTMLInputElement} */ (e.target);
+            if (t.tagName === 'INPUT' && t.type !== 'checkbox') return;
             // Several keys change what lands in the shadow map (M/N/S/C, eyes).
             this._shadowDirty = true;
             if (this._menus.anyOpen()) {
@@ -18239,9 +18258,7 @@ export class ThreeJSViewer {
                     return;
                 }
                 if (e.code === 'KeyH') {
-                    this._clipHelperVisible = !this._clipHelperVisible;
-                    this._clipPanelEl.classList.toggle('visible', this._clipHelperVisible);
-                    this._updateClipMaterials();
+                    this._setClipHelperVisible(!this._clipHelperVisible);
                     return;
                 }
                 {

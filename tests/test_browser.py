@@ -5635,6 +5635,38 @@ def test_clip_tool_has_refined_rotate_and_slide_gizmos(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_clip_show_plane_hides_helper_and_keeps_cut(viewer_client, viewer_page):
+    """The panel's Show plane checkbox (and H) hides the disc and both gizmos
+    while the clip stays active and the panel stays open."""
+    viewer_client.add_sphere("s", radius=1.5)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0, show_helper=True)
+    settle(viewer_client)
+    state_js = """() => {
+      const v = window.threejsViewer;
+      return {
+        clip: v._clipEnabled,
+        cut: v.getObject('s').material.clippingPlanes.length,
+        anchor: v._clipAnchor.visible,
+        gizmos: v._clipGizmo.enabled || v._clipMoveGizmo.enabled
+          || v._clipGizmoHelper.visible || v._clipMoveGizmoHelper.visible,
+        checked: v._clipShowPlaneCheck.checked,
+        panel: v._clipPanelEl.classList.contains('visible'),
+      };
+    }"""
+    on = viewer_page.evaluate(state_js)
+    assert on["anchor"] and on["gizmos"] and on["checked"] and on["cut"] == 1
+
+    viewer_page.click(".tjsv-clip-show-plane")
+    off = viewer_page.evaluate(state_js)
+    assert off["clip"] and off["cut"] == 1 and off["panel"]
+    assert not off["anchor"] and not off["gizmos"] and not off["checked"]
+
+    viewer_page.keyboard.press("h")
+    back = viewer_page.evaluate(state_js)
+    assert back["anchor"] and back["gizmos"] and back["checked"] and back["panel"]
+
+
+@pytest.mark.browser
 def test_binary_draw_ranges_channel_on_swept_tool_and_points(
     viewer_client, viewer_page
 ):
