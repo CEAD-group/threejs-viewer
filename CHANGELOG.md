@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.0.74
+
+### Clip tool (#313, #314)
+
+- The clip panel has a **Show plane** checkbox: it hides the plane disc and both gizmos while the cut stays active, so a section can be set up and then viewed clean. `show_helper=` on `set_clipping_plane` / `set_clipping_slab` drives the same state. Space on a focused checkbox toggles it instead of starting playback.
+- The rotate rings and the normal-slide arrow no longer respond to one press together: dragging changes either the orientation or the offset, never both.
+
+### Gizmos (#314)
+
+- One press drives one gizmo. Every gizmo used to hit-test the pointer on its own, so overlapping handles (two pinned gizmos on coincident objects, or the two clip gizmos) moved together; now the nearest handle under the pointer takes the press.
+- The clip gizmos use the same fat-line handles, palette and hover highlighting as the move gizmo, and draw in the overlay pass. A hovered or dragged handle is drawn in a lighter colour with a wider line (3 to 5 px).
+
+### Polyline and tube picking (#316, issue #311)
+
+- Picking prefers the visible surface: on a closed wall or a U-turn seen at an angle, the near wall wins instead of whichever spine is nearest on screen. Occlusion is computed from each tube segment's bead box (width and height), not by raycasting the mesh. `enable_polyline_picking(occlusion=False)` restores plain screen-nearest picking.
+- Undrawn parts (past a draw range, including the undrawn part of a tube's frontier segment), objects under a hidden or `pickable=False` parent, and points on the clipped side of the clip plane are no longer picked.
+- The cursor no longer flickers between crosshair and arrow while hovering a pickable line or bead (#317).
+
+### Polyline colours (#315, issue #312)
+
+- Two `update_polyline_colors` calls in quick succession always end on the newer colours; an older colour fetch that finishes late is discarded.
+
+### Examples (#302-#309)
+
+- Examples are renumbered without gaps, with helpers moved to `examples/tools/`, and polished. New: a robot cell on kinematic chains (`14_robot_cell.py`), section caps (`16_section_caps.py`), CAD click-to-inspect (`39_cad_inspection.py`) and a million-point toolpath showcase (`40_million_point_toolpath.py`).
+
 ## 0.0.73
 
 ### Joint-driven animation (#293, issue #292)
