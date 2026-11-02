@@ -12029,6 +12029,13 @@ class PolylinePickController {
         this._ndcV = new THREE.Vector2();
         this._rayPt = new THREE.Vector3();
         this._raycaster = new THREE.Raycaster();
+        // Bead-box occlusion scratch (_beadEntryDistance).
+        this._bT = new THREE.Vector3();
+        this._bU = new THREE.Vector3();
+        this._bV = new THREE.Vector3();
+        this._bC = new THREE.Vector3();
+        this._localRay = new THREE.Ray();
+        this._mwInv = new THREE.Matrix4();
 
         // Hover picks are coalesced to one per animation frame: a fast mouse
         // move fires many `pointermove` events, but only the latest cursor
@@ -12149,7 +12156,7 @@ class PolylinePickController {
         const n = w.length;
         const ext = new Float32Array(n);
         const ho = Math.abs(ud.pickHeightOffset || 0);
-        for (let i = 0; i < n; i++) ext[i] = 0.5 * Math.max(w[i], h[i]) + ho;
+        for (let i = 0; i < n; i++) ext[i] = 0.5 * Math.max(w[i], h[i]) + ho * h[i];
         ud.pickHalfExtents = ext;
         return ext;
     }
@@ -12163,7 +12170,15 @@ class PolylinePickController {
      * @param {{x:number,y:number,viewZ:number,ok:boolean}} out
      */
     _nodeScreenInto(pts, i, mw, cam, W, H, out) {
-        const p = this._tmpV.set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+        this._pointScreenInto(this._tmpV.set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]), mw, cam, W, H, out);
+    }
+
+    /**
+     * `_nodeScreenInto` for a local point (overwritten).
+     * @param {THREE.Vector3} p @param {THREE.Matrix4} mw @param {any} cam
+     * @param {number} W @param {number} H @param {{x:number,y:number,viewZ:number,ok:boolean}} out
+     */
+    _pointScreenInto(p, mw, cam, W, H, out) {
         p.applyMatrix4(mw);                    // local → world
         p.applyMatrix4(cam.matrixWorldInverse); // world → view (camera space)
         const viewZ = p.z;                     // view-space depth (negative in front of a perspective cam)
@@ -12194,11 +12209,11 @@ class PolylinePickController {
      * Scan one object's spine for segments near the cursor in screen space,
      * over node range [iStart, iEndNode] visiting one segment per `step`
      * nodes (with `step > 1` each tested segment is the chord node i → i+step,
-     * a decimated coarse pass). Consecutive segments inside their pixel gate
-     * form a run, and each run reports its nearest segment, so the near and
-     * far wall of one closed part come back as separate candidates. `inBead`
-     * says the cursor lies inside a tube segment's projected bead (no pick
-     * threshold), i.e. the view ray enters that bead.
+     * a decimated coarse pass). Every segment inside its pixel gate is
+     * returned, so the near and far wall of one part stay separate candidates
+     * for the depth test even where a turn joins them inside the gate. The
+     * segment ending at `iEndNode` is cut at `endT` (a tube's partly drawn
+     * frontier segment), so its undrawn part never counts.
      *
      * Distances are compared squared (no `Math.sqrt` in the per-segment hot
      * path); `dist2` is the squared pixel distance.
@@ -12206,14 +12221,12 @@ class PolylinePickController {
      * @param {any} cam @param {number} W @param {number} H
      * @param {number} cursorX @param {number} cursorY
      * @param {boolean} isTube @param {Float32Array|null} halfExtents @param {number} lineGate
-     * @param {number} iStart @param {number} iEndNode @param {number} step
-     * @returns {Array<{seg:number, end:number, dist2:number, inBead:boolean}>}
+     * @param {number} iStart @param {number} iEndNode @param {number} step @param {number} endT
+     * @returns {Array<{seg:number, end:number, dist2:number}>}
      */
-    _scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, iStart, iEndNode, step) {
-        /** @type {Array<{seg:number, end:number, dist2:number, inBead:boolean}>} */
-        const runs = [];
-        /** @type {{seg:number, end:number, dist2:number, inBead:boolean}|null} */
-        let run = null;
+    _scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, iStart, iEndNode, step, endT) {
+        /** @type {Array<{seg:number, end:number, dist2:number}>} */
+        const hits = [];
         let prev = this._ps0;
         let cur = this._ps1;
         let i = iStart;
@@ -12221,17 +12234,19 @@ class PolylinePickController {
         while (i < iEndNode) {
             let j = i + step;
             if (j > iEndNode) j = iEndNode;
-            this._nodeScreenInto(pts, j, mw, cam, W, H, cur);
-            let hit = false;
+            if (j === iEndNode && endT < 1) {
+                this._spinePointInto(pts, j, endT, this._tmpV);
+                this._pointScreenInto(this._tmpV, mw, cam, W, H, cur);
+            } else {
+                this._nodeScreenInto(pts, j, mw, cam, W, H, cur);
+            }
             if (prev.ok && cur.ok) {
                 let gate = lineGate;
-                let bead = 0;
                 if (isTube && halfExtents) {
                     const extWorld = Math.max(halfExtents[i], halfExtents[j]);
                     // Nearer node (view-Z closest to 0) → larger pixel footprint → wider gate.
                     const wpp = this._worldPerPixelAtViewZ(Math.max(prev.viewZ, cur.viewZ));
-                    bead = extWorld / wpp;
-                    gate = this.thresholdPx + bead;
+                    gate = this.thresholdPx + extWorld / wpp;
                 }
                 const abx = cur.x - prev.x;
                 const aby = cur.y - prev.y;
@@ -12241,39 +12256,102 @@ class PolylinePickController {
                 const dx = cursorX - (prev.x + abx * t);
                 const dy = cursorY - (prev.y + aby * t);
                 const d2 = dx * dx + dy * dy;
-                if (d2 <= gate * gate) {
-                    hit = true;
-                    if (!run) { run = { seg: i, end: j, dist2: d2, inBead: false }; runs.push(run); }
-                    else if (d2 < run.dist2) { run.seg = i; run.end = j; run.dist2 = d2; }
-                    if (d2 <= bead * bead) run.inBead = true;
-                }
+                if (d2 <= gate * gate) hits.push({ seg: i, end: j, dist2: d2 });
             }
-            if (!hit) run = null;
             const tmp = prev;
             prev = cur;
             cur = tmp;
             i = j;
         }
-        return runs;
+        return hits;
     }
 
     /**
-     * Index of the last spine node the object currently draws, so picks skip
-     * the part a partial draw range hides (issue #311). A tube's frontier
-     * segment is partly drawn and counts; `_pickAt` clamps `t` inside it.
-     * @param {any} o @param {number} n
+     * Local spine point at node `j`, or for `endT < 1` the point `endT` of the
+     * way from node `j - 1` to `j` (the drawn end of a frontier segment).
+     * @param {Float32Array} pts @param {number} j @param {number} endT @param {THREE.Vector3} out
      */
-    _drawnEndNode(o, n) {
+    _spinePointInto(pts, j, endT, out) {
+        out.set(pts[j * 3], pts[j * 3 + 1], pts[j * 3 + 2]);
+        if (endT < 1 && j > 0) {
+            this._AB.set(pts[j * 3 - 3], pts[j * 3 - 2], pts[j * 3 - 1]);
+            out.lerp(this._AB, 1 - endT);
+        }
+        return out;
+    }
+
+    /**
+     * Last spine node the object currently draws, and how much of the segment
+     * ending there is drawn (`endT`, 1 unless a tube's frontier cuts it), so
+     * picks skip the part a partial draw range hides (issue #311).
+     * @param {any} o @param {number} n @returns {{endNode:number, endT:number}}
+     */
+    _drawnEnd(o, n) {
         const ud = o.userData;
         if (ud.isPickableTube) {
-            return ud.pickDrawFrac == null ? n - 1 : Math.min(n - 1, Math.ceil(ud.pickDrawFrac * (n - 1) - 1e-9));
+            if (ud.pickDrawFrac == null) return { endNode: n - 1, endT: 1 };
+            const f = ud.pickDrawFrac * (n - 1);
+            const endNode = Math.min(n - 1, Math.ceil(f - 1e-9));
+            return { endNode, endT: endNode > 0 ? Math.min(1, f - (endNode - 1)) : 1 };
         }
         if (ud.isNativeLine) {
             const c = o.geometry.drawRange.count;
-            return Number.isFinite(c) ? Math.min(n - 1, c - 1) : n - 1;
+            return { endNode: Number.isFinite(c) ? Math.min(n - 1, c - 1) : n - 1, endT: 1 };
         }
         const ic = o.geometry.instanceCount;   // fat line: drawn segments
-        return Number.isFinite(ic) ? Math.min(n - 1, ic) : n - 1;
+        return { endNode: Number.isFinite(ic) ? Math.min(n - 1, ic) : n - 1, endT: 1 };
+    }
+
+    /**
+     * Ray distances at which `ray` enters and leaves the bead box of tube
+     * segment `seg → end` (local end point `B`), Infinity for both when it
+     * misses. The box
+     * spans the segment along T, half the larger width across U and half the
+     * larger height along V, with V the tube's up axis made perpendicular to
+     * the segment and the anchor offset applied, so a flat wide bead only
+     * occludes where the ray actually crosses it. Tested in the tube's local
+     * frame, so any object transform is honoured.
+     * @param {any} ud @param {number} seg @param {number} end @param {THREE.Vector3} A
+     * @param {THREE.Vector3} B @param {THREE.Matrix4} mw @param {THREE.Ray} ray
+     */
+    _beadRaySpan(ud, seg, end, A, B, mw, ray) {
+        const miss = { entry: Infinity, exit: Infinity };
+        const w = ud.pickWidths, h = ud.pickHeights;
+        if (!w || !h) return miss;
+        const T = this._bT.subVectors(B, A);
+        const len = T.length();
+        if (len <= 0) return miss;
+        T.divideScalar(len);
+        const up = ud.pickUp;
+        const V = this._bV;
+        if (up) V.set(up[0], up[1], up[2]); else V.set(0, 0, 1);
+        V.addScaledVector(T, -V.dot(T));
+        if (V.lengthSq() < 1e-12) V.set(1, 0, 0).addScaledVector(T, -T.x);
+        V.normalize();
+        const U = this._bU.crossVectors(T, V);
+        const hw = 0.5 * Math.max(w[seg], w[end]);
+        const hh = 0.5 * Math.max(h[seg], h[end]);
+        const vOff = (ud.pickHeightOffset || 0) * 0.5 * (h[seg] + h[end]);
+        const C = this._bC.addVectors(A, B).multiplyScalar(0.5).addScaledVector(V, vOff);
+        const lr = this._localRay.copy(ray).applyMatrix4(this._mwInv.copy(mw).invert());
+        const o = this._tmpV.subVectors(lr.origin, C);
+        let tmin = -Infinity, tmax = Infinity;
+        for (const [axis, e] of /** @type {Array<[THREE.Vector3, number]>} */ ([[T, 0.5 * len], [U, hw], [V, hh]])) {
+            const oa = o.dot(axis), da = lr.direction.dot(axis);
+            if (Math.abs(da) < 1e-12) {
+                if (Math.abs(oa) > e) return miss;
+                continue;
+            }
+            let t1 = (-e - oa) / da, t2 = (e - oa) / da;
+            if (t1 > t2) { const tt = t1; t1 = t2; t2 = tt; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return miss;
+        }
+        if (tmax < 0) return miss;
+        const entry = lr.at(Math.max(0, tmin), this._bC).applyMatrix4(mw).distanceTo(ray.origin);
+        const exit = lr.at(tmax, this._bC).applyMatrix4(mw).distanceTo(ray.origin);
+        return { entry, exit };
     }
 
     /**
@@ -12307,12 +12385,12 @@ class PolylinePickController {
      *     cursor and the arc-length fraction metrically honest.
      *
      * Screen distance alone has no depth order, so on a closed wall seen at an
-     * angle the far wall's spine often won (issue #311). Every run of in-gate
-     * segments is a candidate; a tube bead the view ray enters is an occluder
-     * at its front surface (ray distance minus the bead half-extent), found
-     * analytically from the spine, so there is no raycast against
-     * million-triangle tube meshes. Candidates behind the nearest occluder are
-     * dropped unless `occlusion` is off. Segments past the draw range, under a
+     * angle the far wall's spine often won (issue #311). Every in-gate segment
+     * is a candidate. The ray is tested against each tube candidate's bead box
+     * (segment length by width by height, from the spine arrays, so there is
+     * no raycast against million-triangle tube meshes), and candidates behind
+     * the nearest point where the ray leaves a bead are dropped unless
+     * `occlusion` is off. Segments past the draw range, under a
      * hidden ancestor, or on the clipped side of an active clip plane never
      * count. Other meshes do not occlude.
      * @param {number} clientX @param {number} clientY
@@ -12329,7 +12407,7 @@ class PolylinePickController {
         cam.updateMatrixWorld();
         cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
 
-        /** @type {Array<{o:any, ud:any, seg:number, end:number, dist2:number, inBead:boolean, isTube:boolean, halfExtents:Float32Array|null, stride:number, n:number, surface:number, ext:number}>} */
+        /** @type {Array<{o:any, ud:any, seg:number, end:number, dist2:number, isTube:boolean, stride:number, n:number, endNode:number, endT:number}>} */
         const cands = [];
         const maxPP = this.maxPickPoints;
         for (const o of this.v._objects.values()) {
@@ -12340,7 +12418,7 @@ class PolylinePickController {
             if (!ud) continue;
             const pts = ud.pickPoints;
             const n = (pts.length / 3) | 0;
-            const endNode = this._drawnEndNode(o, n);
+            const { endNode, endT } = this._drawnEnd(o, n);
             if (endNode < 1) continue;
             o.updateWorldMatrix(true, false);
             const mw = o.matrixWorld;
@@ -12353,39 +12431,50 @@ class PolylinePickController {
             // Decimate the coarse scan to ~maxPickPoints nodes for a big spine;
             // the winner is refined at full resolution below.
             const stride = (maxPP && endNode + 1 > maxPP) ? Math.ceil(endNode / (maxPP - 1)) : 1;
-            const runs = this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, endNode, stride);
-            for (const r of runs) {
-                cands.push({ o, ud, seg: r.seg, end: r.end, dist2: r.dist2, inBead: r.inBead, isTube, halfExtents, stride, n, surface: 0, ext: 0 });
+            const hits = this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, endNode, stride, endT);
+            for (const r of hits) {
+                cands.push({ o, ud, seg: r.seg, end: r.end, dist2: r.dist2, isTube, stride, n, endNode, endT });
             }
         }
         if (!cands.length) return null;
 
-        // Depth and clip test per candidate at the ray's closest approach.
         this._ndcV.set((cursorX / W) * 2 - 1, -(cursorY / H) * 2 + 1);
         this._raycaster.setFromCamera(this._ndcV, cam);
         const ray = this._raycaster.ray;
         const planes = this.v._activeClippingPlanes();
-        let occluder = Infinity;
-        let occluderTol = 0;
-        const live = [];
-        for (const c of cands) {
-            const pts = c.ud.pickPoints;
-            const mw = c.o.matrixWorld;
-            this._Aw.set(pts[c.seg * 3], pts[c.seg * 3 + 1], pts[c.seg * 3 + 2]).applyMatrix4(mw);
-            this._Bw.set(pts[c.end * 3], pts[c.end * 3 + 1], pts[c.end * 3 + 2]).applyMatrix4(mw);
-            ray.distanceSqToSegment(this._Aw, this._Bw, this._rayPt, this._segPt);
-            if (planes.some((/** @type {THREE.Plane} */ pl) => pl.distanceToPoint(this._segPt) < 0)) continue;
-            c.ext = c.isTube && c.halfExtents
-                ? Math.max(c.halfExtents[c.seg], c.halfExtents[c.end]) * mw.getMaxScaleOnAxis() : 0;
-            c.surface = this._rayPt.distanceTo(ray.origin) - c.ext;
-            if (c.isTube && c.inBead && c.surface < occluder) { occluder = c.surface; occluderTol = 0.5 * c.ext; }
-            live.push(c);
-        }
-        let best = null;
-        for (const c of live) {
-            if (this.occlusion && c.surface > occluder + occluderTol) continue;
-            if (!best || c.dist2 < best.dist2) best = c;
-        }
+        // Depth of each candidate along the ray: where the ray enters its bead
+        // box, else its closest approach to the segment. Clipped ones drop out.
+        const evaluate = (/** @type {typeof cands} */ list) => {
+            const out = [];
+            for (const c of list) {
+                const pts = c.ud.pickPoints;
+                const mw = c.o.matrixWorld;
+                this._A.set(pts[c.seg * 3], pts[c.seg * 3 + 1], pts[c.seg * 3 + 2]);
+                this._spinePointInto(pts, c.end, c.end === c.endNode ? c.endT : 1, this._B);
+                this._Aw.copy(this._A).applyMatrix4(mw);
+                this._Bw.copy(this._B).applyMatrix4(mw);
+                ray.distanceSqToSegment(this._Aw, this._Bw, this._rayPt, this._segPt);
+                if (planes.some((/** @type {THREE.Plane} */ pl) => pl.distanceToPoint(this._segPt) < 0)) continue;
+                const span = c.isTube ? this._beadRaySpan(c.ud, c.seg, c.end, this._A, this._B, mw, ray) : null;
+                const entry = span ? span.entry : Infinity;
+                out.push({ c, exit: span ? span.exit : Infinity, depth: Math.min(entry, this._rayPt.distanceTo(ray.origin)) });
+            }
+            return out;
+        };
+        // A bead the ray passes through hides everything behind the point
+        // where the ray leaves it.
+        let limit = Infinity;
+        const choose = (/** @type {ReturnType<typeof evaluate>} */ live) => {
+            let best = null;
+            for (const e of live) {
+                if (this.occlusion && e.depth > limit) continue;
+                if (!best || e.c.dist2 < best.dist2) best = e.c;
+            }
+            return best;
+        };
+        const live = evaluate(cands);
+        for (const e of live) if (e.exit < limit) limit = e.exit;
+        const best = choose(live);
         if (!best) return null;
 
         const bestObj = best.o;
@@ -12395,18 +12484,18 @@ class PolylinePickController {
 
         // Refine a decimated coarse hit: the winning chord spanned `stride`
         // nodes, so rescan the real consecutive segments in a local window
-        // around it to land `bestSeg` on the true nearest full-resolution
-        // segment (the placement stage below assumes bestSeg / bestSeg+1 are
-        // adjacent nodes).
+        // around it, under the same depth limit, to land `bestSeg` on the true
+        // nearest full-resolution segment (the placement stage below assumes
+        // bestSeg / bestSeg+1 are adjacent nodes).
         if (best.stride > 1) {
             const pts = bestUd.pickPoints;
             const { isTube, halfExtents, lineGate } = this._objectGate(bestObj);
-            const endNode = this._drawnEndNode(bestObj, best.n);
             const lo = Math.max(0, bestSeg - best.stride);
-            const hi = Math.min(endNode, bestSeg + 2 * best.stride);
-            const runs = this._scanObjectSegments(pts, best.n, bestObj.matrixWorld, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, lo, hi, 1);
-            let d2 = Infinity;
-            for (const r of runs) if (r.dist2 < d2) { d2 = r.dist2; bestSeg = r.seg; }
+            const hi = Math.min(best.endNode, bestSeg + 2 * best.stride);
+            const endT = hi === best.endNode ? best.endT : 1;
+            const hits = this._scanObjectSegments(pts, best.n, bestObj.matrixWorld, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, lo, hi, 1, endT);
+            const fine = choose(evaluate(hits.map((r) => ({ ...best, seg: r.seg, end: r.end, dist2: r.dist2, stride: 1 }))));
+            if (fine) bestSeg = fine.seg;
         }
 
         // Segment chosen by screen distance; now place the point by the 3D
@@ -20005,6 +20094,7 @@ export class ThreeJSViewer {
                             mesh.userData.pickWidths = tubeLOD ? tubeLOD.originalWidths : widths;
                             mesh.userData.pickHeights = tubeLOD ? tubeLOD.originalHeights : heights;
                             mesh.userData.pickHeightOffset = heightOffset;
+                            mesh.userData.pickUp = upVector;
                         } else {
                             // Click-to-pivot passthrough (issue #215).
                             mesh.userData.pickable = false;
@@ -20725,7 +20815,7 @@ export class ThreeJSViewer {
                         markerColor: data.markerColor,
                         thresholdPx: data.thresholdPx,
                         maxPickPoints: data.maxPickPoints,
-                        occlusion: data.occlusion,
+                        occlusion: data.occlusion !== false,
                     });
                 } else {
                     this._polylinePick.disable();
