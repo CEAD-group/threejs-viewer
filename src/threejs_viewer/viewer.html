@@ -16794,14 +16794,22 @@ class ThreeJSViewer {
         // Hover feedback: highlight the sprite under the cursor + pointer
         // cursor + a native tooltip explaining what a click will do (the
         // bubbles are canvas sprites, so `title` on the canvas is the help).
+        // The cursor is written only when the bubble hover changes, so this
+        // per-move handler does not clear a cursor other features set
+        // (polyline picking's crosshair flickered against it).
+        let bubbleCursor = false;
         this._renderer.domElement.addEventListener('pointermove', (e) => {
             const { hit } = this._gizmoHitTest(e);
             this._setGizmoHoverSprite(hit);
-            this._renderer.domElement.style.cursor = hit ? 'pointer' : '';
+            if (!!hit !== bubbleCursor) {
+                bubbleCursor = !!hit;
+                this._renderer.domElement.style.cursor = hit ? 'pointer' : '';
+            }
             this._renderer.domElement.title = this._gizmoSpriteTitle(hit);
         });
         this._renderer.domElement.addEventListener('pointerleave', () => {
             this._setGizmoHoverSprite(null);
+            bubbleCursor = false;
             this._renderer.domElement.style.cursor = '';
             this._renderer.domElement.title = '';
         });
