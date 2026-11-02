@@ -2812,6 +2812,48 @@ def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_update_polyline_colors_superseded_fetch_does_not_repaint(
+    viewer_client, viewer_page
+):
+    """Two quick recolours whose fetches finish out of order end on the newer
+    colours: the older fetch is held back in the page so it would land last,
+    and it is discarded quietly instead (issue #312)."""
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline(
+        "pl_race", pts, colors=np.array([[1, 0, 0]] * 3, dtype=np.float32)
+    )
+    settle(viewer_client)
+    # The first blob fetch waits 800 ms, later ones 50 ms.
+    viewer_page.evaluate(
+        """() => {
+            const orig = window.fetch.bind(window);
+            window.__origFetch = orig;
+            let n = 0;
+            window.fetch = (url, opts) => new Promise((resolve, reject) => {
+                const wait = n++ === 0 ? 800 : 50;
+                setTimeout(() => orig(url, opts).then(resolve, reject), wait);
+            });
+        }"""
+    )
+    try:
+        viewer_client.update_polyline_colors(
+            "pl_race", np.array([[0, 1, 0]] * 3, dtype=np.float32)
+        )
+        viewer_client.update_polyline_colors(
+            "pl_race", np.array([[0, 0, 1]] * 3, dtype=np.float32)
+        )
+        settle(viewer_client)
+        time.sleep(1.0)  # past the held-back fetch, in case it were still applied
+        c = _read_polyline_first_color(viewer_page, "pl_race")
+    finally:
+        viewer_page.evaluate("() => { window.fetch = window.__origFetch; }")
+    assert c["b"] > 0.99 and c["g"] < 0.01 and c["r"] < 0.01, c
+    assert [m for m in messages if m[0] == "error"] == [], messages
+
+
+@pytest.mark.browser
 def test_update_polyline_colors_flips_material_when_no_initial_colors(
     viewer_client, viewer_page
 ):
@@ -4018,6 +4060,247 @@ def test_parametric_tube_pick(viewer_client, viewer_page):
     # The resolved point sits on the spine at ~the midpoint.
     px, py, pz = pick["point"]
     assert abs(px) < 0.4 and abs(py) < 0.4 and abs(pz) < 0.4, pick["point"]
+
+
+# Sweeps a pixel column through PolylinePickController._pickAt with occlusion on
+# and off, next to viewer.pick() (a mesh raycast) as the ground truth for which
+# wall is visible at each pixel.
+_PICK_COLUMN_JS = """([x, y0, y1]) => {
+  const v = window.threejsViewer;
+  const pc = v._polylinePick;
+  const out = [];
+  const step = y1 > y0 ? 1 : -1;
+  for (let y = y0; step > 0 ? y <= y1 : y >= y1; y += step) {
+    const truth = v.pick(x, y);
+    pc.occlusion = true;
+    const on = pc._pickAt(x, y);
+    pc.occlusion = false;
+    const off = pc._pickAt(x, y);
+    pc.occlusion = true;
+    out.push({
+      truthY: truth ? truth.point.y : null,
+      onY: on ? on.point.y : null,
+      offY: off ? off.point.y : null,
+    });
+  }
+  return out;
+}"""
+
+
+@pytest.mark.browser
+def test_tube_pick_prefers_visible_wall(viewer_client, viewer_page):
+    """On a closed square wall seen at a low angle the near and far walls
+    overlap on screen. Wherever the near wall is the visible surface, the pick
+    lands on it, while the old screen-nearest rule picks the far wall at some
+    of those pixels (issue #311)."""
+    viewer_client.enable_polyline_picking()
+    r = 2.0
+    corners = [(-r, -r), (r, -r), (r, r), (-r, r), (-r, -r)]
+    spine = []
+    for (x0, y0), (x1, y1) in zip(corners, corners[1:]):
+        for t in np.linspace(0, 1, 20, endpoint=False):
+            spine.append((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 0.0))
+    spine.append(corners[-1] + (0.0,))
+    spine = np.array(spine, dtype=np.float32)
+    w = np.full(len(spine), 0.8, dtype=np.float32)
+    viewer_client.add_parametric_tube("wall", spine, w, w * 1.5, color=0x44AAFF)
+    viewer_client.set_camera(position=[0, -14, 2.2], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    near_x, near_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, -r, 0.0])
+    _, far_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, r, 0.0])
+    rows = viewer_page.evaluate(_PICK_COLUMN_JS, [near_x, int(near_y), int(far_y) - 1])
+    near_rows = [row for row in rows if row["truthY"] is not None and row["truthY"] < 0]
+    assert near_rows, rows
+    assert all(row["onY"] is not None and row["onY"] < 0 for row in near_rows), (
+        near_rows
+    )
+    # The scene does exercise the overlap: without occlusion the far wall wins somewhere.
+    assert any(row["offY"] is not None and row["offY"] > 0 for row in near_rows), (
+        near_rows
+    )
+
+
+@pytest.mark.browser
+def test_polyline_pick_skips_undrawn_hidden_and_clipped(viewer_client, viewer_page):
+    """Picks ignore the undrawn part of a line or tube, lines under a hidden
+    parent, and points on the clipped side of the clipping plane (issue #311)."""
+    viewer_client.enable_polyline_picking()
+    xs = np.linspace(-2, 2, 41, dtype=np.float32)
+    line = np.stack([xs, np.zeros_like(xs), np.zeros_like(xs)], axis=1)
+    viewer_client.add_polyline("ln", line, color=0xFF8800, line_width=3)
+    tube_spine = line + np.array([0, 0, 1.5], dtype=np.float32)
+    w = np.full(len(xs), 0.3, dtype=np.float32)
+    viewer_client.add_parametric_tube("tb", tube_spine, w, w, color=0x44AAFF)
+    viewer_client.add_group("hidden_grp", visible=False)
+    viewer_client.add_polyline(
+        "under_hidden",
+        line + np.array([0, 0, -1.5], dtype=np.float32),
+        parent="hidden_grp",
+    )
+    viewer_client.set_camera(position=[0, -10, 0.5], target=[0, 0, 0.5])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    def pick_at(world):
+        x, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, world)
+        return viewer_page.evaluate(
+            "([x, y]) => { const p = window.threejsViewer._polylinePick._pickAt(x, y);"
+            " return p && {id: p.id, fraction: p.fraction}; }",
+            [x, y],
+        )
+
+    assert pick_at([1.5, 0, 0])["id"] == "ln"
+    assert pick_at([1.5, 0, 1.5])["id"] == "tb"
+    assert pick_at([1.5, 0, -1.5]) is None
+
+    viewer_client.set_draw_range("ln", 0.5)
+    viewer_client.set_draw_range("tb", 0.5)
+    settle(viewer_client)
+    assert pick_at([1.5, 0, 0]) is None
+    assert pick_at([1.5, 0, 1.5]) is None
+    drawn = pick_at([-1.0, 0, 0])
+    assert drawn["id"] == "ln" and drawn["fraction"] <= 0.5
+    assert pick_at([-1.0, 0, 1.5])["fraction"] <= 0.5
+
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-1.5, show_helper=False)
+    settle(viewer_client)
+    # Normal +x keeps x >= -1.5; the line left of it is clipped away.
+    assert pick_at([-1.8, 0, 0]) is None
+    assert pick_at([-1.0, 0, 0])["id"] == "ln"
+
+
+@pytest.mark.browser
+def test_tube_pick_flat_bead_occludes_only_where_crossed(viewer_client, viewer_page):
+    """A wide, flat bead in front does not hide a bead the ray reaches above
+    it: occlusion follows the bead box, not a circle of the bead's largest
+    half-extent around its spine."""
+    viewer_client.enable_polyline_picking()
+    xs = np.linspace(-2, 2, 21, dtype=np.float32)
+    front = np.stack([xs, np.full_like(xs, -1.0), np.zeros_like(xs)], axis=1)
+    back = np.stack([xs, np.full_like(xs, 1.0), np.full_like(xs, 0.5)], axis=1)
+    viewer_client.add_parametric_tube(
+        "flat", front, np.full(21, 3.0, np.float32), np.full(21, 0.1, np.float32)
+    )
+    viewer_client.add_parametric_tube(
+        "back", back, np.full(21, 0.3, np.float32), np.full(21, 0.3, np.float32)
+    )
+    viewer_client.set_camera(position=[0, -10, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    x, y_back = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.5, 1.0, 0.5])
+    _, y_front = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.5, -1.0, 0.0])
+    rows = viewer_page.evaluate(_PICK_COLUMN_JS, [x, int(y_back) - 15, int(y_front)])
+    # The flat bead spans y -2.5..0.5, the back bead y 0.85..1.15.
+    back_rows = [r for r in rows if r["truthY"] is not None and r["truthY"] > 0.7]
+    front_rows = [r for r in rows if r["truthY"] is not None and r["truthY"] < 0.7]
+    assert back_rows and front_rows, rows
+    assert all(r["onY"] == pytest.approx(1.0) for r in back_rows), back_rows
+    assert all(r["onY"] == pytest.approx(-1.0) for r in front_rows), front_rows
+
+
+@pytest.mark.browser
+def test_tube_pick_connected_walls_keep_near_wall(viewer_client, viewer_page):
+    """Near and far wall of a U-shaped tube stay separate candidates next to
+    the turn that joins them on screen, so the visible near wall wins."""
+    viewer_client.enable_polyline_picking()
+    leg = np.linspace(-2, 2, 21, dtype=np.float32)
+    turn = np.linspace(-np.pi / 2, np.pi / 2, 9, dtype=np.float32)[1:-1]
+    spine = np.concatenate(
+        [
+            np.stack([leg, np.full_like(leg, -1.0), np.zeros_like(leg)], axis=1),
+            np.stack([2 + np.cos(turn), np.sin(turn), np.zeros_like(turn)], axis=1),
+            np.stack([leg[::-1], np.full_like(leg, 1.0), np.zeros_like(leg)], axis=1),
+        ]
+    ).astype(np.float32)
+    w = np.full(len(spine), 0.8, dtype=np.float32)
+    viewer_client.add_parametric_tube("u", spine, w, w * 1.5, color=0x44AAFF)
+    viewer_client.set_camera(position=[0, -14, 2.2], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    for wx in (1.6, 2.0, 2.4):
+        x, near_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [wx, -1.0, 0.0])
+        _, far_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [wx, 1.0, 0.0])
+        rows = viewer_page.evaluate(_PICK_COLUMN_JS, [x, int(near_y), int(far_y) - 1])
+        near = [r for r in rows if r["truthY"] is not None and r["truthY"] < -0.5]
+        assert near, rows
+        assert all(r["onY"] is not None and r["onY"] < -0.5 for r in near), (wx, near)
+
+
+@pytest.mark.browser
+def test_tube_pick_ignores_undrawn_part_of_frontier_segment(viewer_client, viewer_page):
+    """The frontier segment of a partly drawn tube is hit-tested only up to
+    the frontier, so empty space past it picks nothing."""
+    viewer_client.enable_polyline_picking()
+    spine = np.array([[-2, 0, 0], [2, 0, 0]], dtype=np.float32)
+    w = np.full(2, 0.3, dtype=np.float32)
+    viewer_client.add_parametric_tube("two", spine, w, w)
+    viewer_client.set_camera(position=[0, -10, 0], target=[0, 0, 0])
+    viewer_client.set_draw_range("two", 0.25)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    def pick_at(world):
+        x, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, world)
+        return viewer_page.evaluate(
+            "([x, y]) => { const p = window.threejsViewer._polylinePick._pickAt(x, y);"
+            " return p && {x: p.point.x, fraction: p.fraction}; }",
+            [x, y],
+        )
+
+    assert pick_at([1.5, 0, 0]) is None
+    hit = pick_at([-1.5, 0, 0])
+    assert hit is not None and hit["x"] == pytest.approx(-1.5, abs=0.05)
+
+
+@pytest.mark.browser
+def test_polyline_picking_occlusion_can_be_turned_back_on(viewer_client, viewer_page):
+    """``occlusion=True`` after ``occlusion=False`` restores occlusion, although
+    Python leaves the default off the wire."""
+    occlusion = "() => window.threejsViewer._polylinePick.occlusion"
+    viewer_client.enable_polyline_picking(occlusion=False)
+    settle(viewer_client)
+    assert viewer_page.evaluate(occlusion) is False
+    viewer_client.enable_polyline_picking(occlusion=True)
+    settle(viewer_client)
+    assert viewer_page.evaluate(occlusion) is True
+
+
+@pytest.mark.browser
+def test_polyline_hover_cursor_does_not_flicker(viewer_client, viewer_page):
+    """Hovering along a pickable line keeps the crosshair: the view gimbal's
+    per-move hover handler used to reset the cursor on every pointer move,
+    which alternated with picking's crosshair at frame rate."""
+    viewer_client.enable_polyline_picking()
+    pts = np.array([[-2, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("ln", pts, line_width=6)
+    viewer_client.set_camera(position=[0, -8, 0], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    x0, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [-1.0, 0.0, 0.0])
+    x1, _ = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [1.0, 0.0, 0.0])
+    viewer_page.mouse.move(x0, y)
+    frames(viewer_page, 3)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getCanvas().style.cursor")
+        == "crosshair"
+    )
+    viewer_page.evaluate(
+        """() => {
+          const c = window.threejsViewer.getCanvas();
+          window.__cursors = [];
+          new MutationObserver(() => window.__cursors.push(c.style.cursor))
+            .observe(c, {attributes: true, attributeFilter: ['style']});
+        }"""
+    )
+    viewer_page.mouse.move(x1, y, steps=30)
+    frames(viewer_page, 3)
+    cursors = viewer_page.evaluate("() => window.__cursors")
+    assert "" not in cursors, cursors
 
 
 @pytest.mark.browser
