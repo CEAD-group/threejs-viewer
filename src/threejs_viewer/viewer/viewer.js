@@ -12595,6 +12595,9 @@ const GIZMO_GHOST_OPACITY = 0.22;  // a translucent clone marks the drag-start p
 // is declared later in this file, and reading it at top-level module-eval time
 // (rather than lazily inside a function) would hit the temporal dead zone.
 const GIZMO_AXIS_LENGTH = 1.0;
+// The clip slide line's length as a share of the clip rotate rings' radius, so
+// its hitbox ends well inside the rings and never overlaps theirs.
+const CLIP_SLIDE_GIZMO_RATIO = 0.6;
 const GIZMO_PLANE_GAP_FACTOR = 0.15;
 const GIZMO_PLANE_SIZE_FACTOR = 0.45;
 const GIZMO_PLANE_OPACITY = 0.8;      // plane chips: mostly solid, a hint of what's behind
@@ -12672,30 +12675,13 @@ function ghostGizmoMaterial(src) {
 // One-time structural refinement of a TransformControls' stock handles (the
 // per-frame `restyleGizmoHelper` only re-themes/resizes what survives this).
 // Shared by the move/rotate gizmo (TransformGizmoController) and the clipping
-// tool's rotate + plane-slide gizmos so all of them get the same refined look.
-// Two parts:
-//   1. Slim the rotate gizmo down to just the three coloured axis rings —
-//      remove the bulky outer screen-space ring (`E`), the gray full-circle
-//      backdrop (`XYZE`, the "double circle"), and the gray `AXIS` helper line.
-//   2. Give the translate arrowheads real shading: the stock arrows use a flat
-//      unlit `MeshBasicMaterial`, so the cones read as 2D triangles. Swap to a
-//      lit `MeshStandardMaterial` tinted to the axis colour so scene lighting /
-//      environment sculpt the cone. The lib's per-frame re-theme + highlight
-//      only touch `.color`/`.opacity` (which Standard supports), so they keep
-//      working; `restyleGizmoHelper` re-applies our `_color` each frame regardless.
-//   3. For the move gizmo only (`opts.customTranslateHandles`, the clip
-//      gizmos don't pass it): replace the stock X/Y/Z arrows with a simple
-//      fat line each (axis-control-widget styling) with a pill-shaped
-//      (capsule) picker around it, replace the centre free-move handle's
-//      picker with a sphere and hide its visible mesh entirely (it renders
-//      nothing — only the plane chips and axis lines stay visible), and
-//      leave the plane chips' own geometry untouched (`restyleGizmoHelper`
-//      already resizes/margins them into a clean box shape). The rotate
-//      rings get the same treatment: fat-line half arcs, same linewidth and
-//      palette, radius = GIZMO_AXIS_LENGTH, with a half-torus picker each.
-/** @param {any} control  a THREE TransformControls
- *  @param {{customTranslateHandles?: boolean}} [opts] */
-function refineGizmoHandles(control, opts = {}) {
+// tool's rotate + plane-slide gizmos so all of them look and pick the same:
+// the bulky rotate handles (`E`, `XYZE`, the `AXIS` helper line) go, the X/Y/Z
+// arrows become fat lines with capsule pickers, the centre renders nothing and
+// picks through a sphere, and the rotate rings become fat-line half arcs of
+// radius GIZMO_AXIS_LENGTH with half-torus pickers.
+/** @param {any} control  a THREE TransformControls */
+function refineGizmoHandles(control) {
     const gm = control._gizmo;
     if (!gm) return;
     for (const grp of [gm.gizmo && gm.gizmo.rotate, gm.picker && gm.picker.rotate]) {
@@ -12710,59 +12696,50 @@ function refineGizmoHandles(control, opts = {}) {
             if (child.name === 'AXIS') helperRot.remove(child);
         }
     }
-    if (opts.customTranslateHandles) {
-        buildGizmoTranslateHandles(gm, 1);
-        buildGizmoRotateHandles(gm, 1);
-        return;
-    }
-    const arrows = gm.gizmo && gm.gizmo.translate;
-    if (arrows) {
-        for (const o of arrows.children) {
-            const hex = gizmoAxisColor(o.name);
-            // Single-axis handles only (X/Y/Z arrows + shaft); skip plane chips
-            // and the centre, which stay flat/transparent.
-            if (hex == null || o.name.length !== 1 || o.userData.__litArrow) continue;
-            o.userData.__litArrow = true;
-            const col = gizmoColor(hex);
-            const lit = /** @type {any} */ (new THREE.MeshStandardMaterial({
-                color: col.clone(),
-                emissive: col.clone().multiplyScalar(0.1),  // small floor so the dark side keeps its hue
-                roughness: 0.28,                             // a touch glossy → a highlight that sells the curve
-                metalness: 0.0,
-                transparent: true,
-                opacity: 0.95,
-                depthTest: false,
-                depthWrite: false,
-                toneMapped: false,
-            }));
-            lit._color = col.clone();
-            lit._opacity = 0.95;
-            o.material = lit;
-        }
-    }
-    const pickers = gm.picker && gm.picker.translate;
-    if (pickers) {
-        for (const o of pickers.children) {
-            if (!o.geometry || o.userData.__slimPicker) continue;
-            const s = GIZMO_ARROW_PICKER_SLIM;
-            if (o.name === 'X') o.geometry.scale(1, s, s);
-            else if (o.name === 'Y') o.geometry.scale(s, 1, s);
-            else if (o.name === 'Z') o.geometry.scale(s, s, 1);
-            else if (o.name === 'XYZ') {
-                const c = GIZMO_CENTER_PICKER_SCALE;
-                o.geometry.scale(c, c, c);
-            } else continue;
-            o.userData.__slimPicker = true;
-            o.geometry.computeBoundingBox();
-            o.geometry.computeBoundingSphere();
-        }
-    }
+    buildGizmoTranslateHandles(gm, 1);
+    buildGizmoRotateHandles(gm, 1);
 }
 
-// Legacy stock-arrow picker tuning, kept only for the clip gizmos (which
-// don't opt into `customTranslateHandles`).
-const GIZMO_ARROW_PICKER_SLIM = 0.4;   // radial shrink of the stock arrow pickers so they stop shadowing the plane chips
-const GIZMO_CENTER_PICKER_SCALE = 0.6; // shrink of the stock centre (XYZ free-move) picker octahedron
+// TransformControlsGizmo re-themes its handles (a hardcoded yellow on the
+// hovered one) in its own `updateMatrixWorld`, which the renderer calls after
+// `_animate` has restyled them; `after` runs right behind it, same frame.
+/** @param {any} control  a THREE TransformControls @param {() => void} after */
+function wrapGizmoUpdate(control, after) {
+    const gm = control._gizmo;
+    if (!gm || gm.__restyleWrapped) return;
+    gm.__restyleWrapped = true;
+    const stock = gm.updateMatrixWorld.bind(gm);
+    gm.updateMatrixWorld = (/** @type {boolean} */ force) => { stock(force); after(); };
+}
+
+// Every TransformControls listens to the canvas on its own, so where the
+// handles of two of them overlap on screen (the clip tool's slide line and
+// rotate rings, two pinned move gizmos) one press would drag both. Each
+// control's `pointerHover` (which its own `pointerdown` handler re-runs before
+// `pointerDown`) is replaced by one shared hit test over `getControls()`, and
+// only the control with the nearest picker hit keeps an `axis`, so exactly one
+// of them takes the press and shows a hover highlight.
+const _gizmoArbiterRay = new THREE.Raycaster();
+/** @param {any} control @param {() => any[]} getControls */
+function linkTransformControls(control, getControls) {
+    control.pointerHover = (/** @type {{x:number, y:number}|null} */ pointer) => {
+        const ctls = getControls().filter((c) => c && c.object !== undefined);
+        if (ctls.some((c) => c.dragging)) {
+            for (const c of ctls) if (!c.dragging) c.axis = null;
+            return;
+        }
+        let best = null, bestName = null, bestDist = Infinity;
+        for (const c of ctls) {
+            c.axis = null;
+            if (!c.enabled || !pointer) continue;
+            _gizmoArbiterRay.setFromCamera(/** @type {any} */ (pointer), c.camera);
+            const hits = _gizmoArbiterRay.intersectObject(c._gizmo.picker[c.mode], true);
+            const hit = hits.find((h) => h.object.visible);
+            if (hit && hit.distance < bestDist) { best = c; bestName = hit.object.name; bestDist = hit.distance; }
+        }
+        if (best) best.axis = bestName;
+    };
+}
 
 /** @param {string} name  'X'|'Y'|'Z' @returns {[number, number, number]} */
 function gizmoAxisUnitVector(name) {
@@ -12960,17 +12937,14 @@ function buildGizmoRotateHandles(gm, scale) {
 
 // Refined look for one gizmo helper's handles. Runs every frame (cheap traverse)
 // so our resting palette survives TransformControls' per-frame re-theme.
-// Shared by the move gizmo and the clipping gizmos (which never have planar
-// handles, so the planar-only branches below are inert for them).
+// Shared by the move gizmo and the clipping gizmos (whose single-axis slide
+// gizmo hides the planar handles, so the planar branches are inert there).
 /** @param {any} helper  a TransformControls helper Object3D
- *  @param {{control?: any, color?: number|string|null, hoverColor?: number|string|null, resW?: number, resH?: number}} [opts]
- *    `control`/`color`/`hoverColor` only ever passed by the move gizmo (never
- *    the clip gizmos): opts into live hover/drag highlighting, an optional
- *    colour override (falls back to the per-axis palette), fully-opaque axis
- *    lines (vs. the legacy 0.92 for stock arrows), and no plane outline. */
-function restyleGizmoHelper(helper, opts = {}) {
-    const highlightSet = opts.control ? gizmoHighlightSet(opts.control.axis) : null;
-    const moveGizmo = !!opts.control;   // discriminates the move gizmo's styling from the clip gizmos'
+ *  @param {{control: any, color?: number|string|null, hoverColor?: number|string|null, resW?: number, resH?: number}} opts
+ *    `control` drives the hover/drag highlight; `color`/`hoverColor` override
+ *    the per-axis palette. */
+function restyleGizmoHelper(helper, opts) {
+    const highlightSet = gizmoHighlightSet(opts.control.axis);
     helper.traverse((/** @type {any} */ o) => {
         const m = o.material;
         if (!m) return;
@@ -12983,7 +12957,7 @@ function restyleGizmoHelper(helper, opts = {}) {
         // a picker would be raycast-hit before the chip and report an empty
         // axis, breaking plane-chip dragging.
         if (!o.parent || o.parent.visible === false) return;
-        if (moveGizmo && o.name === 'XYZ') {
+        if (o.name === 'XYZ') {
             // The centre should render nothing (only its sphere picker is
             // real) — TransformControls re-asserts `.visible = true` on its
             // own handles every frame, so force this back off here too
@@ -13011,11 +12985,8 @@ function restyleGizmoHelper(helper, opts = {}) {
         if (planar) {
             // Slightly translucent flat chip, no outline.
             m._opacity = GIZMO_PLANE_OPACITY; m.opacity = GIZMO_PLANE_OPACITY; m.transparent = true;
-        } else if (moveGizmo) {
-            // Move-gizmo axis lines are fully opaque.
-            m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
         } else {
-            m._opacity = 0.92; m.opacity = 0.92; m.transparent = true;
+            m._opacity = 1.0; m.opacity = 1.0; m.transparent = false;
         }
     });
 }
@@ -13069,35 +13040,23 @@ class Gizmo {
         ctrl.addEventListener('dragging-changed', (/** @type {any} */ e) => owner._onDragChange(this, e.value));
         ctrl.addEventListener('objectChange', () => owner._onObjectChange(this));
 
-        owner._refineHandles(this);  // strip the bulky rotate handles + build our own translate handles (one-time)
+        refineGizmoHandles(ctrl);    // one-time handle rebuild, shared with the clip gizmos
+        linkTransformControls(ctrl, () => v._allTransformControls());
         owner._restyleGizmo(this);   // prime colour caches up front
 
-        // TransformControlsGizmo re-themes its own handles (a hardcoded
-        // yellow on whichever one matches `control.axis`) inside its own
-        // `updateMatrixWorld`, which the renderer calls at the start of
-        // every `render()` — strictly *after* our `_restyleGizmo` call in
-        // `_animate`, so it would win the draw every time. Wrap it so our
-        // colours (base + the plane/centre-aware hover highlight) are
-        // re-applied immediately after the stock pass, same frame, before
-        // anything gets drawn.
         const gizmoObj = /** @type {any} */ (ctrl._gizmo);
-        if (gizmoObj && !gizmoObj.__restyleWrapped) {
-            gizmoObj.__restyleWrapped = true;
-            const stockUpdateMatrixWorld = gizmoObj.updateMatrixWorld.bind(gizmoObj);
-            gizmoObj.updateMatrixWorld = (/** @type {boolean} */ force) => {
-                stockUpdateMatrixWorld(force);
-                // The stock pass scales every handle to a constant screen
-                // size; apply this gizmo's `scale` on top of it.
-                if (this.scale !== 1) {
-                    const mode = ctrl.mode;
-                    for (const grp of [gizmoObj.gizmo[mode], gizmoObj.picker[mode]]) {
-                        if (grp) for (const h of grp.children) h.scale.multiplyScalar(this.scale);
-                    }
-                    THREE.Object3D.prototype.updateMatrixWorld.call(gizmoObj, true);
+        wrapGizmoUpdate(ctrl, () => {
+            // The stock pass scales every handle to a constant screen size;
+            // apply this gizmo's `scale` on top of it.
+            if (this.scale !== 1) {
+                const mode = ctrl.mode;
+                for (const grp of [gizmoObj.gizmo[mode], gizmoObj.picker[mode]]) {
+                    if (grp) for (const h of grp.children) h.scale.multiplyScalar(this.scale);
                 }
-                owner._restyleGizmo(this);
-            };
-        }
+                THREE.Object3D.prototype.updateMatrixWorld.call(gizmoObj, true);
+            }
+            owner._restyleGizmo(this);
+        });
     }
 
     dispose() {
@@ -13351,22 +13310,6 @@ class TransformGizmoController {
         const a = this._primary.axes;
         return { translate: { ...a.translate }, rotate: { ...a.rotate } };
     }
-
-    // One-time structural refinement of a gizmo's stock handles (the per-frame
-    // `_restyleGizmo` only re-themes/resizes what survives this). Two parts:
-    //   1. Slim the rotate gizmo down to just the three coloured axis rings —
-    //      remove the bulky outer screen-space ring (`E`), the gray full-circle
-    //      backdrop (`XYZE`, the "double circle"), and the gray `AXIS` helper line.
-    //   2. Give the translate arrowheads real shading: the stock arrows use a flat
-    //      unlit `MeshBasicMaterial`, so the cones read as 2D triangles. Swap to a
-    //      lit `MeshStandardMaterial` tinted to the axis colour so scene lighting /
-    //      environment sculpt the cone. The lib's per-frame re-theme + highlight
-    //      only touch `.color`/`.opacity` (which Standard supports), so they keep
-    //      working; `_restyleGizmo` re-applies our `_color` each frame regardless.
-    // Thin wrappers over the shared free helpers (also used by the clip gizmos,
-    // which don't pass `customTranslateHandles` and keep the stock arrow look).
-    /** @param {Gizmo} g */
-    _refineHandles(g) { refineGizmoHandles(g.control, { customTranslateHandles: true }); }
 
     // Refined look for one gizmo's handles. Runs every frame (cheap traverse).
     // Threads through this gizmo's colour override + live hover/drag axis (for
@@ -14105,21 +14048,16 @@ class AxisControlManager {
         return hit;
     }
 
-    /** True when a move-gizmo handle (interactive or pinned) is under the
-     * pointer or dragged, so the gizmo keeps the gesture on overlap.
+    /** True when a move-gizmo or clip-gizmo handle is under the pointer or
+     * dragged, so the gizmo keeps the gesture on overlap.
      * `refresh` re-runs the gizmo's own hover test, for a touch press that
      * arrives with no hover before it. @param {PointerEvent} e @param {boolean} refresh */
     _gizmoHandleUnder(e, refresh) {
-        const tg = this.v._transformGizmo;
-        if (!tg || !tg.enabled) return false;
-        for (const g of tg._allGizmos()) {
-            const ctl = /** @type {any} */ (g.control);
-            if (ctl.dragging) return true;
-            if (!ctl.enabled || ctl.object === undefined) continue;
-            if (refresh) ctl.pointerHover(ctl._getPointer(e));
-            if (ctl.axis != null) return true;
-        }
-        return false;
+        const ctls = this.v._allTransformControls().filter((c) => c && c.enabled && c.object !== undefined);
+        if (ctls.some((c) => c.dragging)) return true;
+        // One shared hit test (linkTransformControls) updates every control's axis.
+        if (refresh && ctls.length) ctls[0].pointerHover(ctls[0]._getPointer(e));
+        return ctls.some((c) => c.axis != null);
     }
 
     /** @param {PointerEvent} e */
@@ -15469,40 +15407,39 @@ export class ThreeJSViewer {
         this._zAxis = new THREE.Vector3();
         this._localZ = new THREE.Vector3(0, 0, 1);
 
-        // The clip tool carries two gizmos on the same anchor, both wearing the
-        // refined look shared with the move/rotate gizmo (slim rotate rings,
-        // shaded translate cone): a ROTATE gizmo to tilt the plane normal, and a
-        // Z-only TRANSLATE gizmo (local space, so its arrow follows the current
-        // normal) to slide the plane along that normal. Both report through the
-        // same _syncClipFromGizmo handler.
-        this._clipGizmo = new TransformControls(this._camera, this._renderer.domElement);
-        this._clipGizmo.attach(this._clipAnchor);
-        this._clipGizmo.setMode('rotate');
-        this._clipGizmo.enabled = false;
+        // The clip tool carries two gizmos on the same anchor, built and styled
+        // like the move gizmo: a ROTATE gizmo to tilt the plane normal, and a
+        // Z-only TRANSLATE gizmo (local space, so its line follows the current
+        // normal) to slide the plane along it. The slide line is shorter than the
+        // ring radius so the two never share a hitbox, and linkTransformControls
+        // hands an ambiguous press to the nearer handle only. Both live in the
+        // overlay `_gizmoScene` (drawn over the scene, never clipped or framed)
+        // and report through `_syncClipFromGizmo`.
+        const clipGizmo = (/** @type {string} */ mode, /** @type {number} */ size) => {
+            const ctl = /** @type {any} */ (new TransformControls(this._camera, this._renderer.domElement));
+            ctl.attach(this._clipAnchor);
+            ctl.setMode(mode);
+            ctl.setSize(size);
+            ctl.enabled = false;
+            const helper = ctl.getHelper();
+            helper.visible = false;
+            this._gizmoScene.add(helper);
+            refineGizmoHandles(ctl);
+            linkTransformControls(ctl, () => this._allTransformControls());
+            wrapGizmoUpdate(ctl, () => restyleGizmoHelper(helper, {
+                control: ctl, resW: this.container.clientWidth, resH: this.container.clientHeight,
+            }));
+            ctl.addEventListener('dragging-changed', (/** @type {any} */ e) => { this._controls.enabled = !e.value; });
+            ctl.addEventListener('change', () => this._syncClipFromGizmo());
+            return ctl;
+        };
+        this._clipGizmo = clipGizmo('rotate', GIZMO_SIZE);
         this._clipGizmoHelper = this._clipGizmo.getHelper();
-        this._clipGizmoHelper.visible = false;
-        this._scene.add(this._clipGizmoHelper);
-        refineGizmoHandles(this._clipGizmo);  // slim to the three coloured rings
-
-        this._clipMoveGizmo = new TransformControls(this._camera, this._renderer.domElement);
-        this._clipMoveGizmo.attach(this._clipAnchor);
-        this._clipMoveGizmo.setMode('translate');
-        this._clipMoveGizmo.setSpace('local');   // Z arrow follows the plane normal
+        this._clipMoveGizmo = clipGizmo('translate', GIZMO_SIZE * CLIP_SLIDE_GIZMO_RATIO);
+        this._clipMoveGizmoHelper = this._clipMoveGizmo.getHelper();
+        this._clipMoveGizmo.setSpace('local');   // Z line follows the plane normal
         this._clipMoveGizmo.showX = false;        // 1-DOF rail along the normal
         this._clipMoveGizmo.showY = false;
-        this._clipMoveGizmo.enabled = false;
-        this._clipMoveGizmoHelper = this._clipMoveGizmo.getHelper();
-        this._clipMoveGizmoHelper.visible = false;
-        this._scene.add(this._clipMoveGizmoHelper);
-        refineGizmoHandles(this._clipMoveGizmo);  // shade the single Z cone
-
-        // Disable orbit while dragging either gizmo.
-        for (const gz of [this._clipGizmo, this._clipMoveGizmo]) {
-            gz.addEventListener('dragging-changed', (e) => {
-                this._controls.enabled = !e.value;
-            });
-            gz.addEventListener('change', () => this._syncClipFromGizmo());
-        }
 
         // Shared bbox objects for slider range calculation
         this._bbox = new THREE.Box3();
@@ -15633,6 +15570,13 @@ export class ThreeJSViewer {
                 mat.needsUpdate = true;
             }
         });
+    }
+
+    /** Every TransformControls on the canvas (move gizmos, then the clip
+     * slide and rotate gizmos), the set linkTransformControls arbitrates. */
+    _allTransformControls() {
+        const tg = this._transformGizmo;
+        return [...(tg ? tg._allGizmos().map((g) => g.control) : []), this._clipMoveGizmo, this._clipGizmo];
     }
 
     /** @param {any} child */
@@ -20942,13 +20886,6 @@ export class ThreeJSViewer {
         if (this._transformGizmo) this._transformGizmo.update();
         this._axisControls.update();
 
-        // Clipping gizmos wear the same refined look — TransformControls re-themes
-        // its handles every frame, so re-apply our palette while the clip tool is open.
-        if (this._clipGizmo.enabled) {
-            restyleGizmoHelper(this._clipGizmoHelper);
-            restyleGizmoHelper(this._clipMoveGizmoHelper);
-        }
-
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
         this._updateViewTween(frameNow);
         this._camController.updateFrameTween(frameNow);
@@ -23069,9 +23006,8 @@ export class ThreeJSViewer {
         this._controls.dispose();
         this._clipGizmo.dispose();
         this._clipMoveGizmo.dispose();
-        // TransformControls.dispose() doesn't detach the helper it added to the
-        // scene — remove both clip gizmo helpers so teardown frees them.
-        this._scene.remove(this._clipGizmoHelper, this._clipMoveGizmoHelper);
+        // TransformControls.dispose() doesn't detach its helper from the scene.
+        this._gizmoScene.remove(this._clipGizmoHelper, this._clipMoveGizmoHelper);
         this.el.remove();
     }
 }

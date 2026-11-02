@@ -5634,6 +5634,58 @@ def test_clip_tool_has_refined_rotate_and_slide_gizmos(viewer_client, viewer_pag
     assert off is not None and not off["rot"] and not off["move"]
 
 
+# Sweeps a grid of NDC points through the shared gizmo hit test and counts,
+# per control, the points where it holds an axis and the points where more than
+# one control does.
+_GIZMO_HOVER_SCAN_JS = """
+(n) => {
+  const v = window.threejsViewer;
+  const ctls = v._allTransformControls().filter((c) => c.enabled && c.object !== undefined);
+  const owned = ctls.map(() => 0);
+  let shared = 0;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    ctls[0].pointerHover({x: -1 + 2 * (i + 0.5) / n, y: -1 + 2 * (j + 0.5) / n, button: 0});
+    const holders = ctls.map((c, k) => (c.axis != null ? k : -1)).filter((k) => k >= 0);
+    for (const k of holders) owned[k]++;
+    if (holders.length > 1) shared++;
+  }
+  for (const c of ctls) c.axis = null;
+  return {owned, shared};
+}
+"""
+
+
+@pytest.mark.browser
+def test_clip_gizmos_never_share_a_press(viewer_client, viewer_page):
+    """The clip slide line and rotate rings never both claim a pointer
+    position, so one press tilts or slides the plane, never both."""
+    viewer_client.add_sphere("s", radius=1.5)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=True)
+    viewer_client.set_camera(position=[4, -5, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    scan = viewer_page.evaluate(_GIZMO_HOVER_SCAN_JS, 120)
+    assert len(scan["owned"]) == 2
+    assert all(n > 0 for n in scan["owned"]), scan
+    assert scan["shared"] == 0, scan
+
+
+@pytest.mark.browser
+def test_overlapping_pinned_gizmos_never_share_a_press(viewer_client, viewer_page):
+    """Two pinned move gizmos on coincident objects: one hit test decides, so
+    a press drags exactly one of them."""
+    viewer_client.add_box("a", width=1, height=1, depth=1)
+    viewer_client.add_box("b", width=1, height=1, depth=1)
+    viewer_client.add_gizmo("a")
+    viewer_client.add_gizmo("b", mode="rotate")
+    viewer_client.set_camera(position=[4, -5, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    scan = viewer_page.evaluate(_GIZMO_HOVER_SCAN_JS, 120)
+    assert sum(1 for n in scan["owned"] if n > 0) >= 2, scan
+    assert scan["shared"] == 0, scan
+
+
 @pytest.mark.browser
 def test_binary_draw_ranges_channel_on_swept_tool_and_points(
     viewer_client, viewer_page
