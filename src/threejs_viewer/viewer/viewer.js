@@ -18173,9 +18173,9 @@ export class ThreeJSViewer {
 
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
-            // A focused checkbox (Show plane, Cap cut solids) must not swallow the shortcuts.
+            // A focused checkbox (Show plane, Cap cut solids) keeps Space, which toggles it, and passes the other shortcuts on.
             const t = /** @type {HTMLInputElement} */ (e.target);
-            if (t.tagName === 'INPUT' && t.type !== 'checkbox') return;
+            if (t.tagName === 'INPUT' && (t.type !== 'checkbox' || e.code === 'Space')) return;
             // Several keys change what lands in the shadow map (M/N/S/C, eyes).
             this._shadowDirty = true;
             if (this._menus.anyOpen()) {

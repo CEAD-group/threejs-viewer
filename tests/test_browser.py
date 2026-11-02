@@ -5667,6 +5667,36 @@ def test_clip_show_plane_hides_helper_and_keeps_cut(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_focused_clip_checkbox_keeps_space_and_passes_shortcuts(
+    viewer_client, viewer_page
+):
+    """Space on a focused Show plane checkbox toggles the checkbox instead of
+    starting playback, while other shortcuts still reach the viewer."""
+    viewer_client.add_box("spinner")
+    viewer_client.load_animation(_spin_animation("spinner"), autoplay=False)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0, show_helper=True)
+    settle(viewer_client)
+    viewer_page.focus(".tjsv-clip-show-plane")
+    state_js = """() => {
+      const v = window.threejsViewer;
+      return {
+        checked: v._clipShowPlaneCheck.checked,
+        playing: v.getAnimationState().playing,
+        wire: v._shading.wireframeMode,
+      };
+    }"""
+    before = viewer_page.evaluate(state_js)
+    assert before["checked"] and not before["playing"]
+
+    viewer_page.keyboard.press("Space")
+    after = viewer_page.evaluate(state_js)
+    assert not after["checked"] and not after["playing"]
+
+    viewer_page.keyboard.press("KeyM")
+    assert viewer_page.evaluate(state_js)["wire"] == (before["wire"] + 1) % 3
+
+
+@pytest.mark.browser
 def test_binary_draw_ranges_channel_on_swept_tool_and_points(
     viewer_client, viewer_page
 ):
