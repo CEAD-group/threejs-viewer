@@ -5073,6 +5073,7 @@ class ViewerClient:
         marker_color: int = 0x00E5FF,
         threshold_px: float = 14.0,
         max_pick_points: int = 0,
+        occlusion: bool = True,
     ) -> None:
         """Enable interactive picking of points *along* polylines and parametric
         tubes (beads) in the viewer.
@@ -5106,6 +5107,13 @@ class ViewerClient:
                 (the refine runs on the true spine); only nearest-segment
                 *selection* is approximate on sub-stride wiggles. Values below 2
                 disable decimation.
+            occlusion: When true (default), a candidate behind a tube bead
+                that the cursor ray passes through first is skipped, so the
+                pick lands on the visible wall instead of a spine behind it.
+                ``False`` restores plain screen-nearest selection. Either way,
+                the part of a line or tube past its draw range, objects under a
+                hidden parent, and points on the clipped side of the clipping
+                plane are never picked. Other meshes do not occlude.
 
         Notes:
             Each pick is delivered as a dict with keys:
@@ -5137,6 +5145,8 @@ class ViewerClient:
             "thresholdPx": float(threshold_px),
             "maxPickPoints": max_pick_points,
         }
+        if not occlusion:
+            self._polyline_picking["occlusion"] = False
         # Send now if connected; otherwise the connect handler replays it.
         if self._ws is not None:
             self._send(self._polyline_picking)

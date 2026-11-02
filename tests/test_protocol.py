@@ -1735,6 +1735,15 @@ def test_enable_polyline_picking_defaults(client):
     assert msg["maxPickPoints"] == 0
 
 
+def test_enable_polyline_picking_occlusion_flag(client):
+    """Occlusion is the viewer default and stays off the wire; only the
+    opt-out travels (issue #311)."""
+    client.enable_polyline_picking()
+    assert "occlusion" not in client._polyline_picking
+    client.enable_polyline_picking(occlusion=False)
+    assert client._polyline_picking["occlusion"] is False
+
+
 def test_enable_polyline_picking_max_pick_points(client):
     """max_pick_points is forwarded as an int maxPickPoints for the coarse-scan
     decimation (issue #111)."""
