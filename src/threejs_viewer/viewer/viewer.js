@@ -12560,7 +12560,8 @@ class PolylinePickController {
 // Same base/hover colour pairs as examples/36_axis_control.py's RED/GREEN/BLUE,
 // so the move gizmo and the axis-control widget agree on what X/Y/Z look like.
 const GIZMO_PALETTE = { x: 0xAE4346, y: 0x5D9C74, z: 0x4369A2, n: 0xcfd3da };
-const GIZMO_HOVER_PALETTE = { x: 0xC74E52, y: 0x6DB587, z: 0x4D7ABD };
+const GIZMO_HOVER_PALETTE = { x: 0xC87073, y: 0x88B89A, z: 0x6B8EC2 };
+const GIZMO_HOVER_LINE_WIDTH_PX = 5;   // hovered/dragged handle line, against AXIS_CONTROL_LINE_WIDTH_PX at rest
 // Gizmo modifier keys. On Windows a bare Alt press moves focus to the browser's
 // menu bar, so there Shift is the rotate override and Ctrl the snap toggle;
 // elsewhere Alt / Shift (Shift dodges macOS's Ctrl-click = right-click).
@@ -12982,6 +12983,7 @@ function restyleGizmoHelper(helper, opts) {
         }
         m._color = (m._color || new THREE.Color()).copy(col);
         m.color.copy(col);
+        if (m.isLineMaterial) m.linewidth = hovered ? GIZMO_HOVER_LINE_WIDTH_PX : AXIS_CONTROL_LINE_WIDTH_PX;
         if (planar) {
             // Slightly translucent flat chip, no outline.
             m._opacity = GIZMO_PLANE_OPACITY; m.opacity = GIZMO_PLANE_OPACITY; m.transparent = true;
