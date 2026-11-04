@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.75
+
+### Menus (#319)
+
+- New `radio` menu item: the same `options` and `value` as `select` and `segmented`, but it always lists one row per option, with a dot marking the selected one under an optional caption. The selection animates with the eye glyph's timing and honours `prefers-reduced-motion`. Space, Enter and the arrow keys select within the group without reaching the playback keys, and the group is one tab stop.
+- A shortcut on a `select`, `segmented` or `radio` item steps to the next option; before, it reported no value. `setItem` with new `options` and no `value` falls back to the first option when the current value is no longer offered.
+
+### README gallery (#310)
+
+- The README gallery is re-recorded from the current examples by a new script, `tools/record_readme_media.py`, which writes palette-reduced PNGs and GIFs (the gallery shrank from 14.1 MB to 11.7 MB). A failing example is reported at once instead of hanging the recorder, and shots whose optional dependency is missing are skipped.
+- The materials sampler glTF (`examples/tools/materials/`) now stands its bodies on the floor at z=0.
+
+### Repository (#320)
+
+- Agent guidance moved from the long `CLAUDE.md` to a short `AGENTS.md`; `CLAUDE.md` imports it.
+
 ## 0.0.74
 
 ### Clip tool (#313, #314)
