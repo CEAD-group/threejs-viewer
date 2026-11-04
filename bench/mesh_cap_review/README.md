@@ -17,6 +17,12 @@ use `--port 8080` to choose one. It serves only the demo and its known fixtures.
 Ctrl-C stops it. Each browser tab runs independently, without a Python WebSocket
 connection, using the public `handleMessage` embedder API. Reload resets the case.
 
+Add your own GLBs with repeated `--glb /path/to/model.glb` arguments. They appear
+as additional interactive cases, fitted to view with a whole-model/section
+toggle. Only the selected files are served; they are not copied or committed.
+Their cap measurements are observational, not analytic regression assertions.
+`--capture` still captures the eight deterministic regression fixtures.
+
 Use the links to select a case, download its GLB, or force the cap worker. Drag
 to orbit; press **C** for the normal clipping controls. The measured cap area is
 per slice (the sum of both slab caps divided by two). The displayed check is a

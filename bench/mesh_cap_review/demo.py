@@ -156,6 +156,19 @@ def generate():
 
 
 def serve(args):
+    cases = dict(CASES)
+    files = {name: HERE / "fixtures" / f"{name}.glb" for name in CASES}
+    for index, path in enumerate(args.glb):
+        path = path.resolve(strict=True)
+        if path.suffix.lower() != ".glb":
+            raise ValueError(f"Expected a GLB file: {path}")
+        name = f"model-{index + 1}"
+        files[name] = path
+        cases[name] = (
+            path.stem,
+            "Local GLB · fitted to view · C for clipping controls",
+            None,
+        )
     htmls = {"after": args.viewer_html.read_text()}
     if args.before:
         htmls["before"] = args.before.read_text()
@@ -166,28 +179,28 @@ def serve(args):
             req = urlsplit(self.path)
             if req.path.startswith("/fixtures/"):
                 name = req.path.removeprefix("/fixtures/").removesuffix(".glb")
-                if name not in CASES or req.path != f"/fixtures/{name}.glb":
+                if name not in files or req.path != f"/fixtures/{name}.glb":
                     self.send_error(404)
                     return
                 data, mime = (
-                    (HERE / "fixtures" / f"{name}.glb").read_bytes(),
+                    files[name].read_bytes(),
                     "model/gltf-binary",
                 )
             elif req.path == "/":
                 query = parse_qs(req.query)
                 name = query.get("case", ["overlap"])[0]
                 variant = query.get("variant", ["after"])[0]
-                if name not in CASES or variant not in htmls:
+                if name not in cases or variant not in htmls:
                     self.send_error(404)
                     return
                 config = json.dumps(
                     dict(
                         case=name,
-                        cases=CASES,
+                        cases=cases,
                         variant=variant,
                         before=bool(args.before),
                     )
-                )
+                ).replace("<", "\\u003c")
                 html = htmls[variant].replace(
                     "htmlTemplate: HTML_TEMPLATE,",
                     "autoConnect: false, htmlTemplate: HTML_TEMPLATE,",
@@ -273,6 +286,13 @@ def comparison_sheets(page, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument(
+        "--glb",
+        type=Path,
+        action="append",
+        default=[],
+        help="add a local model to the interactive demo; repeat for multiple files",
+    )
     parser.add_argument(
         "--viewer-html", type=Path, default=ROOT / "src/threejs_viewer/viewer.html"
     )

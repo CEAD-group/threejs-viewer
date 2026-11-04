@@ -17,6 +17,8 @@
     const q = new URLSearchParams(location.search);
     window.__clipCapWorkerTriangles = q.get('worker') === '1' ? 0 : null;
     const [title, description, expected] = DEMO.cases[DEMO.case];
+    const external = expected === null;
+    const escapeHTML = s => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     const style = document.createElement('style');
     style.textContent = `
         #review-header,#review-footer {position:fixed;left:0;right:0;z-index:100;
@@ -30,7 +32,7 @@
     document.head.appendChild(style);
     const header = document.createElement('header'); header.id = 'review-header';
     header.innerHTML = `<span class="review-small">PR #331 · ${DEMO.variant.toUpperCase()} · ${q.get('worker') === '1' ? 'Worker' : 'Main thread'}</span>
-        <strong>${title}</strong><p>${description}</p>`;
+        <strong>${escapeHTML(title)}</strong><p>${description}</p>`;
     if (!q.has('capture')) {
         const nav = document.createElement('nav');
         for (const [name, [label]] of Object.entries(DEMO.cases)) {
@@ -52,6 +54,23 @@
     const root = v.getObject('case');
     const meshes = [];
     root.traverse(n => { if (n.isMesh) meshes.push(n); });
+    if (external) {
+        root.updateWorldMatrix(true, true);
+        let bounds;
+        for (const n of meshes) {
+            n.geometry.computeBoundingBox();
+            const box = n.geometry.boundingBox.clone().applyMatrix4(n.matrixWorld);
+            if (bounds) bounds.union(box); else bounds = box;
+        }
+        if (!bounds || bounds.isEmpty()) throw new Error('GLB has no mesh bounds');
+        const center = bounds.getCenter(root.position.clone());
+        const size = bounds.getSize(root.position.clone());
+        const scale = 4 / Math.max(size.x, size.y, size.z);
+        root.scale.multiplyScalar(scale);
+        root.position.sub(center).multiplyScalar(scale);
+        root.updateWorldMatrix(true, true);
+        v.requestShadowUpdate();
+    }
     if (DEMO.case === 'groups') {
         for (const n of meshes) {
             const other = n.material.clone(); other.map = n.material.map.clone();
@@ -64,9 +83,10 @@
     }
     v.handleMessage({type:'set_clipping_caps', enabled:true});
     v.handleMessage({type:'set_clipping_slab',normal:[0,0,1],center:0,thickness:0.8,show_helper:false});
+    if (external && q.get('section') !== '1') v.handleMessage({type:'disable_clipping_plane'});
     v.getMenu('clip').close();
     const wide = DEMO.case === 'layouts';
-    const distance = wide ? 25 : DEMO.case === 'hollow' ? 17 : 13;
+    const distance = wide ? 25 : DEMO.case === 'hollow' || external ? 17 : 13;
     const x = ['overlap','collinear'].includes(DEMO.case) ? 0.5 : 0;
     v.handleMessage({type:'set_camera',position:[x,-distance*0.36,distance],target:[x,0,0],up:[0,0,1],fov:25});
     await frames(); await wait(() => v._clipCaps.settled()); await frames();
@@ -107,6 +127,11 @@
     window.demoStats = {area, expected, capCount:count, colors, pass};
     footer.innerHTML = `<strong>Measured cap area: ${area.toFixed(2)} · expected ${expected}</strong>
         <span style="float:right;color:${pass?'#81dcad':'#ffb18b'}">${pass?'Checks pass':'Regression reproduced'}</span>`;
+    if (external) {
+        const section = new URLSearchParams(q); section.set('section',q.get('section') === '1' ? '0' : '1');
+        footer.innerHTML = `<strong>${meshes.length} meshes loaded · ${count} section caps</strong>
+            <a href="?${section}">${q.get('section') === '1' ? 'Show whole model' : 'Show section'}</a>`;
+    }
     if (!q.has('capture')) {
         const worker = new URLSearchParams(q); worker.set('worker',q.get('worker')==='1'?'0':'1');
         footer.innerHTML += `<br><a href="/fixtures/${DEMO.case}.glb" download>Download GLB</a>
@@ -117,4 +142,8 @@
         }
     } else document.querySelectorAll('.tjsv-rail').forEach(n => n.style.display='none');
     window.demoReady = true;
-})().catch(e => {window.demoError=String(e); console.error(e);});
+})().catch(e => {
+    window.demoError=String(e); console.error(e);
+    const footer = document.getElementById('review-footer');
+    if (footer) footer.textContent = `Could not load demo: ${e}`;
+});
