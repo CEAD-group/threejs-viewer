@@ -366,3 +366,39 @@ def test_coplanar_caps_have_stable_winner(viewer_client, viewer_page, worker):
             for py in (-0.4, 0, 0.4):
                 rgb = viewer_page.evaluate(_PIXEL_AT, [px, py, 0.2])
                 assert rgb[2] > 80 and rgb[2] > 2 * rgb[0], (x, px, py, rgb)
+
+
+def _box_at(x0, x1, y0, y1, z0=-1.0, z1=1.0):
+    pos, _, idx = _box_arrays()
+    p = pos.copy()
+    for axis, (lo, hi) in enumerate(((x0, x1), (y0, y1), (z0, z1))):
+        p[:, axis] = np.where(pos[:, axis] > 0, hi, lo)
+    return p, idx
+
+
+@pytest.mark.parametrize("ortho", [False, True])
+def test_many_capped_meshes_keep_cap_bias_small(viewer_client, viewer_page, ortho):
+    # A depth bias ranked over every mesh in the scene grew to world units in
+    # ortho and drew the cap of the box behind through the front box's face.
+    client, page = viewer_client, viewer_page
+    client.set_sun(enabled=False)
+    client.add_mesh("a", *_box_at(-1, 1, -1, 0), color=0xFF0000)
+    for k in range(300):
+        x = 40 + k * 0.01
+        client.add_mesh(f"f{k}", *_box_at(x, x + 0.005, 0, 0.005), color=0x00FF00)
+    client.add_mesh("z", *_box_at(-1, 1, 0.05, 1.05), color=0x0000FF)
+    client.set_clipping_caps(True)
+    client.set_clipping_plane(normal=[0, 0, 1], distance=0.123, show_helper=False)
+    settle(client)
+    if ortho:
+        page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    client.set_camera(position=[0, -20, 3], target=[0, 0, 0.123], up=[0, 0, 1])
+    settle(client)
+    frames(page, 4)
+    _wait_settled(page)
+    frames(page, 2)
+    # The plane keeps z > 0.123; sample the front face of the box in front.
+    for z in np.linspace(0.15, 0.95, 17):
+        for x in (-0.6, 0, 0.6):
+            rgb = page.evaluate(_PIXEL_AT, [x, -1.0, float(z)])
+            assert rgb[0] > 80 and rgb[2] < rgb[0] / 2, (x, z, rgb)

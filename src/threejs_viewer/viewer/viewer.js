@@ -8437,7 +8437,7 @@ class ShadingDebugController {
             wireframe: true,
             polygonOffset: true,
             polygonOffsetFactor: -1,
-            polygonOffsetUnits: parentMesh.userData.__clipCap ? parentMesh.material.polygonOffsetUnits - 8 : -1,
+            polygonOffsetUnits: parentMesh.userData.__clipCap ? parentMesh.material.polygonOffsetUnits - CLIP_CAP_OFFSET_STEP / 2 : -1,
             side: THREE.DoubleSide,
             clippingPlanes: parentMesh.userData.__clipCap ? parentMesh.material.clippingPlanes : this.v._activeClippingPlanes(),
         });
@@ -9490,6 +9490,14 @@ const CLIP_CAP_WORKER_TRIANGLES = 20000;
 // Closed convex primitives; a plane is a sheet and gets no cap. The torus is
 // closed but not convex, so it goes through the mesh slicer.
 const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
+// Depth bias in polygon-offset units. Differently triangulated coplanar caps
+// need about 128 units apart to resolve; ranks are per overlap and clamped,
+// so the bias stays a few hundredths of a unit even in a 1000-deep ortho view.
+const CLIP_CAP_OFFSET_BASE = 2;
+const CLIP_CAP_OFFSET_STEP = 128;
+const CLIP_CAP_OFFSET_MAX_RANK = 7;
+// Natural id order ('p2' before 'p10') breaks coplanar cap ties.
+const CLIP_CAP_ID_ORDER = new Intl.Collator('en', { numeric: true });
 
 /**
  * Unit basis (u, v) of a plane with unit normal n, u × v = n.
@@ -10843,8 +10851,11 @@ class ClipCapController {
         this.enabled = false;
         /** @type {any[]} */ this._targets = [];
         this._targetsGen = -1;
-        /** Stable scene traversal order breaks coplanar ties between owners. */
-        this._depthOrder = new Map();
+        /** Cap depth ranks need recomputing after an install, removal or owner move. */
+        this._rankDirty = true;
+        /** @type {Map<any, number[]>} owner -> world matrix the ranks were computed for */
+        this._rankPoses = new Map();
+        this._box = new THREE.Box3();
         this._hasCaps = false;
         this._inv = new THREE.Matrix4();
         this._plane = new THREE.Plane();
@@ -10872,7 +10883,7 @@ class ClipCapController {
         // A Set: a tracked child of a tracked group is reached twice.
         /** @type {Set<any>} */ const kept = new Set();
         // Object ids, then source child order: independent of async load order.
-        const objects = [...this.v._objects].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+        const objects = [...this.v._objects].sort(([a], [b]) => CLIP_CAP_ID_ORDER.compare(a, b));
         for (const [, obj] of objects) {
             obj.traverse((/** @type {any} */ node) => {
                 if (node.isMesh && node.userData.clipCapKind) kept.add(node);
@@ -10887,7 +10898,7 @@ class ClipCapController {
             this._forgetWorkerCopy(mesh);
         }
         this._targets = out;
-        this._depthOrder = new Map(out.map((mesh, i) => [mesh, i]));
+        this._rankDirty = true;
         this._targetsGen = this.v._objGeneration;
     }
 
@@ -10904,6 +10915,63 @@ class ClipCapController {
             if (this._updateTarget(mesh, now)) any = true;
         }
         this._hasCaps = any || this.pending > 0;
+        if (any) this._rankCaps();
+    }
+
+    /**
+     * Polygon offset per cap. Caps on one plane are coplanar, so each cap is
+     * pulled ahead of every earlier owner's overlapping cap: later owners win
+     * consistently. Only overlapping caps are ranked, and the rank is clamped,
+     * so the bias stays small however many meshes the scene holds.
+     */
+    _rankCaps() {
+        let moved = this._rankDirty;
+        for (const mesh of this._targets) {
+            if (!mesh.userData.__clipCapState?.caps.length) continue;
+            const e = mesh.matrixWorld.elements, last = this._rankPoses.get(mesh);
+            if (last && last.every((x, i) => x === e[i])) continue;
+            this._rankPoses.set(mesh, e.slice());
+            moved = true;
+        }
+        if (!moved) return;
+        this._rankDirty = false;
+        for (const mesh of this._rankPoses.keys()) if (!mesh.userData.__clipCapState) this._rankPoses.delete(mesh);
+        const nPlanes = this.v._clipPlanes.length;
+        for (let i = 0; i < nPlanes; i++) {
+            /** @type {{cap: any, order: number, box: any, rank: number, prev: any[]}[]} */ const items = [];
+            for (const mesh of this._targets) {
+                const cap = mesh.userData.__clipCapState?.caps[i];
+                if (!cap || !cap.visible) continue;
+                const g = cap.geometry;
+                if (!g.boundingBox) g.computeBoundingBox();
+                cap.updateWorldMatrix(true, false);
+                const box = this._box.copy(g.boundingBox).applyMatrix4(cap.matrixWorld).clone();
+                // Coplanar caps have flat boxes; float noise must not separate them.
+                const size = box.max.clone().sub(box.min);
+                box.expandByScalar(1e-6 * Math.max(size.x, size.y, size.z, 1e-3));
+                items.push({ cap, order: items.length, box, rank: 0, prev: [] });
+            }
+            // Sweep along x; each overlapping pair links the later owner to the earlier one.
+            const byX = items.slice().sort((a, b) => a.box.min.x - b.box.min.x);
+            /** @type {typeof items} */ let active = [];
+            for (const it of byX) {
+                active = active.filter(a => a.box.max.x >= it.box.min.x);
+                for (const a of active) {
+                    if (!a.box.intersectsBox(it.box)) continue;
+                    if (a.order < it.order) it.prev.push(a); else a.prev.push(it);
+                }
+                active.push(it);
+            }
+            for (const it of items) {
+                let r = 0;
+                for (const p of it.prev) r = Math.max(r, p.rank + 1);
+                it.rank = Math.min(r, CLIP_CAP_OFFSET_MAX_RANK);
+                const mat = it.cap.material;
+                mat.polygonOffsetUnits = -(CLIP_CAP_OFFSET_BASE + CLIP_CAP_OFFSET_STEP * it.rank);
+                const overlay = it.cap.userData.wireframeOverlay;
+                if (overlay) overlay.material.polygonOffsetUnits = mat.polygonOffsetUnits - CLIP_CAP_OFFSET_STEP / 2;
+            }
+        }
     }
 
     /**
@@ -10938,6 +11006,7 @@ class ClipCapController {
         if (st.inflight) { st.inflight = 0; this.pending--; }
         this._forgetWorkerCopy(mesh);
         delete mesh.userData.__clipCapState;
+        this._rankDirty = true;
         this.v._shadowDirty = true;
     }
 
@@ -11039,10 +11108,7 @@ class ClipCapController {
                         caps = this._build(mesh, local, withColor, uvName, withGroups);
                     } catch (e) {
                         // Bad input skips this cap; the signature is kept so it is not retried every frame.
-                        if (!mesh.userData.__clipCapWarned) {
-                            mesh.userData.__clipCapWarned = true;
-                            console.warn(`Clip cap for '${mesh.userData.id || mesh.name}' failed:`, e);
-                        }
+                        this._warnFailed(mesh, e);
                         caps = [];
                     }
                     this._install(mesh, st, caps, local);
@@ -11170,7 +11236,7 @@ class ClipCapController {
             st.workerGeomKey = '';
             return;
         }
-        if (msg.error) this._warn(mesh, msg.error);
+        if (msg.error) this._warnFailed(mesh, msg.error);
         const t0 = performance.now();
         this._install(mesh, st, msg.caps, st.inflightLocal);
         st.sig = st.inflightSig;
@@ -11178,11 +11244,11 @@ class ClipCapController {
         this.lastInstallMs = st.last - t0;
     }
 
-    /** @param {any} mesh @param {string} warning */
-    _warn(mesh, warning) {
+    /** Warn once per owner that slicing threw. @param {any} mesh @param {any} error */
+    _warnFailed(mesh, error) {
         if (mesh.userData.__clipCapWarned) return;
         mesh.userData.__clipCapWarned = true;
-        console.warn(`Clip cap for '${mesh.userData.id || mesh.name}': ${warning}`);
+        console.warn(`Clip cap for '${mesh.userData.id || mesh.name}' failed:`, error);
     }
 
     /**
@@ -11191,6 +11257,7 @@ class ClipCapController {
      * @param {ClipCapPiece[]} results @param {number[][]} local
      */
     _install(mesh, st, results, local) {
+        this._rankDirty = true;
         const planes = this.v._clipPlanes;
         const n = Math.min(planes.length, results.length);
         for (let i = 0; i < n; i++) {
@@ -11204,7 +11271,7 @@ class ClipCapController {
                 const mat = new THREE.MeshStandardMaterial({
                     side: THREE.DoubleSide,
                     // Coplanar with the cut rim: pull the cap forward a hair.
-                    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+                    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -CLIP_CAP_OFFSET_BASE,
                     fog: false,
                 });
                 cap = new THREE.Mesh(g, mat);
@@ -11251,12 +11318,6 @@ class ClipCapController {
         for (const cap of st.caps) {
             if (!cap) continue;
             const mat = cap.material;
-            // All caps on a slice are coplanar, even when their owners are
-            // separate GLB meshes. A small, distinct depth-buffer bias makes
-            // later scene meshes win consistently, independent of draw sorting.
-            mat.polygonOffsetUnits = -128 * (1 + (this._depthOrder.get(mesh) || 0));
-            const overlay = cap.userData.wireframeOverlay;
-            if (overlay) overlay.material.polygonOffsetUnits = mat.polygonOffsetUnits - 8;
             if (own.color) mat.color.copy(own.color);
             // glTF keeps the base colour in the map with a white factor: sample it along the cut.
             const baked = this._bakeRegionColors(cap, ownMaterials(mesh));
