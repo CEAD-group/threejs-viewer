@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.76
+
+### Tool panels on a left rail (#324, issue #323)
+
+- The Clipping and Lighting controls are tool panels on a new left-edge rail, enabled from the View menu's Tools section ("Clipping panel" `C`, "Lighting panel" `E`). Enabled panels appear folded; with none enabled there is no left rail. The choice persists in localStorage.
+- `C` turns the cut on and unfolds the Clipping panel, or turns it off and folds it. `E` unfolds and folds Lighting. Both work with the toolbar hidden. `set_clipping_plane` / `set_clipping_slab` unfold the panel only when the cut goes from off to on, so streaming a plane never reopens a folded panel.
+- The panels use the menu styling: segmented buttons, toggle switches, uppercase key chips and numeric fields without spinners. The View menu is regrouped into Tools, Camera and Display sections.
+- `MenuController` menus take `side: 'left'|'right'`. Each side keeps one open body, and closed tabs move aside so they never cover it.
+- Space and Enter on a focused button in a rail body, and keys in a focused select, no longer reach the viewer shortcuts. Changing the wireframe mode refreshes shadows.
+
+### Section caps on meshes and models (#321)
+
+- With caps on, `add_mesh` meshes and the meshes of loaded models (GLB/glTF and the other formats on the same path) get section caps. Each connected part is judged on its own: a part that is closed or has only small holes is capped, while sheets and short open pipes are not. A long open single-wall tube passes the rule and is capped like a solid rod.
+- Interpenetrating bodies merged into one mesh give one solid cap when the winding is consistent; otherwise the fill is even-odd by nesting.
+- On textured meshes the cap colour is the colour map averaged along each cut loop, read through the map's own uv channel and each material's own map, with transparent texels ignored.
+- Skinned, instanced and morph-target meshes are not capped.
+
 ## 0.0.75
 
 ### Menus (#319)
