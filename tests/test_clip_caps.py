@@ -1112,9 +1112,10 @@ def test_model_clones_share_one_worker_copy(viewer_client, viewer_page):
 
 
 def _png(w, h, rgb, right=None):
-    """RGB PNG of one flat colour, or two with `right` on the right half."""
+    """RGB(A) PNG of one flat colour, or two with `right` on the right half."""
     row = bytes(rgb) * (w // 2) + bytes(right or rgb) * (w - w // 2)
     raw = b"".join(b"\x00" + row for _ in range(h))
+    ctype = 6 if len(rgb) == 4 else 2
 
     def chunk(tag, data):
         return (
@@ -1126,20 +1127,26 @@ def _png(w, h, rgb, right=None):
 
     return (
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, ctype, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(raw))
         + chunk(b"IEND", b"")
     )
 
 
-def _textured_box_glb(png):
-    """Closed box with u running along x and a white base-colour factor."""
+def _textured_box_glb(png, channel=0):
+    """Closed box with u running along x and a white base-colour factor. With
+    channel=1 that uv set is TEXCOORD_1 and TEXCOORD_0 is a constant (0.75, 0.5)."""
     g = _Glb()
     mesh = g.box_mesh("plain")
     pos, _, _ = _box_arrays()
     uv = np.clip(pos[:, :2] * 0.5 + 0.5, 0, 1).astype(np.float32)
     prim = g.gltf["meshes"][mesh]["primitives"][0]
-    prim["attributes"]["TEXCOORD_0"] = g.accessor(
+    if channel:
+        const = np.tile(np.float32([0.75, 0.5]), (len(uv), 1))
+        prim["attributes"]["TEXCOORD_0"] = g.accessor(
+            g.view(const.tobytes()), 5126, len(uv), "VEC2"
+        )
+    prim["attributes"][f"TEXCOORD_{channel}"] = g.accessor(
         g.view(uv.tobytes()), 5126, len(uv), "VEC2"
     )
     g.gltf["images"] = [{"bufferView": g.view(png), "mimeType": "image/png"}]
@@ -1149,7 +1156,7 @@ def _textured_box_glb(png):
         {
             "pbrMetallicRoughness": {
                 "baseColorFactor": [1, 1, 1, 1],
-                "baseColorTexture": {"index": 0},
+                "baseColorTexture": {"index": 0, "texCoord": channel},
             }
         }
     ]
@@ -1199,6 +1206,33 @@ def test_textured_cap_samples_the_texture_along_the_cut(
     _wait_settled(viewer_page)
     frames(viewer_page, 2)
     assert _shown_rgb(viewer_page, "tex") == pytest.approx([0xE0, 0xD0, 0xC0], abs=2)
+
+
+@pytest.mark.browser
+def test_textured_cap_reads_the_maps_uv_channel_and_skips_clear_texels(
+    viewer_client, viewer_page
+):
+    """A map on TEXCOORD_1 is sampled through uv1, and fully transparent
+    texels are left out of the average."""
+    dark_light = _png(16, 16, (0x20, 0x20, 0x20), (0xE0, 0xD0, 0xC0))
+    viewer_client.add_model_binary(
+        "uv1", _textured_box_glb(dark_light, channel=1), format="glb"
+    )
+    clear_light = _png(16, 16, (0, 0, 0, 0), (0xE0, 0xD0, 0xC0, 0xFF))
+    viewer_client.add_model_binary(
+        "clear", _textured_box_glb(clear_light), format="glb", position=[0, 5, 0]
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-0.5, show_helper=False)
+    settle(viewer_client)
+    for id in ("uv1", "clear"):
+        _wait_object(viewer_page, id)
+        _wait_caps(viewer_page, id, 1)
+    frames(viewer_page, 2)
+    # uv1 puts the cut in the dark half (uv0 would read the light half).
+    assert _shown_rgb(viewer_page, "uv1") == pytest.approx([0x20] * 3, abs=2)
+    # Every sample is clear, so the cap takes the average of the opaque texels.
+    assert _shown_rgb(viewer_page, "clear") == pytest.approx([0xE0, 0xD0, 0xC0], abs=2)
 
 
 def _pipe(radius, length, n=32, rings=2, hole=None):
@@ -1251,7 +1285,8 @@ def _sphere_with_hole(n_lat=24, n_lon=48, hole_rows=2):
 def test_mesh_cap_tolerates_small_holes_per_part(viewer_client, viewer_page):
     """A body with a small hole and a long hose with open ends read as solid;
     a short open pipe does not, and an open sheet merged into the same mesh
-    as a closed box leaves the box capped."""
+    as a closed box, across the cut and apart or touching one corner, leaves
+    the box capped."""
     pos, idx = _sphere_with_hole()
     viewer_client.add_mesh("holed", pos, idx)
     pos, idx = _pipe(0.2, 6.0, rings=13)
@@ -1259,12 +1294,19 @@ def test_mesh_cap_tolerates_small_holes_per_part(viewer_client, viewer_page):
     pos, idx = _pipe(1.0, 2.0)
     viewer_client.add_mesh("pipe", pos, idx, position=[6, 0, 0])
     bpos, _, bidx = _box_arrays(0.5)
-    sheet = np.array(
-        [[-1, -1, 1.5], [1, -1, 1.5], [1, 1, 1.5], [-1, 1, 1.5]], dtype=np.float32
+    # A vertical sheet across the cut beside the box, and one touching the
+    # box's corner (0.5, 0.5, 0.5) at a single vertex.
+    apart = np.array([[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]], dtype=np.float32)
+    touching = np.array(
+        [[0.5, 0.5, 0.5], [2.5, 2.5, 0.5], [2.5, 2.5, -1.5], [1.5, 1.5, -1.5]],
+        dtype=np.float32,
     )
-    merged = np.concatenate([bpos, sheet])
-    midx = np.concatenate([bidx, np.array([0, 1, 2, 0, 2, 3]) + len(bpos)])
-    viewer_client.add_mesh("merged", merged, midx.astype(np.uint32), position=[0, 4, 0])
+    for k, sheet in enumerate((apart, touching)):
+        merged = np.concatenate([bpos, sheet])
+        midx = np.concatenate([bidx, np.array([0, 1, 2, 0, 2, 3]) + len(bpos)])
+        viewer_client.add_mesh(
+            f"merged{k}", merged, midx.astype(np.uint32), position=[4 * k, 4, 0]
+        )
     viewer_client.set_clipping_caps(True)
     viewer_client.set_clipping_plane(
         normal=[0, 0, 1], distance=-0.25, show_helper=False
@@ -1273,15 +1315,17 @@ def test_mesh_cap_tolerates_small_holes_per_part(viewer_client, viewer_page):
     frames(viewer_page, 3)
     _wait_caps(viewer_page, "holed", 1)
     _wait_caps(viewer_page, "hose", 1)
-    _wait_caps(viewer_page, "merged", 1)
+    _wait_caps(viewer_page, "merged0", 1)
+    _wait_caps(viewer_page, "merged1", 1)
     _wait_settled(viewer_page)
     assert _caps(viewer_page, "pipe") == []
     (cap,) = _caps(viewer_page, "hose")
     assert cap["area"] == pytest.approx(
         0.04 * 16 * math.sin(2 * math.pi / 32), rel=1e-4
     )
-    (cap,) = _caps(viewer_page, "merged")
-    assert cap["area"] == pytest.approx(1.0, rel=1e-4)
+    for k in range(2):
+        (cap,) = _caps(viewer_page, f"merged{k}")
+        assert cap["area"] == pytest.approx(1.0, rel=1e-4)
 
 
 _ASSETS = Path.home() / ".cache" / "threejs-viewer"

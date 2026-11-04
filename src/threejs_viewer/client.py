@@ -4846,10 +4846,13 @@ class ViewerClient:
         boundary loop is small next to the part and its boundary is a small
         share of its edges, so nearly closed game assets (a hose with open
         ends, a body with a small hole) are capped while sheets and short
-        open pipes stay open. The cost of that leniency: a part with small
-        holes is filled as if it were solid, so a long thin open tube (a
-        straw) is capped like a hose, and a cut through a hole itself does not
-        close and leaves that loop open. A solid split across several
+        open pipes stay open. Parts are joined only across edges shared by
+        exactly two triangles, so a sheet touching a body at a corner does not
+        open it. The cost of that leniency: a part with small holes is filled
+        as if it were solid, so a long open single-surface tube (a straw, a
+        hose modelled as one wall) is capped like a solid rod, and a cut
+        through a hole itself does not close and leaves that loop open. A
+        solid split across several
         meshes, skinned and morphing meshes, translucent and wireframe
         objects stay open. A per-object ``clip_cap=`` on the add
         call overrides this switch. Off by default; also toggled by the "Cap
