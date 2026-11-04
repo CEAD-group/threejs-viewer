@@ -1133,9 +1133,10 @@ def _png(w, h, rgb, right=None):
     )
 
 
-def _textured_box_glb(png, channel=0):
+def _textured_box_glb(png, channel=0, vertex_rgb=None):
     """Closed box with u running along x and a white base-colour factor. With
-    channel=1 that uv set is TEXCOORD_1 and TEXCOORD_0 is a constant (0.75, 0.5)."""
+    channel=1 that uv set is TEXCOORD_1 and TEXCOORD_0 is a constant (0.75, 0.5).
+    vertex_rgb adds a uniform COLOR_0."""
     g = _Glb()
     mesh = g.box_mesh("plain")
     pos, _, _ = _box_arrays()
@@ -1149,6 +1150,11 @@ def _textured_box_glb(png, channel=0):
     prim["attributes"][f"TEXCOORD_{channel}"] = g.accessor(
         g.view(uv.tobytes()), 5126, len(uv), "VEC2"
     )
+    if vertex_rgb is not None:
+        rgb = np.tile(np.float32(vertex_rgb), (len(uv), 1))
+        prim["attributes"]["COLOR_0"] = g.accessor(
+            g.view(rgb.tobytes()), 5126, len(uv), "VEC3"
+        )
     g.gltf["images"] = [{"bufferView": g.view(png), "mimeType": "image/png"}]
     g.gltf["samplers"] = [{}]
     g.gltf["textures"] = [{"source": 0, "sampler": 0}]
@@ -1173,6 +1179,21 @@ def _shown_rgb(page, id):
 def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page):
     """A white base-colour factor over a dark texture gives a dark cap."""
     glb = _textured_box_glb(_png(8, 8, (0x30, 0x20, 0x10)))
+    viewer_client.add_model_binary("tex", glb, format="glb")
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    _wait_object(viewer_page, "tex")
+    _wait_caps(viewer_page, "tex", 1)
+    frames(viewer_page, 2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0x30, 0x20, 0x10], abs=2)
+
+
+@pytest.mark.browser
+def test_textured_cap_with_vertex_colours_multiplies_once(viewer_client, viewer_page):
+    """White vertex colours over a dark texture keep the texture colour; the
+    bake must not multiply the texture sample into itself."""
+    glb = _textured_box_glb(_png(8, 8, (0x30, 0x20, 0x10)), vertex_rgb=(1, 1, 1))
     viewer_client.add_model_binary("tex", glb, format="glb")
     viewer_client.set_clipping_caps(True)
     viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)

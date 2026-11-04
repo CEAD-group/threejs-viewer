@@ -9061,6 +9061,8 @@ const MENU_COG_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none
 
 const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'radio', 'label', 'divider', 'custom']);
 /** Item types whose value is one of `options`. */
+// The viewer drives these menus directly, so embedders may not replace or remove them.
+const BUILTIN_MENU_IDS = new Set(['viewer', 'clip', 'lighting']);
 const MENU_CHOICE_TYPES = new Set(['select', 'segmented', 'radio']);
 
 /**
@@ -11270,14 +11272,14 @@ function buildSweptClipCap(geometry, layout, out) {
  * @param {ArrayLike<number>} idx @param {number} end  drawn index count
  * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
  * @param {number} block
- * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+ * @returns {ClipCapPiece[]}
  */
 function sliceTubeClipCap(pos, col, idx, end, planes, block) {
     const nBlocks = Math.floor(end / block);
     const sd = new Float64Array(block);
     /** @type {number[]} */ const P = [];
     /** @type {number[]} */ const C = [];
-    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    /** @type {ClipCapPiece[]} */ const out = [];
     for (const plane of planes) {
         const nx = plane[0], ny = plane[1], nz = plane[2], c = plane[3];
         const basis = clipCapBasis(nx, ny, nz);
@@ -11681,6 +11683,11 @@ function earcut2D(data, holeIndices) {
 }
 
 /**
+ * A cap's triangles and colours; mesh caps of textured owners add the uv samples per filled region.
+ * @typedef {{pos: Float32Array, col: Float32Array | null, reg?: Int32Array, ruv?: Float32Array,
+ *   ruvEnd?: Int32Array, rmat?: Uint16Array | null}} ClipCapPiece
+ */
+/**
  * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
  * torus), free of Three.js so the LOD worker runs the same code. Only the
  * connected parts that read as solid are cut (after welding, each boundary
@@ -11698,7 +11705,7 @@ function earcut2D(data, holeIndices) {
  *   dense xyz positions, optional indices, optional dense rgb colours
  * @param {number} start @param {number} end  drawn index range
  * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
- * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+ * @returns {ClipCapPiece[]}
  */
 function sliceMeshClipCap(src, start, end, planes) {
     const pos = src.pos, idx = src.idx, col = src.col, uv = src.uv || null, tmat = src.mat || null;
@@ -11878,7 +11885,7 @@ function sliceMeshClipCap(src, start, end, planes) {
         }
     }
     const t0 = Math.ceil(Math.max(0, start) / 3), t1 = Math.min(nTriAll, Math.floor(end / 3));
-    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    /** @type {ClipCapPiece[]} */ const out = [];
     const solid = src.solid;
     if (!solid) return planes.map(() => ({ pos: new Float32Array(0), col: col ? new Float32Array(0) : null }));
     const oriented = !!src.oriented;
@@ -12533,7 +12540,7 @@ class ClipCapController {
                 const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
                 if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
                     const t0 = performance.now();
-                    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ let caps;
+                    /** @type {ClipCapPiece[]} */ let caps;
                     try {
                         caps = this._build(mesh, local, withColor, uvName, withGroups);
                     } catch (e) {
@@ -12559,7 +12566,7 @@ class ClipCapController {
      * Main-thread cap arrays per plane.
      * @param {any} mesh @param {number[][]} local @param {boolean} withColor
      * @param {string} uvName @param {boolean} withGroups
-     * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+     * @returns {ClipCapPiece[]}
      */
     _build(mesh, local, withColor, uvName, withGroups) {
         const kind = mesh.userData.clipCapKind;
@@ -12679,7 +12686,7 @@ class ClipCapController {
     /**
      * Swap in cap meshes from per-plane triangle arrays.
      * @param {any} mesh @param {any} st
-     * @param {{pos: Float32Array, col: Float32Array | null}[]} results @param {number[][]} local
+     * @param {ClipCapPiece[]} results @param {number[][]} local
      */
     _install(mesh, st, results, local) {
         const planes = this.v._clipPlanes;
@@ -12710,7 +12717,7 @@ class ClipCapController {
             cap.visible = true;
             const r = /** @type {any} */ (results[i]);
             // Uvs along the cut, per filled region, for sampling the colour map.
-            cap.userData.__regions = r.ruv ? { reg: r.reg, ruv: r.ruv, ruvEnd: r.ruvEnd, rmat: r.rmat || null, base: r.col } : null;
+            cap.userData.__regions = r.ruv ? { reg: r.reg, ruv: r.ruv, ruvEnd: r.ruvEnd, rmat: r.rmat || null, base: r.col ? r.col.slice() : null } : null;
             cap.userData.__regionKey = '';
             // Clipped by every plane but its own, which it lies on.
             const others = planes.filter((/** @type {any} */ _, /** @type {number} */ j) => j !== i);
@@ -25596,12 +25603,12 @@ class ThreeJSViewer {
      *   setItem: (itemId: string, patch: Partial<MenuItemSpec>) => boolean, getValue: (itemId: string) => any}}
      */
     addMenu(spec) {
-        if (spec && spec.id === 'viewer') throw new Error("addMenu: 'viewer' is the built-in menu id");
+        if (spec && BUILTIN_MENU_IDS.has(spec.id)) throw new Error(`addMenu: '${spec.id}' is a built-in menu id`);
         return this._menus.add({ ...spec, builtin: false });
     }
 
     /** @param {string} id @returns {boolean} */
-    removeMenu(id) { return id === 'viewer' ? false : this._menus.remove(id); }
+    removeMenu(id) { return BUILTIN_MENU_IDS.has(id) ? false : this._menus.remove(id); }
 
     /** @param {string} id */
     getMenu(id) { return this._menus.get(id); }

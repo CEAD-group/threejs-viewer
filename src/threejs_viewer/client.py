@@ -4441,7 +4441,8 @@ class ViewerClient:
         back through :meth:`on_menu_action`.
 
         Args:
-            id: Menu id (``"viewer"`` is reserved for the built-in menu).
+            id: Menu id (``"viewer"``, ``"clip"`` and ``"lighting"`` are reserved
+                for the built-in menus).
                 Re-using an id replaces the menu.
             items: Ordered item dicts. ``type`` is one of ``"button"``,
                 ``"toggle"``, ``"eye"``, ``"select"``, ``"segmented"``,
@@ -4476,8 +4477,8 @@ class ViewerClient:
 
         Menus are re-added on reconnect with their latest item state.
         """
-        if id == "viewer":
-            raise ValueError("'viewer' is the built-in menu id")
+        if id in ("viewer", "clip", "lighting"):
+            raise ValueError(f"'{id}' is a built-in menu id")
         if mode not in _ALLOWED_MENU_MODES:
             raise ValueError(
                 f"mode must be one of {sorted(_ALLOWED_MENU_MODES)} (got {mode!r})"
