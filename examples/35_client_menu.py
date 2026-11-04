@@ -35,7 +35,6 @@ client.add_menu(
     "demo",
     label="Demo",
     title="Example menu driven from Python",
-    storage_key="tjsv-example.demo",
     items=[
         # A collapsible label folds the rows up to the next divider.
         {"type": "label", "id": "scene", "label": "Scene", "collapsible": True},

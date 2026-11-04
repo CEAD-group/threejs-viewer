@@ -368,6 +368,14 @@
 .threejs-viewer .tjsv-radio-opt .tjsv-menu-label { transition: color 0.4s cubic-bezier(.4, 0, .2, 1); }
 .threejs-viewer .tjsv-radio-opt:not(.active) .tjsv-menu-label { color: var(--tjsv-text-dim); }
 .threejs-viewer .tjsv-radio-opt.disabled .tjsv-radio-dot { opacity: 0.4; }
+.threejs-viewer .tjsv-radio-opt.disabled .tjsv-menu-label { color: var(--tjsv-text-faint); }
+.threejs-viewer .tjsv-radio-caption[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) {
+    .threejs-viewer .tjsv-radio-dot,
+    .threejs-viewer .tjsv-radio-dot::after,
+    .threejs-viewer .tjsv-radio-opt.active .tjsv-radio-dot::after,
+    .threejs-viewer .tjsv-radio-opt .tjsv-menu-label { transition: none; }
+}
 
 /* Animation Controls */
 .threejs-viewer .tjsv-animation-controls {

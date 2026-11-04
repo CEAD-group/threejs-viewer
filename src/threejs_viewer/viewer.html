@@ -379,6 +379,14 @@
         .threejs-viewer .tjsv-radio-opt .tjsv-menu-label { transition: color 0.4s cubic-bezier(.4, 0, .2, 1); }
         .threejs-viewer .tjsv-radio-opt:not(.active) .tjsv-menu-label { color: var(--tjsv-text-dim); }
         .threejs-viewer .tjsv-radio-opt.disabled .tjsv-radio-dot { opacity: 0.4; }
+        .threejs-viewer .tjsv-radio-opt.disabled .tjsv-menu-label { color: var(--tjsv-text-faint); }
+        .threejs-viewer .tjsv-radio-caption[hidden] { display: none; }
+        @media (prefers-reduced-motion: reduce) {
+            .threejs-viewer .tjsv-radio-dot,
+            .threejs-viewer .tjsv-radio-dot::after,
+            .threejs-viewer .tjsv-radio-opt.active .tjsv-radio-dot::after,
+            .threejs-viewer .tjsv-radio-opt .tjsv-menu-label { transition: none; }
+        }
 
         /* Animation Controls */
         .threejs-viewer .tjsv-animation-controls {
@@ -9542,13 +9550,10 @@ class MenuController {
             el = document.createElement('div');
             el.className = 'tjsv-menu-radio';
             el.setAttribute('role', 'radiogroup');
-            if (it.label) {
-                const lab = document.createElement('div');
-                lab.className = 'tjsv-menu-label tjsv-radio-caption';
-                lab.textContent = it.label;
-                el.appendChild(lab);
-                el.setAttribute('aria-label', it.label);
-            }
+            // Always built, so a label set later through setItem has somewhere to go.
+            const lab = document.createElement('div');
+            lab.className = 'tjsv-menu-label tjsv-radio-caption';
+            el.appendChild(lab);
             const list = document.createElement('div');
             list.className = 'tjsv-radio-list';
             rec.input = list;
@@ -9632,6 +9637,7 @@ class MenuController {
                     lab.textContent = text;
                     child.appendChild(dot);
                     child.appendChild(lab);
+                    child.addEventListener('keydown', (e) => this._onRadioKey(m, rec, o, e));
                 } else {
                     child.className = 'tjsv-seg-btn';
                     child.textContent = text;
@@ -9639,6 +9645,29 @@ class MenuController {
             }
             host.appendChild(child);
         }
+    }
+
+    /**
+     * Radiogroup keys on a focused option: Space/Enter select it, arrows move
+     * the selection. Stopped here, since Space and the arrows are also the
+     * viewer's playback keys.
+     * @param {any} m @param {any} rec @param {{value: any}} o @param {KeyboardEvent} e
+     */
+    _onRadioKey(m, rec, o, e) {
+        const opts = rec.spec.options || [];
+        let target = null;
+        if (e.key === ' ' || e.key === 'Enter') target = o;
+        else if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+            const step = (e.key === 'ArrowDown' || e.key === 'ArrowRight') ? 1 : -1;
+            const i = opts.indexOf(o);
+            target = opts[(i + step + opts.length) % opts.length];
+        }
+        if (!target) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this._commit(m, rec, target.value);
+        const row = [...rec.input.querySelectorAll('.tjsv-radio-opt')][opts.indexOf(target)];
+        if (row) row.focus();
     }
 
     // ---- state -----------------------------------------------------------
@@ -9676,6 +9705,15 @@ class MenuController {
         const type = it.type || 'button';
         if (type === 'toggle' || type === 'eye') {
             this._commit(m, rec, !this._valueOf(m, it));
+            return;
+        }
+        if (MENU_CHOICE_TYPES.has(type)) {
+            // Reached only through a shortcut: step to the next option.
+            const opts = it.options || [];
+            if (!opts.length) return;
+            const cur = String(this._valueOf(m, it));
+            const i = opts.findIndex(o => String(o.value) === cur);
+            this._commit(m, rec, opts[(i + 1) % opts.length].value);
             return;
         }
         if (typeof it.onClick === 'function') it.onClick(it);
@@ -9749,11 +9787,17 @@ class MenuController {
             this._persist(m);
             if ((it.type || '') === 'eye') this._applyEye(it, !!v);
         }
+        if ('options' in patch && !('value' in patch) && it.id && MENU_CHOICE_TYPES.has(it.type || '')) {
+            // A value the new options no longer offer falls back to the first one.
+            const cur = String(this._valueOf(m, it));
+            if (!it.options.some(o => String(o.value) === cur)) {
+                m.state[it.id] = it.options[0]?.value;
+                this._persist(m);
+            }
+        }
         if ('options' in patch && rec.input) this._fillOptions(m, rec);
-        if ('label' in patch) {
-            const lab = (it.type || '') === 'radio'
-                ? rec.el?.querySelector('.tjsv-radio-caption')
-                : rec.el?.querySelector('.tjsv-menu-label');
+        if ('label' in patch && (it.type || '') !== 'radio') {
+            const lab = rec.el?.querySelector('.tjsv-menu-label');
             if (lab) lab.textContent = it.label || '';
             else if ((it.type || '') === 'label' && rec.el) rec.el.textContent = it.label || '';
         }
@@ -9823,14 +9867,21 @@ class MenuController {
                 b.disabled = disabled;
             }
         } else if (type === 'radio') {
+            const cap = el.querySelector('.tjsv-radio-caption');
+            if (cap) { cap.textContent = it.label || ''; cap.hidden = !it.label; }
+            if (it.label) el.setAttribute('aria-label', it.label); else el.removeAttribute('aria-label');
             const v = this._valueOf(m, it);
-            for (const b of rec.input.querySelectorAll('.tjsv-radio-opt')) {
-                const on = String(b.dataset.value) === String(v);
+            const rows = [...rec.input.querySelectorAll('.tjsv-radio-opt')];
+            const sel = rows.findIndex(b => String(b.dataset.value) === String(v));
+            rows.forEach((b, i) => {
+                const on = i === sel;
                 b.classList.toggle('active', on);
                 b.classList.toggle('disabled', disabled);
                 b.setAttribute('aria-checked', String(on));
                 b.disabled = disabled;
-            }
+                // Roving tabindex: the group is one tab stop, the arrows move within it.
+                b.tabIndex = i === (sel < 0 ? 0 : sel) ? 0 : -1;
+            });
         }
     }
 

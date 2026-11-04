@@ -7771,6 +7771,63 @@ def test_add_menu_radio_lists_every_option(viewer_client, viewer_page):
         "value": "y",
     }
 
+    # Keyboard: Space and the arrows select within the group and never reach
+    # the viewer's playback keys; the group is one tab stop.
+    page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.addMenu({id: 'kb', label: 'Kb', items: ["
+        "   {type: 'radio', id: 'r', options: ['a', 'b', 'c'], value: 'a', shortcut: 'Q'},"
+        " ]});"
+        " window.__toggled = 0; v._togglePlay = () => { window.__toggled++; }; }"
+    )
+    page.locator("[data-menu=kb] .tjsv-menu-btn").click()
+    rows = "[data-menu=kb] [data-item=r] .tjsv-radio-opt"
+    assert page.evaluate(
+        f"() => [...document.querySelectorAll('{rows}')].map(b => b.tabIndex)"
+    ) == [0, -1, -1]
+    page.locator(f"{rows}[data-value=a]").focus()
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowUp")
+    page.keyboard.press("Space")
+    kb = (
+        "() => ({value: window.threejsViewer.getMenu('kb').getValue('r'),"
+        " focused: document.activeElement.dataset.value, toggled: window.__toggled,"
+        " caption: document.querySelector('[data-menu=kb] .tjsv-radio-caption').hidden})"
+    )
+    assert page.evaluate(kb) == {
+        "value": "c",
+        "focused": "c",
+        "toggled": 0,
+        "caption": True,
+    }
+
+    # A shortcut steps to the next option; a label set later gets a caption;
+    # an options swap without a value drops a value no longer offered.
+    page.keyboard.press("Escape")
+    _press_viewer_key(page, "q", "KeyQ")
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('kb').getValue('r')") == "a"
+    )
+    late = page.evaluate(
+        "() => { const m = window.threejsViewer.getMenu('kb');"
+        " m.setItem('r', {label: 'Late'});"
+        " m.setItem('r', {options: ['p', 'q']});"
+        " const r = document.querySelector('[data-menu=kb] [data-item=r]');"
+        " const cap = r.querySelector('.tjsv-radio-caption');"
+        " return {caption: cap.textContent, hidden: cap.hidden,"
+        "  aria: r.getAttribute('aria-label'), value: m.getValue('r'),"
+        "  checked: r.querySelector('.tjsv-radio-opt.active').dataset.value}; }"
+    )
+    assert late == {
+        "caption": "Late",
+        "hidden": False,
+        "aria": "Late",
+        "value": "p",
+        "checked": "p",
+    }
+
 
 @pytest.mark.browser
 def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_page):
