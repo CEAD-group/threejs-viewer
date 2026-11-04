@@ -3,6 +3,11 @@
 `threejs-viewer` is licensed under the MIT license. It redistributes the
 following third-party material, which retains its own license.
 
+## Mesh-cap triangulation
+
+`earcut2D` in `viewer.js` adapts Mapbox earcut 2.2.4 and retains its ISC notice
+inside the function, including in the standalone viewer and worker source.
+
 ## Colormap lookup tables — `src/threejs_viewer/_colormap_data.py`
 
 The 256-entry RGB lookup tables embedded in `_colormap_data.py` are reproduced
