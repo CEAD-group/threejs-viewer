@@ -1,6 +1,10 @@
 """Browser tests for clip caps on clipped solids (issue #259)."""
 
+import json
 import math
+import struct
+import zlib
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -57,7 +61,15 @@ _CAP_STATS = """(id) => {
         const dist = planes.map(([nx, ny, nz, c]) =>
             Math.max(...W.map((p) => Math.abs(nx * p[0] + ny * p[1] + nz * p[2] + c))));
         const m = cap.material;
-        return { area, dist, nTri: W.length / 3, open,
+        // Shown colour: material colour times the mean vertex colour.
+        const eff = m.color.clone();
+        const ca = cap.geometry.getAttribute('color');
+        if (m.vertexColors && ca) {
+            let r = 0, g = 0, b = 0;
+            for (let i = 0; i < ca.count; i++) { r += ca.getX(i); g += ca.getY(i); b += ca.getZ(i); }
+            eff.multiply(m.color.clone().setRGB(r / ca.count, g / ca.count, b / ca.count));
+        }
+        return { area, dist, nTri: W.length / 3, open, shown: eff.getHex(),
                  planes: (m.clippingPlanes || []).length,
                  color: m.color.getHex(), vertexColors: !!m.vertexColors };
     });
@@ -677,6 +689,716 @@ def test_tube_worker_cap_lands_on_the_last_plane(viewer_client, viewer_page):
     assert _worker_requests(page) >= 2
     viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=70, show_helper=False)
     viewer_client.delete("t")
+    settle(viewer_client)
+    _wait_settled(page)
+    assert page.evaluate("() => window.threejsViewer._clipCaps.pending") == 0
+
+
+# ---------- Meshes and loaded models ----------
+
+
+def _box_arrays(half=1.0):
+    """Unwelded box: four vertices per face, so every edge is a seam."""
+    pos, nrm, idx = [], [], []
+    for axis in range(3):
+        for sgn in (1.0, -1.0):
+            u, v = (axis + 1) % 3, (axis + 2) % 3
+            base = len(pos)
+            for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                p = [0.0, 0.0, 0.0]
+                p[axis], p[u], p[v] = sgn * half, a * half, b * half
+                n = [0.0, 0.0, 0.0]
+                n[axis] = sgn
+                pos.append(p)
+                nrm.append(n)
+            quad = [base, base + 1, base + 2, base, base + 2, base + 3]
+            idx += (
+                quad
+                if sgn > 0
+                else [quad[0], quad[2], quad[1], quad[3], quad[5], quad[4]]
+            )
+    return (
+        np.array(pos, dtype=np.float32),
+        np.array(nrm, dtype=np.float32),
+        np.array(idx, dtype=np.uint32),
+    )
+
+
+class _Glb:
+    """Minimal deterministic GLB writer for the fixture models below."""
+
+    def __init__(self):
+        self.bin = bytearray()
+        self.gltf = {
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": []}],
+            "nodes": [],
+            "meshes": [],
+            "bufferViews": [],
+            "accessors": [],
+        }
+
+    def view(self, data, stride=None):
+        self.bin += b"\x00" * (-len(self.bin) % 4)
+        v = {"buffer": 0, "byteOffset": len(self.bin), "byteLength": len(data)}
+        if stride:
+            v["byteStride"] = stride
+        self.bin += data
+        self.gltf["bufferViews"].append(v)
+        return len(self.gltf["bufferViews"]) - 1
+
+    def accessor(
+        self, view, ctype, count, kind, offset=0, normalized=False, lo=None, hi=None
+    ):
+        a = {
+            "bufferView": view,
+            "byteOffset": offset,
+            "componentType": ctype,
+            "count": count,
+            "type": kind,
+        }
+        if normalized:
+            a["normalized"] = True
+        if lo is not None:
+            a["min"], a["max"] = lo, hi
+        self.gltf["accessors"].append(a)
+        return len(self.gltf["accessors"]) - 1
+
+    def box_mesh(self, layout="plain", targets=False, skin=False):
+        pos, nrm, idx = _box_arrays()
+        n = len(pos)
+        attrs = {}
+        if layout == "plain":
+            attrs["POSITION"] = self.accessor(
+                self.view(pos.tobytes()), 5126, n, "VEC3", lo=[-1.0] * 3, hi=[1.0] * 3
+            )
+            attrs["NORMAL"] = self.accessor(self.view(nrm.tobytes()), 5126, n, "VEC3")
+        elif layout == "interleaved":
+            inter = np.concatenate([pos, nrm], axis=1).astype(np.float32)
+            v = self.view(inter.tobytes(), stride=24)
+            attrs["POSITION"] = self.accessor(
+                v, 5126, n, "VEC3", lo=[-1.0] * 3, hi=[1.0] * 3
+            )
+            attrs["NORMAL"] = self.accessor(v, 5126, n, "VEC3", offset=12)
+        elif layout == "quantized":
+            # KHR_mesh_quantization: normalized int16 positions and int8 normals, interleaved.
+            rec = np.zeros(n, dtype=[("p", "<i2", 4), ("n", "i1", 4)])
+            rec["p"][:, :3] = np.round(pos * 32767).astype(np.int16)
+            rec["n"][:, :3] = np.round(nrm * 127).astype(np.int8)
+            v = self.view(rec.tobytes(), stride=12)
+            attrs["POSITION"] = self.accessor(
+                v, 5122, n, "VEC3", normalized=True, lo=[-32767] * 3, hi=[32767] * 3
+            )
+            attrs["NORMAL"] = self.accessor(
+                v, 5120, n, "VEC3", offset=8, normalized=True
+            )
+            self.gltf["extensionsUsed"] = ["KHR_mesh_quantization"]
+            self.gltf["extensionsRequired"] = ["KHR_mesh_quantization"]
+        if skin:
+            attrs["JOINTS_0"] = self.accessor(
+                self.view(np.zeros((n, 4), dtype=np.uint8).tobytes()), 5121, n, "VEC4"
+            )
+            w = np.zeros((n, 4), dtype=np.float32)
+            w[:, 0] = 1
+            attrs["WEIGHTS_0"] = self.accessor(self.view(w.tobytes()), 5126, n, "VEC4")
+        prim = {
+            "attributes": attrs,
+            "indices": self.accessor(
+                self.view(idx.astype(np.uint16).tobytes()), 5123, len(idx), "SCALAR"
+            ),
+        }
+        if targets:
+            d = np.zeros_like(pos)
+            d[:, 2] = 0.5
+            prim["targets"] = [
+                {
+                    "POSITION": self.accessor(
+                        self.view(d.tobytes()),
+                        5126,
+                        n,
+                        "VEC3",
+                        lo=[0, 0, 0.5],
+                        hi=[0, 0, 0.5],
+                    )
+                }
+            ]
+        self.gltf["meshes"].append({"primitives": [prim]})
+        return len(self.gltf["meshes"]) - 1
+
+    def node(self, **fields):
+        self.gltf["nodes"].append(fields)
+        i = len(self.gltf["nodes"]) - 1
+        return i
+
+    def bytes(self, roots):
+        self.gltf["scenes"][0]["nodes"] = roots
+        self.bin += b"\x00" * (-len(self.bin) % 4)
+        self.gltf["buffers"] = [{"byteLength": len(self.bin)}]
+        js = json.dumps(self.gltf, separators=(",", ":")).encode()
+        js += b" " * (-len(js) % 4)
+        total = 12 + 8 + len(js) + 8 + len(self.bin)
+        return (
+            struct.pack("<III", 0x46546C67, 2, total)
+            + struct.pack("<II", len(js), 0x4E4F534A)
+            + js
+            + struct.pack("<II", len(self.bin), 0x004E4942)
+            + bytes(self.bin)
+        )
+
+
+def _three_box_glb():
+    """A plain box mirrored by its node, an interleaved one and a quantized one."""
+    g = _Glb()
+    roots = [
+        g.node(
+            name="mirrored",
+            mesh=g.box_mesh("plain"),
+            translation=[-4, 0, 0],
+            scale=[-1, 1, 1],
+        ),
+        g.node(name="interleaved", mesh=g.box_mesh("interleaved")),
+        g.node(name="quantized", mesh=g.box_mesh("quantized"), translation=[4, 0, 0]),
+    ]
+    return g.bytes(roots)
+
+
+def _model_url(client, key, payload):
+    client._blob_store[key] = payload
+    return f"http://localhost:{client._http_port}{key}"
+
+
+def _cap_kinds(page, id):
+    return page.evaluate(
+        "(id) => { const out = {}; window.threejsViewer.getObject(id).traverse((n) => {"
+        " if (n.isMesh && !n.userData.__clipCap) out[n.name] = n.userData.clipCapKind || null; });"
+        " return out; }",
+        id,
+    )
+
+
+@pytest.mark.browser
+def test_mesh_cap_fills_closed_unwelded_box(viewer_client, viewer_page):
+    pos, nrm, idx = _box_arrays()
+    viewer_client.add_mesh("m", pos, idx, normals=nrm, color=0x00FF00)
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[0.6, 0.8, 0], distance=0.2, show_helper=False
+    )
+    settle(viewer_client)
+    _wait_caps(viewer_page, "m", 1)
+    (cap,) = _caps(viewer_page, "m")
+    assert cap["dist"][0] < 1e-5
+    assert cap["open"] == 0
+    assert cap["color"] == 0x00FF00
+    # 0.6x + 0.8y = -0.2 across the 2x2 square, times height 2.
+    xs = np.linspace(-1, 1, 200001)
+    ys = (-0.2 - 0.6 * xs) / 0.8
+    inside = np.abs(ys) <= 1
+    length = np.hypot(1, 0.6 / 0.8) * (xs[inside].max() - xs[inside].min())
+    assert cap["area"] == pytest.approx(2 * length, rel=1e-3)
+
+
+@pytest.mark.browser
+def test_mesh_cap_leaves_open_shells_open(viewer_client, viewer_page):
+    """A sheet and an open-ended pipe are not closed meshes, so neither is
+    capped, not even where the pipe's cut is a closed circle; a closed box
+    next to them is."""
+    a = np.linspace(0, 2 * np.pi, 33)[:-1]
+    ring = np.stack([np.cos(a), np.sin(a)], axis=1)
+    pos = np.concatenate(
+        [np.c_[ring, np.full(32, -1.0)], np.c_[ring, np.full(32, 1.0)]]
+    ).astype(np.float32)
+    tris = []
+    for i in range(32):
+        j = (i + 1) % 32
+        tris += [i, j, 32 + j, i, 32 + j, 32 + i]
+    viewer_client.add_mesh("tube", pos, np.array(tris, dtype=np.uint32))
+    sheet = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], dtype=np.float32)
+    viewer_client.add_mesh(
+        "sheet",
+        sheet,
+        np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32),
+        position=[3, 0, 0],
+    )
+    bpos, bnrm, bidx = _box_arrays(0.5)
+    viewer_client.add_mesh("box", bpos, bidx, normals=bnrm, position=[0, 3, 0])
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-0.1, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    _wait_caps(viewer_page, "box", 1)
+    assert _caps(viewer_page, "tube") == []
+    assert _caps(viewer_page, "sheet") == []
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.3, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    _wait_settled(viewer_page)
+    assert _caps(viewer_page, "tube") == []
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("worker", [False, True])
+def test_mesh_cap_of_interpenetrating_bodies_has_no_hole(
+    viewer_client, viewer_page, worker
+):
+    """A shaft pushed through a hub and merged into one mesh: both loops run
+    with the surface, so the winding rule fills the shaft's square too."""
+    _use_worker(viewer_page, worker)
+    hub_p, _, hub_i = _box_arrays(1.0)
+    hub_p = hub_p * np.array([1.0, 1.0, 0.5], dtype=np.float32)
+    shaft_p, _, shaft_i = _box_arrays(1.0)
+    shaft_p = shaft_p * np.array([0.2, 0.2, 2.0], dtype=np.float32)
+    pos = np.concatenate([hub_p, shaft_p])
+    idx = np.concatenate([hub_i, shaft_i + len(hub_p)]).astype(np.uint32)
+    viewer_client.add_mesh("hub", pos, idx)
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(viewer_page, "hub", 1)
+    (cap,) = _caps(viewer_page, "hub")
+    assert cap["area"] == pytest.approx(4.0, rel=1e-4)
+    # Above the hub only the shaft is cut.
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=-1.0, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_settled(viewer_page)
+    (cap,) = _caps(viewer_page, "hub")
+    assert cap["area"] == pytest.approx(0.16, rel=1e-4)
+
+
+@pytest.mark.browser
+def test_glb_caps_interleaved_quantized_and_mirrored_meshes(viewer_client, viewer_page):
+    viewer_client.add_model_binary("g", _three_box_glb(), format="glb")
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[0, 1, 0], distance=-0.25, show_helper=False
+    )
+    settle(viewer_client)
+    assert _cap_kinds(viewer_page, "g") == {
+        "mirrored": "mesh",
+        "interleaved": "mesh",
+        "quantized": "mesh",
+    }
+    _wait_caps(viewer_page, "g", 3)
+    caps = _caps(viewer_page, "g")
+    for cap in caps:
+        assert cap["dist"][0] < 1e-4
+        assert cap["open"] == 0
+        assert cap["area"] == pytest.approx(4.0, rel=1e-3)
+    viewer_client.set_clipping_slab(
+        normal=[0, 0, 1], center=0.1, thickness=0.5, show_helper=False
+    )
+    settle(viewer_client)
+    _wait_caps(viewer_page, "g", 6)
+    caps = _caps(viewer_page, "g")
+    assert all(c["planes"] == 1 for c in caps)
+    assert all(c["area"] == pytest.approx(4.0, rel=1e-3) for c in caps)
+
+
+@pytest.mark.browser
+def test_skinned_and_morphed_model_meshes_get_no_cap(viewer_client, viewer_page):
+    g = _Glb()
+    joint = g.node(name="joint")
+    skinned = g.node(name="skinned", mesh=g.box_mesh("plain", skin=True), skin=0)
+    g.gltf["skins"] = [{"joints": [joint]}]
+    morphed = g.node(
+        name="morphed", mesh=g.box_mesh("plain", targets=True), translation=[4, 0, 0]
+    )
+    plain = g.node(name="plain", mesh=g.box_mesh("plain"), translation=[-4, 0, 0])
+    viewer_client.add_model_binary(
+        "g", g.bytes([joint, skinned, morphed, plain]), format="glb"
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    kinds = _cap_kinds(viewer_page, "g")
+    assert kinds == {"skinned": None, "morphed": None, "plain": "mesh"}
+    _wait_caps(viewer_page, "g", 1)
+
+
+@pytest.mark.browser
+def test_mesh_and_model_clip_cap_override(viewer_client, viewer_page):
+    pos, nrm, idx = _box_arrays()
+    viewer_client.add_mesh("off", pos, idx, normals=nrm, clip_cap=False)
+    viewer_client.add_model_binary(
+        "model_off", _three_box_glb(), format="glb", clip_cap=False, position=[0, 5, 0]
+    )
+    viewer_client.add_mesh(
+        "on", pos, idx, normals=nrm, clip_cap=True, position=[0, -5, 0]
+    )
+    viewer_client.add_mesh(
+        "glass", pos, idx, normals=nrm, opacity=0.5, position=[5, 0, 0]
+    )
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.2, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(viewer_page, "on", 1)
+    viewer_client.set_clipping_caps(True)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    _wait_settled(viewer_page)
+    assert _cap_count(viewer_page, "off") == 0
+    assert _cap_count(viewer_page, "model_off") == 0
+    assert _cap_count(viewer_page, "glass") == 0
+
+
+@pytest.mark.browser
+def test_model_cache_clones_carry_their_own_caps(viewer_client, viewer_page):
+    """Two clones of one cached model each get a cap; deleting one leaves the
+    other's, and a re-add of the deleted id is capped again."""
+    url = _model_url(viewer_client, "/clipcap_boxes.glb", _three_box_glb())
+    viewer_client.add_model("a", url, format="glb")
+    viewer_client.add_model("b", url, format="glb", position=[0, 0, 5])
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    _wait_object(viewer_page, "a")
+    _wait_object(viewer_page, "b")
+    _wait_caps(viewer_page, "a", 3)
+    _wait_caps(viewer_page, "b", 3)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getModelCacheStats().hits")
+        >= 1
+    )
+    viewer_client.delete("a")
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_caps(viewer_page, "b", 3)
+    viewer_client.add_model("a", url, format="glb")
+    settle(viewer_client)
+    _wait_object(viewer_page, "a")
+    _wait_caps(viewer_page, "a", 3)
+    assert all(
+        c["area"] == pytest.approx(4.0, rel=1e-3) for c in _caps(viewer_page, "a")
+    )
+    # Each clone owns its cap meshes.
+    shared = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; const caps = (id) => { const out = [];"
+        " v.getObject(id).traverse((n) => { if (n.userData.__clipCap) out.push(n.geometry); }); return out; };"
+        " const a = caps('a'); return caps('b').some((g) => a.includes(g)); }"
+    )
+    assert shared is False
+
+
+@pytest.mark.browser
+def test_model_clones_share_one_worker_copy(viewer_client, viewer_page):
+    """Clones of a cached model share their attributes, so the worker gets
+    one copy of the geometry, released when the last clone goes."""
+    page = viewer_page
+    _use_worker(page, True)
+    url = _model_url(viewer_client, "/clipcap_share.glb", _three_box_glb())
+    for i in range(3):
+        viewer_client.add_model(f"m{i}", url, format="glb", position=[0, 0, 5 * i])
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    for i in range(3):
+        _wait_object(page, f"m{i}")
+        _wait_caps(page, f"m{i}", 3)
+    stats = page.evaluate(
+        "() => { const c = window.threejsViewer._clipCaps;"
+        " return { sent: c.sourcesSent, refs: [...c._workerSources.values()] }; }"
+    )
+    # One source per box mesh of the model, each used by the three clones.
+    assert stats["sent"] == 3
+    assert sorted(stats["refs"]) == [3, 3, 3]
+    for i in range(3):
+        viewer_client.delete(f"m{i}")
+    settle(viewer_client)
+    frames(page, 2)
+    assert (
+        page.evaluate("() => window.threejsViewer._clipCaps._workerSources.size") == 0
+    )
+
+
+def _png(w, h, rgb, right=None):
+    """RGB(A) PNG of one flat colour, or two with `right` on the right half."""
+    row = bytes(rgb) * (w // 2) + bytes(right or rgb) * (w - w // 2)
+    raw = b"".join(b"\x00" + row for _ in range(h))
+    ctype = 6 if len(rgb) == 4 else 2
+
+    def chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, ctype, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _textured_box_glb(png, channel=0):
+    """Closed box with u running along x and a white base-colour factor. With
+    channel=1 that uv set is TEXCOORD_1 and TEXCOORD_0 is a constant (0.75, 0.5)."""
+    g = _Glb()
+    mesh = g.box_mesh("plain")
+    pos, _, _ = _box_arrays()
+    uv = np.clip(pos[:, :2] * 0.5 + 0.5, 0, 1).astype(np.float32)
+    prim = g.gltf["meshes"][mesh]["primitives"][0]
+    if channel:
+        const = np.tile(np.float32([0.75, 0.5]), (len(uv), 1))
+        prim["attributes"]["TEXCOORD_0"] = g.accessor(
+            g.view(const.tobytes()), 5126, len(uv), "VEC2"
+        )
+    prim["attributes"][f"TEXCOORD_{channel}"] = g.accessor(
+        g.view(uv.tobytes()), 5126, len(uv), "VEC2"
+    )
+    g.gltf["images"] = [{"bufferView": g.view(png), "mimeType": "image/png"}]
+    g.gltf["samplers"] = [{}]
+    g.gltf["textures"] = [{"source": 0, "sampler": 0}]
+    g.gltf["materials"] = [
+        {
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [1, 1, 1, 1],
+                "baseColorTexture": {"index": 0, "texCoord": channel},
+            }
+        }
+    ]
+    prim["material"] = 0
+    return g.bytes([g.node(name="box", mesh=mesh)])
+
+
+def _shown_rgb(page, id):
+    (cap,) = _caps(page, id)
+    return [(cap["shown"] >> s) & 0xFF for s in (16, 8, 0)]
+
+
+@pytest.mark.browser
+def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page):
+    """A white base-colour factor over a dark texture gives a dark cap."""
+    glb = _textured_box_glb(_png(8, 8, (0x30, 0x20, 0x10)))
+    viewer_client.add_model_binary("tex", glb, format="glb")
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    _wait_object(viewer_page, "tex")
+    _wait_caps(viewer_page, "tex", 1)
+    frames(viewer_page, 2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0x30, 0x20, 0x10], abs=2)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("worker", [False, True])
+def test_textured_cap_samples_the_texture_along_the_cut(
+    viewer_client, viewer_page, worker
+):
+    """Dark on the left half of the texture, light on the right: a cut
+    through each half takes that half's colour, not the whole average."""
+    _use_worker(viewer_page, worker)
+    glb = _textured_box_glb(_png(16, 16, (0x20, 0x20, 0x20), (0xE0, 0xD0, 0xC0)))
+    viewer_client.add_model_binary("tex", glb, format="glb")
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-0.5, show_helper=False)
+    settle(viewer_client)
+    _wait_object(viewer_page, "tex")
+    _wait_caps(viewer_page, "tex", 1)
+    frames(viewer_page, 2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0x20] * 3, abs=2)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.5, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_settled(viewer_page)
+    frames(viewer_page, 2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0xE0, 0xD0, 0xC0], abs=2)
+
+
+@pytest.mark.browser
+def test_textured_cap_reads_the_maps_uv_channel_and_skips_clear_texels(
+    viewer_client, viewer_page
+):
+    """A map on TEXCOORD_1 is sampled through uv1, and fully transparent
+    texels are left out of the average."""
+    dark_light = _png(16, 16, (0x20, 0x20, 0x20), (0xE0, 0xD0, 0xC0))
+    viewer_client.add_model_binary(
+        "uv1", _textured_box_glb(dark_light, channel=1), format="glb"
+    )
+    clear_light = _png(16, 16, (0, 0, 0, 0), (0xE0, 0xD0, 0xC0, 0xFF))
+    viewer_client.add_model_binary(
+        "clear", _textured_box_glb(clear_light), format="glb", position=[0, 5, 0]
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-0.5, show_helper=False)
+    settle(viewer_client)
+    for id in ("uv1", "clear"):
+        _wait_object(viewer_page, id)
+        _wait_caps(viewer_page, id, 1)
+    frames(viewer_page, 2)
+    # uv1 puts the cut in the dark half (uv0 would read the light half).
+    assert _shown_rgb(viewer_page, "uv1") == pytest.approx([0x20] * 3, abs=2)
+    # Every sample is clear, so the cap takes the average of the opaque texels.
+    assert _shown_rgb(viewer_page, "clear") == pytest.approx([0xE0, 0xD0, 0xC0], abs=2)
+
+
+def _pipe(radius, length, n=32, rings=2, hole=None):
+    """Open pipe along z; with `hole` a sphere-like closed body instead."""
+    a = np.linspace(0, 2 * np.pi, n + 1)[:-1]
+    zs = np.linspace(-length / 2, length / 2, rings)
+    pos = np.array(
+        [[radius * np.cos(t), radius * np.sin(t), z] for z in zs for t in a],
+        dtype=np.float32,
+    )
+    tris = []
+    for r in range(rings - 1):
+        for i in range(n):
+            j = (i + 1) % n
+            p, q = r * n, (r + 1) * n
+            tris += [p + i, p + j, q + j, p + i, q + j, q + i]
+    return pos, np.array(tris, dtype=np.uint32)
+
+
+def _sphere_with_hole(n_lat=24, n_lon=48, hole_rows=2):
+    """Welded UV sphere with the top `hole_rows` bands removed: a small hole."""
+    th = np.linspace(0, np.pi, n_lat + 1)[1:-1]
+    ph = np.linspace(0, 2 * np.pi, n_lon + 1)[:-1]
+    pos = (
+        [[0, 0, 1]]
+        + [
+            [np.sin(t) * np.cos(p), np.sin(t) * np.sin(p), np.cos(t)]
+            for t in th
+            for p in ph
+        ]
+        + [[0, 0, -1]]
+    )
+    ring = lambda i: 1 + i * n_lon  # noqa: E731
+    tris = []
+    if hole_rows == 0:
+        for j in range(n_lon):
+            tris += [0, ring(0) + j, ring(0) + (j + 1) % n_lon]
+    for i in range(max(0, hole_rows - 1), n_lat - 2):
+        for j in range(n_lon):
+            a, b = ring(i) + j, ring(i) + (j + 1) % n_lon
+            c, d = ring(i + 1) + j, ring(i + 1) + (j + 1) % n_lon
+            tris += [a, c, d, a, d, b]
+    last = len(pos) - 1
+    for j in range(n_lon):
+        tris += [ring(n_lat - 2) + j, last, ring(n_lat - 2) + (j + 1) % n_lon]
+    return np.array(pos, dtype=np.float32), np.array(tris, dtype=np.uint32)
+
+
+@pytest.mark.browser
+def test_mesh_cap_tolerates_small_holes_per_part(viewer_client, viewer_page):
+    """A body with a small hole and a long hose with open ends read as solid;
+    a short open pipe does not, and an open sheet merged into the same mesh
+    as a closed box, across the cut and apart or touching one corner, leaves
+    the box capped."""
+    pos, idx = _sphere_with_hole()
+    viewer_client.add_mesh("holed", pos, idx)
+    pos, idx = _pipe(0.2, 6.0, rings=13)
+    viewer_client.add_mesh("hose", pos, idx, position=[3, 0, 0])
+    pos, idx = _pipe(1.0, 2.0)
+    viewer_client.add_mesh("pipe", pos, idx, position=[6, 0, 0])
+    bpos, _, bidx = _box_arrays(0.5)
+    # A vertical sheet across the cut beside the box, and one touching the
+    # box's corner (0.5, 0.5, 0.5) at a single vertex.
+    apart = np.array([[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]], dtype=np.float32)
+    touching = np.array(
+        [[0.5, 0.5, 0.5], [2.5, 2.5, 0.5], [2.5, 2.5, -1.5], [1.5, 1.5, -1.5]],
+        dtype=np.float32,
+    )
+    for k, sheet in enumerate((apart, touching)):
+        merged = np.concatenate([bpos, sheet])
+        midx = np.concatenate([bidx, np.array([0, 1, 2, 0, 2, 3]) + len(bpos)])
+        viewer_client.add_mesh(
+            f"merged{k}", merged, midx.astype(np.uint32), position=[4 * k, 4, 0]
+        )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[0, 0, 1], distance=-0.25, show_helper=False
+    )
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    _wait_caps(viewer_page, "holed", 1)
+    _wait_caps(viewer_page, "hose", 1)
+    _wait_caps(viewer_page, "merged0", 1)
+    _wait_caps(viewer_page, "merged1", 1)
+    _wait_settled(viewer_page)
+    assert _caps(viewer_page, "pipe") == []
+    (cap,) = _caps(viewer_page, "hose")
+    assert cap["area"] == pytest.approx(
+        0.04 * 16 * math.sin(2 * math.pi / 32), rel=1e-4
+    )
+    for k in range(2):
+        (cap,) = _caps(viewer_page, f"merged{k}")
+        assert cap["area"] == pytest.approx(1.0, rel=1e-4)
+
+
+_ASSETS = Path.home() / ".cache" / "threejs-viewer"
+
+
+@pytest.mark.browser
+@pytest.mark.skipif(
+    not (_ASSETS / "DamagedHelmet.glb").exists()
+    or not (_ASSETS / "Avocado.glb").exists(),
+    reason="example assets not downloaded",
+)
+def test_real_gltf_assets_are_capped(viewer_client, viewer_page):
+    """The Avocado and the DamagedHelmet hoses read as solid and are capped."""
+    viewer_client.add_model_binary("avocado", _ASSETS / "Avocado.glb", "glb", y_up=True)
+    viewer_client.add_model_binary(
+        "helmet", _ASSETS / "DamagedHelmet.glb", "glb", position=[3, 0, 0], y_up=True
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[1, 0, 0], distance=-0.003, show_helper=False
+    )
+    settle(viewer_client)
+    _wait_object(viewer_page, "avocado")
+    _wait_caps(viewer_page, "avocado", 1)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=3.3, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_caps(viewer_page, "helmet", 1)
+    (cap,) = _caps(viewer_page, "helmet")
+    assert cap["area"] > 0
+
+
+def _sphere_mesh(n_lat=120, n_lon=240, r=1.0):
+    th = np.linspace(0, np.pi, n_lat + 1)
+    ph = np.linspace(0, 2 * np.pi, n_lon + 1)[:-1]
+    T, P = np.meshgrid(th, ph, indexing="ij")
+    pos = np.stack(
+        [r * np.sin(T) * np.cos(P), r * np.sin(T) * np.sin(P), r * np.cos(T)], -1
+    ).reshape(-1, 3)
+    tris = []
+    for i in range(n_lat):
+        for j in range(n_lon):
+            a, b = i * n_lon + j, i * n_lon + (j + 1) % n_lon
+            c, d = a + n_lon, b + n_lon
+            tris += [a, c, d, a, d, b]
+    return pos.astype(np.float32), np.array(tris, dtype=np.uint32)
+
+
+@pytest.mark.browser
+def test_mesh_worker_cap_lands_on_the_last_plane(viewer_client, viewer_page):
+    """A large mesh is sliced on the worker: the geometry is copied once,
+    stale slices are dropped and the cap ends on the final plane."""
+    page = viewer_page
+    _use_worker(page, True)
+    pos, idx = _sphere_mesh()
+    viewer_client.add_mesh("s", pos, idx)
+    viewer_client.set_clipping_caps(True)
+    settle(viewer_client)
+    _wait_object(page, "s")
+    for d in (0.8, 0.5, 0.2, -0.1, -0.3):
+        viewer_client.set_clipping_plane(
+            normal=[0, 0, 1], distance=d, show_helper=False
+        )
+        frames(page, 1)
+    settle(viewer_client)
+    _wait_caps(page, "s", 1)
+    (cap,) = _caps(page, "s")
+    assert cap["dist"][0] < 1e-4
+    assert cap["open"] == 0
+    assert cap["area"] == pytest.approx(math.pi * (1 - 0.09), rel=0.01)
+    assert _worker_requests(page) >= 2
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.6, show_helper=False)
+    viewer_client.delete("s")
     settle(viewer_client)
     _wait_settled(page)
     assert page.evaluate("() => window.threejsViewer._clipCaps.pending") == 0

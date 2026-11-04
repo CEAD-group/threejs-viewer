@@ -95,6 +95,8 @@ changes whenever their inputs change.
   Controllers intentionally share `viewer.js` and the resulting script block.
 - Keep `buildTubeArrays` dependency-free. The main thread and inline LOD worker
   share its definition through `toString()`; changes must work in both contexts.
+- Keep the clip-cap slicers (`sliceTubeClipCap`, `sliceMeshClipCap`, `earcut2D`)
+  dependency-free for the same reason: the LOD worker injects them through `toString()`.
 - Preserve reuse of existing gzip/base64 blobs when their decoded bytes match.
   Recompressing unchanged assets can produce different bytes across zlib versions
   and fail CI's freshness check. See `tests/test_build.py`.
