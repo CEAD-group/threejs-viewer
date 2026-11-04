@@ -3859,6 +3859,67 @@ function depthMaterialFields(params, defaultDepthWrite) {
     return { fields, depthWriteExplicit };
 }
 
+// Default exponent of the grazing-angle opacity falloff (see applyGrazingOpacity).
+const GRAZING_POWER_DEFAULT = 2;
+
+/**
+ * Validated `grazingOpacity`/`grazingPower` of a mesh payload, or null when unset.
+ * @param {any} params
+ * @returns {{opacity: number, power: number} | null}
+ */
+function grazingOpacityFields(params) {
+    if (params.grazingOpacity == null) return null;
+    const opacity = Number(params.grazingOpacity);
+    const power = params.grazingPower != null ? Number(params.grazingPower) : GRAZING_POWER_DEFAULT;
+    if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1 || !Number.isFinite(power) || power <= 0) {
+        console.warn(`grazingOpacity ignored: needs 0..1 and grazingPower > 0, got ${params.grazingOpacity}, ${params.grazingPower}`);
+        return null;
+    }
+    return { opacity, power };
+}
+
+/**
+ * Per-fragment opacity that rises toward `opacity` where the surface turns
+ * edge-on: alpha = mix(alpha, opacity, pow(1 - |n.v|, power)). A translucent
+ * solid then reads as a body from low angles instead of a flat tint over
+ * whatever is behind it. Edits only the fragment's alpha, so lighting, tone
+ * mapping, clipping, depthWrite and `transparent` are untouched; an opaque
+ * material discards alpha anyway. Chains existing hooks and program keys
+ * like softenSunShadows. Values live in uniforms, so one program serves all.
+ * @param {THREE.Material} material
+ * @param {{opacity: number, power: number}} grazing
+ */
+function applyGrazingOpacity(material, grazing) {
+    const m = /** @type {any} */ (material);
+    const uniforms = {
+        tjsvGrazingOpacity: { value: grazing.opacity },
+        tjsvGrazingPower: { value: grazing.power },
+    };
+    // Introspection: getObject(id).material.userData.grazingOpacity/.grazingPower.
+    m.userData.grazingOpacity = grazing.opacity;
+    m.userData.grazingPower = grazing.power;
+    const before = material.onBeforeCompile;
+    const previousKey = material.customProgramCacheKey;
+    const stockKey = previousKey === THREE.Material.prototype.customProgramCacheKey;
+    material.onBeforeCompile = function (shader, renderer) {
+        before.call(this, shader, renderer);
+        Object.assign(shader.uniforms, uniforms);
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>',
+                '#include <common>\nuniform float tjsvGrazingOpacity;\nuniform float tjsvGrazingPower;')
+            .replace('#include <opaque_fragment>', `{
+    vec3 tjsvViewDir = isOrthographic ? vec3( 0.0, 0.0, 1.0 ) : normalize( vViewPosition );
+    float tjsvEdge = pow( 1.0 - clamp( abs( dot( normalize( normal ), tjsvViewDir ) ), 0.0, 1.0 ), tjsvGrazingPower );
+    diffuseColor.a = mix( diffuseColor.a, tjsvGrazingOpacity, tjsvEdge );
+}
+#include <opaque_fragment>`);
+    };
+    material.customProgramCacheKey = function () {
+        return (stockKey ? before.toString() : previousKey.call(this)) + '|tjsv-grazing-opacity-v1';
+    };
+    material.needsUpdate = true;
+}
+
 /**
  * A mesh's own materials, past a display swap (debug shading, low-quality
  * clay) that parks them in `userData.originalMaterial`. set_color/set_opacity
@@ -22503,6 +22564,8 @@ class ThreeJSViewer {
                             ...depth,
                         });
                         if (depthWriteExplicit) meshMaterial.userData.__depthWriteExplicit = true;
+                        const grazing = grazingOpacityFields(data);
+                        if (grazing) applyGrazingOpacity(meshMaterial, grazing);
 
                         const mesh = new THREE.Mesh(geometry, meshMaterial);
                         mesh.name = data.id;

@@ -714,6 +714,29 @@ def test_add_mesh_sends_depth_fields():
     assert header["polygonOffsetUnits"] == -2.0
 
 
+def test_add_mesh_sends_grazing_opacity_only_when_asked():
+    """grazingOpacity/grazingPower ride the header only when set, and bad values raise."""
+    client = ViewerClient(port=5666, open_browser=False)
+    client._ws = _CaptureWS()
+    tri = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    idx = np.array([[0, 1, 2]], dtype=np.uint32)
+    client.add_mesh("plain", tri, idx, opacity=0.3)
+    header = client._ws.messages[-1]
+    assert "grazingOpacity" not in header and "grazingPower" not in header
+    client.add_mesh("g", tri, idx, opacity=0.3, grazing_opacity=0.85)
+    header = client._ws.messages[-1]
+    assert header["grazingOpacity"] == 0.85 and header["grazingPower"] == 2.0
+    client.add_mesh("g3", tri, idx, opacity=0.3, grazing_opacity=1, grazing_power=3)
+    assert client._ws.messages[-1]["grazingPower"] == 3.0
+    for bad in (
+        {"grazing_opacity": 1.5},
+        {"grazing_opacity": float("nan")},
+        {"grazing_opacity": 0.5, "grazing_power": 0},
+    ):
+        with pytest.raises(ValueError):
+            client.add_mesh("bad", tri, idx, **bad)
+
+
 def test_viewer_url_carries_ws_host_when_not_localhost():
     """The viewer defaults to ws://localhost; any other host rides along as
     ``ws_host`` so the WebSocket and the blob sidecar share one hostname."""
