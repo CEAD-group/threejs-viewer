@@ -45,8 +45,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #   or a PNG for one frame),
 #   live=(start, frames, interval) in seconds (GIF).
 # js runs in the page before the first capture, click=<object id> clicks the
-# centre of that object first, keys=<list> presses keys before the capture. size
-# is the page size; gif_width the GIF width.
+# centre of that object first, keys=<list> presses keys before the capture.
+# view=dict(dir=, box=None, fill=0.9) switches to perspective, looks along -dir
+# and frames box=(min, max), or all visible content without one; the examples
+# open in an orthographic iso view, which reads flat in a still. size is the
+# page size; gif_width the GIF width.
 FRAME_ALL = "window.threejsViewer.frameAll();"
 # Exit code of a child whose example needs a package that is not installed.
 SKIPPED = 4
@@ -80,22 +83,32 @@ SHOTS = {
     "bead_texture_print": dict(
         example="37_bead_texture.py", seek=(0.03, 1.0, 36), js=FRAME_ALL, gif_width=960
     ),
-    "bead_texture_corner": dict(example="37_bead_texture.py", seek=(1.0, 1.0, 1)),
+    "bead_texture_corner": dict(
+        example="37_bead_texture.py",
+        seek=(1.0, 1.0, 1),
+        view=dict(dir=(-1, -1.1, 0.8), box=((-5, -5, 0), (80, 75, 42)), fill=1.0),
+    ),
     "bead_texture_hero": dict(
-        example="37_bead_texture.py", seek=(1.0, 1.0, 1), js=FRAME_ALL
+        example="37_bead_texture.py",
+        seek=(1.0, 1.0, 1),
+        view=dict(dir=(-0.45, -1, 0.75), box=((0, 0, 0), (292, 200, 42)), fill=0.7),
     ),
     "point_cloud": dict(example="25_point_cloud.py", seek=(1.0, 1.0, 1)),
     "point_cloud_sweep": dict(example="25_point_cloud.py", seek=(0.03, 1.0, 36)),
     "points_octree_lod": dict(example="27_points_octree_lod.py", seek=(0.0, 1.0, 32)),
     "live_points_stream": dict(example="30_live_points_stream.py", live=(2, 24, 0.25)),
-    "depth_cues": dict(example="20_line_depth_cues.py", at=5),
+    "depth_cues": dict(
+        example="20_line_depth_cues.py",
+        at=5,
+        view=dict(dir=(0.25, -1, 0.25), box=((-4, -4, -4.4), (4, 4, 4)), fill=0.95),
+    ),
     "polyline_picking": dict(example="22_polyline_picking.py", at=5, js=FRAME_ALL),
     "glb_models": dict(example="08_glb_models.py", at=6),
     "materials_sampler": dict(
         example="31_watch_gltf.py",
         args=["examples/tools/materials/materials.gltf"],
         at=25,
-        js=FRAME_ALL,
+        view=dict(dir=(0, -1, 1.4)),
     ),
     "billboards": dict(example="34_billboard_modes.py", at=5),
     "gizmos": dict(example="24_gizmo_dimensions.py", at=5),
@@ -124,6 +137,34 @@ def _object_centre_js(obj_id):
                 if (v.pick(x, y)?.objectId === {obj_id!r}) {{ sx += x; sy += y; n++; }}
         return n ? [sx / n, sy / n] : null;
     }})()"""
+
+
+def _focus(page):
+    # Viewer shortcuts listen on the container, which has a tabindex.
+    page.evaluate("window.threejsViewer.container.focus()")
+
+
+def _setup(page, shot):
+    """Apply the shot's camera view, then its js."""
+    view = shot.get("view")
+    if view:
+        if page.evaluate("window.threejsViewer.getCameraPose().fov === null"):
+            _focus(page)
+            page.keyboard.press("o")  # the only public switch to perspective
+        box = view.get("box")
+        page.evaluate(
+            """([d, box, fill]) => {
+                const v = window.threejsViewer, t = v.getCameraPose().target;
+                v.setCameraPose({position: [t.x + d[0], t.y + d[1], t.z + d[2]],
+                                 up: [0, 0, 1]});
+                if (box) v.frameBox(box[0], box[1], {fill});
+                else v.frameAll();
+            }""",
+            [list(view["dir"]), [list(c) for c in box] if box else None,
+             view.get("fill", 0.9)],
+        )  # fmt: skip
+    if shot.get("js"):
+        page.evaluate(shot["js"])
 
 
 def _record(client, connected, shot, out):
@@ -155,8 +196,7 @@ def _record(client, connected, shot, out):
                 timeout=120_000,
             )
             wait_until(shot.get("warmup", 3))
-            if shot.get("js"):
-                page.evaluate(shot["js"])
+            _setup(page, shot)
             duration = page.evaluate(
                 "(() => { const v = window.threejsViewer; v.setAnimationPlaying(false);"
                 " return v.getAnimationState().duration; })()"
@@ -171,8 +211,7 @@ def _record(client, connected, shot, out):
         elif "live" in shot:
             start, n, interval = shot["live"]
             wait_until(start)
-            if shot.get("js"):
-                page.evaluate(shot["js"])
+            _setup(page, shot)
             for i in range(n):
                 wait_until(start + i * interval)
                 frames.append(page.screenshot())
@@ -183,16 +222,15 @@ def _record(client, connected, shot, out):
                 if hit is None:
                     raise RuntimeError(f"{shot['click']} is not on screen")
                 page.mouse.click(*hit)
-            if shot.get("js"):
+            if shot.get("js") or shot.get("view"):
                 # After the example's own framing and loads.
                 wait_until(shot["at"] * 0.6)
                 page.wait_for_function(
                     "window.threejsViewer.getLoadState().pending === 0"
                 )
-                page.evaluate(shot["js"])
+                _setup(page, shot)
             if shot.get("keys"):
-                # Viewer shortcuts listen on the container, which has a tabindex.
-                page.evaluate("window.threejsViewer.container.focus()")
+                _focus(page)
                 for key in shot["keys"]:
                     page.keyboard.press(key)
             wait_until(shot["at"])
