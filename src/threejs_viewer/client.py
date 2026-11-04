@@ -4840,11 +4840,12 @@ class ViewerClient:
         (:meth:`add_mesh`) and loaded models (:meth:`add_model`,
         :meth:`add_model_binary`) with a flat face in the object's colour
         (per-vertex colours are interpolated along the cut, textures are not
-        applied), so a solid no longer reads as a hollow shell. On a mesh or
-        model only the closed loops of the cut are filled, one mesh at a
-        time: an open sheet stays open, and a solid split across several
-        meshes is not closed. Skinned and morphing meshes, translucent and
-        wireframe objects stay open. A per-object ``clip_cap=`` on the add
+        applied), so a solid no longer reads as a hollow shell. A mesh or
+        model mesh is capped only when it is closed (after welding, every
+        edge is shared by exactly two triangles), one mesh at a time: sheets,
+        pipes without end faces and leaky meshes stay open, and so does a
+        solid split across several meshes. Skinned and morphing meshes,
+        translucent and wireframe objects stay open. A per-object ``clip_cap=`` on the add
         call overrides this switch. Off by default; also toggled by the "Cap
         cut solids" box in the clipping panel (``C``).
 

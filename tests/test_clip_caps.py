@@ -3,6 +3,7 @@
 import json
 import math
 import struct
+import zlib
 
 import numpy as np
 import pytest
@@ -891,8 +892,9 @@ def test_mesh_cap_fills_closed_unwelded_box(viewer_client, viewer_page):
 
 @pytest.mark.browser
 def test_mesh_cap_leaves_open_shells_open(viewer_client, viewer_page):
-    """A sheet and an open-ended cylinder cut along their length have no
-    closed loop, so nothing is filled; a closed box next to them is."""
+    """A sheet and an open-ended pipe are not closed meshes, so neither is
+    capped, not even where the pipe's cut is a closed circle; a closed box
+    next to them is."""
     a = np.linspace(0, 2 * np.pi, 33)[:-1]
     ring = np.stack([np.cos(a), np.sin(a)], axis=1)
     pos = np.concatenate(
@@ -919,12 +921,41 @@ def test_mesh_cap_leaves_open_shells_open(viewer_client, viewer_page):
     _wait_caps(viewer_page, "box", 1)
     assert _caps(viewer_page, "tube") == []
     assert _caps(viewer_page, "sheet") == []
-    # Across its axis the open tube cut is a closed circle, which is filled.
     viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.3, show_helper=False)
     settle(viewer_client)
-    _wait_caps(viewer_page, "tube", 1)
-    (cap,) = _caps(viewer_page, "tube")
-    assert cap["area"] == pytest.approx(32 / 2 * math.sin(2 * math.pi / 32), rel=1e-4)
+    frames(viewer_page, 3)
+    _wait_settled(viewer_page)
+    assert _caps(viewer_page, "tube") == []
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("worker", [False, True])
+def test_mesh_cap_of_interpenetrating_bodies_has_no_hole(
+    viewer_client, viewer_page, worker
+):
+    """A shaft pushed through a hub and merged into one mesh: both loops run
+    with the surface, so the winding rule fills the shaft's square too."""
+    _use_worker(viewer_page, worker)
+    hub_p, _, hub_i = _box_arrays(1.0)
+    hub_p = hub_p * np.array([1.0, 1.0, 0.5], dtype=np.float32)
+    shaft_p, _, shaft_i = _box_arrays(1.0)
+    shaft_p = shaft_p * np.array([0.2, 0.2, 2.0], dtype=np.float32)
+    pos = np.concatenate([hub_p, shaft_p])
+    idx = np.concatenate([hub_i, shaft_i + len(hub_p)]).astype(np.uint32)
+    viewer_client.add_mesh("hub", pos, idx)
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    _wait_caps(viewer_page, "hub", 1)
+    (cap,) = _caps(viewer_page, "hub")
+    assert cap["area"] == pytest.approx(4.0, rel=1e-4)
+    # Above the hub only the shaft is cut.
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=-1.0, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_settled(viewer_page)
+    (cap,) = _caps(viewer_page, "hub")
+    assert cap["area"] == pytest.approx(0.16, rel=1e-4)
 
 
 @pytest.mark.browser
@@ -1038,6 +1069,96 @@ def test_model_cache_clones_carry_their_own_caps(viewer_client, viewer_page):
         " const a = caps('a'); return caps('b').some((g) => a.includes(g)); }"
     )
     assert shared is False
+
+
+@pytest.mark.browser
+def test_model_clones_share_one_worker_copy(viewer_client, viewer_page):
+    """Clones of a cached model share their attributes, so the worker gets
+    one copy of the geometry, released when the last clone goes."""
+    page = viewer_page
+    _use_worker(page, True)
+    url = _model_url(viewer_client, "/clipcap_share.glb", _three_box_glb())
+    for i in range(3):
+        viewer_client.add_model(f"m{i}", url, format="glb", position=[0, 0, 5 * i])
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    for i in range(3):
+        _wait_object(page, f"m{i}")
+        _wait_caps(page, f"m{i}", 3)
+    stats = page.evaluate(
+        "() => { const c = window.threejsViewer._clipCaps;"
+        " return { sent: c.sourcesSent, refs: [...c._workerSources.values()] }; }"
+    )
+    # One source per box mesh of the model, each used by the three clones.
+    assert stats["sent"] == 3
+    assert sorted(stats["refs"]) == [3, 3, 3]
+    for i in range(3):
+        viewer_client.delete(f"m{i}")
+    settle(viewer_client)
+    frames(page, 2)
+    assert (
+        page.evaluate("() => window.threejsViewer._clipCaps._workerSources.size") == 0
+    )
+
+
+def _png(w, h, rgb):
+    """Uncompressed-filter RGB PNG of one flat colour."""
+    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+
+    def chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+@pytest.mark.browser
+def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page):
+    """A white base-colour factor over a dark texture gives a dark cap."""
+    g = _Glb()
+    mesh = g.box_mesh("plain")
+    pos, _, _ = _box_arrays()
+    uv = np.clip(pos[:, :2] * 0.5 + 0.5, 0, 1).astype(np.float32)
+    prim = g.gltf["meshes"][mesh]["primitives"][0]
+    prim["attributes"]["TEXCOORD_0"] = g.accessor(
+        g.view(uv.tobytes()), 5126, len(uv), "VEC2"
+    )
+    g.gltf["images"] = [
+        {"bufferView": g.view(_png(8, 8, (0x30, 0x20, 0x10))), "mimeType": "image/png"}
+    ]
+    g.gltf["samplers"] = [{}]
+    g.gltf["textures"] = [{"source": 0, "sampler": 0}]
+    g.gltf["materials"] = [
+        {
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [1, 1, 1, 1],
+                "baseColorTexture": {"index": 0},
+            }
+        }
+    ]
+    prim["material"] = 0
+    viewer_client.add_model_binary(
+        "tex", g.bytes([g.node(name="box", mesh=mesh)]), format="glb"
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
+    settle(viewer_client)
+    _wait_object(viewer_page, "tex")
+    _wait_caps(viewer_page, "tex", 1)
+    frames(viewer_page, 2)
+    (cap,) = _caps(viewer_page, "tex")
+    rgb = [(cap["color"] >> s) & 0xFF for s in (16, 8, 0)]
+    assert rgb == pytest.approx([0x30, 0x20, 0x10], abs=2)
 
 
 def _sphere_mesh(n_lat=120, n_lon=240, r=1.0):

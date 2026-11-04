@@ -5097,6 +5097,17 @@ function buildGeometry(spine, widths, heights, upVec, ringColors, vOffs, breakMa
 const _tubes = new Map();   // tubeId -> { spine, widths, heights, ringColors, upVec, nPoints, epsilonDivisor }
 const _rdpCache = new Map(); // tubeId -> { chunkDists, chunkIndices }
 const _clipCapGeoms = new Map(); // cap id -> { key, pos, col, idx }
+const _clipCapSources = new Map(); // mesh source key -> { pos, col, idx, refs: Set<cap id> }
+const _clipCapMeshRefs = new Map(); // cap id -> mesh source key
+function _releaseClipCapSource(capId) {
+    const key = _clipCapMeshRefs.get(capId);
+    if (key === undefined) return;
+    _clipCapMeshRefs.delete(capId);
+    const shared = _clipCapSources.get(key);
+    if (!shared) return;
+    shared.refs.delete(capId);
+    if (!shared.refs.size) _clipCapSources.delete(key);
+}
 
 self.onmessage = function(e) {
     const msg = e.data;
@@ -5104,11 +5115,27 @@ self.onmessage = function(e) {
     // 'clipCap': slice a tube's drawn bands by the clip planes. The geometry
     // copy is cached per cap id and only resent when it changed.
     if (msg.type === 'clipCap') {
-        if (msg.positions) {
-            _clipCapGeoms.set(msg.capId, { key: msg.geomKey, pos: msg.positions, col: msg.colors, idx: msg.indices });
+        let g;
+        if (msg.kind === 'mesh') {
+            // Mesh sources are shared by every target (model clone) that slices them.
+            if (msg.positions && !_clipCapSources.has(msg.sourceKey)) {
+                _clipCapSources.set(msg.sourceKey, { pos: msg.positions, col: msg.colors, idx: msg.indices, refs: new Set() });
+            }
+            const prev = _clipCapMeshRefs.get(msg.capId);
+            if (prev !== msg.sourceKey) {
+                _releaseClipCapSource(msg.capId);
+                const shared = _clipCapSources.get(msg.sourceKey);
+                if (shared) { shared.refs.add(msg.capId); _clipCapMeshRefs.set(msg.capId, msg.sourceKey); }
+            }
+            g = _clipCapSources.get(msg.sourceKey);
+        } else {
+            if (msg.positions) {
+                _clipCapGeoms.set(msg.capId, { key: msg.geomKey, pos: msg.positions, col: msg.colors, idx: msg.indices });
+            }
+            g = _clipCapGeoms.get(msg.capId);
+            if (g && g.key !== msg.geomKey) g = null;
         }
-        const g = _clipCapGeoms.get(msg.capId);
-        if (!g || g.key !== msg.geomKey) {
+        if (!g) {
             self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, missing: true });
             return;
         }
@@ -5131,6 +5158,7 @@ self.onmessage = function(e) {
     }
     if (msg.type === 'clipCapDispose') {
         _clipCapGeoms.delete(msg.capId);
+        _releaseClipCapSource(msg.capId);
         return;
     }
 
@@ -9985,14 +10013,17 @@ function earcut2D(data, holeIndices) {
 
 /**
  * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
- * torus), free of Three.js so the LOD worker runs the same code. Per plane
- * the drawn triangles are sliced, the crossings welded on a grid (so
- * unwelded UV or normal seams join), chain ends a hair apart joined, every
- * chain that does not close pruned, and the closed loops filled by nesting
- * depth (even depth fills, odd depth is a hole), so the result does not
- * depend on winding or normals. An open sheet gets no cap. Pruning boxes
- * per triangle chunk are cached on `src`.
- * @param {{pos: ArrayLike<number>, idx: ArrayLike<number> | null, col: ArrayLike<number> | null, chunks?: Float32Array, radius?: number}} src
+ * torus), free of Three.js so the LOD worker runs the same code. Only a
+ * closed mesh (after welding, every edge used by exactly two triangles) is
+ * capped; the check runs once per source and is cached on it with the
+ * pruning boxes. Per plane the drawn triangles are sliced, the crossings
+ * welded on a grid (so unwelded UV or normal seams join), chain ends a hair
+ * apart joined, every chain that does not close pruned, and the loops
+ * filled. With consistent face winding the section is filled where its
+ * winding number is positive, so interpenetrating bodies merged into one
+ * mesh stay solid and do not overlap; otherwise even-odd by nesting
+ * depth, where a loop that leaves its container is filled on its own.
+ * @param {{pos: ArrayLike<number>, idx: ArrayLike<number> | null, col: ArrayLike<number> | null, chunks?: Float32Array, radius?: number, center?: number[], closed?: boolean, oriented?: boolean}} src
  *   dense xyz positions, optional indices, optional dense rgb colours
  * @param {number} start @param {number} end  drawn index range
  * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
@@ -10034,13 +10065,53 @@ function sliceMeshClipCap(src, start, end, planes) {
         src.chunks = box;
         const r = Math.hypot(gx1 - gx0, gy1 - gy0, gz1 - gz0) / 2;
         src.radius = r > 0 && isFinite(r) ? r : 1;
+        src.center = [(gx0 + gx1) / 2, (gy0 + gy1) / 2, (gz0 + gz1) / 2];
     }
     const chunks = src.chunks;
     const radius = /** @type {number} */ (src.radius);
     const quant = radius * 1e-7;
     const tol = radius * 1e-4;
+    if (src.closed === undefined) {
+        // Closed and consistently wound? Sorted half-edge keys (lo * nW + hi) * 2 + direction.
+        // Weld grid of radius / 1e5 keeps the packed integer key under 2^53.
+        const nV = pos.length / 3, wq = radius * 1e-5, span = 200003, off = 100001;
+        const [cx, cy, cz] = /** @type {number[]} */ (src.center);
+        const wid = new Int32Array(nV);
+        /** @type {Map<number, number>} */ const ids = new Map();
+        for (let v = 0; v < nV; v++) {
+            const key = ((Math.round((pos[v * 3] - cx) / wq) + off) * span
+                + Math.round((pos[v * 3 + 1] - cy) / wq) + off) * span + Math.round((pos[v * 3 + 2] - cz) / wq) + off;
+            let id = ids.get(key);
+            if (id === undefined) { id = ids.size; ids.set(key, id); }
+            wid[v] = id;
+        }
+        const nW = ids.size;
+        const he = new Float64Array(nTriAll * 3);
+        let m = 0;
+        /** @param {number} p @param {number} q */
+        const half = (p, q) => (p < q ? (p * nW + q) * 2 : (q * nW + p) * 2 + 1);
+        for (let t = 0; t < nTriAll; t++) {
+            const a = wid[vtx(t, 0)], b = wid[vtx(t, 1)], c = wid[vtx(t, 2)];
+            if (a === b || b === c || c === a) continue;
+            he[m++] = half(a, b); he[m++] = half(b, c); he[m++] = half(c, a);
+        }
+        const sorted = he.subarray(0, m).sort();
+        let closed = m > 0 && nW < 6e7, oriented = closed;
+        for (let i = 0; i < m && closed;) {
+            const key = Math.floor(sorted[i] / 2);
+            let j = i + 1;
+            while (j < m && Math.floor(sorted[j] / 2) === key) j++;
+            if (j - i !== 2) closed = false;
+            else if (sorted[i] === sorted[i + 1]) oriented = false;
+            i = j;
+        }
+        src.closed = closed;
+        src.oriented = oriented;
+    }
     const t0 = Math.ceil(Math.max(0, start) / 3), t1 = Math.min(nTriAll, Math.floor(end / 3));
     /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    if (!src.closed) return planes.map(() => ({ pos: new Float32Array(0), col: col ? new Float32Array(0) : null }));
+    const oriented = !!src.oriented;
     for (const plane of planes) {
         const nx = plane[0], ny = plane[1], nz = plane[2], c0 = plane[3];
         /** @type {Map<string, number>} */ const keyOf = new Map();
@@ -10108,7 +10179,19 @@ function sliceMeshClipCap(src, start, end, planes) {
                 if (pc !== pa) crossing(cc, a, sc, sa);
                 if (nc !== 2) continue;
                 const i0 = weld(0), i1 = weld(6);
-                if (i0 !== i1) { segA.push(i0); segB.push(i1); }
+                if (i0 === i1) continue;
+                // Along n x N with N the winding normal: a loop then runs
+                // counter-clockwise about +n around material.
+                const a3 = a * 3, b3 = bb * 3, c3 = cc * 3;
+                const e1x = pos[b3] - pos[a3], e1y = pos[b3 + 1] - pos[a3 + 1], e1z = pos[b3 + 2] - pos[a3 + 2];
+                const e2x = pos[c3] - pos[a3], e2y = pos[c3 + 1] - pos[a3 + 1], e2z = pos[c3 + 2] - pos[a3 + 2];
+                const Nx = e1y * e2z - e1z * e2y, Ny = e1z * e2x - e1x * e2z, Nz = e1x * e2y - e1y * e2x;
+                const mx = ny * Nz - nz * Ny, my = nz * Nx - nx * Nz, mz = nx * Ny - ny * Nx;
+                if ((cross[6] - cross[0]) * mx + (cross[7] - cross[1]) * my + (cross[8] - cross[2]) * mz >= 0) {
+                    segA.push(i0); segB.push(i1);
+                } else {
+                    segA.push(i1); segB.push(i0);
+                }
             }
         }
         const nPts = PX.length / 3;
@@ -10119,7 +10202,17 @@ function sliceMeshClipCap(src, start, end, planes) {
         // two chain ends a hair apart: join each odd-degree point to the
         // nearest other one within tol.
         const deg = new Int32Array(nPts);
-        for (let s = 0; s < nSeg; s++) { deg[segA[s]]++; deg[segB[s]]++; }
+        // Join reach per point: at most half its shortest cut segment, so
+        // ends of separate small parts are never joined into a false loop.
+        const reach2 = new Float64Array(nPts).fill(tol * tol);
+        for (let s = 0; s < nSeg; s++) {
+            const p = segA[s], q = segB[s];
+            deg[p]++; deg[q]++;
+            const l2 = 0.25 * ((PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
+                + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2);
+            if (l2 < reach2[p]) reach2[p] = l2;
+            if (l2 < reach2[q]) reach2[q] = l2;
+        }
         const rep = new Int32Array(nPts);
         for (let p = 0; p < nPts; p++) rep[p] = p;
         /** @type {Map<string, number[]>} */ const cells = new Map();
@@ -10136,7 +10229,7 @@ function sliceMeshClipCap(src, start, end, planes) {
             for (let p = 0; p < nPts; p++) {
                 if (!(deg[p] & 1) || matched[p]) continue;
                 const gx = Math.floor(PX[p * 3] / tol), gy = Math.floor(PX[p * 3 + 1] / tol), gz = Math.floor(PX[p * 3 + 2] / tol);
-                let best = -1, bestD = tol * tol;
+                let best = -1, bestD = reach2[p];
                 for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
                     const list = cells.get(cellKey(gx + dx, gy + dy, gz + dz));
                     if (!list) continue;
@@ -10144,7 +10237,7 @@ function sliceMeshClipCap(src, start, end, planes) {
                         if (q === p || matched[q]) continue;
                         const d = (PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
                             + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2;
-                        if (d <= bestD) { bestD = d; best = q; }
+                        if (d <= bestD && d <= reach2[q]) { bestD = d; best = q; }
                     }
                 }
                 if (best >= 0) { matched[p] = 1; matched[best] = 1; rep[best] = p; }
@@ -10185,6 +10278,7 @@ function sliceMeshClipCap(src, start, end, planes) {
         }
         // Walk the loops; a walk stuck at a non-manifold point is dropped.
         /** @type {number[][]} */ const loops = [];
+        /** @type {number[]} */ const loopDir = [];
         for (let s0 = 0; s0 < nSeg; s0++) {
             if (!alive[s0]) continue;
             alive[s0] = 0;
@@ -10192,6 +10286,8 @@ function sliceMeshClipCap(src, start, end, planes) {
             const chain = [first];
             let cur = segB[s0];
             let closed = false;
+            // Segments walked along their winding direction minus against it.
+            let vote = 1;
             for (let guard = 0; guard <= nSeg; guard++) {
                 if (cur === first) { closed = true; break; }
                 chain.push(cur);
@@ -10200,18 +10296,20 @@ function sliceMeshClipCap(src, start, end, planes) {
                 if (h < 0) break;
                 const s = h >> 1;
                 alive[s] = 0;
+                vote += (h & 1) ? -1 : 1;
                 cur = (h & 1) ? segA[s] : segB[s];
             }
-            if (closed && chain.length >= 3) loops.push(chain);
+            if (closed && chain.length >= 3) { loops.push(chain); loopDir.push(vote >= 0 ? 1 : -1); }
         }
         nSeg = 0;
 
         // 2D loops in the plane basis, biggest first.
         const basis = clipCapBasis(nx, ny, nz);
         const minArea = radius * radius * 1e-12;
-        /** @type {{pts: number[], xy: Float64Array, area: number, box: number[], depth: number, holes: any[]}[]} */
+        /** @type {{pts: number[], xy: Float64Array, area: number, sign: number, flip: number, box: number[], depth: number, parent: any, outer: boolean, holes: any[]}[]} */
         const polys = [];
-        for (const chain of loops) {
+        for (let li = 0; li < loops.length; li++) {
+            const chain = loops[li];
             const m = chain.length;
             const xy = new Float64Array(m * 2);
             let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
@@ -10226,10 +10324,12 @@ function sliceMeshClipCap(src, start, end, planes) {
                 if (y > by1) by1 = y;
             }
             let a2 = 0;
-            for (let i = 0, j = m - 1; i < m; j = i++) a2 += (xy[j * 2] - xy[i * 2]) * (xy[j * 2 + 1] + xy[i * 2 + 1]);
+            for (let i = 0, j = m - 1; i < m; j = i++) a2 += xy[j * 2] * xy[i * 2 + 1] - xy[i * 2] * xy[j * 2 + 1];
             const area = Math.abs(a2) / 2;
             if (!(area > minArea)) continue;
-            polys.push({ pts: chain, xy, area, box: [bx0, by0, bx1, by1], depth: 0, holes: [] });
+            // Counter-clockwise as walked times the walk's agreement with the winding.
+            const sign = (a2 > 0 ? 1 : -1) * loopDir[li];
+            polys.push({ pts: chain, xy, area, sign, box: [bx0, by0, bx1, by1], flip: 1, depth: 0, parent: null, outer: false, holes: [] });
         }
         polys.sort((p, q) => q.area - p.area);
         /** @param {number} qx @param {number} qy @param {Float64Array} xy */
@@ -10242,7 +10342,12 @@ function sliceMeshClipCap(src, start, end, planes) {
             }
             return inn;
         };
-        // Nesting depth from the smallest containing loop; even fills.
+        /** True when a sample of P's vertices leaves O: P overlaps O's boundary. @param {any} P @param {any} O */
+        const leaves = (P, O) => {
+            const m = P.xy.length / 2, step = Math.max(1, Math.floor(m / 64));
+            for (let i = 0; i < m; i += step) if (!inside(P.xy[i * 2], P.xy[i * 2 + 1], O.xy)) return true;
+            return false;
+        };
         for (let i = 0; i < polys.length; i++) {
             const P = polys[i];
             // Test from the midpoint of the first edge: a vertex may sit on a touching loop.
@@ -10251,15 +10356,32 @@ function sliceMeshClipCap(src, start, end, planes) {
                 const O = polys[j], b = O.box;
                 if (qx < b[0] || qx > b[2] || qy < b[1] || qy > b[3]) continue;
                 if (!inside(qx, qy, O.xy)) continue;
-                P.depth = O.depth + 1;
-                if (P.depth & 1) O.holes.push(P);
+                P.parent = O;
                 break;
+            }
+            const O = P.parent;
+            if (oriented) {
+                // Winding number, with a body wound inside out flipped by its outermost loop.
+                if (!O) { P.flip = P.sign; P.depth = 1; P.outer = true; continue; }
+                P.flip = O.flip;
+                P.depth = O.depth + P.sign * P.flip;
+                let host = O;
+                while (host && !host.outer) host = host.parent;
+                if (P.depth > 0) {
+                    // Inside filled area it is covered, unless it pokes out of its filler.
+                    P.outer = O.depth <= 0 || !host || leaves(P, host);
+                } else if (O.depth > 0 && host && !leaves(P, host)) host.holes.push(P);
+            } else {
+                P.depth = O ? O.depth + 1 : 0;
+                if (P.depth & 1 && O && leaves(P, O)) P.depth = 0;
+                P.outer = !(P.depth & 1);
+                if (!P.outer && O) O.holes.push(P);
             }
         }
         /** @type {number[]} */ const tp = [];
         /** @type {number[]} */ const tc = [];
         for (const O of polys) {
-            if (O.depth & 1) continue;
+            if (!O.outer) continue;
             const parts = [O, ...O.holes];
             let total = 0;
             for (const part of parts) total += part.pts.length;
@@ -10293,6 +10415,15 @@ function sliceMeshClipCap(src, start, end, planes) {
 
 /** @type {WeakMap<any, any>} position attribute -> unpacked slicer source */
 const MESH_CLIP_CAP_SOURCES = new WeakMap();
+let meshClipCapSourceCount = 0;
+
+/**
+ * Change counter of a (possibly interleaved) attribute, -1 for none.
+ * @param {any} a
+ */
+function attrVersion(a) {
+    return a ? (a.isInterleavedBufferAttribute ? a.data.version : a.version) : -1;
+}
 
 /**
  * Dense xyz positions, rgb colours and indices of a geometry for
@@ -10300,14 +10431,13 @@ const MESH_CLIP_CAP_SOURCES = new WeakMap();
  * attributes are unpacked once, plain float arrays are used as they are.
  * Cached per position attribute, so the clones of a cached model share one.
  * @param {THREE.BufferGeometry} geometry @param {boolean} withColor
- * @returns {{pos: ArrayLike<number>, idx: ArrayLike<number> | null, col: ArrayLike<number> | null, chunks?: Float32Array, radius?: number}}
+ * @returns {{key: string, pos: ArrayLike<number>, idx: ArrayLike<number> | null, col: ArrayLike<number> | null, chunks?: Float32Array, radius?: number}}
  */
 function meshClipCapSource(geometry, withColor) {
     const p = /** @type {any} */ (geometry.getAttribute('position'));
     const index = geometry.getIndex();
     const c = withColor ? /** @type {any} */ (geometry.getAttribute('color')) : null;
-    /** @param {any} a */
-    const version = (a) => (a ? (a.isInterleavedBufferAttribute ? a.data.version : a.version) : -1);
+    const version = attrVersion;
     const hit = MESH_CLIP_CAP_SOURCES.get(p);
     if (hit && hit.posV === version(p) && hit.index === index && hit.idxV === version(index)
         && hit.col === c && hit.colV === version(c)) return hit.src;
@@ -10323,6 +10453,8 @@ function meshClipCapSource(geometry, withColor) {
         return outArr;
     };
     const src = {
+        // Worker copies are keyed on this, so clones of one model share one copy.
+        key: `src${++meshClipCapSourceCount}`,
         pos: plain(p) ? p.array : unpack(p),
         idx: index ? index.array : null,
         col: c ? (plain(c) ? c.array : unpack(c)) : null,
@@ -10406,6 +10538,10 @@ class ClipCapController {
         /** Worker requests posted so far (test seam). */
         this.requests = 0;
         this._reqId = 0;
+        /** Worker mesh sources: source key -> number of targets attached to it. */
+        /** @type {Map<string, number>} */ this._workerSources = new Map();
+        /** Mesh sources copied to the worker so far (test seam). */
+        this.sourcesSent = 0;
         /** Main-thread ms spent on the last worker request and install (bench seam). */
         this.lastRequestMs = 0;
         this.lastInstallMs = 0;
@@ -10487,9 +10623,20 @@ class ClipCapController {
     }
 
     /** @param {any} mesh */
+    /** Drop a target's reference to a shared worker mesh source. @param {any} st */
+    _detachSource(st) {
+        const k = st.workerSourceKey;
+        if (!k) return;
+        st.workerSourceKey = '';
+        const n = (this._workerSources.get(k) || 0) - 1;
+        if (n > 0) this._workerSources.set(k, n); else this._workerSources.delete(k);
+    }
+
+    /** @param {any} mesh */
     _forgetWorkerCopy(mesh) {
         const st = mesh.userData.__clipCapState;
         if (!st || !st.workerGeomKey) return;
+        this._detachSource(st);
         st.workerGeomKey = '';
         if (this.v._lodWorker) this.v._lodWorker.postMessage({ type: 'clipCapDispose', capId: mesh.uuid });
     }
@@ -10513,9 +10660,9 @@ class ClipCapController {
         mesh.updateWorldMatrix(true, false);
         this._inv.copy(mesh.matrixWorld).invert();
         const planes = this.v._clipPlanes;
-        const sig = [geom.id, posAttr.version, index ? index.version : -1,
+        const sig = [geom.id, attrVersion(posAttr), attrVersion(index),
             geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0,
-            withColor ? colAttr.version : -1, planes.length];
+            withColor ? attrVersion(colAttr) : -1, planes.length];
         /** @type {number[][]} */ const local = [];
         for (const p of planes) {
             this._plane.copy(p).applyMatrix4(this._inv);
@@ -10622,15 +10769,23 @@ class ClipCapController {
         if (mesh.userData.clipCapKind === 'mesh') {
             const src = meshClipCapSource(geom, withColor);
             const [start, end] = meshDrawnRange(geom, src);
-            msg = { type: 'clipCap', kind: 'mesh', capId: mesh.uuid, reqId: ++this._reqId, geomKey, planes: local, start, end };
-            if (st.workerGeomKey !== geomKey) {
-                msg.positions = new Float32Array(src.pos);
-                msg.indices = src.idx ? Uint32Array.from(src.idx) : null;
-                msg.colors = src.col ? new Float32Array(src.col) : null;
-                transfer.push(msg.positions.buffer);
-                if (msg.indices) transfer.push(msg.indices.buffer);
-                if (msg.colors) transfer.push(msg.colors.buffer);
-                st.workerGeomKey = geomKey;
+            msg = { type: 'clipCap', kind: 'mesh', capId: mesh.uuid, reqId: ++this._reqId,
+                sourceKey: src.key, planes: local, start, end };
+            if (st.workerSourceKey !== src.key) {
+                this._detachSource(st);
+                // Only the first target of a source sends its data.
+                if (!this._workerSources.has(src.key)) {
+                    msg.positions = new Float32Array(src.pos);
+                    msg.indices = src.idx ? Uint32Array.from(src.idx) : null;
+                    msg.colors = src.col ? new Float32Array(src.col) : null;
+                    transfer.push(msg.positions.buffer);
+                    if (msg.indices) transfer.push(msg.indices.buffer);
+                    if (msg.colors) transfer.push(msg.colors.buffer);
+                    this.sourcesSent++;
+                }
+                this._workerSources.set(src.key, (this._workerSources.get(src.key) || 0) + 1);
+                st.workerSourceKey = src.key;
+                st.workerGeomKey = src.key;
             }
         } else {
             const posAttr = geom.getAttribute('position');
@@ -10673,6 +10828,8 @@ class ClipCapController {
         st.inflight = 0;
         if (msg.missing) {
             // The worker lost the geometry copy (terminated): resend next frame.
+            if (st.workerSourceKey) this._workerSources.delete(st.workerSourceKey);
+            st.workerSourceKey = '';
             st.workerGeomKey = '';
             return;
         }
@@ -10744,6 +10901,9 @@ class ClipCapController {
             if (!cap) continue;
             const mat = cap.material;
             if (own.color) mat.color.copy(own.color);
+            // glTF keeps the base colour in the map with a white factor.
+            const avg = textureAverageColor(own.map);
+            if (avg) mat.color.multiply(avg);
             if (own.roughness !== undefined) mat.roughness = own.roughness;
             if (own.metalness !== undefined) mat.metalness = own.metalness;
             const vc = withColor && !!cap.geometry.getAttribute('color');
@@ -10753,6 +10913,49 @@ class ClipCapController {
             cap.receiveShadow = mesh.receiveShadow;
         }
     }
+}
+
+/**
+ * Average colour (linear) of a colour map, computed once per texture version
+ * from a 16x16 downsample and cached on the texture; null for compressed,
+ * data or not yet loaded images.
+ * @param {any} tex
+ * @returns {THREE.Color | null}
+ */
+function textureAverageColor(tex) {
+    if (!tex || tex.isCompressedTexture || tex.isDataTexture) return null;
+    const ud = tex.userData;
+    if (ud.__avgColorVersion === tex.version) return ud.__avgColor;
+    const img = tex.image;
+    const ready = img && ((typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap)
+        || (typeof HTMLImageElement !== 'undefined' && img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0)
+        || (typeof HTMLCanvasElement !== 'undefined' && img instanceof HTMLCanvasElement)
+        || (typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas));
+    if (!ready) return null;
+    /** @type {THREE.Color | null} */ let avg = null;
+    try {
+        const cv = document.createElement('canvas');
+        cv.width = 16; cv.height = 16;
+        const ctx = /** @type {CanvasRenderingContext2D} */ (cv.getContext('2d', { willReadFrequently: true }));
+        ctx.drawImage(img, 0, 0, 16, 16);
+        const px = ctx.getImageData(0, 0, 16, 16).data;
+        const srgb = tex.colorSpace === THREE.SRGBColorSpace;
+        const c = new THREE.Color();
+        let r = 0, g = 0, b = 0;
+        for (let i = 0; i < px.length; i += 4) {
+            if (srgb) c.setRGB(px[i] / 255, px[i + 1] / 255, px[i + 2] / 255, THREE.SRGBColorSpace);
+            else c.setRGB(px[i] / 255, px[i + 1] / 255, px[i + 2] / 255, THREE.LinearSRGBColorSpace);
+            r += c.r; g += c.g; b += c.b;
+        }
+        const n = px.length / 4;
+        avg = new THREE.Color(r / n, g / n, b / n);
+    } catch (e) {
+        // A tainted or undrawable image keeps the factor colour alone.
+        avg = null;
+    }
+    ud.__avgColor = avg;
+    ud.__avgColorVersion = tex.version;
+    return avg;
 }
 
 /**
