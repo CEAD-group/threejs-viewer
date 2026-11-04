@@ -5985,7 +5985,7 @@ def test_clip_show_plane_hides_helper_and_keeps_cut(viewer_client, viewer_page):
         gizmos: v._clipGizmo.enabled || v._clipMoveGizmo.enabled
           || v._clipGizmoHelper.visible || v._clipMoveGizmoHelper.visible,
         checked: v._clipShowPlaneCheck.checked,
-        panel: v._clipPanelEl.classList.contains('visible'),
+        panel: v.getMenu('clip').isOpen(),
       };
     }"""
     on = viewer_page.evaluate(state_js)
@@ -7541,28 +7541,41 @@ def test_toolbar_hidden_by_default_and_client_toggle(viewer_client, viewer_page)
 
 @pytest.mark.browser
 def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
-    """The menu lists every advanced option with its shortcut key; an item
-    click runs the same action as the key, and the state labels follow."""
+    """The View menu groups every option into sections, renders booleans as
+    toggles and modes as segmented/select rows with their shortcut chips, and
+    a row and its key drive the same state."""
     page = viewer_page
     viewer_client.set_toolbar_visible(True)
     settle(viewer_client)
-    page.locator(".tjsv-btn-menu").click()
-    items = page.evaluate(
-        "() => [...document.querySelectorAll('[data-menu=viewer] .tjsv-menu-action')]"
-        "  .filter(b => !b.hidden)"
-        "  .map(b => [b.querySelector('.tjsv-menu-label').textContent,"
-        "             b.querySelector('kbd').textContent])"
+    assert (
+        page.evaluate(
+            "() => document.querySelector('.tjsv-btn-menu .tjsv-menu-btn-label')"
+            ".textContent"
+        )
+        == "View"
     )
-    assert items == [
-        ["Clipping plane", "C"],
-        ["Lighting", "E"],
-        ["Orbit mode", "R"],
-        ["Projection", "O"],
-        ["Wireframe", "M"],
-        ["Shading debug", "N"],
-        ["Distance fog", "D"],
-        ["Eye-dome lighting", "\u21e7D"],
-        ["Frame all", "F"],
+    page.locator(".tjsv-btn-menu").click()
+    rows = page.evaluate(
+        "() => [...document.querySelectorAll('[data-menu=viewer] .tjsv-menu > *')]"
+        "  .filter(e => !e.hidden && !e.classList.contains('tjsv-menu-status'))"
+        "  .map(e => e.dataset.item"
+        "    ? [e.dataset.item, e.className.split(' ')[0],"
+        "       e.querySelector('kbd').textContent]"
+        "    : ['section', e.textContent])"
+    )
+    assert rows == [
+        ["section", "Tools"],
+        ["clip", "tjsv-menu-item", "C"],
+        ["lighting", "tjsv-menu-item", "E"],
+        ["section", "Camera"],
+        ["projection", "tjsv-menu-row", "O"],
+        ["orbit", "tjsv-menu-row", "R"],
+        ["frame", "tjsv-menu-action", "F"],
+        ["section", "Display"],
+        ["wireframe", "tjsv-menu-row", "M"],
+        ["shading", "tjsv-menu-row", "N"],
+        ["fog", "tjsv-menu-item", "D"],
+        ["edl", "tjsv-menu-item", "\u21e7D"],
     ]
     # Camera tracking only shows once an animation with a track target exists.
     assert (
@@ -7570,20 +7583,298 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
         is True
     )
 
-    page.locator("[data-menu=viewer] [data-item=wireframe]").click()
-    state = page.evaluate(
+    wire_state = (
         "() => ({mode: window.threejsViewer._shading.wireframeMode,"
-        "        active: document.querySelector('[data-item=wireframe]')"
-        "                  .classList.contains('active'),"
-        "        label: document.querySelector('[data-item=wireframe] .tjsv-menu-state')"
-        "                  .textContent,"
+        "        active: document.querySelector("
+        "          '[data-item=wireframe] .tjsv-seg-btn.active').textContent,"
         "        open: window.threejsViewer._menuOpen})"
     )
-    assert state == {"mode": 1, "active": True, "label": "wire", "open": True}
+    page.locator("[data-item=wireframe] .tjsv-seg-btn[data-value='2']").click()
+    assert page.evaluate(wire_state) == {"mode": 2, "active": "Both", "open": True}
+    # The key cycles the same state, and the row follows it.
+    _press_viewer_key(page, "m", "KeyM")
+    page.evaluate("() => new Promise(r => queueMicrotask(r))")
+    assert page.evaluate(wire_state) == {"mode": 0, "active": "Off", "open": True}
+
+    page.locator("[data-item=projection] .tjsv-seg-btn[data-value=ortho]").click()
+    assert page.evaluate("() => window.threejsViewer._isOrtho") is True
+    page.locator("[data-item=fog]").click()
+    assert page.evaluate(
+        "() => [window.threejsViewer._depthCue.fogActive,"
+        " document.querySelector('[data-item=fog]').classList.contains('active')]"
+    ) == [True, True]
+    page.locator("[data-item=shading] select").select_option("1")
+    assert page.evaluate("() => window.threejsViewer._shading.shadingMode") == 1
 
     # A pointerdown outside the toolbar closes the menu.
     page.mouse.click(400, 300)
     assert page.evaluate("() => window.threejsViewer._menuOpen") is False
+
+
+_RAIL_PANEL_STATE = """() => {
+  const v = window.threejsViewer;
+  const tab = (id) => {
+    const m = v.getMenu(id);
+    return {hidden: m.el.hidden, open: m.isOpen(),
+            left: m.el.classList.contains('tjsv-side-left')};
+  };
+  const ls = (id) => localStorage.getItem('tjsv.toolPanel.' + id);
+  return {clip: v._clipEnabled, clipTab: tab('clip'), lightTab: tab('lighting'),
+          clipStored: ls('clip'), lightStored: ls('lighting'),
+          item: document.querySelector('[data-menu=viewer] [data-item=clip]')
+            .classList.contains('active'),
+          lightItem: document.querySelector('[data-menu=viewer] [data-item=lighting]')
+            .classList.contains('active'),
+          leftTabs: [...document.querySelectorAll('.tjsv-rail-panel.tjsv-side-left')]
+            .filter(e => !e.hidden).length,
+          inBody: !!v.getMenu('clip').el.querySelector('.tjsv-menu .tjsv-clipping-panel')};
+}"""
+
+
+@pytest.mark.browser
+def test_clip_panel_is_a_left_rail_tool_in_sync_with_key_menu_and_python(
+    viewer_client, viewer_page
+):
+    """The clip controls live in the body of a Clipping tab on the LEFT rail.
+    No tool panel is enabled at first, so there is no left rail. C (with the
+    toolbar hidden) and set_clipping_plane enable and unfold it; the View
+    menu toggle decides whether the tab exists, persisted in localStorage."""
+    page = viewer_page
+    viewer_client.add_box("b")
+    settle(viewer_client)
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["inBody"] and st["clipTab"]["left"]
+    assert st["leftTabs"] == 0 and not st["clip"] and st["clipStored"] is None
+
+    # C with the toolbar hidden: the panel is enabled, unfolded, the cut on.
+    _press_viewer_key(page, "c", "KeyC")
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["clip"] and st["item"] and st["clipStored"] == "true"
+    assert st["clipTab"] == {"hidden": False, "open": True, "left": True}
+    # The panel's own switch turns the cut off and keeps the panel open.
+    page.locator(".tjsv-clip-enabled").click()
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert not st["clip"] and st["clipTab"]["open"]
+    page.locator(".tjsv-clip-enabled").click()
+    # C again: cut off and folded; the panel stays enabled.
+    _press_viewer_key(page, "c", "KeyC")
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert not st["clip"] and st["leftTabs"] == 1
+    assert st["clipTab"] == {"hidden": False, "open": False, "left": True}
+    # Unfolding the tab turns the cut on.
+    page.locator("[data-menu=clip] .tjsv-menu-btn").click()
+    assert page.evaluate(_RAIL_PANEL_STATE)["clip"] is True
+
+    # Python: disable turns the cut off and leaves the panel; set reopens it.
+    viewer_client.disable_clipping_plane()
+    settle(viewer_client)
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert not st["clip"] and not st["clipTab"]["hidden"]
+    page.locator("[data-menu=clip] .tjsv-menu-btn").click()
+    page.locator("[data-menu=clip] .tjsv-menu-btn").click()
+    viewer_client.disable_clipping_plane()
+    page.locator("[data-menu=clip] .tjsv-menu-btn").click()
+    settle(viewer_client)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.1)
+    settle(viewer_client)
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["clip"] and st["clipTab"]["open"]
+
+    # The View toggle removes the tab (the cut stays) and brings it back folded.
+    viewer_client.set_toolbar_visible(True)
+    settle(viewer_client)
+    page.locator(".tjsv-btn-menu").click()
+    page.locator("[data-menu=viewer] [data-item=clip]").click()
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["clip"] and not st["item"] and st["clipStored"] == "false"
+    assert st["clipTab"]["hidden"] and st["leftTabs"] == 0
+    page.locator("[data-menu=viewer] [data-item=clip]").click()
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["item"] and st["clipTab"] == {
+        "hidden": False,
+        "open": False,
+        "left": True,
+    }
+
+    # A fresh viewer in the same browser restores the enabled panels.
+    fresh = page.evaluate(
+        "() => { const V = window.threejsViewer.constructor;"
+        " const div = document.createElement('div');"
+        " div.style.cssText = 'width:300px;height:200px;position:absolute;left:-2000px;top:0';"
+        " document.body.appendChild(div);"
+        " const live = window.threejsViewer;"
+        " const w = new V(div, {htmlTemplate: live._options.htmlTemplate,"
+        "   cubemapData: live._options.cubemapData, autoConnect: false});"
+        " const r = [w.getMenu('clip').el.hidden, w.getMenu('lighting').el.hidden];"
+        " w.destroy(); div.remove(); return r; }"
+    )
+    assert fresh == [False, True]
+
+
+@pytest.mark.browser
+def test_lighting_panel_is_a_left_rail_tool_toggled_by_e(viewer_client, viewer_page):
+    """E enables and unfolds the Lighting tool panel even with the toolbar
+    hidden; E again folds it and the tab stays; the View toggle removes it."""
+    page = viewer_page
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["lightTab"]["hidden"] and st["leftTabs"] == 0
+    _press_viewer_key(page, "e", "KeyE")
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["lightTab"] == {"hidden": False, "open": True, "left": True}
+    assert st["lightItem"] and st["lightStored"] == "true"
+    assert page.evaluate(
+        "() => !!window.threejsViewer.getMenu('lighting').el"
+        ".querySelector('.tjsv-menu .tjsv-lighting-panel .tjsv-lighting-exposure')"
+    )
+    _press_viewer_key(page, "e", "KeyE")
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["lightTab"] == {"hidden": False, "open": False, "left": True}
+    page.evaluate("() => window.threejsViewer._setToolPanelEnabled('lighting', false)")
+    st = page.evaluate(_RAIL_PANEL_STATE)
+    assert st["lightTab"]["hidden"] and st["lightStored"] == "false"
+
+
+@pytest.mark.browser
+def test_left_and_right_rail_bodies_open_together(viewer_client, viewer_page):
+    """Each rail side keeps its own open body: a left tool panel and a right
+    client legend are open at once. Both tool tabs stack on the left, and a
+    closed right tab never covers the open right body."""
+    page = viewer_page
+    viewer_client.set_toolbar_visible(True)
+    settle(viewer_client)
+    page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.addMenu({id: 'legend', label: 'Legend', mode: 'panel',"
+        "   items: [{type: 'label', label: 'Legend'}]});"
+        " v.addMenu({id: 'demo', label: 'Demo', items: [{type: 'button', label: 'Go'}]}); }"
+    )
+    _press_viewer_key(page, "e", "KeyE")
+    _press_viewer_key(page, "c", "KeyC")
+    st = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const r = (id) => v.getMenu(id).el.querySelector(':scope > .tjsv-menu-btn')"
+        "   .getBoundingClientRect();"
+        " return {clip: v.getMenu('clip').isOpen(), light: v.getMenu('lighting').isOpen(),"
+        "   legend: v.getMenu('legend').isOpen(),"
+        "   clipLeft: r('clip').left, lightLeft: r('lighting').left,"
+        "   stacked: r('lighting').top >= r('clip').bottom}; }"
+    )
+    # Opening Clipping folded Lighting (same side) but not the right legend.
+    assert st["clip"] and st["legend"] and not st["light"] and st["stacked"]
+    assert st["lightLeft"] == 0
+
+    page.locator(".tjsv-btn-menu").click()
+    page.wait_for_timeout(300)  # the 0.18 s slide transition
+    geo = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const body = v.getMenu('viewer').el.querySelector(':scope > .tjsv-menu')"
+        "   .getBoundingClientRect();"
+        " return ['legend', 'demo'].map(id => v.getMenu(id).el"
+        "   .querySelector(':scope > .tjsv-menu-btn').getBoundingClientRect().right"
+        "   <= body.left + 0.5)"
+        "   .concat([v.getMenu('clip').isOpen()]); }"
+    )
+    assert geo == [True, True, True]
+
+
+@pytest.mark.browser
+def test_streamed_clipping_plane_never_reopens_a_folded_panel(
+    viewer_client, viewer_page
+):
+    """Only the off-to-on transition of the cut unfolds the Clipping panel: a
+    script streaming the plane leaves a folded tab folded and an open
+    Lighting body open."""
+    page = viewer_page
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0)
+    settle(viewer_client)
+    assert page.evaluate("() => window.threejsViewer.getMenu('clip').isOpen()")
+    page.locator("[data-menu=clip] .tjsv-menu-btn").click()
+    _press_viewer_key(page, "e", "KeyE")
+    for i in range(5):
+        viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.1 * i)
+        viewer_client.set_clipping_slab(normal=[0, 1, 0], center=0.1 * i, thickness=1)
+    settle(viewer_client)
+    st = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return [v._clipEnabled, v.getMenu('clip').isOpen(),"
+        "         v.getMenu('lighting').isOpen(), v._clipPosition]; }"
+    )
+    assert st == [True, False, True, 0.4]
+
+
+@pytest.mark.browser
+def test_space_on_panel_buttons_stays_with_the_button(viewer_client, viewer_page):
+    """Space on a focused panel button (the clip switch, a segmented button)
+    activates that button and never reaches the play/pause key."""
+    page = viewer_page
+    viewer_client.add_box("spinner")
+    viewer_client.load_animation(_spin_animation("spinner"), autoplay=False)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0)
+    settle(viewer_client)
+    state = (
+        "() => { const v = window.threejsViewer;"
+        " return [v._clipEnabled, v._clipSlabMode, v.getAnimationState().playing]; }"
+    )
+    page.focus(".tjsv-clip-mode-slab")
+    page.keyboard.press("Space")
+    assert page.evaluate(state) == [True, True, False]
+    page.focus(".tjsv-clip-enabled")
+    page.keyboard.press("Space")
+    assert page.evaluate(state) == [False, True, False]
+
+
+@pytest.mark.browser
+def test_focused_select_keeps_its_keys_from_viewer_shortcuts(
+    viewer_client, viewer_page
+):
+    """Letters and arrows in a focused select (tone mapping) do not fire the
+    viewer's shortcuts or move the clip plane."""
+    page = viewer_page
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0)
+    settle(viewer_client)
+    _press_viewer_key(page, "e", "KeyE")
+    page.focus(".tjsv-lighting-tone-mapping")
+    page.keyboard.press("m")
+    page.keyboard.press("ArrowLeft")
+    st = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return [v._shading.wireframeMode, v._clipPosition]; }"
+    )
+    assert st == [0, 0]
+
+
+@pytest.mark.browser
+def test_clip_normal_fields_have_no_spinners_and_commit(viewer_client, viewer_page):
+    """The normal fields are plain numeric inputs (no spinner arrows), commit
+    on Enter, and arrow keys inside them never move the plane."""
+    page = viewer_page
+    viewer_client.add_box("b")
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0)
+    settle(viewer_client)
+    looks = page.evaluate(
+        "() => ['.tjsv-clip-nx', '.tjsv-clip-ny', '.tjsv-clip-nz'].map(sel => {"
+        " const el = document.querySelector(sel);"
+        " return [el.type, getComputedStyle(el).appearance]; })"
+    )
+    assert looks == [["number", "textfield"]] * 3
+    # Blink paints the spin buttons as pseudo-elements that computed style
+    # cannot read, so check the rule that removes them.
+    spin = page.evaluate(
+        "() => [...document.styleSheets].flatMap(s => [...s.cssRules])"
+        "  .filter(r => r.selectorText && r.selectorText.includes("
+        "    '.tjsv-num-input::-webkit-inner-spin-button'))"
+        "  .map(r => r.style.getPropertyValue('appearance'))"
+    )
+    assert spin == ["none"]
+    page.locator(".tjsv-clip-nz").fill("1")
+    page.locator(".tjsv-clip-nz").press("Enter")
+    page.locator(".tjsv-clip-nz").press("ArrowRight")
+    page.locator(".tjsv-clip-nz").press("ArrowLeft")
+    st = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return [v._clipPlane.normal.toArray().map(c => +c.toFixed(4)), v._clipPosition]; }"
+    )
+    assert st == [[0.7071, 0, 0.7071], 0]
 
 
 @pytest.mark.browser

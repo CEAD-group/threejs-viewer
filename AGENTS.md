@@ -38,6 +38,7 @@ development tools for JavaScript type checking, not runtime or build dependencie
 | `tests/` | Python tests and Playwright browser integration tests |
 | `examples/` | Runnable demonstrations of the public API |
 | `bench/` | Offline quality and performance tools; not shipped or run in CI |
+| `tools/record_readme_media.py` | Re-records the README gallery in `docs/media` from the examples (`SHOTS`); not run in CI |
 | `plans/` | Decision records with their own status; not a source of current architecture |
 
 Start with `README.md` for usage and `DESIGN.md` for design context. Check the

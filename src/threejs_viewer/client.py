@@ -723,9 +723,11 @@ class ViewerClient:
                 CAD-like; wider values exaggerate perspective. Must be finite
                 and within the open interval ``(0, 180)``; other values raise
                 ``ValueError``.
-            toolbar: Show the viewer's top-right menu button on launch (default
-                ``False``: the viewer opens with no chrome besides the view
-                gimbal). The menu lists the advanced options (clipping,
+            toolbar: Show the viewer's own "View" menu tab, and the Clipping
+                and Lighting tabs under it, on the right-edge rail at launch
+                (default ``False``: the viewer opens with no chrome besides the
+                view gimbal; the Clipping and Lighting tabs then appear only
+                while ``C``/``E`` or the clipping calls open them). The menu lists the advanced options (clipping,
                 lighting, orbit mode, projection, wireframe, shading debug,
                 depth cues, framing) with their keyboard shortcuts, which
                 keep working either way. Toggle at runtime with
@@ -4403,7 +4405,11 @@ class ViewerClient:
         self._send(msg)
 
     def set_toolbar_visible(self, visible: bool = True) -> None:
-        """Show or hide the viewer's top-right menu button.
+        """Show or hide the viewer's "View" menu tab on the right-edge rail.
+
+        The Clipping and Lighting tabs under it follow: always shown with the
+        toolbar, and otherwise only while clipping is on or their panel is
+        open, so ``C``, ``E`` and the clipping calls still reach them.
 
         The viewer opens without it unless ``ViewerClient(toolbar=True)`` was
         passed. The menu lists the advanced options with their keyboard
@@ -4743,7 +4749,7 @@ class ViewerClient:
         or whose ``collapseOnly`` worker pass has not yet completed.
 
         Also bound to the ``S`` key in the live viewer (toggles every eligible
-        tube globally; the key is gated on the clipping panel being closed so
+        tube globally; the key is gated on clipping being off so
         the existing clip-S slab-mode shortcut still works).
         """
         self._send(
@@ -4816,7 +4822,7 @@ class ViewerClient:
     ) -> None:
         """
         Set default clipping plane axis and position for when the user
-        first opens the clipping panel (C key).
+        first opens the Clipping rail tab (C key).
 
         Args:
             normal: [x, y, z] plane normal direction (e.g. [0, 0, -1] for Z-).
