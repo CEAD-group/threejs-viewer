@@ -7352,7 +7352,7 @@ class CameraController {
 //   open across outside clicks (a legend). `bodyWidth` (CSS length,
 //   default 190px) sizes the body.
 //
-// ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'label'|'divider'|'custom',
+// ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'radio'|'label'|'divider'|'custom',
 //         id, label, hint, shortcut, bindKey, state, active, checked, value,
 //         options: [{value, label}], ids, prefix, disabled, hidden,
 //         onClick(item), onChange(value, item), render(el, item) }
@@ -7361,7 +7361,7 @@ class CameraController {
 //   is shown as a key chip AND bound (user-defined keyboard shortcuts) unless
 //   `bindKey: false`; keys the viewer itself uses are refused with a warning. `eye` items own every tracked
 //   object whose id is in `ids` or starts with `prefix` and flip its
-//   `.visible`; a menu `storageKey` persists toggle/eye/select/segmented
+//   `.visible`; a menu `storageKey` persists toggle/eye/select/segmented/radio
 //   values in localStorage under that key. An eye may instead supply
 //   `match(objId)` (custom ownership) and/or `apply(on)` (custom show/hide,
 //   replacing the object walk) for layers that are not plain id shapes;
@@ -7371,6 +7371,8 @@ class CameraController {
 //   after it, up to the next `divider` or collapsible label, hide while it
 //   is collapsed (`collapsed`, default false; persisted under storageKey
 //   like the other values; getValue/setItem({collapsed}) read and set it).
+//   `radio` takes the same `options`/`value` as select and segmented but
+//   always renders one row per option with a dot, under an optional label.
 
 /** @typedef {{
  *   type?: string, id?: string, label?: string, hint?: string, shortcut?: string,
@@ -7389,7 +7391,9 @@ class CameraController {
  *   bodyWidth?: string, builtin?: boolean,
  * }} MenuSpec */
 
-const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'label', 'divider', 'custom']);
+const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'radio', 'label', 'divider', 'custom']);
+/** Item types whose value is one of `options`. */
+const MENU_CHOICE_TYPES = new Set(['select', 'segmented', 'radio']);
 
 /**
  * Parse a shortcut label such as "Shift+D" or "M" into a matcher for keydown.
@@ -7735,14 +7739,9 @@ class MenuController {
             lab.textContent = it.label || '';
             const sel = document.createElement('select');
             sel.className = 'tjsv-menu-select';
-            for (const o of it.options || []) {
-                const opt = document.createElement('option');
-                opt.value = String(o.value);
-                opt.textContent = o.label ?? String(o.value);
-                sel.appendChild(opt);
-            }
             sel.addEventListener('change', () => this._commit(m, rec, sel.value));
             rec.input = sel;
+            this._fillOptions(m, rec);
             el.appendChild(lab);
             el.appendChild(sel);
         } else if (type === 'segmented') {
@@ -7753,18 +7752,26 @@ class MenuController {
             lab.textContent = it.label || '';
             const seg = document.createElement('div');
             seg.className = 'tjsv-segmented';
-            for (const o of it.options || []) {
-                const b = document.createElement('button');
-                b.type = 'button';
-                b.className = 'tjsv-seg-btn';
-                b.dataset.value = String(o.value);
-                b.textContent = o.label ?? String(o.value);
-                b.addEventListener('click', () => this._commit(m, rec, o.value));
-                seg.appendChild(b);
-            }
             rec.input = seg;
+            this._fillOptions(m, rec);
             if (it.label) el.appendChild(lab);
             el.appendChild(seg);
+        } else if (type === 'radio') {
+            el = document.createElement('div');
+            el.className = 'tjsv-menu-radio';
+            el.setAttribute('role', 'radiogroup');
+            if (it.label) {
+                const lab = document.createElement('div');
+                lab.className = 'tjsv-menu-label tjsv-radio-caption';
+                lab.textContent = it.label;
+                el.appendChild(lab);
+                el.setAttribute('aria-label', it.label);
+            }
+            const list = document.createElement('div');
+            list.className = 'tjsv-radio-list';
+            rec.input = list;
+            this._fillOptions(m, rec);
+            el.appendChild(list);
         } else {
             // button: a full-width action; toggle | eye: a row [mark] label … state [kbd]
             el = document.createElement('button');
@@ -7816,9 +7823,45 @@ class MenuController {
         m.body.appendChild(el);
     }
 
+    /** (Re)build the option children of a select, segmented or radio item. @param {any} m @param {any} rec */
+    _fillOptions(m, rec) {
+        const type = rec.spec.type;
+        const host = rec.input;
+        host.innerHTML = '';
+        for (const o of rec.spec.options || []) {
+            const text = o.label ?? String(o.value);
+            let child;
+            if (type === 'select') {
+                child = document.createElement('option');
+                child.value = String(o.value);
+                child.textContent = text;
+            } else {
+                child = document.createElement('button');
+                child.type = 'button';
+                child.dataset.value = String(o.value);
+                child.addEventListener('click', () => this._commit(m, rec, o.value));
+                if (type === 'radio') {
+                    child.className = 'tjsv-menu-item tjsv-radio-opt';
+                    child.setAttribute('role', 'radio');
+                    const dot = document.createElement('span');
+                    dot.className = 'tjsv-radio-dot';
+                    const lab = document.createElement('span');
+                    lab.className = 'tjsv-menu-label';
+                    lab.textContent = text;
+                    child.appendChild(dot);
+                    child.appendChild(lab);
+                } else {
+                    child.className = 'tjsv-seg-btn';
+                    child.textContent = text;
+                }
+            }
+            host.appendChild(child);
+        }
+    }
+
     // ---- state -----------------------------------------------------------
 
-    /** Current value of a toggle/eye/select/segmented item. @param {any} m @param {MenuItemSpec|undefined} it */
+    /** Current value of a toggle/eye/select/segmented/radio item. @param {any} m @param {MenuItemSpec|undefined} it */
     _valueOf(m, it) {
         if (!it) return undefined;
         const type = it.type || 'button';
@@ -7831,7 +7874,7 @@ class MenuController {
             const c = evalProp(it.checked, it);
             return c === undefined ? type === 'eye' : !!c;
         }
-        if (type === 'select' || type === 'segmented') {
+        if (MENU_CHOICE_TYPES.has(type)) {
             const v = evalProp(it.value, it);
             return v !== undefined ? v : (it.options?.[0]?.value);
         }
@@ -7924,23 +7967,11 @@ class MenuController {
             this._persist(m);
             if ((it.type || '') === 'eye') this._applyEye(it, !!v);
         }
-        if ('options' in patch && rec.input) {
-            rec.input.innerHTML = '';
-            const isSel = rec.input.tagName === 'SELECT';
-            for (const o of it.options || []) {
-                const child = document.createElement(isSel ? 'option' : 'button');
-                if (isSel) { /** @type {HTMLOptionElement} */ (child).value = String(o.value); }
-                else {
-                    child.className = 'tjsv-seg-btn';
-                    child.dataset.value = String(o.value);
-                    child.addEventListener('click', () => this._commit(m, rec, o.value));
-                }
-                child.textContent = o.label ?? String(o.value);
-                rec.input.appendChild(child);
-            }
-        }
+        if ('options' in patch && rec.input) this._fillOptions(m, rec);
         if ('label' in patch) {
-            const lab = rec.el?.querySelector('.tjsv-menu-label');
+            const lab = (it.type || '') === 'radio'
+                ? rec.el?.querySelector('.tjsv-radio-caption')
+                : rec.el?.querySelector('.tjsv-menu-label');
             if (lab) lab.textContent = it.label || '';
             else if ((it.type || '') === 'label' && rec.el) rec.el.textContent = it.label || '';
         }
@@ -8007,6 +8038,15 @@ class MenuController {
             const v = this._valueOf(m, it);
             for (const b of rec.input.querySelectorAll('.tjsv-seg-btn')) {
                 b.classList.toggle('active', String(b.dataset.value) === String(v));
+                b.disabled = disabled;
+            }
+        } else if (type === 'radio') {
+            const v = this._valueOf(m, it);
+            for (const b of rec.input.querySelectorAll('.tjsv-radio-opt')) {
+                const on = String(b.dataset.value) === String(v);
+                b.classList.toggle('active', on);
+                b.classList.toggle('disabled', disabled);
+                b.setAttribute('aria-checked', String(on));
                 b.disabled = disabled;
             }
         }

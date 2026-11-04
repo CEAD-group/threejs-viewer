@@ -83,6 +83,17 @@ client.add_menu(
             "options": ["left", "right"],
             "value": "right",
         },
+        {
+            "type": "radio",
+            "id": "marker_color",
+            "label": "Marker colour",
+            "options": [
+                {"value": 0xFFFFFF, "label": "White"},
+                {"value": 0xFF3333, "label": "Red"},
+                {"value": 0x33CCFF, "label": "Cyan"},
+            ],
+            "value": 0xFFFFFF,
+        },
     ],
 )
 
@@ -105,6 +116,8 @@ def on_action(action):
                 for i in range(5)
             }
         )
+    elif item == "marker_color":
+        client.set_color("marker", value)
     elif item == "side":
         state["side"] = -1.0 if value == "left" else 1.0
         client.update_menu_item(

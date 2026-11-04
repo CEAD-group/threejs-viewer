@@ -7723,6 +7723,56 @@ def test_add_menu_dropdown_items_and_callbacks(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_add_menu_radio_lists_every_option(viewer_client, viewer_page):
+    """A radio item renders one row per option with the selected one marked,
+    commits on click, and follows setItem for options, value and disabled."""
+    page = viewer_page
+    page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " window.__log = [];"
+        " v.addMenu({id: 'demo', label: 'Demo', items: ["
+        "   {type: 'radio', id: 'pick', label: 'Pick',"
+        "    options: [{value: 'a', label: 'Alpha'}, 'b', 'c'], value: 'b',"
+        "    onChange: (val) => window.__log.push('pick:' + val)},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push(a.type + ':' + a.value));"
+        "}"
+    )
+    read = (
+        "() => { const r = document.querySelector('[data-menu=demo] [data-item=pick]');"
+        " return {caption: r.querySelector('.tjsv-radio-caption').textContent,"
+        "  rows: [...r.querySelectorAll('.tjsv-radio-opt')].map(b =>"
+        "   [b.dataset.value, b.textContent, b.getAttribute('aria-checked'), b.disabled]),"
+        "  value: window.threejsViewer.getMenu('demo').getValue('pick')}; }"
+    )
+    assert page.evaluate(read) == {
+        "caption": "Pick",
+        "rows": [
+            ["a", "Alpha", "false", False],
+            ["b", "b", "true", False],
+            ["c", "c", "false", False],
+        ],
+        "value": "b",
+    }
+
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+    page.locator("[data-menu=demo] .tjsv-radio-opt[data-value=c]").click()
+    assert page.evaluate("() => window.__log") == ["pick:c", "radio:c"]
+    assert page.evaluate(read)["value"] == "c"
+
+    page.evaluate(
+        "() => window.threejsViewer.getMenu('demo').setItem('pick',"
+        " {options: ['x', 'y'], value: 'y', disabled: true, label: 'Other'})"
+    )
+    assert page.evaluate(read) == {
+        "caption": "Other",
+        "rows": [["x", "x", "false", True], ["y", "y", "true", True]],
+        "value": "y",
+    }
+
+
+@pytest.mark.browser
 def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_page):
     """An eye item hides every object it owns, keeps hiding objects that are
     added later, persists under storageKey, and hidingEyeFor names it."""
