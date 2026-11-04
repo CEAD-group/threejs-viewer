@@ -3,6 +3,18 @@
 `threejs-viewer` is licensed under the MIT license. It redistributes the
 following third-party material, which retains its own license.
 
+## Mesh-cap polygon operations and triangulation
+
+`src/threejs_viewer/viewer/polygon-clipping.js` wraps the bundled factory from
+[polygon-clipping 0.15.7](https://github.com/mfogel/polygon-clipping/tree/v0.15.7).
+It includes splaytree 3.1.2 and robust-predicates 3.0.2. Their full notices are
+retained inside the factory, so the standalone viewer and worker retain them.
+The bundled Microsoft TypeScript runtime helper retains its Apache-2.0 notice;
+the full Apache license below applies to that helper too.
+
+`earcut2D` in `viewer.js` adapts Mapbox earcut 2.2.4 and retains its ISC notice
+inside the function, including in the standalone viewer and worker source.
+
 ## Colormap lookup tables — `src/threejs_viewer/_colormap_data.py`
 
 The 256-entry RGB lookup tables embedded in `_colormap_data.py` are reproduced
