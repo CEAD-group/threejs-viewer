@@ -61,9 +61,8 @@ SHOTS = {
     "section_caps": dict(
         example="16_section_caps.py",
         at=10,
-        # Depends on the template's clip panel class.
-        js="document.querySelector('.tjsv-clipping-panel').style.display = 'none';"
-        + FRAME_ALL,
+        # Hides the Clipping rail tab that set_clipping_slab opens.
+        js="window.threejsViewer.getMenu('clip').setHidden(true);" + FRAME_ALL,
     ),
     "cad_inspection": dict(example="39_cad_inspection.py", click="block_right", at=5),
     "million_point_toolpath": dict(

@@ -153,7 +153,7 @@ const CLIP_AXIS_NORMALS = {
  * @property {number} [maxPixelRatio]                     Cap on the renderer pixel ratio, applied as min(devicePixelRatio, maxPixelRatio) (default Infinity = no cap, clamped to >= 0.5; issue #237). Overridable per page via the `max_pixel_ratio` URL query param, which wins over this option.
  * @property {boolean} [dblclickFrame]                    Double-click frames the hit object / resets the view on a miss (default true). Set false when the embedder uses dblclick itself (issue #177); `setDblclickFrame(bool)` flips it at runtime.
  * @property {false | {maxEntries?: number, maxBytes?: number}} [modelCache] Session cache of parsed models keyed by URL (issue #221). Default 64 entries / 256 MB; `false` disables it. `clearModelCache()` empties it.
- * @property {boolean} [toolbar]                          Show the top-right menu button (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
+ * @property {boolean} [toolbar]                          Show the View menu tab and the Clipping/Lighting tabs on the rail (default false: the viewer opens with no chrome besides the gimbal). Overridable per page via the `toolbar` URL query param, which wins over this option; `setToolbarVisible()` flips it at runtime.
  */
 
 /**
@@ -7345,12 +7345,13 @@ class CameraController {
 // visibility and shortcut display; the caller owns content and callbacks.
 //
 // MENU  { id, label, title, mode: 'dropdown'|'panel', items: [ITEM…],
-//         storageKey, bodyWidth, hidden }
+//         storageKey, bodyWidth, hidden, open, onOpenChange }
 //   Every menu is a vertical tab on the right-edge rail whose body slides
 //   out on click (an embedding app's N-panel). `dropdown` (the default) starts
-//   folded and closes on an outside click; `panel` starts open and stays
-//   open across outside clicks (a legend). `bodyWidth` (CSS length,
-//   default 190px) sizes the body.
+//   folded and closes on an outside click; `panel` starts open (unless
+//   `open: false`) and stays open across outside clicks (a legend).
+//   `bodyWidth` (CSS length, default 190px) sizes the body. `onOpenChange(open)`
+//   fires whenever the body folds or unfolds, for any reason.
 //
 // ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'radio'|'label'|'divider'|'custom',
 //         id, label, hint, shortcut, bindKey, state, active, checked, value,
@@ -7388,7 +7389,8 @@ class CameraController {
 /** @typedef {{
  *   id: string, label?: string, title?: string, mode?: 'dropdown'|'panel',
  *   items?: MenuItemSpec[], storageKey?: string, hidden?: boolean,
- *   bodyWidth?: string, builtin?: boolean,
+ *   bodyWidth?: string, builtin?: boolean, open?: boolean,
+ *   onOpenChange?: (open: boolean) => void,
  * }} MenuSpec */
 
 const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'radio', 'label', 'divider', 'custom']);
@@ -7563,7 +7565,7 @@ class MenuController {
         m.handle = this._makeHandle(m);
         this.applyEyes(m);
         this.refresh(m);
-        if (mode === 'panel') this._setOpen(m, true);
+        if (mode === 'panel' && spec.open !== false) this._setOpen(m, true);
         this._layoutRail();
         return m.handle;
     }
@@ -7671,9 +7673,8 @@ class MenuController {
         tab.title = spec.title || spec.label || '';
         tab.setAttribute('aria-expanded', 'false');
         tab.setAttribute('aria-label', spec.label || spec.id);
-        tab.innerHTML = spec.builtin
-            ? '<span class="tjsv-status-dot disconnected"></span>'
-            : `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
+        tab.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
+            + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
         tab.addEventListener('click', (e) => { e.stopPropagation(); this._setOpen(m, !m.open); });
         m.button = tab;
         root.appendChild(tab);
@@ -7792,14 +7793,14 @@ class MenuController {
             }
             el.appendChild(lab);
             el.appendChild(st);
-            if (it.shortcut) {
-                const kbd = document.createElement('kbd');
-                // Display only: the modifier word would not fit the 190px body.
-                kbd.textContent = it.shortcut.replace(/Shift\+/i, '\u21E7');
-                kbd.title = it.shortcut;
-                el.appendChild(kbd);
-            }
             el.addEventListener('click', () => this._activate(m, rec));
+        }
+        if (it.shortcut && (el instanceof HTMLButtonElement || type === 'select' || type === 'segmented')) {
+            const kbd = document.createElement('kbd');
+            // Display only: the modifier word would not fit the 190px body.
+            kbd.textContent = it.shortcut.replace(/Shift\+/i, '\u21E7');
+            kbd.title = it.shortcut;
+            el.appendChild(kbd);
         }
         if (it.id) el.dataset.item = it.id;
         if (it.hint) el.title = it.hint;
@@ -7886,7 +7887,9 @@ class MenuController {
     _valueOf(m, it) {
         if (!it) return undefined;
         const type = it.type || 'button';
-        if (it.id && it.id in m.state) return m.state[it.id];
+        // The built-in menu reads live viewer state through its functions, never a stored value.
+        const live = m.spec.builtin && type !== 'label';
+        if (!live && it.id && it.id in m.state) return m.state[it.id];
         if (type === 'label' && it.collapsible) {
             const local = m.folds.get(it);
             return local !== undefined ? local : !!evalProp(it.collapsed, it);
@@ -8153,10 +8156,12 @@ class MenuController {
         if (want) {
             for (const o of this._menus.values()) if (o !== m) this._setOpen(o, false);
         }
+        const changed = m.open !== want;
         m.open = want;
         m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
         if (want) { this.refresh(m); this._placeBody(m); }
+        if (changed && typeof m.spec.onOpenChange === 'function') m.spec.onOpenChange(want);
     }
 
     /** @returns {boolean} */
@@ -8209,8 +8214,11 @@ class ShadingDebugController {
         this._uvTex = null;
     }
 
-    cycleWireframe() {
-        this.wireframeMode = (this.wireframeMode + 1) % 3;
+    cycleWireframe() { this.setWireframeMode(this.wireframeMode + 1); }
+
+    /** @param {number} mode 0 normal, 1 wireframe only, 2 solid + wireframe */
+    setWireframeMode(mode) {
+        this.wireframeMode = ((mode % 3) + 3) % 3;
         this.applyWireframe();
     }
 
@@ -8290,8 +8298,11 @@ class ShadingDebugController {
         return overlay;
     }
 
-    cycleShading() {
-        this.shadingMode = (this.shadingMode + 1) % 4;
+    cycleShading() { this.setShadingMode(this.shadingMode + 1); }
+
+    /** @param {number} mode 0 off, 1 normals, 2 UV checker, 3 normal lines */
+    setShadingMode(mode) {
+        this.shadingMode = ((mode % 4) + 4) % 4;
         this.applyShading();
     }
 
@@ -14537,7 +14548,7 @@ export class ThreeJSViewer {
         // Renderer pixel-ratio cap (issue #237). URL `max_pixel_ratio` > option > Infinity.
         this._maxPixelRatio = resolveMaxPixelRatio(options, urlParams);
 
-        // Top-left menu button. Precedence: URL `toolbar` param > option > hidden.
+        // View menu tab. Precedence: URL `toolbar` param > option > hidden.
         this._toolbarVisible = resolveToolbarVisible(options, urlParams);
 
         // State
@@ -14811,9 +14822,11 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Build the menu controller and the viewer's own options menu on it. The
-     * built-in menu is an ordinary `addMenu` spec whose items read live
-     * viewer state through function-valued `active`/`state`/`hidden`.
+     * Build the menu controller and the viewer's own menus on it: the
+     * built-in options menu (the "View" tab with the connection dot) and the
+     * Clipping and Lighting tabs stacked under it, whose bodies hold the
+     * template's clip and lighting controls. The built-in items read live
+     * viewer state through function-valued `checked`/`value`/`state`/`hidden`.
      */
     _initMenus() {
         this._menus = new MenuController(this, { rail: this._menuRailEl });
@@ -14822,43 +14835,79 @@ export class ThreeJSViewer {
         this._menus.reserveKeys(['C', 'E', 'R', 'T', 'O', 'M', 'N', 'D', 'Shift+D', 'F', 'S', 'V', 'Home']);
         const v = this;
         this._menus.add({
-            id: 'viewer', builtin: true, label: 'Viewer', title: 'Viewer options (connection status)', hidden: true,
+            id: 'viewer', builtin: true, label: 'View', title: 'Viewer options (connection status)',
+            hidden: true, bodyWidth: '244px',
             items: [
-                { id: 'clip', label: 'Clipping plane', shortcut: 'C',
-                  active: () => !!v._clipEnabled, onClick: () => v._toggleClipPanel() },
-                { id: 'lighting', label: 'Lighting', shortcut: 'E',
-                  active: () => v._lightingPanelEl.classList.contains('visible'),
-                  onClick: () => v._toggleLightingPanel() },
-                { id: 'orbit', label: 'Orbit mode', shortcut: 'R',
-                  active: () => v._orbitMode === 'free', state: () => v._orbitMode === 'free' ? 'free' : 'turntable',
+                { type: 'label', label: 'Tools', collapsible: true },
+                { type: 'toggle', id: 'clip', label: 'Clipping plane', shortcut: 'C',
+                  checked: () => !!v._clipEnabled, onChange: (on) => v._setClipEnabled(on) },
+                { type: 'toggle', id: 'lighting', label: 'Lighting panel', shortcut: 'E',
+                  checked: () => !!v._menus?.get('lighting')?.isOpen(),
+                  onChange: (on) => v._setLightingPanelOpen(on) },
+                { type: 'label', label: 'Camera', collapsible: true },
+                { type: 'segmented', id: 'projection', label: 'Projection', shortcut: 'O',
+                  options: [{ value: 'persp', label: 'Persp' }, { value: 'ortho', label: 'Ortho' }],
+                  value: () => v._isOrtho ? 'ortho' : 'persp',
+                  onChange: (val) => { if ((val === 'ortho') !== !!v._isOrtho) v._switchCamera(val === 'ortho'); } },
+                { type: 'segmented', id: 'orbit', label: 'Orbit', shortcut: 'R',
                   hint: 'Turntable keeps Z up; Free is trackball-style. Hold Alt while dragging for the other mode.',
-                  onClick: () => v._setOrbitMode(v._orbitMode === 'turntable' ? 'free' : 'turntable') },
-                { id: 'track', label: 'Camera tracking', shortcut: 'T',
+                  options: [{ value: 'turntable', label: 'Turntable' }, { value: 'free', label: 'Free' }],
+                  value: () => v._orbitMode, onChange: (val) => v._setOrbitMode(val) },
+                // A cycle through targets and modes, so a toggle row whose state text names the mode.
+                { type: 'toggle', id: 'track', label: 'Camera tracking', shortcut: 'T',
                   hidden: () => !v._hasTrackingTargets(),
-                  active: () => v._trackMode !== 'off', state: () => v._trackStateLabel(),
-                  onClick: () => v._cycleTrackMode() },
-                { id: 'projection', label: 'Projection', shortcut: 'O',
-                  active: () => !!v._isOrtho, state: () => v._isOrtho ? 'orthographic' : 'perspective',
-                  onClick: () => v._switchCamera(!v._isOrtho) },
-                { id: 'wireframe', label: 'Wireframe', shortcut: 'M',
-                  active: () => (v._shading?.wireframeMode ?? 0) !== 0,
-                  state: () => ['off', 'wire', 'solid + wire'][v._shading?.wireframeMode ?? 0],
-                  onClick: () => v._shading.cycleWireframe() },
-                { id: 'shading', label: 'Shading debug', shortcut: 'N',
-                  active: () => (v._shading?.shadingMode ?? 0) !== 0,
-                  state: () => ['off', 'normals', 'UV checker', 'normal lines'][v._shading?.shadingMode ?? 0],
-                  onClick: () => v._shading.cycleShading() },
-                { id: 'fog', label: 'Distance fog', shortcut: 'D',
-                  active: () => !!v._depthCue?.fogActive, onClick: () => v._depthCue.toggleFog() },
-                { id: 'edl', label: 'Eye-dome lighting', shortcut: 'Shift+D',
-                  active: () => !!v._depthCue?.edlActive, onClick: () => v._depthCue.toggleEdl() },
-                { id: 'frame', label: 'Frame all', shortcut: 'F', onClick: () => v.resetView() },
+                  checked: () => v._trackMode !== 'off', state: () => v._trackStateLabel(),
+                  onChange: () => v._cycleTrackMode() },
+                { type: 'button', id: 'frame', label: 'Frame all', shortcut: 'F', onClick: () => v.resetView() },
+                { type: 'label', label: 'Display', collapsible: true },
+                { type: 'segmented', id: 'wireframe', label: 'Wireframe', shortcut: 'M',
+                  options: [{ value: '0', label: 'Off' }, { value: '1', label: 'Wire' }, { value: '2', label: 'Both' }],
+                  value: () => String(v._shading?.wireframeMode ?? 0),
+                  onChange: (val) => v._shading.setWireframeMode(Number(val)) },
+                { type: 'select', id: 'shading', label: 'Shading debug', shortcut: 'N',
+                  options: [{ value: '0', label: 'Off' }, { value: '1', label: 'Normals' },
+                      { value: '2', label: 'UV checker' }, { value: '3', label: 'Normal lines' }],
+                  value: () => String(v._shading?.shadingMode ?? 0),
+                  onChange: (val) => v._shading.setShadingMode(Number(val)) },
+                { type: 'toggle', id: 'fog', label: 'Distance fog', shortcut: 'D',
+                  checked: () => !!v._depthCue?.fogActive, onChange: () => v._depthCue.toggleFog() },
+                { type: 'toggle', id: 'edl', label: 'Eye-dome lighting', shortcut: 'Shift+D',
+                  checked: () => !!v._depthCue?.edlActive, onChange: () => v._depthCue.toggleEdl() },
             ],
         });
+        // Clipping and Lighting are panel-mode tabs: they survive outside clicks
+        // (orbiting the cut) and start folded and hidden; _syncRailPanels shows them.
+        /** @param {string} id @param {string} label @param {string} title @param {HTMLElement} panel @param {string} width */
+        const panelMenu = (id, label, title, panel, width) => this._menus.add({
+            id, label, title, mode: 'panel', open: false, hidden: true, bodyWidth: width,
+            items: [{ type: 'custom', id: 'panel', render: (el) => el.appendChild(panel) }],
+            onOpenChange: (open) => {
+                if (id === 'clip' && open && !v._clipEnabled) v._setClipEnabled(true);
+                v._syncRailPanels();
+                v._menus.refresh();
+            },
+        });
+        panelMenu('clip', 'Clipping', 'Clipping plane (C)', this._clipPanelEl, '236px');
+        panelMenu('lighting', 'Lighting', 'Lighting (E)', this._lightingPanelEl, '244px');
         const root = /** @type {HTMLElement} */ (this._menus.get('viewer').el);
         this._toolbarEl = root;
         this._statusDot = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-dot'));
         this._statusText = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-text'));
+    }
+
+    /**
+     * Show the Clipping and Lighting tabs whenever the toolbar is visible, and
+     * otherwise only while they are in use (clipping on, or the body open), so
+     * `C`, `E` and the Python clip calls reach their controls with the
+     * toolbar hidden.
+     */
+    _syncRailPanels() {
+        const tb = !!this._toolbarVisible;
+        const clip = this._menus?.get('clip');
+        const light = this._menus?.get('lighting');
+        if (!clip || !light) return;
+        clip.setHidden(!tb && !this._clipEnabled && !clip.isOpen());
+        light.setHidden(!tb && !light.isOpen());
     }
 
     _cacheElements() {
@@ -14884,7 +14933,6 @@ export class ThreeJSViewer {
         this._lightingSunElevationSlider = q('.tjsv-lighting-sun-elevation');
         this._lightingSunElevationValue = q('.tjsv-lighting-sun-elevation-value');
         this._lightingResetBtn = q('.tjsv-lighting-reset');
-        this._lightingCloseBtn = q('.tjsv-lighting-close');
         this._clipDistanceSlider = q('.tjsv-clip-distance');
         this._clipDistanceValue = q('.tjsv-clip-distance-value');
         this._clipThicknessSlider = q('.tjsv-clip-thickness');
@@ -14895,7 +14943,8 @@ export class ThreeJSViewer {
         this._clipModeSingle = q('.tjsv-clip-mode-single');
         this._clipModeSlab = q('.tjsv-clip-mode-slab');
         this._clipThicknessSection = q('.tjsv-clip-thickness-section');
-        this._clipClose = q('.tjsv-clip-close');
+        this._clipEnabledBtn = q('.tjsv-clip-enabled');
+        this._clipViewNormalBtn = q('.tjsv-clip-view-normal');
         this._clipCapsCheck = q('.tjsv-clip-caps');
         this._clipShowPlaneCheck = q('.tjsv-clip-show-plane');
         this._animControlsEl = q('.tjsv-animation-controls');
@@ -15935,8 +15984,23 @@ export class ThreeJSViewer {
         this._syncClipHelperVisibility();
     }
 
-    _toggleClipPanel() {
-        this._clipEnabled = !this._clipEnabled;
+    _toggleClipPanel() { this._setClipEnabled(!this._clipEnabled); }
+
+    /**
+     * Turn the cut on or off. With `fold` (the `C` key, the View menu toggle,
+     * Python) turning it on also opens the Clipping tab and turning it off
+     * folds it; the panel's own switch passes `fold: false` so it stays open.
+     * @param {boolean} on @param {{fold?: boolean}} [opts]
+     */
+    _setClipEnabled(on, { fold = true } = {}) {
+        on = !!on;
+        const clipMenu = this._menus.get('clip');
+        if (on === this._clipEnabled) {
+            if (on && fold) this._openRailPanel('clip');
+            this._menus.refresh();
+            return;
+        }
+        this._clipEnabled = on;
         if (this._clipEnabled && this._clipDefaults) {
             const d = this._clipDefaults;
             this._clipDefaults = null;
@@ -15951,11 +16015,43 @@ export class ThreeJSViewer {
             }
             if (d.distance != null) this._setClipDistance(d.distance);
         }
-        this._clipPanelEl.classList.toggle('visible', this._clipEnabled);
-        this._menus?.refresh();
+        this._syncClipEnabledUI();
+        if (fold) {
+            if (on) this._openRailPanel('clip'); else clipMenu.close();
+        }
+        this._syncRailPanels();
+        this._menus.refresh();
         if (this._clipEnabled) this._updateClipSliderRange();
         this._syncAnchorFromPlane();
         this._updateClipMaterials();
+    }
+
+    /** Mirror `_clipEnabled` into the Clipping panel's switch and dim its controls while off. */
+    _syncClipEnabledUI() {
+        this._clipEnabledBtn.classList.toggle('active', this._clipEnabled);
+        this._clipEnabledBtn.classList.toggle('off', !this._clipEnabled);
+        this._clipEnabledBtn.setAttribute('aria-pressed', String(this._clipEnabled));
+        this._clipPanelEl.classList.toggle('tjsv-clip-off', !this._clipEnabled);
+    }
+
+    /** Unhide a rail tab the toolbar may be hiding and unfold it. @param {string} id */
+    _openRailPanel(id) {
+        const m = this._menus.get(id);
+        m.setHidden(false);
+        m.open();
+    }
+
+    /** Snap an orthographic camera onto the clip normal (the `V` key). */
+    _viewAlongClipNormal() {
+        const center = this._clipPlane.normal.clone().multiplyScalar(this._clipPosition);
+        this._controls.target.copy(center);
+        const camPos = center.clone().addScaledVector(this._clipPlane.normal, 50);
+        if (!this._isOrtho) this._switchCamera(true);
+        this._camera.position.copy(camPos);
+        this._camera.lookAt(center);
+        this._camera.zoom = 1;
+        this._camera.updateProjectionMatrix();
+        this._controls.update();
     }
 
     _applyNormalInputs() {
@@ -16035,9 +16131,12 @@ export class ThreeJSViewer {
 
     // ========== Lighting Panel ==========
 
-    _toggleLightingPanel() {
-        this._lightingPanelEl.classList.toggle('visible');
-        this._menus?.refresh();
+    _toggleLightingPanel() { this._setLightingPanelOpen(!this._menus.get('lighting').isOpen()); }
+
+    /** Unfold or fold the Lighting tab (`E`, the View menu toggle). @param {boolean} open */
+    _setLightingPanelOpen(open) {
+        if (open) this._openRailPanel('lighting'); else this._menus.get('lighting').close();
+        this._menus.refresh();
     }
 
     _applyToneMappingExposure(value) {
@@ -16149,7 +16248,6 @@ export class ThreeJSViewer {
         this._lightingAmbientSlider.value = String(d.ambientIntensity);
         this._lightingAmbientValue.textContent = d.ambientIntensity.toFixed(2);
 
-        this._lightingCloseBtn.addEventListener('click', () => this._toggleLightingPanel());
 
         // Cubemap picker: options are filled by _initCubemaps once the sets are
         // known; hidden until then (and when there is only one set).
@@ -18301,8 +18399,10 @@ export class ThreeJSViewer {
         this._clipShowPlaneCheck.checked = this._clipHelperVisible;
         this._clipShowPlaneCheck.addEventListener('change', () => this._setClipHelperVisible(this._clipShowPlaneCheck.checked));
 
-        // Close button
-        this._clipClose.addEventListener('click', () => this._toggleClipPanel());
+        // The panel's own on/off switch keeps the panel open; V-key action
+        this._clipEnabledBtn.addEventListener('click', () => this._setClipEnabled(!this._clipEnabled, { fold: false }));
+        this._clipViewNormalBtn.addEventListener('click', () => { if (this._clipEnabled) this._viewAlongClipNormal(); });
+        this._syncClipEnabledUI();
 
         // Animation controls
         this.el.querySelector('.tjsv-btn-start').addEventListener('click', () => this._seekToTime(0));
@@ -18434,16 +18534,7 @@ export class ThreeJSViewer {
             // Clipping shortcuts
             if (this._clipEnabled) {
                 if (e.code === 'KeyV') {
-                    const center = this._clipPlane.normal.clone().multiplyScalar(this._clipPosition);
-                    this._controls.target.copy(center);
-                    const camDist = 50;
-                    const camPos = center.clone().addScaledVector(this._clipPlane.normal, camDist);
-                    if (!this._isOrtho) this._switchCamera(true);
-                    this._camera.position.copy(camPos);
-                    this._camera.lookAt(center);
-                    this._camera.zoom = 1;
-                    this._camera.updateProjectionMatrix();
-                    this._controls.update();
+                    this._viewAlongClipNormal();
                     return;
                 }
                 if (e.code === 'KeyS') {
@@ -20786,8 +20877,9 @@ export class ThreeJSViewer {
                 if (matchedAxis) this._setClipAxis(matchedAxis);
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
-                this._clipPanelEl.classList.add('visible');
-                this._menus?.refresh();
+                this._syncClipEnabledUI();
+                this._openRailPanel('clip');
+                this._menus.refresh();
                 this._updateClipMaterials();
                 break;
             }
@@ -20812,16 +20904,14 @@ export class ThreeJSViewer {
                 if (matchedAxis2) this._setClipAxis(matchedAxis2);
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
-                this._clipPanelEl.classList.add('visible');
-                this._menus?.refresh();
+                this._syncClipEnabledUI();
+                this._openRailPanel('clip');
+                this._menus.refresh();
                 this._updateClipMaterials();
                 break;
             }
             case 'disable_clipping_plane':
-                this._clipEnabled = false;
-                this._clipPanelEl.classList.remove('visible');
-                this._menus?.refresh();
-                this._updateClipMaterials();
+                this._setClipEnabled(false);
                 break;
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
@@ -22829,6 +22919,7 @@ export class ThreeJSViewer {
     setToolbarVisible(visible) {
         this._toolbarVisible = !!visible;
         this._menus.get('viewer').setHidden(!this._toolbarVisible);
+        this._syncRailPanels();
     }
 
     /** @returns {boolean} */
