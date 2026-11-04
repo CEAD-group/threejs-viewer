@@ -172,7 +172,7 @@ def _setup(page, shot):
         page.evaluate(shot["js"])
 
 
-def _record(client, connected, shot, out):
+def _record(client, connected, captured, shot, out):
     from playwright.sync_api import sync_playwright
 
     width, height = shot.get("size", (1280, 800))
@@ -240,6 +240,8 @@ def _record(client, connected, shot, out):
                     page.keyboard.press(key)
             wait_until(shot["at"])
             frames.append(page.screenshot())
+        # A live example fails its next send once the browser closes.
+        captured.set()
         browser.close()
     if len(frames) == 1:
         _write_png(frames[0], out.with_suffix(".png"))
@@ -314,7 +316,7 @@ def _child(name, out_dir):
 
     shot = SHOTS[name]
     out = Path(out_dir).resolve() / name
-    started, connected = threading.Event(), threading.Event()
+    started, connected, captured = (threading.Event() for _ in range(3))
     orig_init, orig_connect = ViewerClient.__init__, ViewerClient.connect
     signature = inspect.signature(orig_init)
 
@@ -339,7 +341,7 @@ def _child(name, out_dir):
         while client.port == 0 and time.monotonic() < deadline:
             time.sleep(0.05)
         try:
-            _record(client, connected, shot, out)
+            _record(client, connected, captured, shot, out)
         except Exception:  # noqa: BLE001
             _exit(1, f"{name}: {traceback.format_exc()}")
         _exit(0)
@@ -355,14 +357,15 @@ def _child(name, out_dir):
     try:
         runpy.run_path(str(example), run_name="__main__")
     except SystemExit as e:
-        if e.code not in (None, 0):
+        if e.code not in (None, 0) and not captured.is_set():
             _exit(1, f"{name}: example exited with {e.code!r}")
     except ModuleNotFoundError as e:
         if not started.is_set():
             _exit(SKIPPED, f"{name}: skipped, needs the {e.name} package")
         _exit(1, f"{name}: {traceback.format_exc()}")
     except BaseException:  # noqa: BLE001
-        _exit(1, f"{name}: {traceback.format_exc()}")
+        if not captured.is_set():
+            _exit(1, f"{name}: {traceback.format_exc()}")
     if not started.is_set():
         _exit(1, f"{name}: the example never connected a viewer")
     # The example returned before the capture finished; the capture thread exits.
