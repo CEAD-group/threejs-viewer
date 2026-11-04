@@ -6,6 +6,12 @@
   `Comment by Claude (bot)` for Claude, `Review by **Codex (OpenAI)**` (or
   `**Codex (OpenAI)**` on an inline comment) for Codex. They post from Thijs's
   account, so the line is the only attribution a reader sees.
+- Every PR with a visible effect (rendering, UI, gizmos, picking, colour,
+  README media) gets before/after screenshots in its body, unasked. Capture
+  "before" from `origin/main` and "after" from the branch with headless
+  Playwright, and look at each image yourself. Host them on a
+  `pr-<N>-images` pre-release (`gh release create pr-<N>-images --prerelease
+  ...`) and link the release-asset URLs; never commit them to a branch.
 - Preserve existing local changes and keep edits focused on the requested task.
 - Keep this file focused on actionable guidance. Put API details in docstrings,
   usage in examples, and regression explanations beside the relevant code or tests.
