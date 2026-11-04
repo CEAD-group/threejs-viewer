@@ -58,7 +58,7 @@ _ALLOWED_AXIS_CONTROL_KINDS = frozenset(
 )
 _ALLOWED_HIGHLIGHT_STYLES = frozenset({"silhouette", "edges"})
 _ALLOWED_MENU_ITEM_TYPES = frozenset(
-    {"button", "toggle", "eye", "select", "segmented", "label", "divider"}
+    {"button", "toggle", "eye", "select", "segmented", "radio", "label", "divider"}
 )
 _ALLOWED_MENU_MODES = frozenset({"dropdown", "panel"})
 
@@ -4439,7 +4439,7 @@ class ViewerClient:
                 Re-using an id replaces the menu.
             items: Ordered item dicts. ``type`` is one of ``"button"``,
                 ``"toggle"``, ``"eye"``, ``"select"``, ``"segmented"``,
-                ``"label"``, ``"divider"`` (default ``"button"``). Every
+                ``"radio"``, ``"label"``, ``"divider"`` (default ``"button"``). Every
                 interactive item needs an ``id``. Common keys: ``label``,
                 ``hint`` (tooltip), ``shortcut`` (a user-defined keyboard
                 shortcut such as ``"G"`` or ``"Shift+G"``: shown as a key chip
@@ -4449,9 +4449,10 @@ class ViewerClient:
                 ``disabled``, ``state`` (small grey text).
                 ``toggle`` takes ``checked``; ``eye`` takes ``ids`` and/or
                 ``prefix`` naming the viewer objects it shows/hides
-                (``checked`` defaults to ``True``); ``select`` and
-                ``segmented`` take ``options`` (a list of values or of
-                ``{"value", "label"}`` dicts) and ``value``. A ``label``
+                (``checked`` defaults to ``True``); ``select``,
+                ``segmented`` and ``radio`` take ``options`` (a list of values
+                or of ``{"value", "label"}`` dicts) and ``value``; ``radio``
+                always lists one row per option. A ``label``
                 with ``collapsible=True`` heads a foldable section: the rows
                 after it, up to the next ``divider`` or collapsible label,
                 hide while it is folded (``collapsed``, default ``False``).
@@ -4462,7 +4463,7 @@ class ViewerClient:
             mode: ``"dropdown"`` (default: starts folded, an outside click
                 folds it back) or ``"panel"`` (starts open and stays open
                 across outside clicks, for a legend).
-            storage_key: Persist toggle/eye/select/segmented values and
+            storage_key: Persist toggle/eye/select/segmented/radio values and
                 section fold state in the browser's localStorage under this key.
             title: Tooltip on the tab.
             body_width: CSS width of the body (default ``"190px"``).
@@ -4569,8 +4570,8 @@ class ViewerClient:
         """Register a callback for interactions with menus from :meth:`add_menu`.
 
         The callback receives a dict ``{"menu", "item", "type", "value"}``:
-        ``value`` is the new value for toggles, eyes, selects and segmented
-        controls, and absent for buttons. It runs on the client's WebSocket
+        ``value`` is the new value for toggles, eyes, selects, segmented
+        and radio controls, and absent for buttons. It runs on the client's WebSocket
         thread, so keep it short and hand real work to your own thread.
         """
         self._menu_callbacks.append(callback)

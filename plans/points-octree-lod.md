@@ -11,8 +11,8 @@
 > **deviation from D8**: timestamps ship as f32, not u16 — u16 needs an
 > "unbounded" sentinel the shader can read (an immortal flag); deferred.
 > Current per-point payload is 6 (i16 xyz) + 3 (u8 rgb) + 8 (f32 times)
-> = 17 B. CLAUDE.md carries the as-built behavior; this doc remains the
-> rationale + Phase 3 blueprint.
+> = 17 B. See `AGENTS.md` for repository guidance and the implementation
+> and tests for current behavior; this doc remains the rationale + Phase 3 blueprint.
 
 ## The problem
 

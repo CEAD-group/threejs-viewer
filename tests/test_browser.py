@@ -7723,6 +7723,113 @@ def test_add_menu_dropdown_items_and_callbacks(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_add_menu_radio_lists_every_option(viewer_client, viewer_page):
+    """A radio item renders one row per option with the selected one marked,
+    commits on click, and follows setItem for options, value and disabled."""
+    page = viewer_page
+    page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " window.__log = [];"
+        " v.addMenu({id: 'demo', label: 'Demo', items: ["
+        "   {type: 'radio', id: 'pick', label: 'Pick',"
+        "    options: [{value: 'a', label: 'Alpha'}, 'b', 'c'], value: 'b',"
+        "    onChange: (val) => window.__log.push('pick:' + val)},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push(a.type + ':' + a.value));"
+        "}"
+    )
+    read = (
+        "() => { const r = document.querySelector('[data-menu=demo] [data-item=pick]');"
+        " return {caption: r.querySelector('.tjsv-radio-caption').textContent,"
+        "  rows: [...r.querySelectorAll('.tjsv-radio-opt')].map(b =>"
+        "   [b.dataset.value, b.textContent, b.getAttribute('aria-checked'), b.disabled]),"
+        "  value: window.threejsViewer.getMenu('demo').getValue('pick')}; }"
+    )
+    assert page.evaluate(read) == {
+        "caption": "Pick",
+        "rows": [
+            ["a", "Alpha", "false", False],
+            ["b", "b", "true", False],
+            ["c", "c", "false", False],
+        ],
+        "value": "b",
+    }
+
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+    page.locator("[data-menu=demo] .tjsv-radio-opt[data-value=c]").click()
+    assert page.evaluate("() => window.__log") == ["pick:c", "radio:c"]
+    assert page.evaluate(read)["value"] == "c"
+
+    page.evaluate(
+        "() => window.threejsViewer.getMenu('demo').setItem('pick',"
+        " {options: ['x', 'y'], value: 'y', disabled: true, label: 'Other'})"
+    )
+    assert page.evaluate(read) == {
+        "caption": "Other",
+        "rows": [["x", "x", "false", True], ["y", "y", "true", True]],
+        "value": "y",
+    }
+
+    # Keyboard: Space and the arrows select within the group and never reach
+    # the viewer's playback keys; the group is one tab stop.
+    page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.addMenu({id: 'kb', label: 'Kb', items: ["
+        "   {type: 'radio', id: 'r', options: ['a', 'b', 'c'], value: 'a', shortcut: 'Q'},"
+        " ]});"
+        " window.__toggled = 0; v._togglePlay = () => { window.__toggled++; }; }"
+    )
+    page.locator("[data-menu=kb] .tjsv-menu-btn").click()
+    rows = "[data-menu=kb] [data-item=r] .tjsv-radio-opt"
+    assert page.evaluate(
+        f"() => [...document.querySelectorAll('{rows}')].map(b => b.tabIndex)"
+    ) == [0, -1, -1]
+    page.locator(f"{rows}[data-value=a]").focus()
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowUp")
+    page.keyboard.press("Space")
+    kb = (
+        "() => ({value: window.threejsViewer.getMenu('kb').getValue('r'),"
+        " focused: document.activeElement.dataset.value, toggled: window.__toggled,"
+        " caption: document.querySelector('[data-menu=kb] .tjsv-radio-caption').hidden})"
+    )
+    assert page.evaluate(kb) == {
+        "value": "c",
+        "focused": "c",
+        "toggled": 0,
+        "caption": True,
+    }
+
+    # A shortcut steps to the next option; a label set later gets a caption;
+    # an options swap without a value drops a value no longer offered.
+    page.keyboard.press("Escape")
+    _press_viewer_key(page, "q", "KeyQ")
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('kb').getValue('r')") == "a"
+    )
+    late = page.evaluate(
+        "() => { const m = window.threejsViewer.getMenu('kb');"
+        " m.setItem('r', {label: 'Late'});"
+        " m.setItem('r', {options: ['p', 'q']});"
+        " const r = document.querySelector('[data-menu=kb] [data-item=r]');"
+        " const cap = r.querySelector('.tjsv-radio-caption');"
+        " return {caption: cap.textContent, hidden: cap.hidden,"
+        "  aria: r.getAttribute('aria-label'), value: m.getValue('r'),"
+        "  checked: r.querySelector('.tjsv-radio-opt.active').dataset.value}; }"
+    )
+    assert late == {
+        "caption": "Late",
+        "hidden": False,
+        "aria": "Late",
+        "value": "p",
+        "checked": "p",
+    }
+
+
+@pytest.mark.browser
 def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_page):
     """An eye item hides every object it owns, keeps hiding objects that are
     added later, persists under storageKey, and hidingEyeFor names it."""

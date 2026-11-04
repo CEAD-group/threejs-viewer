@@ -41,7 +41,7 @@ Concrete wins for agent-driven editing:
 What it doesn't fix:
 - Cross-cutting seams (the `_CHANNEL_APPLY` → `_setClipTime` coupling) are unchanged — just relocated.
 - Context-window pressure: modern Claude models handle 4800 lines fine. The benefit is about *task framing*, not raw comprehension.
-- Dominant factors for agentic success on this codebase (good `CLAUDE.md`, good tests, fast feedback loops) dwarf internal structure.
+- Dominant factors for agentic success on this codebase (good `AGENTS.md`, good tests, fast feedback loops) dwarf internal structure.
 
 ### Calibrated verdict
 
@@ -214,9 +214,9 @@ Each step must compile, type-check, and pass all 154 tests before moving to the 
 
 ## Docs to update in the same PR
 
-Neither CLAUDE.md nor DESIGN.md need heavy changes — they describe user-facing behavior (WS API, examples, keybindings) which the refactor doesn't touch. But the one-line internal-structure descriptions should get a small expansion so a future agent reading these files knows the controller layout exists without having to open viewer.js.
+Neither AGENTS.md nor DESIGN.md need heavy changes for this refactor. Keep repository guidance in AGENTS.md and architecture details in DESIGN.md, with enough information for a future agent to find the controller layout without opening viewer.js.
 
-- **`CLAUDE.md:55`** — current line: `  - \`viewer.js\` - ES module exporting \`ThreeJSViewer(container, options)\` class`. Update to note the in-file controller classes (`ParametricTube`, `CameraController`, `ShadingDebugController`, `ClippingController`, `AnimationPlayer`) and that they're intentionally kept in one file (concat-only build).
+- **`AGENTS.md`** — keep the source map and build constraints accurate if the controller layout changes. Controllers intentionally share `viewer.js` because the build concatenates and inlines sources.
 - **`DESIGN.md:235`** — current line: `│       ├── viewer.js    # ES module: ThreeJSViewer class`. Same update — one-line mention of the controller decomposition.
 - **`DESIGN.md`** — add a short "Viewer internal structure" subsection under the existing architecture narrative (just a few lines: what each controller owns, where the seams are). Aim for ~10 lines, not a full architecture essay. This is the one doc where agents should be able to orient without reading viewer.js.
 - **`CHANGELOG.md`** — add a line under the unreleased section noting internal viewer refactor (no behavior change). Keep it terse; end users don't care.
