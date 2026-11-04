@@ -8,6 +8,7 @@
 - `C` turns the cut on and unfolds the Clipping panel, or turns it off and folds it. `E` unfolds and folds Lighting. Both work with the toolbar hidden. `set_clipping_plane` / `set_clipping_slab` unfold the panel only when the cut goes from off to on, so streaming a plane never reopens a folded panel.
 - The panels use the menu styling: segmented buttons, toggle switches, uppercase key chips and numeric fields without spinners. The View menu is regrouped into Tools, Camera and Display sections.
 - `MenuController` menus take `side: 'left'|'right'`. Each side keeps one open body, and closed tabs move aside so they never cover it.
+- `clip` and `lighting` are reserved menu ids, like `viewer` (#329).
 - Space and Enter on a focused button in a rail body, and keys in a focused select, no longer reach the viewer shortcuts. Changing the wireframe mode refreshes shadows.
 
 ### Section caps on meshes and models (#321)
@@ -16,6 +17,15 @@
 - Interpenetrating bodies merged into one mesh give one solid cap when the winding is consistent; otherwise the fill is even-odd by nesting.
 - On textured meshes the cap colour is the colour map averaged along each cut loop, read through the map's own uv channel and each material's own map, with transparent texels ignored.
 - Skinned, instanced and morph-target meshes are not capped.
+- A textured mesh with vertex colours gets the texture times the vertex colour on its cap; the first version squared the texture sample (#329).
+
+### Grazing-angle opacity (#326)
+
+- `add_mesh` takes `grazing_opacity` (0..1) and `grazing_power` (default 2). A translucent surface keeps its alpha head-on and moves toward `grazing_opacity` where it is seen edge-on, so a translucent solid reads as a body instead of a flat tint. It survives `set_opacity`.
+
+### View tab (#327)
+
+- The View tab is a settings cog with the connection dot as a corner badge, replacing the dot and the vertical "View" label.
 
 ## 0.0.75
 
