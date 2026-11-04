@@ -59,7 +59,7 @@ threejs-viewer open
 
 ## Gallery
 
-Every image comes from a script in [examples/](examples/); the file name is given under each one. `tools/record_readme_media.py` re-records them.
+Every image except the dimension annotations comes from a script in [examples/](examples/), named under each one,; `tools/record_readme_media.py` re-records them.
 
 ### Toolpaths and beads
 
@@ -114,7 +114,7 @@ Every image comes from a script in [examples/](examples/); the file name is give
 | ![Dimension annotations](docs/media/annotations.png) | ![Shader floor grid](docs/media/floor_grid.png) |
 | Linear dimensions, a diagonal and labelled points on a box. `add_dimension` / `add_point_annotation` | An anti-aliased, distance-faded floor grid with screen-space-stable line width. `29_floor_grid.py` |
 | ![Client-defined menu](docs/media/client_menu.png) | ![Lighting panel](docs/media/lighting_panel.png) |
-| A Python-defined menu on the right rail: eyes, toggles, selects and shortcuts round-trip to Python. `35_client_menu.py` | The `E` panel: tone mapping, exposure, environment map, ambient and sun. |
+| A Python-defined menu on the right rail: eyes, toggles, selects and shortcuts round-trip to Python. `35_client_menu.py` | The `E` panel: tone mapping, exposure, environment map, ambient and sun. `01_primitives.py` with `E` pressed |
 
 ## Usage
 

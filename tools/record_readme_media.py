@@ -9,15 +9,31 @@ GIF. Without names every shot in SHOTS is recorded. Animated shots of an
 example with a loaded animation are seeked frame by frame (deterministic
 loops); live examples are captured at a fixed interval. Needs the
 browser-test group (`uv sync --group browser-test`).
+
+Shots that use `at=` or `live=`, and the octree-LOD shot, wait on wall-clock
+time (node streaming and live updates run on their own clocks), so their
+output can differ with machine speed. Seeked shots only differ by GPU.
+
+PNGs are palette-quantized after capture: with pngquant when it is on PATH,
+otherwise with Pillow. Both are deterministic for a given tool version.
+
+A shot whose example needs a missing optional package (`usd_connecting_rod`
+needs `usd_brep`) is skipped with a message; any other failure exits non-zero
+as soon as the example fails.
+
+The script depends on a few viewer internals, each marked where it is used.
 """
 
 import argparse
+import inspect
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,8 +45,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #   or a PNG for one frame),
 #   live=(start, frames, interval) in seconds (GIF).
 # js runs in the page before the first capture, click=<object id> clicks the
-# centre of that object first. size is the page size; gif_width the GIF width.
-FRAME_ALL = "window.tjsv.viewer.frameAll();"
+# centre of that object first, keys=<list> presses keys before the capture. size
+# is the page size; gif_width the GIF width.
+FRAME_ALL = "window.threejsViewer.frameAll();"
+# Exit code of a child whose example needs a package that is not installed.
+SKIPPED = 4
 
 SHOTS = {
     "robot_cell": dict(
@@ -39,7 +58,9 @@ SHOTS = {
     "section_caps": dict(
         example="16_section_caps.py",
         at=10,
-        js="window.tjsv.viewer._clipPanelEl.style.display = 'none';" + FRAME_ALL,
+        # Depends on the template's clip panel class.
+        js="document.querySelector('.tjsv-clipping-panel').style.display = 'none';"
+        + FRAME_ALL,
     ),
     "cad_inspection": dict(example="39_cad_inspection.py", click="block_right", at=5),
     "million_point_toolpath": dict(
@@ -83,8 +104,9 @@ SHOTS = {
     "client_menu": dict(
         example="35_client_menu.py",
         at=5,
-        js="window.tjsv.viewer.getMenu('demo').open();",
+        js="window.threejsViewer.getMenu('demo').open();",
     ),
+    "lighting_panel": dict(example="01_primitives.py", at=5, keys=["e"]),
     # Needs the optional usd_brep package.
     "usd_connecting_rod": dict(
         example="38_usd_connecting_rod.py", at=8, size=(1600, 1000)
@@ -93,16 +115,18 @@ SHOTS = {
 
 
 def _object_centre_js(obj_id):
+    # Centroid of the canvas pixels where pick() hits the object, on a 10 px grid.
     return f"""(() => {{
-        const t = window.tjsv, v = t.viewer, o = v.getObject({obj_id!r});
-        const c = new t.THREE.Box3().setFromObject(o).getCenter(new t.THREE.Vector3());
-        c.project(v._camera);
-        const r = v.getCanvas().getBoundingClientRect();
-        return [r.left + (c.x + 1) / 2 * r.width, r.top + (1 - c.y) / 2 * r.height];
+        const v = window.threejsViewer, r = v.getCanvas().getBoundingClientRect();
+        let sx = 0, sy = 0, n = 0;
+        for (let y = r.top + 5; y < r.bottom; y += 10)
+            for (let x = r.left + 5; x < r.right; x += 10)
+                if (v.pick(x, y)?.objectId === {obj_id!r}) {{ sx += x; sy += y; n++; }}
+        return n ? [sx / n, sy / n] : null;
     }})()"""
 
 
-def _record(client, shot, out):
+def _record(client, connected, shot, out):
     from playwright.sync_api import sync_playwright
 
     width, height = shot.get("size", (1280, 800))
@@ -113,7 +137,8 @@ def _record(client, shot, out):
         )
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(client.viewer_url)
-        client._connected_event.wait(timeout=120)
+        if not connected.wait(timeout=120):
+            raise TimeoutError("viewer did not connect")
         t0 = time.monotonic()
 
         def wait_until(t):
@@ -126,20 +151,20 @@ def _record(client, shot, out):
 
         if "seek" in shot:
             page.wait_for_function(
-                "window.tjsv?.viewer.getAnimationState() && window.tjsv.viewer.getLoadState().pending === 0",
+                "window.threejsViewer?.getAnimationState() && window.threejsViewer.getLoadState().pending === 0",
                 timeout=120_000,
             )
             wait_until(shot.get("warmup", 3))
             if shot.get("js"):
                 page.evaluate(shot["js"])
             duration = page.evaluate(
-                "(() => { const v = window.tjsv.viewer; v.setAnimationPlaying(false);"
+                "(() => { const v = window.threejsViewer; v.setAnimationPlaying(false);"
                 " return v.getAnimationState().duration; })()"
             )
             a, b, n = shot["seek"]
             for i in range(n):
                 t = duration * (a + (b - a) * i / max(n - 1, 1))
-                page.evaluate(f"window.tjsv.viewer.seekAnimationTime({t})")
+                page.evaluate(f"window.threejsViewer.seekAnimationTime({t})")
                 settle()
                 time.sleep(shot.get("frame_wait", 0.15))
                 frames.append(page.screenshot())
@@ -154,22 +179,53 @@ def _record(client, shot, out):
         else:
             if shot.get("click"):
                 wait_until(shot["at"] / 2)
-                x, y = page.evaluate(_object_centre_js(shot["click"]))
-                page.mouse.click(x, y)
+                hit = page.evaluate(_object_centre_js(shot["click"]))
+                if hit is None:
+                    raise RuntimeError(f"{shot['click']} is not on screen")
+                page.mouse.click(*hit)
             if shot.get("js"):
                 # After the example's own framing and loads.
                 wait_until(shot["at"] * 0.6)
                 page.wait_for_function(
-                    "window.tjsv.viewer.getLoadState().pending === 0"
+                    "window.threejsViewer.getLoadState().pending === 0"
                 )
                 page.evaluate(shot["js"])
+            if shot.get("keys"):
+                # Viewer shortcuts listen on the container, which has a tabindex.
+                page.evaluate("window.threejsViewer.container.focus()")
+                for key in shot["keys"]:
+                    page.keyboard.press(key)
             wait_until(shot["at"])
-            page.screenshot(path=str(out.with_suffix(".png")))
+            frames.append(page.screenshot())
         browser.close()
     if len(frames) == 1:
-        out.with_suffix(".png").write_bytes(frames[0])
+        _write_png(frames[0], out.with_suffix(".png"))
     elif frames:
         _write_gif(frames, out.with_suffix(".gif"), shot)
+
+
+def _write_png(data, path):
+    """Write a screenshot as a palette PNG, which is a third to a tenth the size."""
+    path.write_bytes(data)
+    pngquant = shutil.which("pngquant")
+    if pngquant:
+        # 98/99: quality floor not met or no gain; the RGB file stays.
+        r = subprocess.run(
+            [pngquant, "--force", "--skip-if-larger", "--strip", "--speed", "1",
+             "--quality", "80-100", "--output", str(path), str(path)]
+        )  # fmt: skip
+        if r.returncode in (0, 98, 99):
+            return
+    import io
+
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    im = im.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", optimize=True)
+    if buf.tell() < len(data):
+        path.write_bytes(buf.getvalue())
 
 
 def _write_gif(frames, path, shot):
@@ -202,47 +258,71 @@ def _write_gif(frames, path, shot):
     )
 
 
+def _exit(code, message=None):
+    if message:
+        print(message, file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 def _child(name, out_dir):
-    import threejs_viewer.client as tc
+    from threejs_viewer import ViewerClient
 
     shot = SHOTS[name]
     out = Path(out_dir).resolve() / name
-    orig_init, orig_start = tc.ViewerClient.__init__, tc.ViewerClient._start_servers
-    started = []
+    started, connected = threading.Event(), threading.Event()
+    orig_init, orig_connect = ViewerClient.__init__, ViewerClient.connect
+    signature = inspect.signature(orig_init)
 
-    def init(self, *a, **kw):
-        orig_init(self, *a, **kw)
-        self.port = 0
-        self.open_browser = False
+    # The examples build their own client: patch in a free port and no system
+    # browser, and start the capture from connect().
+    def init(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.arguments.update(port=0, open_browser=False)
+        orig_init(*bound.args, **bound.kwargs)
 
-    def start(self):
-        orig_start(self)
-        if not started:
-            started.append(self)
+    def connect(self, timeout=30.0):
+        if not started.is_set():
+            started.set()
+            threading.Thread(target=run, args=(self,), daemon=True).start()
+        result = orig_connect(self, timeout=120)
+        connected.set()
+        return result
 
-            def run():
-                try:
-                    _record(self, shot, out)
-                    code = 0
-                except Exception as e:  # noqa: BLE001
-                    print(f"{name}: {e}", file=sys.stderr)
-                    code = 1
-                sys.stdout.flush()
-                os._exit(code)
+    def run(client):
+        # port is 0 until connect() has bound the servers.
+        deadline = time.monotonic() + 60
+        while client.port == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        try:
+            _record(client, connected, shot, out)
+        except Exception:  # noqa: BLE001
+            _exit(1, f"{name}: {traceback.format_exc()}")
+        _exit(0)
 
-            threading.Thread(target=run, daemon=True).start()
-
-    tc.ViewerClient.__init__ = init
-    tc.ViewerClient._start_servers = start
-    threading.Timer(300, lambda: os._exit(3)).start()
+    ViewerClient.__init__ = init
+    ViewerClient.connect = connect
+    watchdog = threading.Timer(300, _exit, args=(3, f"{name}: timed out"))
+    watchdog.daemon = True
+    watchdog.start()
     example = ROOT / "examples" / shot["example"]
     sys.argv = [str(example), *shot.get("args", [])]
     sys.path.insert(0, str(example.parent))
     try:
         runpy.run_path(str(example), run_name="__main__")
-    except SystemExit:
-        pass
-    # The example returned before the capture finished; the thread exits.
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            _exit(1, f"{name}: example exited with {e.code!r}")
+    except ModuleNotFoundError as e:
+        if not started.is_set():
+            _exit(SKIPPED, f"{name}: skipped, needs the {e.name} package")
+        _exit(1, f"{name}: {traceback.format_exc()}")
+    except BaseException:  # noqa: BLE001
+        _exit(1, f"{name}: {traceback.format_exc()}")
+    if not started.is_set():
+        _exit(1, f"{name}: the example never connected a viewer")
+    # The example returned before the capture finished; the capture thread exits.
     threading.Event().wait()
 
 
@@ -265,6 +345,9 @@ def main():
     def run(name):
         cmd = [sys.executable, __file__, "--child", name, "--out", args.out]
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+        if r.returncode == SKIPPED:
+            print(r.stderr.strip().splitlines()[-1])
+            return 0
         print(f"{name}: {'ok' if r.returncode == 0 else 'failed'}")
         if r.returncode:
             print(r.stderr[-2000:], file=sys.stderr)
