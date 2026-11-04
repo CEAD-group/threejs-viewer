@@ -11,12 +11,14 @@
 - `clip` and `lighting` are reserved menu ids, like `viewer` (#329).
 - Space and Enter on a focused button in a rail body, and keys in a focused select, no longer reach the viewer shortcuts. Changing the wireframe mode refreshes shadows.
 
-### Section caps on meshes and models (#321)
+### Section caps on meshes and models (#321, #331)
 
 - With caps on, `add_mesh` meshes and the meshes of loaded models (GLB/glTF and the other formats on the same path) get section caps. Each connected part is judged on its own: a part that is closed or has only small holes is capped, while sheets and short open pipes are not. A long open single-wall tube passes the rule and is capped like a solid rod.
 - Interpenetrating bodies merged into one mesh give one solid cap when the winding is consistent; otherwise the fill is even-odd by nesting.
 - On textured meshes the cap colour is the colour map averaged along each cut loop, read through the map's own uv channel and each material's own map, with transparent texels ignored.
 - Skinned, instanced and morph-target meshes are not capped.
+- Caps of separate meshes that meet on the clip plane no longer flicker: overlapping coplanar caps get a small, bounded depth priority in a stable id order (#331).
+- Caps rebuild when a geometry's position, index or colour attribute, its interleaved buffer, or its material groups are replaced, without moving the plane. The M wireframe modes include the cap triangulation. Worker slicing failures are reported in the console (#331).
 
 ### Grazing-angle opacity (#326)
 
