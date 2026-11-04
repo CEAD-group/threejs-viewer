@@ -1,6 +1,7 @@
 // @ts-check
 import * as THREE from 'three';
 import { ViewerControls, isPickTarget } from './controls.js';
+import { createPolygonClipper } from './polygon-clipping.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -5088,6 +5089,9 @@ ${sliceTubeClipCap.toString()}
 
 ${earcut2D.toString()}
 
+${createPolygonClipper.toString()}
+const meshCapPolygons = createPolygonClipper();
+
 const MESH_CAP_HOLE_RATIO = ${MESH_CAP_HOLE_RATIO};
 const MESH_CAP_BOUNDARY_RATIO = ${MESH_CAP_BOUNDARY_RATIO};
 ${sliceMeshClipCap.toString()}
@@ -9735,6 +9739,24 @@ function sliceTubeClipCap(pos, col, idx, end, planes, block) {
  * @returns {number[]}
  */
 function earcut2D(data, holeIndices) {
+    /* Adapted from Mapbox earcut 2.2.4.
+ISC License
+
+Copyright (c) 2016, Mapbox
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+    */
     /** @typedef {{i: number, x: number, y: number, prev: any, next: any, z: number, prevZ: any, nextZ: any, steiner: boolean}} EarNode */
     /** @param {number} i @param {number} x @param {number} y @returns {EarNode} */
     const node = (i, x, y) => ({ i, x, y, prev: null, next: null, z: 0, prevZ: null, nextZ: null, steiner: false });
@@ -10069,6 +10091,8 @@ function earcut2D(data, holeIndices) {
     return triangles;
 }
 
+const meshCapPolygons = createPolygonClipper();
+
 /**
  * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
  * torus), free of Three.js so the LOD worker runs the same code. Only the
@@ -10267,7 +10291,7 @@ function sliceMeshClipCap(src, start, end, planes) {
         }
     }
     const t0 = Math.ceil(Math.max(0, start) / 3), t1 = Math.min(nTriAll, Math.floor(end / 3));
-    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    /** @type {{pos: Float32Array, col: Float32Array | null, reg?: Int32Array, ruv?: Float32Array, ruvEnd?: Int32Array, rmat?: Uint16Array | null}[]} */ const out = [];
     const solid = src.solid;
     if (!solid) return planes.map(() => ({ pos: new Float32Array(0), col: col ? new Float32Array(0) : null }));
     const oriented = !!src.oriented;
@@ -10513,38 +10537,35 @@ function sliceMeshClipCap(src, start, end, planes) {
             }
             return inn;
         };
-        /** True when a sample of P's vertices leaves O: P overlaps O's boundary. @param {any} P @param {any} O */
-        const leaves = (P, O) => {
-            const m = P.xy.length / 2, step = Math.max(1, Math.floor(m / 64));
-            for (let i = 0; i < m; i += step) if (!inside(P.xy[i * 2], P.xy[i * 2 + 1], O.xy)) return true;
-            return false;
-        };
+        /** @param {any} P @returns {number[][]} */
+        const ring = (P) => Array.from({ length: P.xy.length / 2 },
+            (_, k) => [P.xy[k * 2], P.xy[k * 2 + 1]]);
         for (let i = 0; i < polys.length; i++) {
             const P = polys[i];
-            // Test from the midpoint of the first edge: a vertex may sit on a touching loop.
             const qx = (P.xy[0] + P.xy[2]) / 2, qy = (P.xy[1] + P.xy[3]) / 2;
             for (let j = i - 1; j >= 0; j--) {
                 const O = polys[j], b = O.box;
-                if (qx < b[0] || qx > b[2] || qy < b[1] || qy > b[3]) continue;
+                if (P.box[0] < b[0] || P.box[2] > b[2] || P.box[1] < b[1] || P.box[3] > b[3]) continue;
                 if (!inside(qx, qy, O.xy)) continue;
+                // Test the entire contour, including edges crossing a concavity;
+                // sampling vertices can incorrectly classify overlaps as holes.
+                if (meshCapPolygons.difference([ring(P)], [ring(O)]).length) continue;
                 P.parent = O;
                 break;
             }
             const O = P.parent;
             if (oriented) {
-                // Winding number, with a body wound inside out flipped by its outermost loop.
-                if (!O) { P.flip = P.sign; P.depth = 1; P.outer = true; continue; }
-                P.flip = O.flip;
-                P.depth = O.depth + P.sign * P.flip;
-                let host = O;
-                while (host && !host.outer) host = host.parent;
-                if (P.depth > 0) {
-                    // Inside filled area it is covered, unless it pokes out of its filler.
-                    P.outer = O.depth <= 0 || !host || leaves(P, host);
-                } else if (O.depth > 0 && host && !leaves(P, host)) host.holes.push(P);
+                P.flip = O ? O.flip : P.sign;
+                P.outer = P.sign * P.flip > 0;
+                // Keep positive contours even inside another body: they may
+                // fill part of that body's hole. Overlaps are removed below.
+                if (!P.outer) {
+                    let host = O;
+                    while (host && !host.outer) host = host.parent;
+                    if (host) host.holes.push(P);
+                }
             } else {
                 P.depth = O ? O.depth + 1 : 0;
-                if (P.depth & 1 && O && leaves(P, O)) P.depth = 0;
                 P.outer = !(P.depth & 1);
                 if (!P.outer && O) O.holes.push(P);
             }
@@ -10556,6 +10577,9 @@ function sliceMeshClipCap(src, start, end, planes) {
         /** @type {number[]} */ const ruv = [];
         /** @type {number[]} */ const ruvEnd = [];
         /** @type {number[]} */ const rmat = [];
+        // Each region keeps its own interpolated colors and texture samples.
+        // Subtract earlier filled regions so their shared area is drawn once.
+        /** @type {{shape: number[][][], box: number[]}[]} */ const covered = [];
         for (const O of polys) {
             if (!O.outer) continue;
             const parts = [O, ...O.holes];
@@ -10570,7 +10594,67 @@ function sliceMeshClipCap(src, start, end, planes) {
                 for (const p of part.pts) ids.push(p);
             }
             const tris = earcut2D(data, holeIdx);
-            for (let f = 0; f < tris.length; f += 3) {
+            const shape = parts.map((part) => Array.from({ length: part.xy.length / 2 },
+                (_, i) => [part.xy[i * 2], part.xy[i * 2 + 1]]));
+            const b = O.box;
+            const clips = covered.filter((q) => q.box[0] < b[2] && q.box[2] > b[0]
+                && q.box[1] < b[3] && q.box[3] > b[1]);
+            covered.push({ shape, box: b });
+            if (clips.length) {
+                const remainder = meshCapPolygons.difference(shape, ...clips.map((q) => q.shape));
+                // New intersection vertices inherit the original cap's piecewise
+                // linear colors, including where another region cuts its interior.
+                /** @param {number} x @param {number} y */
+                const colorAt = (x, y) => {
+                    for (let f = 0; f < tris.length; f += 3) {
+                        const a = tris[f], b = tris[f + 1], c = tris[f + 2];
+                        const ax = data[a * 2], ay = data[a * 2 + 1];
+                        const bx = data[b * 2], by = data[b * 2 + 1];
+                        const cx = data[c * 2], cy = data[c * 2 + 1];
+                        const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+                        if (!den) continue;
+                        const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / den;
+                        const v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / den;
+                        const w = 1 - u - v;
+                        if (u < -1e-7 || v < -1e-7 || w < -1e-7) continue;
+                        return [0, 1, 2].map((k) => u * PC[ids[a] * 3 + k]
+                            + v * PC[ids[b] * 3 + k] + w * PC[ids[c] * 3 + k]);
+                    }
+                    // A rounded boundary point may lie just outside the source
+                    // tessellation. Use its nearest source vertex in that case.
+                    let best = 0, distance = Infinity;
+                    for (let i = 0; i < ids.length; i++) {
+                        const d = (data[i * 2] - x) ** 2 + (data[i * 2 + 1] - y) ** 2;
+                        if (d < distance) { best = i; distance = d; }
+                    }
+                    return PC.slice(ids[best] * 3, ids[best] * 3 + 3);
+                };
+                for (const polygon of remainder) {
+                    /** @type {number[]} */ const xy = [];
+                    /** @type {number[]} */ const holes = [];
+                    for (let r = 0; r < polygon.length; r++) {
+                        if (r) holes.push(xy.length / 2);
+                        // Boolean output rings repeat the starting point.
+                        for (let i = 0; i < polygon[r].length - 1; i++) xy.push(...polygon[r][i]);
+                    }
+                    const faces = earcut2D(xy, holes);
+                    for (let f = 0; f < faces.length; f += 3) {
+                        const a = faces[f];
+                        let b = faces[f + 1], c = faces[f + 2];
+                        if ((xy[b * 2] - xy[a * 2]) * (xy[c * 2 + 1] - xy[a * 2 + 1])
+                            - (xy[b * 2 + 1] - xy[a * 2 + 1]) * (xy[c * 2] - xy[a * 2]) > 0) {
+                            const swap = b; b = c; c = swap;
+                        }
+                        for (const v of [a, b, c]) {
+                            const x = xy[v * 2], y = xy[v * 2 + 1];
+                            tp.push(x * basis[0] + y * basis[3] - c0 * nx,
+                                x * basis[1] + y * basis[4] - c0 * ny,
+                                x * basis[2] + y * basis[5] - c0 * nz);
+                            if (col) tc.push(...colorAt(x, y));
+                        }
+                    }
+                }
+            } else for (let f = 0; f < tris.length; f += 3) {
                 const a = tris[f];
                 let b = tris[f + 1], cc = tris[f + 2];
                 const ccw = (data[b * 2] - data[a * 2]) * (data[cc * 2 + 1] - data[a * 2 + 1])
@@ -10603,6 +10687,17 @@ function sliceMeshClipCap(src, start, end, planes) {
 
 /** @type {WeakMap<any, Map<string, any>>} position attribute -> (colour, uv, groups) -> slicer source */
 const MESH_CLIP_CAP_SOURCES = new WeakMap();
+/** Attribute identities distinguish replacement buffers with equal versions. */
+const CLIP_CAP_ATTRIBUTE_IDS = new WeakMap();
+let clipCapAttributeCount = 0;
+/** @param {any} attr */
+function clipCapAttributeId(attr) {
+    if (!attr) return -1;
+    let id = CLIP_CAP_ATTRIBUTE_IDS.get(attr);
+    if (id === undefined) { id = ++clipCapAttributeCount; CLIP_CAP_ATTRIBUTE_IDS.set(attr, id); }
+    return id;
+}
+
 let meshClipCapSourceCount = 0;
 
 /**
@@ -10881,7 +10976,12 @@ class ClipCapController {
         const sig = [geom.id, attrVersion(posAttr), attrVersion(index),
             geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0,
             withColor ? attrVersion(colAttr) : -1, withUV ? attrVersion(geom.getAttribute(uvName)) : -2,
-            withUV ? uvName.length + (mapped.map.channel || 0) : -1, withGroups ? geom.groups.length : 0, planes.length];
+            withUV ? uvName.length + (mapped.map.channel || 0) : -1, withGroups ? geom.groups.length : 0, planes.length,
+            clipCapAttributeId(posAttr), clipCapAttributeId(index),
+            withColor ? clipCapAttributeId(colAttr) : -1,
+            withUV ? clipCapAttributeId(geom.getAttribute(uvName)) : -1];
+        // Group assignments can change without changing the number of groups.
+        if (withGroups) for (const g of geom.groups) sig.push(g.start, g.count, g.materialIndex ?? 0);
         /** @type {number[][]} */ const local = [];
         for (const p of planes) {
             this._plane.copy(p).applyMatrix4(this._inv);
@@ -10984,7 +11084,7 @@ class ClipCapController {
         const t0 = performance.now();
         const geom = mesh.geometry;
         // Draw range is left out: a shorter reveal reuses the cached copy.
-        const geomKey = [sig[0], sig[1], sig[2], sig[5], sig[6]].join(':');
+        const geomKey = [sig[0], sig[1], sig[2], sig[5], sig[6], sig[11], sig[12], sig[13]].join(':');
         /** @type {any} */ let msg;
         /** @type {ArrayBuffer[]} */ const transfer = [];
         if (mesh.userData.clipCapKind === 'mesh') {
@@ -11099,7 +11199,7 @@ class ClipCapController {
             cap.visible = true;
             const r = /** @type {any} */ (results[i]);
             // Uvs along the cut, per filled region, for sampling the colour map.
-            cap.userData.__regions = r.ruv ? { reg: r.reg, ruv: r.ruv, ruvEnd: r.ruvEnd, rmat: r.rmat || null, base: r.col } : null;
+            cap.userData.__regions = r.ruv ? { reg: r.reg, ruv: r.ruv, ruvEnd: r.ruvEnd, rmat: r.rmat || null, base: r.col ? r.col.slice() : null } : null;
             cap.userData.__regionKey = '';
             // Clipped by every plane but its own, which it lies on.
             const others = planes.filter((/** @type {any} */ _, /** @type {number} */ j) => j !== i);
