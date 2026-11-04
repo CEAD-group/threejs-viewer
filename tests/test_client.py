@@ -1390,3 +1390,25 @@ def test_primitive_clip_cap_override_rides_params():
     assert params[1]["clipCap"] is True
     assert "clipCap" not in params[2]
     assert params[3]["clipCap"] is True
+
+
+def test_mesh_and_model_clip_cap_override_rides_header():
+    """add_mesh, add_model and add_model_binary carry clipCap only when set."""
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client._http_port = 1
+    pos = np.zeros((3, 3), dtype=np.float32)
+    idx = np.array([0, 1, 2], dtype=np.uint32)
+    client.add_mesh("m", pos, idx, clip_cap=False)
+    client.add_mesh("n", pos, idx)
+    client.add_model("g", "a.glb", format="glb", clip_cap=True)
+    client.add_model("h", "a.glb", format="glb")
+    client.add_model_binary("b", b"glTF", format="glb", clip_cap=False)
+    client.add_model_binary("c", b"glTF", format="glb")
+    assert sent[0]["clipCap"] is False
+    assert "clipCap" not in sent[1]
+    assert sent[2]["object"]["clipCap"] is True
+    assert "clipCap" not in sent[3]["object"]
+    assert sent[4]["clipCap"] is False
+    assert "clipCap" not in sent[5]
