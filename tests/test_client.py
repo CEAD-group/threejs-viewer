@@ -939,6 +939,8 @@ def test_add_menu_radio_item_payload():
     "kwargs, match",
     [
         ({"id": "viewer", "items": []}, "built-in menu id"),
+        ({"id": "clip", "items": []}, "built-in menu id"),
+        ({"id": "lighting", "items": []}, "built-in menu id"),
         ({"id": "m", "items": [], "mode": "rail"}, "mode must be"),
         ({"id": "m", "items": [{"type": "toggle"}]}, "needs an 'id'"),
         ({"id": "m", "items": [{"type": "slider", "id": "x"}]}, "item type must be"),
