@@ -169,10 +169,9 @@ def serve(args):
             "Local GLB · fitted to view · C for clipping controls",
             None,
         )
-    htmls = {"after": args.viewer_html.read_text()}
+    htmls = {"after": args.viewer_html}
     if args.before:
-        htmls["before"] = args.before.read_text()
-    script = (HERE / "demo.js").read_text()
+        htmls["before"] = args.before
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -201,10 +200,15 @@ def serve(args):
                         before=bool(args.before),
                     )
                 ).replace("<", "\\u003c")
-                html = htmls[variant].replace(
-                    "htmlTemplate: HTML_TEMPLATE,",
-                    "autoConnect: false, htmlTemplate: HTML_TEMPLATE,",
+                html = (
+                    htmls[variant]
+                    .read_text()
+                    .replace(
+                        "htmlTemplate: HTML_TEMPLATE,",
+                        "autoConnect: false, htmlTemplate: HTML_TEMPLATE,",
+                    )
                 )
+                script = (HERE / "demo.js").read_text()
                 html = html.replace(
                     "</body>",
                     f"<script>const DEMO = {config};\n{script}</script></body>",

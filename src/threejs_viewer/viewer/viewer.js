@@ -5212,13 +5212,14 @@ self.onmessage = function(e) {
             self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, missing: true });
             return;
         }
-        let caps;
+        let caps, error;
         try {
             caps = msg.kind === 'mesh'
                 ? sliceMeshClipCap(g, msg.start, msg.end, msg.planes)
                 : sliceTubeClipCap(g.pos, g.col, g.idx, Math.min(msg.end, g.idx.length), msg.planes, msg.block);
         } catch (err) {
             // Bad input skips the cap rather than killing the worker.
+            error = String(err);
             caps = msg.planes.map(() => ({ pos: new Float32Array(0), col: null }));
         }
         const transfer = [];
@@ -5228,7 +5229,7 @@ self.onmessage = function(e) {
             if (c.ruv) transfer.push(c.ruv.buffer, c.reg.buffer, c.ruvEnd.buffer);
             if (c.rmat) transfer.push(c.rmat.buffer);
         }
-        self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, caps }, transfer);
+        self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, caps, error }, transfer);
         return;
     }
     if (msg.type === 'clipCapDispose') {
@@ -8414,8 +8415,6 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165) — wireframing
         // one would draw the whole extruded shell as a wire cage.
         if (obj.userData.__highlightOutline) return;
-        // Clip caps follow the wire-only mode from ClipCapController.
-        if (obj.userData.__clipCap) return;
         if (!obj.material) return;
         for (const m of wornAndOwnMaterials(obj)) this._applyWireframeToMaterial(m);
         let overlay = obj.userData.wireframeOverlay;
@@ -8425,7 +8424,8 @@ class ShadingDebugController {
                 obj.userData.wireframeOverlay = overlay;
                 obj.add(overlay);
             } else {
-                overlay.material.clippingPlanes = this.v._activeClippingPlanes();
+                overlay.geometry = obj.geometry;
+                overlay.material.clippingPlanes = obj.userData.__clipCap ? obj.material.clippingPlanes : this.v._activeClippingPlanes();
                 overlay.material.needsUpdate = true;
             }
             overlay.visible = true;
@@ -8441,9 +8441,9 @@ class ShadingDebugController {
             wireframe: true,
             polygonOffset: true,
             polygonOffsetFactor: -1,
-            polygonOffsetUnits: -1,
+            polygonOffsetUnits: parentMesh.userData.__clipCap ? parentMesh.material.polygonOffsetUnits - 8 : -1,
             side: THREE.DoubleSide,
-            clippingPlanes: this.v._activeClippingPlanes(),
+            clippingPlanes: parentMesh.userData.__clipCap ? parentMesh.material.clippingPlanes : this.v._activeClippingPlanes(),
         });
         const overlay = new THREE.Mesh(parentMesh.geometry, mat);
         overlay.userData.isWireOverlay = true;
@@ -10159,7 +10159,7 @@ const meshCapPolygons = createPolygonClipper();
 /**
  * A cap's triangles and colours; mesh caps of textured owners add the uv samples per filled region.
  * @typedef {{pos: Float32Array, col: Float32Array | null, reg?: Int32Array, ruv?: Float32Array,
- *   ruvEnd?: Int32Array, rmat?: Uint16Array | null}} ClipCapPiece
+ *   ruvEnd?: Int32Array, rmat?: Uint16Array | null, warning?: string}} ClipCapPiece
  */
 /**
  * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
@@ -10605,9 +10605,6 @@ function sliceMeshClipCap(src, start, end, planes) {
             }
             return inn;
         };
-        /** @param {any} P @returns {number[][]} */
-        const ring = (P) => Array.from({ length: P.xy.length / 2 },
-            (_, k) => [P.xy[k * 2], P.xy[k * 2 + 1]]);
         for (let i = 0; i < polys.length; i++) {
             const P = polys[i];
             const qx = (P.xy[0] + P.xy[2]) / 2, qy = (P.xy[1] + P.xy[3]) / 2;
@@ -10615,9 +10612,27 @@ function sliceMeshClipCap(src, start, end, planes) {
                 const O = polys[j], b = O.box;
                 if (P.box[0] < b[0] || P.box[2] > b[2] || P.box[1] < b[1] || P.box[3] > b[3]) continue;
                 if (!inside(qx, qy, O.xy)) continue;
-                // Test the entire contour, including edges crossing a concavity;
-                // sampling vertices can incorrectly classify overlaps as holes.
-                if (meshCapPolygons.difference([ring(P)], [ring(O)]).length) continue;
+                // Vertices alone miss edges crossing a concavity. Reject proper
+                // edge crossings too, without a costly boolean for every nesting.
+                let contained = true;
+                for (let k = 0; k < P.xy.length; k += 2) {
+                    if (!inside(P.xy[k], P.xy[k + 1], O.xy)) { contained = false; break; }
+                    const l = (k + 2) % P.xy.length;
+                    const ax = P.xy[k], ay = P.xy[k + 1], bx = P.xy[l], by = P.xy[l + 1];
+                    for (let m = 0; m < O.xy.length; m += 2) {
+                        const n = (m + 2) % O.xy.length;
+                        const cx = O.xy[m], cy = O.xy[m + 1], dx = O.xy[n], dy = O.xy[n + 1];
+                        if (Math.max(ax, bx) < Math.min(cx, dx) || Math.max(cx, dx) < Math.min(ax, bx)
+                            || Math.max(ay, by) < Math.min(cy, dy) || Math.max(cy, dy) < Math.min(ay, by)) continue;
+                        const a = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                        const b = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+                        const c = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
+                        const d = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+                        if (a * b < 0 && c * d < 0) { contained = false; break; }
+                    }
+                    if (!contained) break;
+                }
+                if (!contained) continue;
                 P.parent = O;
                 break;
             }
@@ -10628,6 +10643,9 @@ function sliceMeshClipCap(src, start, end, planes) {
                 // Keep positive contours even inside another body: they may
                 // fill part of that body's hole. Overlaps are removed below.
                 if (!P.outer) {
+                    // Ownership is inferred from contour nesting, not source
+                    // solids. Multiple independently hollow bodies with nested
+                    // negative loops remain ambiguous after merging into one mesh.
                     let host = O;
                     while (host && !host.outer) host = host.parent;
                     if (host) host.holes.push(P);
@@ -10647,7 +10665,8 @@ function sliceMeshClipCap(src, start, end, planes) {
         /** @type {number[]} */ const rmat = [];
         // Each region keeps its own interpolated colors and texture samples.
         // Subtract earlier filled regions so their shared area is drawn once.
-        /** @type {{shape: number[][][], box: number[]}[]} */ const covered = [];
+        /** @type {{shape: number[][][], box: number[], holes: any[]}[]} */ const covered = [];
+        let warning = '';
         for (const O of polys) {
             if (!O.outer) continue;
             const parts = [O, ...O.holes];
@@ -10666,36 +10685,97 @@ function sliceMeshClipCap(src, start, end, planes) {
                 (_, i) => [part.xy[i * 2], part.xy[i * 2 + 1]]));
             const b = O.box;
             const clips = covered.filter((q) => q.box[0] < b[2] && q.box[2] > b[0]
-                && q.box[1] < b[3] && q.box[3] > b[1]);
-            covered.push({ shape, box: b });
+                && q.box[1] < b[3] && q.box[3] > b[1]
+                // An island wholly inside an earlier hole has no shared fill.
+                && !q.holes.some(h => {
+                    for (let p = O.parent; p; p = p.parent) if (p === h) return true;
+                    return false;
+                }));
+            covered.push({ shape, box: b, holes: O.holes });
+            let remainder = null;
             if (clips.length) {
-                const remainder = meshCapPolygons.difference(shape, ...clips.map((q) => q.shape));
+                try {
+                    remainder = meshCapPolygons.difference(shape, ...clips.map((q) => q.shape));
+                } catch (error) {
+                    // Near-coincident intersections can defeat the sweep line.
+                    // Retry on a grid much finer than the slice weld tolerance.
+                    const step = radius * 1e-9;
+                    /** @param {number[][][]} polygon */
+                    const snapped = polygon => polygon.map(ring => ring.map(p => p.map(x => Math.round(x / step) * step)));
+                    try {
+                        remainder = meshCapPolygons.difference(snapped(shape), ...clips.map(q => snapped(q.shape)));
+                    } catch (_) {
+                        // Keep this region's original cap. Occasional overlapping
+                        // faces are preferable to losing every cap of the mesh.
+                        warning = `overlap subtraction failed; using unsubtracted region (${String(error)})`;
+                    }
+                }
+            }
+            if (remainder) {
                 // New intersection vertices inherit the original cap's piecewise
                 // linear colors, including where another region cuts its interior.
+                /** @type {Map<string, number[]>} */ const colorCache = new Map();
+                if (col) for (let i = 0; i < ids.length; i++) {
+                    colorCache.set(`${data[i * 2]},${data[i * 2 + 1]}`, PC.slice(ids[i] * 3, ids[i] * 3 + 3));
+                }
+                // A lazy AABB tree bounds triangle searches for newly introduced
+                // vertices. Unchanged loop points are constant-time map lookups.
+                /** @type {any} */ let colorTree;
+                /** @param {number[]} faces @returns {any} */
+                const buildTree = faces => {
+                    const box = [Infinity, Infinity, -Infinity, -Infinity];
+                    for (const f of faces) for (let k = 0; k < 3; k++) {
+                        const v = tris[f + k], x = data[v * 2], y = data[v * 2 + 1];
+                        box[0] = Math.min(box[0], x); box[1] = Math.min(box[1], y);
+                        box[2] = Math.max(box[2], x); box[3] = Math.max(box[3], y);
+                    }
+                    if (faces.length <= 8) return { box, faces };
+                    const axis = box[2] - box[0] > box[3] - box[1] ? 0 : 1;
+                    /** @param {number} f */
+                    const center = f => data[tris[f] * 2 + axis] + data[tris[f + 1] * 2 + axis] + data[tris[f + 2] * 2 + axis];
+                    faces.sort((a, b) => center(a) - center(b));
+                    const mid = faces.length >> 1;
+                    return { box, left: buildTree(faces.slice(0, mid)), right: buildTree(faces.slice(mid)) };
+                };
                 /** @param {number} x @param {number} y */
                 const colorAt = (x, y) => {
-                    for (let f = 0; f < tris.length; f += 3) {
-                        const a = tris[f], b = tris[f + 1], c = tris[f + 2];
-                        const ax = data[a * 2], ay = data[a * 2 + 1];
-                        const bx = data[b * 2], by = data[b * 2 + 1];
-                        const cx = data[c * 2], cy = data[c * 2 + 1];
-                        const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-                        if (!den) continue;
-                        const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / den;
-                        const v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / den;
-                        const w = 1 - u - v;
-                        if (u < -1e-7 || v < -1e-7 || w < -1e-7) continue;
-                        return [0, 1, 2].map((k) => u * PC[ids[a] * 3 + k]
-                            + v * PC[ids[b] * 3 + k] + w * PC[ids[c] * 3 + k]);
+                    const key = `${x},${y}`, known = colorCache.get(key);
+                    if (known) return known;
+                    if (!colorTree) colorTree = buildTree(Array.from({ length: tris.length / 3 }, (_, i) => i * 3));
+                    const stack = [colorTree];
+                    let result;
+                    while (stack.length && !result) {
+                        const node = stack.pop(), box = node.box;
+                        const e = radius * 1e-7;
+                        if (x < box[0] - e || y < box[1] - e || x > box[2] + e || y > box[3] + e) continue;
+                        if (!node.faces) { stack.push(node.left, node.right); continue; }
+                        for (const f of node.faces) {
+                            const a = tris[f], b = tris[f + 1], c = tris[f + 2];
+                            const ax = data[a * 2], ay = data[a * 2 + 1];
+                            const bx = data[b * 2], by = data[b * 2 + 1];
+                            const cx = data[c * 2], cy = data[c * 2 + 1];
+                            const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+                            if (!den) continue;
+                            const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / den;
+                            const v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / den;
+                            const w = 1 - u - v;
+                            if (u < -1e-7 || v < -1e-7 || w < -1e-7) continue;
+                            result = [0, 1, 2].map(k => u * PC[ids[a] * 3 + k]
+                                + v * PC[ids[b] * 3 + k] + w * PC[ids[c] * 3 + k]);
+                            break;
+                        }
                     }
-                    // A rounded boundary point may lie just outside the source
-                    // tessellation. Use its nearest source vertex in that case.
-                    let best = 0, distance = Infinity;
-                    for (let i = 0; i < ids.length; i++) {
-                        const d = (data[i * 2] - x) ** 2 + (data[i * 2 + 1] - y) ** 2;
-                        if (d < distance) { best = i; distance = d; }
+                    if (!result) {
+                        // A rounded boundary point may lie outside the source.
+                        let best = 0, distance = Infinity;
+                        for (let i = 0; i < ids.length; i++) {
+                            const d = (data[i * 2] - x) ** 2 + (data[i * 2 + 1] - y) ** 2;
+                            if (d < distance) { best = i; distance = d; }
+                        }
+                        result = PC.slice(ids[best] * 3, ids[best] * 3 + 3);
                     }
-                    return PC.slice(ids[best] * 3, ids[best] * 3 + 3);
+                    colorCache.set(key, result);
+                    return result;
                 };
                 for (const polygon of remainder) {
                     /** @type {number[]} */ const xy = [];
@@ -10706,6 +10786,7 @@ function sliceMeshClipCap(src, start, end, planes) {
                         for (let i = 0; i < polygon[r].length - 1; i++) xy.push(...polygon[r][i]);
                     }
                     const faces = earcut2D(xy, holes);
+                    const colors = col ? Array.from({ length: xy.length / 2 }, (_, i) => colorAt(xy[i * 2], xy[i * 2 + 1])) : null;
                     for (let f = 0; f < faces.length; f += 3) {
                         const a = faces[f];
                         let b = faces[f + 1], c = faces[f + 2];
@@ -10718,7 +10799,7 @@ function sliceMeshClipCap(src, start, end, planes) {
                             tp.push(x * basis[0] + y * basis[3] - c0 * nx,
                                 x * basis[1] + y * basis[4] - c0 * ny,
                                 x * basis[2] + y * basis[5] - c0 * nz);
-                            if (col) tc.push(...colorAt(x, y));
+                            if (colors) tc.push(...colors[v]);
                         }
                     }
                 }
@@ -10749,6 +10830,7 @@ function sliceMeshClipCap(src, start, end, planes) {
                 reg: new Int32Array(reg), ruv: new Float32Array(ruv), ruvEnd: new Int32Array(ruvEnd),
                 rmat: tmat ? new Uint16Array(rmat) : null }
             : { pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
+        if (warning) out[out.length - 1].warning = warning;
     }
     return out;
 }
@@ -10761,9 +10843,12 @@ let clipCapAttributeCount = 0;
 /** @param {any} attr */
 function clipCapAttributeId(attr) {
     if (!attr) return -1;
-    let id = CLIP_CAP_ATTRIBUTE_IDS.get(attr);
-    if (id === undefined) { id = ++clipCapAttributeCount; CLIP_CAP_ATTRIBUTE_IDS.set(attr, id); }
-    return id;
+    let entry = CLIP_CAP_ATTRIBUTE_IDS.get(attr);
+    if (!entry || entry.data !== attr.data) {
+        entry = { id: ++clipCapAttributeCount, data: attr.data };
+        CLIP_CAP_ATTRIBUTE_IDS.set(attr, entry);
+    }
+    return entry.id;
 }
 
 let meshClipCapSourceCount = 0;
@@ -10800,7 +10885,8 @@ function meshClipCapSource(geometry, withColor, uvName, withGroups) {
     let byFlag = MESH_CLIP_CAP_SOURCES.get(p);
     if (!byFlag) { byFlag = new Map(); MESH_CLIP_CAP_SOURCES.set(p, byFlag); }
     const hit = byFlag.get(flag);
-    if (hit && hit.posV === version(p) && hit.index === index && hit.idxV === version(index)
+    const identity = [p, index, c, u].map(clipCapAttributeId).join(',');
+    if (hit && hit.identity === identity && hit.posV === version(p) && hit.index === index && hit.idxV === version(index)
         && hit.col === c && hit.colV === version(c) && hit.uv === u && hit.uvV === version(u)) return hit.src;
     /** @param {any} a */
     const plain = (a) => !a.isInterleavedBufferAttribute && !a.normalized && a.itemSize === 3
@@ -10833,7 +10919,7 @@ function meshClipCapSource(geometry, withColor, uvName, withGroups) {
             : null,
         mat,
     };
-    byFlag.set(flag, { posV: version(p), index, idxV: version(index), col: c, colV: version(c),
+    byFlag.set(flag, { identity, posV: version(p), index, idxV: version(index), col: c, colV: version(c),
         uv: u, uvV: version(u), src });
     return src;
 }
@@ -10905,6 +10991,8 @@ class ClipCapController {
         this.enabled = false;
         /** @type {any[]} */ this._targets = [];
         this._targetsGen = -1;
+        /** Stable scene traversal order breaks coplanar ties between owners. */
+        this._depthOrder = new Map();
         this._hasCaps = false;
         this._inv = new THREE.Matrix4();
         this._plane = new THREE.Plane();
@@ -10931,7 +11019,9 @@ class ClipCapController {
     _collectTargets() {
         // A Set: a tracked child of a tracked group is reached twice.
         /** @type {Set<any>} */ const kept = new Set();
-        for (const obj of this.v._objects.values()) {
+        // Object ids, then source child order: independent of async load order.
+        const objects = [...this.v._objects].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+        for (const [, obj] of objects) {
             obj.traverse((/** @type {any} */ node) => {
                 if (node.isMesh && node.userData.clipCapKind) kept.add(node);
             });
@@ -10945,6 +11035,7 @@ class ClipCapController {
             this._forgetWorkerCopy(mesh);
         }
         this._targets = out;
+        this._depthOrder = new Map(out.map((mesh, i) => [mesh, i]));
         this._targetsGen = this.v._objGeneration;
     }
 
@@ -10990,6 +11081,7 @@ class ClipCapController {
             mesh.remove(cap);
             cap.geometry.dispose();
             cap.material.dispose();
+            cap.userData.wireframeOverlay?.material.dispose();
         }
         if (st.inflight) { st.inflight = 0; this.pending--; }
         this._forgetWorkerCopy(mesh);
@@ -11025,7 +11117,7 @@ class ClipCapController {
     _signature(mesh) {
         const own = ownMaterials(mesh)[0];
         // A translucent body or a wire cage shows its inside on purpose.
-        if (!own || own.transparent || own.opacity < 1 || own.wireframe) return null;
+        if (!own || own.transparent || own.opacity < 1 || (own.userData.__wireframeSaved ?? own.wireframe)) return null;
         const geom = mesh.geometry;
         const posAttr = geom.getAttribute('position');
         if (!posAttr) return null;
@@ -11226,11 +11318,19 @@ class ClipCapController {
             st.workerGeomKey = '';
             return;
         }
+        if (msg.error) this._warn(mesh, msg.error);
         const t0 = performance.now();
         this._install(mesh, st, msg.caps, st.inflightLocal);
         st.sig = st.inflightSig;
         st.last = performance.now();
         this.lastInstallMs = st.last - t0;
+    }
+
+    /** @param {any} mesh @param {string} warning */
+    _warn(mesh, warning) {
+        if (mesh.userData.__clipCapWarned) return;
+        mesh.userData.__clipCapWarned = true;
+        console.warn(`Clip cap for '${mesh.userData.id || mesh.name}': ${warning}`);
     }
 
     /**
@@ -11239,6 +11339,8 @@ class ClipCapController {
      * @param {ClipCapPiece[]} results @param {number[][]} local
      */
     _install(mesh, st, results, local) {
+        const warning = results.find(r => r.warning)?.warning;
+        if (warning) this._warn(mesh, warning);
         const planes = this.v._clipPlanes;
         const n = Math.min(planes.length, results.length);
         for (let i = 0; i < n; i++) {
@@ -11278,6 +11380,7 @@ class ClipCapController {
                 mat.clipShadows = true;
                 mat.needsUpdate = true;
             }
+            this.v._shading._applyWireframeTo(cap);
         }
         for (let i = n; i < st.caps.length; i++) {
             const cap = st.caps[i];
@@ -11285,6 +11388,7 @@ class ClipCapController {
             mesh.remove(cap);
             cap.geometry.dispose();
             cap.material.dispose();
+            cap.userData.wireframeOverlay?.material.dispose();
         }
         st.caps.length = n;
         this.v._shadowDirty = true;
@@ -11297,6 +11401,12 @@ class ClipCapController {
         for (const cap of st.caps) {
             if (!cap) continue;
             const mat = cap.material;
+            // All caps on a slice are coplanar, even when their owners are
+            // separate GLB meshes. A small, distinct depth-buffer bias makes
+            // later scene meshes win consistently, independent of draw sorting.
+            mat.polygonOffsetUnits = -128 * (1 + (this._depthOrder.get(mesh) || 0));
+            const overlay = cap.userData.wireframeOverlay;
+            if (overlay) overlay.material.polygonOffsetUnits = mat.polygonOffsetUnits - 8;
             if (own.color) mat.color.copy(own.color);
             // glTF keeps the base colour in the map with a white factor: sample it along the cut.
             const baked = this._bakeRegionColors(cap, ownMaterials(mesh));

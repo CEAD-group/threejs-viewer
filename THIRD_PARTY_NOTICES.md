@@ -41,8 +41,8 @@ Draco is released under the **Apache License, Version 2.0**.
 Copyright 2017 The Draco Authors.
 
 A copy of the Apache License, Version 2.0 is included below, as required by
-sections 4(a)–4(d) of that license (it applies to both the turbo colormap data
-and the Draco decoder above).
+sections 4(a)–4(d) of that license (it applies to the turbo colormap data,
+the Draco decoder above, and the TypeScript helpers bundled with polygon-clipping).
 
 ---
 

@@ -75,3 +75,31 @@ The texture × vertex-color repair is also in PR #329; it is shared coverage,
 not an additional fix unique to #331. The UV/layout cases demonstrate preserved
 behavior and already pass on the baseline. The remaining five cases exercise
 #331's geometry and cache-invalidation fixes.
+
+## Review stress cases and display checks
+
+```bash
+node bench/mesh_cap_review/slice_bench.mjs
+# Optional comparison with another extracted viewer.js:
+node bench/mesh_cap_review/slice_bench.mjs /tmp/pre-review-viewer.js
+
+git show origin/main:src/threejs_viewer/viewer.html > /tmp/main-viewer.html
+uv run python bench/mesh_cap_review/capture_display.py \
+  --before /tmp/main-viewer.html --output /tmp/cap-display
+```
+
+The Node bench checks overlapping colored 1024/4096-segment cylinders, forty
+nested rings, a forced polygon-library failure, and 300 seeded scenes of
+overlapping prisms cut by a tilted plane. Timings are informational; the checks
+assert areas, interpolated colors, finite nonempty caps and fallback warnings.
+The display capture writes four PNGs showing cross-mesh cap priority and the
+solid-plus-wire M mode. Browser regressions also check the winning pixels at
+different camera angles and cap-overlay cleanup after rebuilding/disabling caps.
+
+Overlap subtraction retries numerical failures on a fine grid, then retains
+the original region with a once-per-mesh warning if the retry fails. That last
+fallback can retain overlapping faces. Hole ownership within a merged mesh is
+still inferred from contour nesting; independently hollow bodies with multiply
+nested holes can be ambiguous. The resulting per-region triangulations are not
+a conforming mesh: adjacent regions can have T-junctions. This is a rendering
+capper, not an exact solid-boolean export.

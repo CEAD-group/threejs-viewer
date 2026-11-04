@@ -6,6 +6,7 @@ import pytest
 from conftest import frames, settle
 from test_clip_caps import (
     _Glb,
+    _PIXEL_AT,
     _box_arrays,
     _caps,
     _model_url,
@@ -271,3 +272,97 @@ def test_cap_rebuilds_when_group_assignments_change(viewer_client, viewer_page, 
     _wait_settled(viewer_page)
     frames(viewer_page)
     assert _shown_rgb(viewer_page, "m") == pytest.approx([208, 160, 64], abs=2)
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_cap_wireframe_cycle_rebuild_and_disposal(viewer_client, viewer_page, worker):
+    pos, _, idx = _box_arrays()
+    viewer_client.add_mesh("m", pos, idx)
+    _clip(viewer_client, viewer_page, worker)
+    # Real M-key events: wire-only must keep caps, solid+wire must include them.
+    for mode in (1, 2):
+        viewer_page.evaluate("""() => window.threejsViewer.container.dispatchEvent(
+            new KeyboardEvent('keydown', {key:'m',code:'KeyM',bubbles:true}))""")
+        frames(viewer_page)
+        _wait_settled(viewer_page)
+        assert viewer_page.evaluate(
+            """mode => {
+            const caps = window.threejsViewer.getObject('m').userData.__clipCapState?.caps;
+            return caps?.length === 1 && caps.every(c => c.visible &&
+                (mode === 1 ? c.material.wireframe : !c.material.wireframe &&
+                c.userData.wireframeOverlay?.visible &&
+                c.userData.wireframeOverlay.geometry === c.geometry &&
+                c.userData.wireframeOverlay.material.clippingPlanes.length === 0));
+        }""",
+            mode,
+        )
+    viewer_page.evaluate("""() => {
+        const cap = window.threejsViewer.getObject('m').userData.__clipCapState.caps[0];
+        window.oldCapGeometry = cap.geometry;
+        window.capOverlayMaterial = cap.userData.wireframeOverlay.material;
+        window.overlayDisposed = 0;
+        window.capOverlayMaterial.addEventListener('dispose', () => window.overlayDisposed++);
+    }""")
+    viewer_client.set_clipping_slab(normal=[0, 0, 1], center=0.1, thickness=0.5)
+    settle(viewer_client)
+    frames(viewer_page)
+    _wait_settled(viewer_page)
+    assert viewer_page.evaluate("""() => {
+        const caps = window.threejsViewer.getObject('m').userData.__clipCapState.caps;
+        return caps.length === 2 && caps.every(c => c.geometry !== window.oldCapGeometry &&
+            c.userData.wireframeOverlay?.visible && c.userData.wireframeOverlay.geometry === c.geometry &&
+            c.userData.wireframeOverlay.material.clippingPlanes.length === 1);
+    }""")
+    viewer_client.set_clipping_caps(False)
+    settle(viewer_client)
+    frames(viewer_page)
+    assert viewer_page.evaluate("window.overlayDisposed") == 1
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_cap_rebuilds_when_interleaved_data_is_replaced(
+    viewer_client, viewer_page, worker
+):
+    g = _Glb()
+    mesh = g.box_mesh("interleaved")
+    viewer_client.add_model_binary("m", g.bytes([g.node(mesh=mesh)]), "glb")
+    _clip(viewer_client, viewer_page, worker)
+    assert _caps(viewer_page, "m")[0]["area"] == pytest.approx(4)
+    viewer_page.evaluate("""() => window.threejsViewer.getObject('m').traverse(n => {
+        if (!n.isMesh || n.userData.__clipCap) return;
+        const p = n.geometry.getAttribute('position');
+        const previous = p.data;
+        p.data = new previous.constructor(previous.array.slice(), previous.stride);
+        for (let i=0; i<p.count; i++) p.setX(i,p.getX(i)*2);
+    })""")
+    frames(viewer_page)
+    _wait_settled(viewer_page)
+    assert _caps(viewer_page, "m")[0]["area"] == pytest.approx(8)
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_coplanar_caps_have_stable_winner(viewer_client, viewer_page, worker):
+    pos, _, idx = _box_arrays()
+    viewer_client.add_mesh("first", pos, idx, color=0xFF0000)
+    angle = 0.37
+    rotated = pos.copy()
+    rotated[:, 0] = pos[:, 0] * np.cos(angle) - pos[:, 1] * np.sin(angle)
+    rotated[:, 1] = pos[:, 0] * np.sin(angle) + pos[:, 1] * np.cos(angle)
+    viewer_client.add_mesh("last", rotated, idx, color=0x0000FF)
+    viewer_client.set_sun(enabled=False)
+    _use_worker(viewer_page, worker)
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_slab(
+        normal=[0, 0, 1], center=0, thickness=0.4, show_helper=False
+    )
+    settle(viewer_client)
+    frames(viewer_page)
+    _wait_settled(viewer_page)
+    for x in (-2, -0.01, 0.01, 2):
+        viewer_client.set_camera(position=[x, -3, 8], target=[0, 0, 0], up=[0, 1, 0])
+        settle(viewer_client)
+        frames(viewer_page, 3)
+        for px in (-0.4, 0, 0.4):
+            for py in (-0.4, 0, 0.4):
+                rgb = viewer_page.evaluate(_PIXEL_AT, [px, py, 0.2])
+                assert rgb[2] > 80 and rgb[2] > 2 * rgb[0], (x, px, py, rgb)
