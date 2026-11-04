@@ -17,7 +17,6 @@
 - Interpenetrating bodies merged into one mesh give one solid cap when the winding is consistent; otherwise the fill is even-odd by nesting.
 - On textured meshes the cap colour is the colour map averaged along each cut loop, read through the map's own uv channel and each material's own map, with transparent texels ignored.
 - Skinned, instanced and morph-target meshes are not capped.
-- A textured mesh with vertex colours gets the texture times the vertex colour on its cap; the first version squared the texture sample (#329).
 
 ### Grazing-angle opacity (#326)
 
