@@ -2812,6 +2812,48 @@ def test_update_polyline_colors_swaps_colors(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_update_polyline_colors_superseded_fetch_does_not_repaint(
+    viewer_client, viewer_page
+):
+    """Two quick recolours whose fetches finish out of order end on the newer
+    colours: the older fetch is held back in the page so it would land last,
+    and it is discarded quietly instead (issue #312)."""
+    messages = []
+    viewer_page.on("console", lambda m: messages.append((m.type, m.text)))
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline(
+        "pl_race", pts, colors=np.array([[1, 0, 0]] * 3, dtype=np.float32)
+    )
+    settle(viewer_client)
+    # The first blob fetch waits 800 ms, later ones 50 ms.
+    viewer_page.evaluate(
+        """() => {
+            const orig = window.fetch.bind(window);
+            window.__origFetch = orig;
+            let n = 0;
+            window.fetch = (url, opts) => new Promise((resolve, reject) => {
+                const wait = n++ === 0 ? 800 : 50;
+                setTimeout(() => orig(url, opts).then(resolve, reject), wait);
+            });
+        }"""
+    )
+    try:
+        viewer_client.update_polyline_colors(
+            "pl_race", np.array([[0, 1, 0]] * 3, dtype=np.float32)
+        )
+        viewer_client.update_polyline_colors(
+            "pl_race", np.array([[0, 0, 1]] * 3, dtype=np.float32)
+        )
+        settle(viewer_client)
+        time.sleep(1.0)  # past the held-back fetch, in case it were still applied
+        c = _read_polyline_first_color(viewer_page, "pl_race")
+    finally:
+        viewer_page.evaluate("() => { window.fetch = window.__origFetch; }")
+    assert c["b"] > 0.99 and c["g"] < 0.01 and c["r"] < 0.01, c
+    assert [m for m in messages if m[0] == "error"] == [], messages
+
+
+@pytest.mark.browser
 def test_update_polyline_colors_flips_material_when_no_initial_colors(
     viewer_client, viewer_page
 ):
@@ -4018,6 +4060,247 @@ def test_parametric_tube_pick(viewer_client, viewer_page):
     # The resolved point sits on the spine at ~the midpoint.
     px, py, pz = pick["point"]
     assert abs(px) < 0.4 and abs(py) < 0.4 and abs(pz) < 0.4, pick["point"]
+
+
+# Sweeps a pixel column through PolylinePickController._pickAt with occlusion on
+# and off, next to viewer.pick() (a mesh raycast) as the ground truth for which
+# wall is visible at each pixel.
+_PICK_COLUMN_JS = """([x, y0, y1]) => {
+  const v = window.threejsViewer;
+  const pc = v._polylinePick;
+  const out = [];
+  const step = y1 > y0 ? 1 : -1;
+  for (let y = y0; step > 0 ? y <= y1 : y >= y1; y += step) {
+    const truth = v.pick(x, y);
+    pc.occlusion = true;
+    const on = pc._pickAt(x, y);
+    pc.occlusion = false;
+    const off = pc._pickAt(x, y);
+    pc.occlusion = true;
+    out.push({
+      truthY: truth ? truth.point.y : null,
+      onY: on ? on.point.y : null,
+      offY: off ? off.point.y : null,
+    });
+  }
+  return out;
+}"""
+
+
+@pytest.mark.browser
+def test_tube_pick_prefers_visible_wall(viewer_client, viewer_page):
+    """On a closed square wall seen at a low angle the near and far walls
+    overlap on screen. Wherever the near wall is the visible surface, the pick
+    lands on it, while the old screen-nearest rule picks the far wall at some
+    of those pixels (issue #311)."""
+    viewer_client.enable_polyline_picking()
+    r = 2.0
+    corners = [(-r, -r), (r, -r), (r, r), (-r, r), (-r, -r)]
+    spine = []
+    for (x0, y0), (x1, y1) in zip(corners, corners[1:]):
+        for t in np.linspace(0, 1, 20, endpoint=False):
+            spine.append((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 0.0))
+    spine.append(corners[-1] + (0.0,))
+    spine = np.array(spine, dtype=np.float32)
+    w = np.full(len(spine), 0.8, dtype=np.float32)
+    viewer_client.add_parametric_tube("wall", spine, w, w * 1.5, color=0x44AAFF)
+    viewer_client.set_camera(position=[0, -14, 2.2], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    near_x, near_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, -r, 0.0])
+    _, far_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.0, r, 0.0])
+    rows = viewer_page.evaluate(_PICK_COLUMN_JS, [near_x, int(near_y), int(far_y) - 1])
+    near_rows = [row for row in rows if row["truthY"] is not None and row["truthY"] < 0]
+    assert near_rows, rows
+    assert all(row["onY"] is not None and row["onY"] < 0 for row in near_rows), (
+        near_rows
+    )
+    # The scene does exercise the overlap: without occlusion the far wall wins somewhere.
+    assert any(row["offY"] is not None and row["offY"] > 0 for row in near_rows), (
+        near_rows
+    )
+
+
+@pytest.mark.browser
+def test_polyline_pick_skips_undrawn_hidden_and_clipped(viewer_client, viewer_page):
+    """Picks ignore the undrawn part of a line or tube, lines under a hidden
+    parent, and points on the clipped side of the clipping plane (issue #311)."""
+    viewer_client.enable_polyline_picking()
+    xs = np.linspace(-2, 2, 41, dtype=np.float32)
+    line = np.stack([xs, np.zeros_like(xs), np.zeros_like(xs)], axis=1)
+    viewer_client.add_polyline("ln", line, color=0xFF8800, line_width=3)
+    tube_spine = line + np.array([0, 0, 1.5], dtype=np.float32)
+    w = np.full(len(xs), 0.3, dtype=np.float32)
+    viewer_client.add_parametric_tube("tb", tube_spine, w, w, color=0x44AAFF)
+    viewer_client.add_group("hidden_grp", visible=False)
+    viewer_client.add_polyline(
+        "under_hidden",
+        line + np.array([0, 0, -1.5], dtype=np.float32),
+        parent="hidden_grp",
+    )
+    viewer_client.set_camera(position=[0, -10, 0.5], target=[0, 0, 0.5])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    def pick_at(world):
+        x, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, world)
+        return viewer_page.evaluate(
+            "([x, y]) => { const p = window.threejsViewer._polylinePick._pickAt(x, y);"
+            " return p && {id: p.id, fraction: p.fraction}; }",
+            [x, y],
+        )
+
+    assert pick_at([1.5, 0, 0])["id"] == "ln"
+    assert pick_at([1.5, 0, 1.5])["id"] == "tb"
+    assert pick_at([1.5, 0, -1.5]) is None
+
+    viewer_client.set_draw_range("ln", 0.5)
+    viewer_client.set_draw_range("tb", 0.5)
+    settle(viewer_client)
+    assert pick_at([1.5, 0, 0]) is None
+    assert pick_at([1.5, 0, 1.5]) is None
+    drawn = pick_at([-1.0, 0, 0])
+    assert drawn["id"] == "ln" and drawn["fraction"] <= 0.5
+    assert pick_at([-1.0, 0, 1.5])["fraction"] <= 0.5
+
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-1.5, show_helper=False)
+    settle(viewer_client)
+    # Normal +x keeps x >= -1.5; the line left of it is clipped away.
+    assert pick_at([-1.8, 0, 0]) is None
+    assert pick_at([-1.0, 0, 0])["id"] == "ln"
+
+
+@pytest.mark.browser
+def test_tube_pick_flat_bead_occludes_only_where_crossed(viewer_client, viewer_page):
+    """A wide, flat bead in front does not hide a bead the ray reaches above
+    it: occlusion follows the bead box, not a circle of the bead's largest
+    half-extent around its spine."""
+    viewer_client.enable_polyline_picking()
+    xs = np.linspace(-2, 2, 21, dtype=np.float32)
+    front = np.stack([xs, np.full_like(xs, -1.0), np.zeros_like(xs)], axis=1)
+    back = np.stack([xs, np.full_like(xs, 1.0), np.full_like(xs, 0.5)], axis=1)
+    viewer_client.add_parametric_tube(
+        "flat", front, np.full(21, 3.0, np.float32), np.full(21, 0.1, np.float32)
+    )
+    viewer_client.add_parametric_tube(
+        "back", back, np.full(21, 0.3, np.float32), np.full(21, 0.3, np.float32)
+    )
+    viewer_client.set_camera(position=[0, -10, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    x, y_back = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.5, 1.0, 0.5])
+    _, y_front = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [0.5, -1.0, 0.0])
+    rows = viewer_page.evaluate(_PICK_COLUMN_JS, [x, int(y_back) - 15, int(y_front)])
+    # The flat bead spans y -2.5..0.5, the back bead y 0.85..1.15.
+    back_rows = [r for r in rows if r["truthY"] is not None and r["truthY"] > 0.7]
+    front_rows = [r for r in rows if r["truthY"] is not None and r["truthY"] < 0.7]
+    assert back_rows and front_rows, rows
+    assert all(r["onY"] == pytest.approx(1.0) for r in back_rows), back_rows
+    assert all(r["onY"] == pytest.approx(-1.0) for r in front_rows), front_rows
+
+
+@pytest.mark.browser
+def test_tube_pick_connected_walls_keep_near_wall(viewer_client, viewer_page):
+    """Near and far wall of a U-shaped tube stay separate candidates next to
+    the turn that joins them on screen, so the visible near wall wins."""
+    viewer_client.enable_polyline_picking()
+    leg = np.linspace(-2, 2, 21, dtype=np.float32)
+    turn = np.linspace(-np.pi / 2, np.pi / 2, 9, dtype=np.float32)[1:-1]
+    spine = np.concatenate(
+        [
+            np.stack([leg, np.full_like(leg, -1.0), np.zeros_like(leg)], axis=1),
+            np.stack([2 + np.cos(turn), np.sin(turn), np.zeros_like(turn)], axis=1),
+            np.stack([leg[::-1], np.full_like(leg, 1.0), np.zeros_like(leg)], axis=1),
+        ]
+    ).astype(np.float32)
+    w = np.full(len(spine), 0.8, dtype=np.float32)
+    viewer_client.add_parametric_tube("u", spine, w, w * 1.5, color=0x44AAFF)
+    viewer_client.set_camera(position=[0, -14, 2.2], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    for wx in (1.6, 2.0, 2.4):
+        x, near_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [wx, -1.0, 0.0])
+        _, far_y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [wx, 1.0, 0.0])
+        rows = viewer_page.evaluate(_PICK_COLUMN_JS, [x, int(near_y), int(far_y) - 1])
+        near = [r for r in rows if r["truthY"] is not None and r["truthY"] < -0.5]
+        assert near, rows
+        assert all(r["onY"] is not None and r["onY"] < -0.5 for r in near), (wx, near)
+
+
+@pytest.mark.browser
+def test_tube_pick_ignores_undrawn_part_of_frontier_segment(viewer_client, viewer_page):
+    """The frontier segment of a partly drawn tube is hit-tested only up to
+    the frontier, so empty space past it picks nothing."""
+    viewer_client.enable_polyline_picking()
+    spine = np.array([[-2, 0, 0], [2, 0, 0]], dtype=np.float32)
+    w = np.full(2, 0.3, dtype=np.float32)
+    viewer_client.add_parametric_tube("two", spine, w, w)
+    viewer_client.set_camera(position=[0, -10, 0], target=[0, 0, 0])
+    viewer_client.set_draw_range("two", 0.25)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    def pick_at(world):
+        x, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, world)
+        return viewer_page.evaluate(
+            "([x, y]) => { const p = window.threejsViewer._polylinePick._pickAt(x, y);"
+            " return p && {x: p.point.x, fraction: p.fraction}; }",
+            [x, y],
+        )
+
+    assert pick_at([1.5, 0, 0]) is None
+    hit = pick_at([-1.5, 0, 0])
+    assert hit is not None and hit["x"] == pytest.approx(-1.5, abs=0.05)
+
+
+@pytest.mark.browser
+def test_polyline_picking_occlusion_can_be_turned_back_on(viewer_client, viewer_page):
+    """``occlusion=True`` after ``occlusion=False`` restores occlusion, although
+    Python leaves the default off the wire."""
+    occlusion = "() => window.threejsViewer._polylinePick.occlusion"
+    viewer_client.enable_polyline_picking(occlusion=False)
+    settle(viewer_client)
+    assert viewer_page.evaluate(occlusion) is False
+    viewer_client.enable_polyline_picking(occlusion=True)
+    settle(viewer_client)
+    assert viewer_page.evaluate(occlusion) is True
+
+
+@pytest.mark.browser
+def test_polyline_hover_cursor_does_not_flicker(viewer_client, viewer_page):
+    """Hovering along a pickable line keeps the crosshair: the view gimbal's
+    per-move hover handler used to reset the cursor on every pointer move,
+    which alternated with picking's crosshair at frame rate."""
+    viewer_client.enable_polyline_picking()
+    pts = np.array([[-2, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("ln", pts, line_width=6)
+    viewer_client.set_camera(position=[0, -8, 0], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+
+    x0, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [-1.0, 0.0, 0.0])
+    x1, _ = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [1.0, 0.0, 0.0])
+    viewer_page.mouse.move(x0, y)
+    frames(viewer_page, 3)
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer.getCanvas().style.cursor")
+        == "crosshair"
+    )
+    viewer_page.evaluate(
+        """() => {
+          const c = window.threejsViewer.getCanvas();
+          window.__cursors = [];
+          new MutationObserver(() => window.__cursors.push(c.style.cursor))
+            .observe(c, {attributes: true, attributeFilter: ['style']});
+        }"""
+    )
+    viewer_page.mouse.move(x1, y, steps=30)
+    frames(viewer_page, 3)
+    cursors = viewer_page.evaluate("() => window.__cursors")
+    assert "" not in cursors, cursors
 
 
 @pytest.mark.browser
@@ -5632,6 +5915,120 @@ def test_clip_tool_has_refined_rotate_and_slide_gizmos(viewer_client, viewer_pag
         if off and not off["move"]:
             break
     assert off is not None and not off["rot"] and not off["move"]
+
+
+# Sweeps a grid of NDC points through the shared gizmo hit test and counts,
+# per control, the points where it holds an axis and the points where more than
+# one control does.
+_GIZMO_HOVER_SCAN_JS = """
+(n) => {
+  const v = window.threejsViewer;
+  const ctls = v._allTransformControls().filter((c) => c.enabled && c.object !== undefined);
+  const owned = ctls.map(() => 0);
+  let shared = 0;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    ctls[0].pointerHover({x: -1 + 2 * (i + 0.5) / n, y: -1 + 2 * (j + 0.5) / n, button: 0});
+    const holders = ctls.map((c, k) => (c.axis != null ? k : -1)).filter((k) => k >= 0);
+    for (const k of holders) owned[k]++;
+    if (holders.length > 1) shared++;
+  }
+  for (const c of ctls) c.axis = null;
+  return {owned, shared};
+}
+"""
+
+
+@pytest.mark.browser
+def test_clip_gizmos_never_share_a_press(viewer_client, viewer_page):
+    """The clip slide line and rotate rings never both claim a pointer
+    position, so one press tilts or slides the plane, never both."""
+    viewer_client.add_sphere("s", radius=1.5)
+    viewer_client.set_clipping_plane(normal=[0, 0, 1], distance=0.0, show_helper=True)
+    viewer_client.set_camera(position=[4, -5, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    scan = viewer_page.evaluate(_GIZMO_HOVER_SCAN_JS, 120)
+    assert len(scan["owned"]) == 2
+    assert all(n > 0 for n in scan["owned"]), scan
+    assert scan["shared"] == 0, scan
+
+
+@pytest.mark.browser
+def test_overlapping_pinned_gizmos_never_share_a_press(viewer_client, viewer_page):
+    """Two pinned move gizmos on coincident objects: one hit test decides, so
+    a press drags exactly one of them."""
+    viewer_client.add_box("a", width=1, height=1, depth=1)
+    viewer_client.add_box("b", width=1, height=1, depth=1)
+    viewer_client.add_gizmo("a")
+    viewer_client.add_gizmo("b", mode="rotate")
+    viewer_client.set_camera(position=[4, -5, 3], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    scan = viewer_page.evaluate(_GIZMO_HOVER_SCAN_JS, 120)
+    assert sum(1 for n in scan["owned"] if n > 0) >= 2, scan
+    assert scan["shared"] == 0, scan
+
+
+@pytest.mark.browser
+def test_clip_show_plane_hides_helper_and_keeps_cut(viewer_client, viewer_page):
+    """The panel's Show plane checkbox hides the disc and both gizmos while
+    the clip stays active and the panel stays open."""
+    viewer_client.add_sphere("s", radius=1.5)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0, show_helper=True)
+    settle(viewer_client)
+    state_js = """() => {
+      const v = window.threejsViewer;
+      return {
+        clip: v._clipEnabled,
+        cut: v.getObject('s').material.clippingPlanes.length,
+        anchor: v._clipAnchor.visible,
+        gizmos: v._clipGizmo.enabled || v._clipMoveGizmo.enabled
+          || v._clipGizmoHelper.visible || v._clipMoveGizmoHelper.visible,
+        checked: v._clipShowPlaneCheck.checked,
+        panel: v._clipPanelEl.classList.contains('visible'),
+      };
+    }"""
+    on = viewer_page.evaluate(state_js)
+    assert on["anchor"] and on["gizmos"] and on["checked"] and on["cut"] == 1
+
+    viewer_page.click(".tjsv-clip-show-plane")
+    off = viewer_page.evaluate(state_js)
+    assert off["clip"] and off["cut"] == 1 and off["panel"]
+    assert not off["anchor"] and not off["gizmos"] and not off["checked"]
+
+    viewer_page.click(".tjsv-clip-show-plane")
+    back = viewer_page.evaluate(state_js)
+    assert back["anchor"] and back["gizmos"] and back["checked"] and back["panel"]
+
+
+@pytest.mark.browser
+def test_focused_clip_checkbox_keeps_space_and_passes_shortcuts(
+    viewer_client, viewer_page
+):
+    """Space on a focused Show plane checkbox toggles the checkbox instead of
+    starting playback, while other shortcuts still reach the viewer."""
+    viewer_client.add_box("spinner")
+    viewer_client.load_animation(_spin_animation("spinner"), autoplay=False)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.0, show_helper=True)
+    settle(viewer_client)
+    viewer_page.focus(".tjsv-clip-show-plane")
+    state_js = """() => {
+      const v = window.threejsViewer;
+      return {
+        checked: v._clipShowPlaneCheck.checked,
+        playing: v.getAnimationState().playing,
+        wire: v._shading.wireframeMode,
+      };
+    }"""
+    before = viewer_page.evaluate(state_js)
+    assert before["checked"] and not before["playing"]
+
+    viewer_page.keyboard.press("Space")
+    after = viewer_page.evaluate(state_js)
+    assert not after["checked"] and not after["playing"]
+
+    viewer_page.keyboard.press("KeyM")
+    assert viewer_page.evaluate(state_js)["wire"] == (before["wire"] + 1) % 3
 
 
 @pytest.mark.browser
@@ -7323,6 +7720,113 @@ def test_add_menu_dropdown_items_and_callbacks(viewer_client, viewer_page):
     }
     assert page.evaluate("() => window.threejsViewer.removeMenu('demo')") is True
     assert page.evaluate("() => document.querySelector('[data-menu=demo]')") is None
+
+
+@pytest.mark.browser
+def test_add_menu_radio_lists_every_option(viewer_client, viewer_page):
+    """A radio item renders one row per option with the selected one marked,
+    commits on click, and follows setItem for options, value and disabled."""
+    page = viewer_page
+    page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " window.__log = [];"
+        " v.addMenu({id: 'demo', label: 'Demo', items: ["
+        "   {type: 'radio', id: 'pick', label: 'Pick',"
+        "    options: [{value: 'a', label: 'Alpha'}, 'b', 'c'], value: 'b',"
+        "    onChange: (val) => window.__log.push('pick:' + val)},"
+        " ]});"
+        " v.onMenuAction(a => window.__log.push(a.type + ':' + a.value));"
+        "}"
+    )
+    read = (
+        "() => { const r = document.querySelector('[data-menu=demo] [data-item=pick]');"
+        " return {caption: r.querySelector('.tjsv-radio-caption').textContent,"
+        "  rows: [...r.querySelectorAll('.tjsv-radio-opt')].map(b =>"
+        "   [b.dataset.value, b.textContent, b.getAttribute('aria-checked'), b.disabled]),"
+        "  value: window.threejsViewer.getMenu('demo').getValue('pick')}; }"
+    )
+    assert page.evaluate(read) == {
+        "caption": "Pick",
+        "rows": [
+            ["a", "Alpha", "false", False],
+            ["b", "b", "true", False],
+            ["c", "c", "false", False],
+        ],
+        "value": "b",
+    }
+
+    page.locator("[data-menu=demo] .tjsv-menu-btn").click()
+    page.locator("[data-menu=demo] .tjsv-radio-opt[data-value=c]").click()
+    assert page.evaluate("() => window.__log") == ["pick:c", "radio:c"]
+    assert page.evaluate(read)["value"] == "c"
+
+    page.evaluate(
+        "() => window.threejsViewer.getMenu('demo').setItem('pick',"
+        " {options: ['x', 'y'], value: 'y', disabled: true, label: 'Other'})"
+    )
+    assert page.evaluate(read) == {
+        "caption": "Other",
+        "rows": [["x", "x", "false", True], ["y", "y", "true", True]],
+        "value": "y",
+    }
+
+    # Keyboard: Space and the arrows select within the group and never reach
+    # the viewer's playback keys; the group is one tab stop.
+    page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " v.addMenu({id: 'kb', label: 'Kb', items: ["
+        "   {type: 'radio', id: 'r', options: ['a', 'b', 'c'], value: 'a', shortcut: 'Q'},"
+        " ]});"
+        " window.__toggled = 0; v._togglePlay = () => { window.__toggled++; }; }"
+    )
+    page.locator("[data-menu=kb] .tjsv-menu-btn").click()
+    rows = "[data-menu=kb] [data-item=r] .tjsv-radio-opt"
+    assert page.evaluate(
+        f"() => [...document.querySelectorAll('{rows}')].map(b => b.tabIndex)"
+    ) == [0, -1, -1]
+    page.locator(f"{rows}[data-value=a]").focus()
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowUp")
+    page.keyboard.press("Space")
+    kb = (
+        "() => ({value: window.threejsViewer.getMenu('kb').getValue('r'),"
+        " focused: document.activeElement.dataset.value, toggled: window.__toggled,"
+        " caption: document.querySelector('[data-menu=kb] .tjsv-radio-caption').hidden})"
+    )
+    assert page.evaluate(kb) == {
+        "value": "c",
+        "focused": "c",
+        "toggled": 0,
+        "caption": True,
+    }
+
+    # A shortcut steps to the next option; a label set later gets a caption;
+    # an options swap without a value drops a value no longer offered.
+    page.keyboard.press("Escape")
+    _press_viewer_key(page, "q", "KeyQ")
+    assert (
+        page.evaluate("() => window.threejsViewer.getMenu('kb').getValue('r')") == "a"
+    )
+    late = page.evaluate(
+        "() => { const m = window.threejsViewer.getMenu('kb');"
+        " m.setItem('r', {label: 'Late'});"
+        " m.setItem('r', {options: ['p', 'q']});"
+        " const r = document.querySelector('[data-menu=kb] [data-item=r]');"
+        " const cap = r.querySelector('.tjsv-radio-caption');"
+        " return {caption: cap.textContent, hidden: cap.hidden,"
+        "  aria: r.getAttribute('aria-label'), value: m.getValue('r'),"
+        "  checked: r.querySelector('.tjsv-radio-opt.active').dataset.value}; }"
+    )
+    assert late == {
+        "caption": "Late",
+        "hidden": False,
+        "aria": "Late",
+        "value": "p",
+        "checked": "p",
+    }
 
 
 @pytest.mark.browser

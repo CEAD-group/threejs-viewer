@@ -327,6 +327,56 @@
 .threejs-viewer .tjsv-seg-btn:hover:not(:disabled) { color: var(--tjsv-button-text); }
 .threejs-viewer .tjsv-seg-btn.active { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: var(--tjsv-on-primary); }
 
+/* Radio: one tjsv-menu-item row per option, a dot marks the selected one */
+.threejs-viewer .tjsv-menu-radio { margin: 1px 0; }
+.threejs-viewer .tjsv-menu-radio[hidden] { display: none; }
+.threejs-viewer .tjsv-radio-caption {
+    display: block;
+    padding: 3px 5px 1px;
+    color: var(--tjsv-text-dim);
+    font-size: 11px;
+}
+/* Same 0.4s and easing as the eye glyph's SMIL sweep; selecting overshoots slightly. */
+.threejs-viewer .tjsv-radio-dot {
+    position: relative;
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    width: 14px;
+    height: 14px;
+    margin: 0 2px;
+    border-radius: 50%;
+    background: var(--tjsv-panel-3);
+    border: 1px solid var(--tjsv-border);
+    transition: background 0.4s cubic-bezier(.4, 0, .2, 1), border-color 0.4s cubic-bezier(.4, 0, .2, 1);
+}
+.threejs-viewer .tjsv-radio-dot::after {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: #fff;
+    transform: scale(0);
+    opacity: 0;
+    transition: transform 0.4s cubic-bezier(.4, 0, .2, 1), opacity 0.4s cubic-bezier(.4, 0, .2, 1);
+}
+.threejs-viewer .tjsv-radio-opt.active .tjsv-radio-dot { background: var(--tjsv-primary); border-color: var(--tjsv-primary); }
+.threejs-viewer .tjsv-radio-opt.active .tjsv-radio-dot::after {
+    transform: scale(1);
+    opacity: 1;
+    transition: transform 0.4s cubic-bezier(.34, 1.56, .64, 1), opacity 0.2s cubic-bezier(.4, 0, .2, 1);
+}
+.threejs-viewer .tjsv-radio-opt .tjsv-menu-label { transition: color 0.4s cubic-bezier(.4, 0, .2, 1); }
+.threejs-viewer .tjsv-radio-opt:not(.active) .tjsv-menu-label { color: var(--tjsv-text-dim); }
+.threejs-viewer .tjsv-radio-opt.disabled .tjsv-radio-dot { opacity: 0.4; }
+.threejs-viewer .tjsv-radio-opt.disabled .tjsv-menu-label { color: var(--tjsv-text-faint); }
+.threejs-viewer .tjsv-radio-caption[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) {
+    .threejs-viewer .tjsv-radio-dot,
+    .threejs-viewer .tjsv-radio-dot::after,
+    .threejs-viewer .tjsv-radio-opt.active .tjsv-radio-dot::after,
+    .threejs-viewer .tjsv-radio-opt .tjsv-menu-label { transition: none; }
+}
+
 /* Animation Controls */
 .threejs-viewer .tjsv-animation-controls {
     position: absolute;

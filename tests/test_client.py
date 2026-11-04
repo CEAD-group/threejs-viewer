@@ -893,6 +893,25 @@ def test_add_menu_validates_and_records_for_reconnect():
     assert "demo" not in client._menus
 
 
+def test_add_menu_radio_item_payload():
+    client = ViewerClient()
+    sent = []
+    client._send = sent.append
+    client.add_menu(
+        "demo",
+        items=[
+            {"type": "radio", "id": "c", "label": "C", "options": [1, 2], "value": 2}
+        ],
+    )
+    assert sent[0]["menu"]["items"][0] == {
+        "type": "radio",
+        "id": "c",
+        "label": "C",
+        "value": 2,
+        "options": [{"value": 1}, {"value": 2}],
+    }
+
+
 @pytest.mark.parametrize(
     "kwargs, match",
     [
