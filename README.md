@@ -59,7 +59,7 @@ threejs-viewer open
 
 ## Gallery
 
-Every image except the dimension annotations comes from a script in [examples/](examples/), named under each one,; `tools/record_readme_media.py` re-records them.
+Every image except the dimension annotations comes from a script in [examples/](examples/), named under each one; `tools/record_readme_media.py` re-records them.
 
 ### Toolpaths and beads
 
