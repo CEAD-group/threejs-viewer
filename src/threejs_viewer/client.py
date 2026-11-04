@@ -4838,14 +4838,20 @@ class ViewerClient:
         (:meth:`add_swept_tool`), parametric tubes
         (:meth:`add_parametric_tube`, :meth:`add_toolpath`), meshes
         (:meth:`add_mesh`) and loaded models (:meth:`add_model`,
-        :meth:`add_model_binary`) with a flat face in the object's colour
-        (per-vertex colours are interpolated along the cut, textures are not
-        applied), so a solid no longer reads as a hollow shell. A mesh or
-        model mesh is capped only when it is closed (after welding, every
-        edge is shared by exactly two triangles), one mesh at a time: sheets,
-        pipes without end faces and leaky meshes stay open, and so does a
-        solid split across several meshes. Skinned and morphing meshes,
-        translucent and wireframe objects stay open. A per-object ``clip_cap=`` on the add
+        :meth:`add_model_binary`) with a flat face in the object's colour,
+        so a solid no longer reads as a hollow shell. Per-vertex colours are
+        interpolated along the cut; on a textured mesh each filled region
+        takes the colour map's average along its cut loop. Meshes are judged
+        per connected part after welding: a part is capped when every
+        boundary loop is small next to the part and its boundary is a small
+        share of its edges, so nearly closed game assets (a hose with open
+        ends, a body with a small hole) are capped while sheets and short
+        open pipes stay open. The cost of that leniency: a part with small
+        holes is filled as if it were solid, so a long thin open tube (a
+        straw) is capped like a hose, and a cut through a hole itself does not
+        close and leaves that loop open. A solid split across several
+        meshes, skinned and morphing meshes, translucent and wireframe
+        objects stay open. A per-object ``clip_cap=`` on the add
         call overrides this switch. Off by default; also toggled by the "Cap
         cut solids" box in the clipping panel (``C``).
 

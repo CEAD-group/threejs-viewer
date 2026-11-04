@@ -4,6 +4,7 @@ import json
 import math
 import struct
 import zlib
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -60,7 +61,15 @@ _CAP_STATS = """(id) => {
         const dist = planes.map(([nx, ny, nz, c]) =>
             Math.max(...W.map((p) => Math.abs(nx * p[0] + ny * p[1] + nz * p[2] + c))));
         const m = cap.material;
-        return { area, dist, nTri: W.length / 3, open,
+        // Shown colour: material colour times the mean vertex colour.
+        const eff = m.color.clone();
+        const ca = cap.geometry.getAttribute('color');
+        if (m.vertexColors && ca) {
+            let r = 0, g = 0, b = 0;
+            for (let i = 0; i < ca.count; i++) { r += ca.getX(i); g += ca.getY(i); b += ca.getZ(i); }
+            eff.multiply(m.color.clone().setRGB(r / ca.count, g / ca.count, b / ca.count));
+        }
+        return { area, dist, nTri: W.length / 3, open, shown: eff.getHex(),
                  planes: (m.clippingPlanes || []).length,
                  color: m.color.getHex(), vertexColors: !!m.vertexColors };
     });
@@ -1102,9 +1111,10 @@ def test_model_clones_share_one_worker_copy(viewer_client, viewer_page):
     )
 
 
-def _png(w, h, rgb):
-    """Uncompressed-filter RGB PNG of one flat colour."""
-    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+def _png(w, h, rgb, right=None):
+    """RGB PNG of one flat colour, or two with `right` on the right half."""
+    row = bytes(rgb) * (w // 2) + bytes(right or rgb) * (w - w // 2)
+    raw = b"".join(b"\x00" + row for _ in range(h))
 
     def chunk(tag, data):
         return (
@@ -1122,9 +1132,8 @@ def _png(w, h, rgb):
     )
 
 
-@pytest.mark.browser
-def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page):
-    """A white base-colour factor over a dark texture gives a dark cap."""
+def _textured_box_glb(png):
+    """Closed box with u running along x and a white base-colour factor."""
     g = _Glb()
     mesh = g.box_mesh("plain")
     pos, _, _ = _box_arrays()
@@ -1133,9 +1142,7 @@ def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page
     prim["attributes"]["TEXCOORD_0"] = g.accessor(
         g.view(uv.tobytes()), 5126, len(uv), "VEC2"
     )
-    g.gltf["images"] = [
-        {"bufferView": g.view(_png(8, 8, (0x30, 0x20, 0x10))), "mimeType": "image/png"}
-    ]
+    g.gltf["images"] = [{"bufferView": g.view(png), "mimeType": "image/png"}]
     g.gltf["samplers"] = [{}]
     g.gltf["textures"] = [{"source": 0, "sampler": 0}]
     g.gltf["materials"] = [
@@ -1147,18 +1154,164 @@ def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page
         }
     ]
     prim["material"] = 0
-    viewer_client.add_model_binary(
-        "tex", g.bytes([g.node(name="box", mesh=mesh)]), format="glb"
-    )
+    return g.bytes([g.node(name="box", mesh=mesh)])
+
+
+def _shown_rgb(page, id):
+    (cap,) = _caps(page, id)
+    return [(cap["shown"] >> s) & 0xFF for s in (16, 8, 0)]
+
+
+@pytest.mark.browser
+def test_textured_model_cap_takes_the_texture_average(viewer_client, viewer_page):
+    """A white base-colour factor over a dark texture gives a dark cap."""
+    glb = _textured_box_glb(_png(8, 8, (0x30, 0x20, 0x10)))
+    viewer_client.add_model_binary("tex", glb, format="glb")
     viewer_client.set_clipping_caps(True)
     viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
     settle(viewer_client)
     _wait_object(viewer_page, "tex")
     _wait_caps(viewer_page, "tex", 1)
     frames(viewer_page, 2)
-    (cap,) = _caps(viewer_page, "tex")
-    rgb = [(cap["color"] >> s) & 0xFF for s in (16, 8, 0)]
-    assert rgb == pytest.approx([0x30, 0x20, 0x10], abs=2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0x30, 0x20, 0x10], abs=2)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("worker", [False, True])
+def test_textured_cap_samples_the_texture_along_the_cut(
+    viewer_client, viewer_page, worker
+):
+    """Dark on the left half of the texture, light on the right: a cut
+    through each half takes that half's colour, not the whole average."""
+    _use_worker(viewer_page, worker)
+    glb = _textured_box_glb(_png(16, 16, (0x20, 0x20, 0x20), (0xE0, 0xD0, 0xC0)))
+    viewer_client.add_model_binary("tex", glb, format="glb")
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=-0.5, show_helper=False)
+    settle(viewer_client)
+    _wait_object(viewer_page, "tex")
+    _wait_caps(viewer_page, "tex", 1)
+    frames(viewer_page, 2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0x20] * 3, abs=2)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.5, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_settled(viewer_page)
+    frames(viewer_page, 2)
+    assert _shown_rgb(viewer_page, "tex") == pytest.approx([0xE0, 0xD0, 0xC0], abs=2)
+
+
+def _pipe(radius, length, n=32, rings=2, hole=None):
+    """Open pipe along z; with `hole` a sphere-like closed body instead."""
+    a = np.linspace(0, 2 * np.pi, n + 1)[:-1]
+    zs = np.linspace(-length / 2, length / 2, rings)
+    pos = np.array(
+        [[radius * np.cos(t), radius * np.sin(t), z] for z in zs for t in a],
+        dtype=np.float32,
+    )
+    tris = []
+    for r in range(rings - 1):
+        for i in range(n):
+            j = (i + 1) % n
+            p, q = r * n, (r + 1) * n
+            tris += [p + i, p + j, q + j, p + i, q + j, q + i]
+    return pos, np.array(tris, dtype=np.uint32)
+
+
+def _sphere_with_hole(n_lat=24, n_lon=48, hole_rows=2):
+    """Welded UV sphere with the top `hole_rows` bands removed: a small hole."""
+    th = np.linspace(0, np.pi, n_lat + 1)[1:-1]
+    ph = np.linspace(0, 2 * np.pi, n_lon + 1)[:-1]
+    pos = (
+        [[0, 0, 1]]
+        + [
+            [np.sin(t) * np.cos(p), np.sin(t) * np.sin(p), np.cos(t)]
+            for t in th
+            for p in ph
+        ]
+        + [[0, 0, -1]]
+    )
+    ring = lambda i: 1 + i * n_lon  # noqa: E731
+    tris = []
+    if hole_rows == 0:
+        for j in range(n_lon):
+            tris += [0, ring(0) + j, ring(0) + (j + 1) % n_lon]
+    for i in range(max(0, hole_rows - 1), n_lat - 2):
+        for j in range(n_lon):
+            a, b = ring(i) + j, ring(i) + (j + 1) % n_lon
+            c, d = ring(i + 1) + j, ring(i + 1) + (j + 1) % n_lon
+            tris += [a, c, d, a, d, b]
+    last = len(pos) - 1
+    for j in range(n_lon):
+        tris += [ring(n_lat - 2) + j, last, ring(n_lat - 2) + (j + 1) % n_lon]
+    return np.array(pos, dtype=np.float32), np.array(tris, dtype=np.uint32)
+
+
+@pytest.mark.browser
+def test_mesh_cap_tolerates_small_holes_per_part(viewer_client, viewer_page):
+    """A body with a small hole and a long hose with open ends read as solid;
+    a short open pipe does not, and an open sheet merged into the same mesh
+    as a closed box leaves the box capped."""
+    pos, idx = _sphere_with_hole()
+    viewer_client.add_mesh("holed", pos, idx)
+    pos, idx = _pipe(0.2, 6.0, rings=13)
+    viewer_client.add_mesh("hose", pos, idx, position=[3, 0, 0])
+    pos, idx = _pipe(1.0, 2.0)
+    viewer_client.add_mesh("pipe", pos, idx, position=[6, 0, 0])
+    bpos, _, bidx = _box_arrays(0.5)
+    sheet = np.array(
+        [[-1, -1, 1.5], [1, -1, 1.5], [1, 1, 1.5], [-1, 1, 1.5]], dtype=np.float32
+    )
+    merged = np.concatenate([bpos, sheet])
+    midx = np.concatenate([bidx, np.array([0, 1, 2, 0, 2, 3]) + len(bpos)])
+    viewer_client.add_mesh("merged", merged, midx.astype(np.uint32), position=[0, 4, 0])
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[0, 0, 1], distance=-0.25, show_helper=False
+    )
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    _wait_caps(viewer_page, "holed", 1)
+    _wait_caps(viewer_page, "hose", 1)
+    _wait_caps(viewer_page, "merged", 1)
+    _wait_settled(viewer_page)
+    assert _caps(viewer_page, "pipe") == []
+    (cap,) = _caps(viewer_page, "hose")
+    assert cap["area"] == pytest.approx(
+        0.04 * 16 * math.sin(2 * math.pi / 32), rel=1e-4
+    )
+    (cap,) = _caps(viewer_page, "merged")
+    assert cap["area"] == pytest.approx(1.0, rel=1e-4)
+
+
+_ASSETS = Path.home() / ".cache" / "threejs-viewer"
+
+
+@pytest.mark.browser
+@pytest.mark.skipif(
+    not (_ASSETS / "DamagedHelmet.glb").exists()
+    or not (_ASSETS / "Avocado.glb").exists(),
+    reason="example assets not downloaded",
+)
+def test_real_gltf_assets_are_capped(viewer_client, viewer_page):
+    """The Avocado and the DamagedHelmet hoses read as solid and are capped."""
+    viewer_client.add_model_binary("avocado", _ASSETS / "Avocado.glb", "glb", y_up=True)
+    viewer_client.add_model_binary(
+        "helmet", _ASSETS / "DamagedHelmet.glb", "glb", position=[3, 0, 0], y_up=True
+    )
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(
+        normal=[1, 0, 0], distance=-0.003, show_helper=False
+    )
+    settle(viewer_client)
+    _wait_object(viewer_page, "avocado")
+    _wait_caps(viewer_page, "avocado", 1)
+    viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=3.3, show_helper=False)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    _wait_caps(viewer_page, "helmet", 1)
+    (cap,) = _caps(viewer_page, "helmet")
+    assert cap["area"] > 0
 
 
 def _sphere_mesh(n_lat=120, n_lon=240, r=1.0):
