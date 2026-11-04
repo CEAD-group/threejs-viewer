@@ -61,8 +61,9 @@ SHOTS = {
     "section_caps": dict(
         example="16_section_caps.py",
         at=10,
-        # Hides the Clipping rail tab that set_clipping_slab opens.
-        js="window.threejsViewer.getMenu('clip').setHidden(true);" + FRAME_ALL,
+        # Hides the left tool rail that set_clipping_slab brings up.
+        js="['clip', 'lighting'].forEach(id => window.threejsViewer.getMenu(id).setHidden(true));"
+        + FRAME_ALL,
     ),
     "cad_inspection": dict(example="39_cad_inspection.py", click="block_right", at=5),
     "million_point_toolpath": dict(

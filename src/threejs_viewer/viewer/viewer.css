@@ -39,9 +39,11 @@
 }
 
 /* ---- Menus ----
-   an embedding app's rail, verbatim: each menu is a vertical tab folded against the
-   right edge; clicking it slides the body out. Tabs stack top to bottom
-   (MenuController._layoutRail measures each tab). */
+   an embedding app's rail: each menu is a vertical tab folded against the
+   right edge (or, for side: 'left', the left edge); clicking it slides the
+   body out. Tabs stack top to bottom per side (MenuController._layoutRail
+   measures each tab). While a body is open, the closed tabs on its side hang
+   along its outer edge (--tjsv-rail-shift) so they never cover it. */
 .threejs-viewer .tjsv-rail {
     position: absolute;
     inset: 0;
@@ -55,16 +57,25 @@
     right: 0;
     display: flex;
     align-items: flex-start;
-    transform: translateX(var(--tjsv-body-w, 190px));
+    transform: translateX(calc(var(--tjsv-body-w, 190px) - var(--tjsv-rail-shift, 0px)));
     transition: transform 0.18s ease;
     pointer-events: none;   /* children re-enable; the gap stays click-through */
-    /* The transform makes each panel its own stacking context, so without this
-       an open body covers the tabs of every panel before it in the DOM. A
-       closed panel shows only its tab (its body is off-screen), so it can sit
-       above the open one: no tab is ever hidden by an open body. */
+    /* Each panel is its own stacking context (the transform); a closed one
+       shows only its tab, so it sits above the open one. */
     z-index: 2;
 }
 .threejs-viewer .tjsv-rail-panel.open { transform: translateX(0); z-index: 1; }
+/* Left rail: the mirror image, tab against the left edge, body to its right. */
+.threejs-viewer .tjsv-rail-panel.tjsv-side-left {
+    right: auto;
+    left: 0;
+    flex-direction: row-reverse;
+    transform: translateX(calc(var(--tjsv-rail-shift, 0px) - var(--tjsv-body-w, 190px)));
+}
+.threejs-viewer .tjsv-rail-panel.tjsv-side-left.open { transform: translateX(0); }
+/* A shifted closed panel would otherwise show part of its body beside its tab;
+   hidden only after the fold has slid it away. */
+.threejs-viewer .tjsv-rail-panel:not(.open) > .tjsv-menu { visibility: hidden; transition: visibility 0s linear 0.18s; }
 .threejs-viewer .tjsv-rail-panel[hidden] { display: none; }
 .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn {
     pointer-events: auto;
@@ -85,6 +96,7 @@
     align-items: center;
     gap: 6px;
 }
+.threejs-viewer .tjsv-side-left > .tjsv-menu-btn { border-right: 1px solid var(--tjsv-border); border-left: none; border-radius: 0 4px 4px 0; }
 .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn:hover { background: var(--tjsv-panel-3); }
 .threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { background: var(--tjsv-primary); border-color: var(--tjsv-primary); color: var(--tjsv-on-primary); }
 .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
@@ -110,21 +122,19 @@
     background: var(--tjsv-menu-bg);
     border: 1px solid var(--tjsv-border);
     border-right: none;
-    /* Resting shape: square top-left, flush against its tab. When open,
+    /* Resting shape: square top corner flush against its tab. When open,
        MenuController._placeBody sets max-height, the upward lift and the corners. */
     border-radius: 0 0 0 4px;
-    /* Extra right padding: a stacked tab below can overlap an open body's
-       right edge, so rows keep clear of it. */
-    padding: 6px 26px 8px 8px;
+    padding: 6px 8px 8px;
     color: var(--tjsv-text);
     font-size: 12px;
     /* A touch scroll that reaches the end of the body must not chain to the page. */
     overscroll-behavior: contain;
     touch-action: pan-y;
 }
+.threejs-viewer .tjsv-side-left > .tjsv-menu { border-right: 1px solid var(--tjsv-border); border-left: none; border-radius: 0 0 4px 0; }
 .threejs-viewer .tjsv-menu-status {
     color: var(--tjsv-text-dim);
-    font-family: monospace;
     font-size: 11px;
     margin: 2px 0 5px;
     border-bottom: 1px solid var(--tjsv-border);
@@ -198,8 +208,9 @@
 .threejs-viewer .tjsv-menu-label { flex: 1; }
 .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
 .threejs-viewer .tjsv-menu kbd {
-    font-family: monospace;
+    font-family: inherit;
     font-size: 10px;
+    font-weight: 600;
     color: var(--tjsv-text-dim);
     background: var(--tjsv-panel-2);
     border: 1px solid var(--tjsv-border);
@@ -577,8 +588,9 @@
     border: 1px solid var(--tjsv-input-border);
     border-radius: 3px;
     color: var(--tjsv-input-text);
-    font-family: monospace;
+    font: inherit;
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
     padding: 2px 4px;
     text-align: right;
     -webkit-appearance: textfield;
@@ -597,8 +609,8 @@
     flex: 0 0 auto;
     min-width: 34px;
     text-align: right;
-    font-family: monospace;
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
     color: var(--tjsv-text-dim);
 }
 /* Switch rows: a real checkbox spread over the row, painted as the menu toggle pill. */

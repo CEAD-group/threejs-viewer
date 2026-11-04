@@ -7345,13 +7345,15 @@ class CameraController {
 // visibility and shortcut display; the caller owns content and callbacks.
 //
 // MENU  { id, label, title, mode: 'dropdown'|'panel', items: [ITEM…],
-//         storageKey, bodyWidth, hidden, open, onOpenChange }
+//         storageKey, bodyWidth, hidden, open, onOpenChange, side }
 //   Every menu is a vertical tab on the right-edge rail whose body slides
 //   out on click (an embedding app's N-panel). `dropdown` (the default) starts
 //   folded and closes on an outside click; `panel` starts open (unless
 //   `open: false`) and stays open across outside clicks (a legend).
 //   `bodyWidth` (CSS length, default 190px) sizes the body. `onOpenChange(open)`
-//   fires whenever the body folds or unfolds, for any reason.
+//   fires whenever the body folds or unfolds, for any reason. `side`
+//   ('right' default, or 'left') picks the rail edge; each side stacks its own
+//   tabs and keeps at most one body open.
 //
 // ITEM  { type: 'button'|'toggle'|'eye'|'select'|'segmented'|'radio'|'label'|'divider'|'custom',
 //         id, label, hint, shortcut, bindKey, state, active, checked, value,
@@ -7390,7 +7392,7 @@ class CameraController {
  *   id: string, label?: string, title?: string, mode?: 'dropdown'|'panel',
  *   items?: MenuItemSpec[], storageKey?: string, hidden?: boolean,
  *   bodyWidth?: string, builtin?: boolean, open?: boolean,
- *   onOpenChange?: (open: boolean) => void,
+ *   onOpenChange?: (open: boolean) => void, side?: 'left'|'right',
  * }} MenuSpec */
 
 const MENU_ITEM_TYPES = new Set(['button', 'toggle', 'eye', 'select', 'segmented', 'radio', 'label', 'divider', 'custom']);
@@ -7550,7 +7552,7 @@ class MenuController {
         const mode = spec.mode === 'panel' ? 'panel' : 'dropdown';
         /** @type {any} */
         const m = {
-            spec: { ...spec, mode, items: (spec.items || []).map(it => ({ ...it })) },
+            spec: { ...spec, mode, side: spec.side === 'left' ? 'left' : 'right', items: (spec.items || []).map(it => ({ ...it })) },
             open: false, root: null, button: null, body: null,
             /** @type {Map<string, any>} */ items: new Map(),
             /** @type {any[]} every item record in body order, with or without an id */ order: [],
@@ -7587,14 +7589,33 @@ class MenuController {
      * label. Runs after add/remove/setHidden.
      */
     _layoutRail() {
-        let top = RAIL_BASE_TOP;
+        /** @type {Record<string, number>} */
+        const top = { left: RAIL_BASE_TOP, right: RAIL_BASE_TOP };
         for (const m of this._menus.values()) {
             if (m.root.hidden) continue;
-            m.root.style.setProperty('--tjsv-rail-top', `${top}px`);
-            m.railTop = top;
-            top += m.button.getBoundingClientRect().height + RAIL_GAP;
+            const side = m.spec.side;
+            m.root.style.setProperty('--tjsv-rail-top', `${top[side]}px`);
+            m.railTop = top[side];
+            top[side] += m.button.getBoundingClientRect().height + RAIL_GAP;
         }
         for (const m of this._menus.values()) if (m.open) this._placeBody(m);
+        this._syncShift('left');
+        this._syncShift('right');
+    }
+
+    /**
+     * Hang the closed tabs of one side along the outer edge of that side's
+     * open body, so a stacked tab never covers it.
+     * @param {'left'|'right'} side
+     */
+    _syncShift(side) {
+        let w = 0;
+        for (const m of this._menus.values()) if (m.open && m.spec.side === side) w = m.body.offsetWidth;
+        for (const m of this._menus.values()) {
+            if (m.spec.side !== side) continue;
+            if (m.open || !w) m.root.style.removeProperty('--tjsv-rail-shift');
+            else m.root.style.setProperty('--tjsv-rail-shift', `${w}px`);
+        }
     }
 
     /**
@@ -7616,7 +7637,10 @@ class MenuController {
         m.body.style.marginTop = `${-lift}px`;
         const r = RAIL_BODY_RADIUS;
         const flushBottom = lift > 0 && lift >= bodyH - tabH;
-        m.body.style.borderRadius = `${lift > 0 ? r : 0}px 0 0 ${flushBottom ? 0 : r}px`;
+        // Round only the corners away from the tab (its side is mirrored on the left rail).
+        const top = lift > 0 ? r : 0, bottom = flushBottom ? 0 : r;
+        m.body.style.borderRadius = m.spec.side === 'left'
+            ? `0 ${top}px ${bottom}px 0` : `${top}px 0 0 ${bottom}px`;
     }
 
     /** @param {any} m */
@@ -7654,7 +7678,7 @@ class MenuController {
     _build(m) {
         const spec = m.spec;
         const root = document.createElement('div');
-        root.className = 'tjsv-menu-root tjsv-rail-panel';
+        root.className = 'tjsv-menu-root tjsv-rail-panel' + (spec.side === 'left' ? ' tjsv-side-left' : '');
         root.dataset.menu = spec.id;
         if (spec.hidden) root.hidden = true;
         if (spec.bodyWidth) root.style.setProperty('--tjsv-body-w', spec.bodyWidth);
@@ -7662,6 +7686,11 @@ class MenuController {
 
         const body = document.createElement('div');
         body.className = 'tjsv-menu';
+        // Space and Enter activate a focused button natively; they must not also reach the viewer's play key.
+        body.addEventListener('keydown', (e) => {
+            const t = /** @type {HTMLElement} */ (e.target);
+            if (t.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) e.stopPropagation();
+        });
         m.body = body;
         if (this._resizeObs) this._resizeObs.observe(body);
 
@@ -8153,14 +8182,17 @@ class MenuController {
     /** @param {any} m @param {boolean} open */
     _setOpen(m, open) {
         const want = !!open && !m.spec.hidden;
-        if (want) {
-            for (const o of this._menus.values()) if (o !== m) this._setOpen(o, false);
-        }
         const changed = m.open !== want;
+        // Set first, so hooks fired by the folds below already see this menu as open.
         m.open = want;
+        if (want) {
+            // One open body per rail side.
+            for (const o of this._menus.values()) if (o !== m && o.spec.side === m.spec.side) this._setOpen(o, false);
+        }
         m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
         if (want) { this.refresh(m); this._placeBody(m); }
+        this._syncShift(m.spec.side);
         if (changed && typeof m.spec.onOpenChange === 'function') m.spec.onOpenChange(want);
     }
 
@@ -8219,6 +8251,7 @@ class ShadingDebugController {
     /** @param {number} mode 0 normal, 1 wireframe only, 2 solid + wireframe */
     setWireframeMode(mode) {
         this.wireframeMode = ((mode % 3) + 3) % 3;
+        this.v._shadowDirty = true;
         this.applyWireframe();
     }
 
@@ -14823,10 +14856,11 @@ export class ThreeJSViewer {
 
     /**
      * Build the menu controller and the viewer's own menus on it: the
-     * built-in options menu (the "View" tab with the connection dot) and the
-     * Clipping and Lighting tabs stacked under it, whose bodies hold the
-     * template's clip and lighting controls. The built-in items read live
-     * viewer state through function-valued `checked`/`value`/`state`/`hidden`.
+     * built-in options menu (the "View" tab with the connection dot, right
+     * rail) and the Clipping and Lighting tool panels (left rail), whose
+     * bodies hold the template's clip and lighting controls. The View menu's
+     * Tools toggles decide which tool panels exist. The built-in items read
+     * live viewer state through function-valued `checked`/`value`/`state`/`hidden`.
      */
     _initMenus() {
         this._menus = new MenuController(this, { rail: this._menuRailEl });
@@ -14839,11 +14873,12 @@ export class ThreeJSViewer {
             hidden: true, bodyWidth: '244px',
             items: [
                 { type: 'label', label: 'Tools', collapsible: true },
-                { type: 'toggle', id: 'clip', label: 'Clipping plane', shortcut: 'C',
-                  checked: () => !!v._clipEnabled, onChange: (on) => v._setClipEnabled(on) },
+                { type: 'toggle', id: 'clip', label: 'Clipping panel', shortcut: 'C',
+                  hint: 'Show the Clipping tool panel on the left rail',
+                  checked: () => !!v._toolPanels?.clip, onChange: (on) => v._setToolPanelEnabled('clip', on) },
                 { type: 'toggle', id: 'lighting', label: 'Lighting panel', shortcut: 'E',
-                  checked: () => !!v._menus?.get('lighting')?.isOpen(),
-                  onChange: (on) => v._setLightingPanelOpen(on) },
+                  hint: 'Show the Lighting tool panel on the left rail',
+                  checked: () => !!v._toolPanels?.lighting, onChange: (on) => v._setToolPanelEnabled('lighting', on) },
                 { type: 'label', label: 'Camera', collapsible: true },
                 { type: 'segmented', id: 'projection', label: 'Projection', shortcut: 'O',
                   options: [{ value: 'persp', label: 'Persp' }, { value: 'ortho', label: 'Ortho' }],
@@ -14875,20 +14910,26 @@ export class ThreeJSViewer {
                   checked: () => !!v._depthCue?.edlActive, onChange: () => v._depthCue.toggleEdl() },
             ],
         });
-        // Clipping and Lighting are panel-mode tabs: they survive outside clicks
-        // (orbiting the cut) and start folded and hidden; _syncRailPanels shows them.
+        // Tool panels: left-rail, panel-mode tabs (they survive outside clicks
+        // such as orbiting the cut), folded at start; enabled ones are shown.
+        /** @type {{clip: boolean, lighting: boolean}} */
+        this._toolPanels = { clip: false, lighting: false };
+        for (const id of /** @type {const} */ (['clip', 'lighting'])) {
+            try { this._toolPanels[id] = localStorage.getItem(`tjsv.toolPanel.${id}`) === 'true'; } catch (e) { /* ignore */ }
+        }
         /** @param {string} id @param {string} label @param {string} title @param {HTMLElement} panel @param {string} width */
         const panelMenu = (id, label, title, panel, width) => this._menus.add({
-            id, label, title, mode: 'panel', open: false, hidden: true, bodyWidth: width,
+            id, label, title, side: 'left', mode: 'panel', open: false, hidden: true, bodyWidth: width,
             items: [{ type: 'custom', id: 'panel', render: (el) => el.appendChild(panel) }],
             onOpenChange: (open) => {
+                // Unfolding the clip controls turns the cut on, as opening its panel always did.
                 if (id === 'clip' && open && !v._clipEnabled) v._setClipEnabled(true);
-                v._syncRailPanels();
                 v._menus.refresh();
             },
         });
         panelMenu('clip', 'Clipping', 'Clipping plane (C)', this._clipPanelEl, '236px');
         panelMenu('lighting', 'Lighting', 'Lighting (E)', this._lightingPanelEl, '244px');
+        this._syncRailPanels();
         const root = /** @type {HTMLElement} */ (this._menus.get('viewer').el);
         this._toolbarEl = root;
         this._statusDot = /** @type {HTMLElement} */ (root.querySelector('.tjsv-status-dot'));
@@ -14896,18 +14937,27 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Show the Clipping and Lighting tabs whenever the toolbar is visible, and
-     * otherwise only while they are in use (clipping on, or the body open), so
-     * `C`, `E` and the Python clip calls reach their controls with the
-     * toolbar hidden.
+     * Show the enabled tool panels on the left rail; none enabled, no left
+     * rail. Runs at start and when a panel's enabled state changes, never from
+     * a fold, so an embedder's `getMenu(id).setHidden(true)` holds until the
+     * user (C, E, the View toggle) or a clip transition brings the tab back.
+     * @param {Array<'clip'|'lighting'>} [ids]
      */
-    _syncRailPanels() {
-        const tb = !!this._toolbarVisible;
-        const clip = this._menus?.get('clip');
-        const light = this._menus?.get('lighting');
-        if (!clip || !light) return;
-        clip.setHidden(!tb && !this._clipEnabled && !clip.isOpen());
-        light.setHidden(!tb && !light.isOpen());
+    _syncRailPanels(ids = ['clip', 'lighting']) {
+        for (const id of ids) this._menus?.get(id)?.setHidden(!this._toolPanels[id]);
+    }
+
+    /**
+     * Enable or disable a tool panel (its left-rail tab exists only while
+     * enabled), persisted under `tjsv.toolPanel.<id>`. Enabling leaves the tab
+     * folded; disabling folds and removes it and leaves the clip state alone.
+     * @param {'clip'|'lighting'} id @param {boolean} on
+     */
+    _setToolPanelEnabled(id, on) {
+        this._toolPanels[id] = !!on;
+        try { localStorage.setItem(`tjsv.toolPanel.${id}`, String(!!on)); } catch (e) { /* ignore */ }
+        this._syncRailPanels([id]);
+        this._menus.refresh();
     }
 
     _cacheElements() {
@@ -15987,9 +16037,9 @@ export class ThreeJSViewer {
     _toggleClipPanel() { this._setClipEnabled(!this._clipEnabled); }
 
     /**
-     * Turn the cut on or off. With `fold` (the `C` key, the View menu toggle,
-     * Python) turning it on also opens the Clipping tab and turning it off
-     * folds it; the panel's own switch passes `fold: false` so it stays open.
+     * Turn the cut on or off. With `fold` (the `C` key) turning it on also
+     * enables and unfolds the Clipping panel and turning it off folds it; the
+     * panel's own switch and `disable_clipping_plane` pass `fold: false`.
      * @param {boolean} on @param {{fold?: boolean}} [opts]
      */
     _setClipEnabled(on, { fold = true } = {}) {
@@ -16019,7 +16069,6 @@ export class ThreeJSViewer {
         if (fold) {
             if (on) this._openRailPanel('clip'); else clipMenu.close();
         }
-        this._syncRailPanels();
         this._menus.refresh();
         if (this._clipEnabled) this._updateClipSliderRange();
         this._syncAnchorFromPlane();
@@ -16034,11 +16083,11 @@ export class ThreeJSViewer {
         this._clipPanelEl.classList.toggle('tjsv-clip-off', !this._clipEnabled);
     }
 
-    /** Unhide a rail tab the toolbar may be hiding and unfold it. @param {string} id */
+    /** Enable a tool panel (so its tab exists) and unfold it. @param {'clip'|'lighting'} id */
     _openRailPanel(id) {
-        const m = this._menus.get(id);
-        m.setHidden(false);
-        m.open();
+        if (!this._toolPanels[id]) this._setToolPanelEnabled(id, true);
+        else this._menus.get(id).setHidden(false);
+        this._menus.get(id).open();
     }
 
     /** Snap an orthographic camera onto the clip normal (the `V` key). */
@@ -16133,7 +16182,7 @@ export class ThreeJSViewer {
 
     _toggleLightingPanel() { this._setLightingPanelOpen(!this._menus.get('lighting').isOpen()); }
 
-    /** Unfold or fold the Lighting tab (`E`, the View menu toggle). @param {boolean} open */
+    /** Unfold (enabling it) or fold the Lighting panel (`E`). @param {boolean} open */
     _setLightingPanelOpen(open) {
         if (open) this._openRailPanel('lighting'); else this._menus.get('lighting').close();
         this._menus.refresh();
@@ -18473,6 +18522,8 @@ export class ThreeJSViewer {
             // A focused checkbox (Show plane, Cap cut solids) keeps Space, which toggles it, and passes the other shortcuts on.
             const t = /** @type {HTMLInputElement} */ (e.target);
             if (t.tagName === 'INPUT' && (t.type !== 'checkbox' || e.code === 'Space')) return;
+            // A focused select owns letters (jump to option) and arrows.
+            if (t.tagName === 'SELECT') return;
             // Several keys change what lands in the shadow map (M/N/S/C, eyes).
             this._shadowDirty = true;
             if (this._menus.anyOpen()) {
@@ -20858,6 +20909,8 @@ export class ThreeJSViewer {
                     this.setStrandCollapseEnabled(data.id, !!data.enabled));
                 break;
             case 'set_clipping_plane': {
+                // Only the off-to-on transition unfolds the panel, so a streamed plane never reopens it.
+                const wasClipOn = this._clipEnabled;
                 this._clipEnabled = true;
                 this._clipSlabMode = false;
                 this._clipPlanes = [this._clipPlane];
@@ -20878,12 +20931,13 @@ export class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._syncClipEnabledUI();
-                this._openRailPanel('clip');
+                if (!wasClipOn) this._openRailPanel('clip');
                 this._menus.refresh();
                 this._updateClipMaterials();
                 break;
             }
             case 'set_clipping_slab': {
+                const wasClipOn = this._clipEnabled;
                 this._clipEnabled = true;
                 this._clipSlabMode = true;
                 this._clipPlanes = [this._clipPlane, this._clipPlane2];
@@ -20905,13 +20959,13 @@ export class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._syncClipEnabledUI();
-                this._openRailPanel('clip');
+                if (!wasClipOn) this._openRailPanel('clip');
                 this._menus.refresh();
                 this._updateClipMaterials();
                 break;
             }
             case 'disable_clipping_plane':
-                this._setClipEnabled(false);
+                this._setClipEnabled(false, { fold: false });
                 break;
             case 'set_clipping_defaults':
                 this._clipDefaults = { normal: data.normal, distance: data.distance };
@@ -22919,7 +22973,6 @@ export class ThreeJSViewer {
     setToolbarVisible(visible) {
         this._toolbarVisible = !!visible;
         this._menus.get('viewer').setHidden(!this._toolbarVisible);
-        this._syncRailPanels();
     }
 
     /** @returns {boolean} */
