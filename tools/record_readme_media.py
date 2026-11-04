@@ -95,7 +95,12 @@ SHOTS = {
     ),
     "point_cloud": dict(example="25_point_cloud.py", seek=(1.0, 1.0, 1)),
     "point_cloud_sweep": dict(example="25_point_cloud.py", seek=(0.03, 1.0, 36)),
-    "points_octree_lod": dict(example="27_points_octree_lod.py", seek=(0.0, 1.0, 32)),
+    "points_octree_lod": dict(
+        example="27_points_octree_lod.py",
+        seek=(0.0, 1.0, 32),
+        # The box skips the sheet's thin z tails, which the example frames.
+        view=dict(dir=(0.4, -1, 0.8), box=((-20, -10, -1), (20, 10, 1)), fill=0.9),
+    ),
     "live_points_stream": dict(example="30_live_points_stream.py", live=(2, 24, 0.25)),
     "depth_cues": dict(
         example="20_line_depth_cues.py",
