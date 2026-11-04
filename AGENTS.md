@@ -2,8 +2,10 @@
 
 ## Working conventions
 
-- Identify the author of PR comments accurately: **Codex (OpenAI)** for comments
-  written by Codex, and **Claude** for comments written by Claude.
+- Open every issue or PR comment and review an agent writes with an author line:
+  `Comment by Claude (bot)` for Claude, `Review by **Codex (OpenAI)**` (or
+  `**Codex (OpenAI)**` on an inline comment) for Codex. They post from Thijs's
+  account, so the line is the only attribution a reader sees.
 - Preserve existing local changes and keep edits focused on the requested task.
 - Keep this file focused on actionable guidance. Put API details in docstrings,
   usage in examples, and regression explanations beside the relevant code or tests.
@@ -80,7 +82,7 @@ tests auto-skip without `pytest-playwright`, so skipped tests do not validate
 browser behavior. Documentation-only changes do not need the application suite.
 
 CI checks lint, formatting, non-browser tests, browser tests, and byte-exact
-freshness of `viewer.html` and `viewer/static/cubemaps/index.json`. Include generated
+freshness of `viewer.html` and `src/threejs_viewer/viewer/static/cubemaps/index.json`. Include generated
 changes whenever their inputs change.
 
 ## Implementation constraints
@@ -97,8 +99,12 @@ changes whenever their inputs change.
   and fail CI's freshness check. See `tests/test_build.py`.
 - Keep HDR cubemap assets in flat RGBE format. The viewer decodes them in-file;
   do not introduce an HDR loader dependency without accounting for embedders.
-- The Draco decoder is vendored under `viewer/static/draco/` and inlined by the
-  build. Keep its version aligned with the viewer's Three.js version.
+- The Draco decoder is vendored under `src/threejs_viewer/viewer/static/draco/`
+  and inlined by the build. Keep its version aligned with the viewer's Three.js
+  version. Never add a CDN fallback: production runs offline behind a firewall.
+- The shadow map renders only when `_shadowDirty` is set (`shadowMap.autoUpdate`
+  is off). A new path that moves, adds, hides or re-materials geometry must set
+  it or call `requestShadowUpdate()`, or shadows go stale without any error.
 - Dispose owned GPU resources, workers, and event handlers when replacing or
   destroying their owners. Guard asynchronous loads against stale results after
   replacement or destruction. Dispose the environment render target that owns
@@ -120,7 +126,9 @@ changes whenever their inputs change.
 - Fetch binary payloads through the checked fetch helpers. Report HTTP failures
   clearly and balance pending-fetch counters on both success and failure.
 - Preserve initial visibility, deferred parenting, and object replacement
-  behavior across all add paths, including asynchronously loaded models.
+  behavior across all add paths, including asynchronously loaded models. Every
+  add path registers through `_registerObject`, and `_applyInitialVisibility`
+  runs before `_deleteObject`, which prunes the pending visibility it reads.
 - Keep resize work coalesced to animation frames and skip rendering when the
   container has zero size. Avoid repeated framebuffer allocations for equal sizes.
 
@@ -181,6 +189,9 @@ time, such as playback, throttled LOD updates, or delayed streaming.
 
 ## Versioning and releases
 
+- PRs describe their change in the PR body and do not edit `CHANGELOG.md`. The
+  changelog is written at release time in its own PR from the merged PR bodies,
+  and the release is that PR plus a pushed `v*` tag.
 - Python package versions come from release tags through `hatch-vcs`; do not
   hard-code a package version. Build checkouts need tags (`fetch-depth: 0` in CI).
 - Keep `VIEWER_VERSION = '0.0.0-dev'` in committed `viewer.js`. Release CI replaces
