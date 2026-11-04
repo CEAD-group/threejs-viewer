@@ -5073,12 +5073,16 @@ ${tubeUVPeriod.toString()}
 
 ${writeTubeUVs.toString()}
 
-// Clip cap slicer for tubes (issue #259), shared with the main thread.
+// Clip cap slicers for tubes and meshes (issue #259), shared with the main thread.
 ${clipCapBasis.toString()}
 
 ${convexHull2D.toString()}
 
 ${sliceTubeClipCap.toString()}
+
+${earcut2D.toString()}
+
+${sliceMeshClipCap.toString()}
 
 
 // ---- Geometry build (plain math, no Three.js) ----
@@ -5108,7 +5112,15 @@ self.onmessage = function(e) {
             self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, missing: true });
             return;
         }
-        const caps = sliceTubeClipCap(g.pos, g.col, g.idx, Math.min(msg.end, g.idx.length), msg.planes, msg.block);
+        let caps;
+        try {
+            caps = msg.kind === 'mesh'
+                ? sliceMeshClipCap(g, msg.start, msg.end, msg.planes)
+                : sliceTubeClipCap(g.pos, g.col, g.idx, Math.min(msg.end, g.idx.length), msg.planes, msg.block);
+        } catch (err) {
+            // Bad input skips the cap rather than killing the worker.
+            caps = msg.planes.map(() => ({ pos: new Float32Array(0), col: null }));
+        }
         const transfer = [];
         for (const c of caps) {
             transfer.push(c.pos.buffer);
@@ -9225,14 +9237,15 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
 
 // ========== Clip caps (issue #259) ==========
 //
-// Analytic section caps for solids the viewer builds itself: primitives (the
-// convex hull of the triangle-edge crossings), swept tool bodies (a union of
-// convex station-pair cells), parametric tubes (a union of convex hulls, one
-// per drawn ring band, sliced on the LOD worker when large) and the torus (the
-// drawn triangles sliced and chained into loops). Each cap is a child mesh of its owner, built in the
-// owner's local frame and clipped only by the other slab plane. Opt-in:
-// `clipCaps` option / `clip_caps` URL param / `set_clipping_caps`, or a
-// per-object `clipCap` override. Meshes and models stay open.
+// Analytic section caps: primitives (the convex hull of the triangle-edge
+// crossings), swept tool bodies (a union of convex station-pair cells),
+// parametric tubes (a union of convex hulls, one per drawn ring band) and
+// every other triangle mesh, add_mesh, loaded models and the torus (the drawn
+// triangles sliced, chained into loops and only closed loops filled). Tubes
+// and meshes that are large are sliced on the LOD worker. Each cap is a child
+// mesh of its owner, built in the owner's local frame and clipped only by the
+// other slab plane. Opt-in: `clipCaps` option / `clip_caps` URL param /
+// `set_clipping_caps`, or a per-object `clipCap` override.
 
 // On the main thread, above this many drawn triangles or once a rebuild took
 // longer than CLIP_CAP_SYNC_MS, a cap rebuild runs at most every
@@ -9240,10 +9253,10 @@ function buildSweptToolGeometry(stationPos, axisArr, profileArr, sections, ringC
 const CLIP_CAP_SYNC_TRIANGLES = 200000;
 const CLIP_CAP_SYNC_MS = 8;
 const CLIP_CAP_THROTTLE_MS = 500;
-// Tubes drawing more triangles than this are sliced on the LOD worker.
+// Tubes and meshes drawing more triangles than this are sliced on the LOD worker.
 const CLIP_CAP_WORKER_TRIANGLES = 20000;
 // Closed convex primitives; a plane is a sheet and gets no cap. The torus is
-// closed but not convex, so it goes through the triangle slicer.
+// closed but not convex, so it goes through the mesh slicer.
 const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
 
 /**
@@ -9285,20 +9298,6 @@ function convexHull2D(xs, ys, n) {
     }
     lower.pop(); upper.pop();
     return lower.concat(upper);
-}
-
-/**
- * Even-odd point-in-polygon test in 2D.
- * @param {THREE.Vector2} q @param {THREE.Vector2[]} poly
- */
-function pointInPolygon2D(q, poly) {
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const a = poly[i], b = poly[j];
-        if ((a.y > q.y) !== (b.y > q.y)
-            && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-    }
-    return inside;
 }
 
 /**
@@ -9374,95 +9373,6 @@ class ClipCapBuilder {
     _vertex(i) {
         this.pos.push(this._p[i * 3], this._p[i * 3 + 1], this._p[i * 3 + 2]);
         if (this.col) this.col.push(this._c[i * 3], this._c[i * 3 + 1], this._c[i * 3 + 2]);
-    }
-
-    /**
-     * Triangulate closed loops of points on the plane. Loops running
-     * counter-clockwise about +n are filled; clockwise ones are holes in the
-     * smallest filled loop containing them. Overlapping filled loops (a round
-     * join body inside its bead) each get their own coplanar fan.
-     * @param {{pts: number[], cols: number[] | null}[]} loops
-     */
-    emitLoops(loops) {
-        const [ux, uy, uz, vx, vy, vz] = this.basis;
-        /** @type {{v: THREE.Vector2[], area: number, loop: any, holes: any[], box: number[]}[]} */
-        const outer = [];
-        /** @type {{v: THREE.Vector2[], area: number, loop: any}[]} */
-        const holes = [];
-        for (const loop of loops) {
-            const n = loop.pts.length / 3;
-            if (n < 3) continue;
-            /** @type {THREE.Vector2[]} */ const v = [];
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (let i = 0; i < n; i++) {
-                const x = loop.pts[i * 3], y = loop.pts[i * 3 + 1], z = loop.pts[i * 3 + 2];
-                const px = x * ux + y * uy + z * uz, py = x * vx + y * vy + z * vz;
-                v.push(new THREE.Vector2(px, py));
-                if (px < minX) minX = px;
-                if (px > maxX) maxX = px;
-                if (py < minY) minY = py;
-                if (py > maxY) maxY = py;
-            }
-            const area = THREE.ShapeUtils.area(v);
-            if (!(Math.abs(area) > 0)) continue;
-            if (area > 0) outer.push({ v, area, loop, holes: [], box: [minX, minY, maxX, maxY] });
-            else holes.push({ v, area, loop });
-        }
-        for (const h of holes) {
-            const q = h.v[0];
-            /** @type {any} */ let best = null;
-            for (const o of outer) {
-                const b = o.box;
-                if (q.x < b[0] || q.x > b[2] || q.y < b[1] || q.y > b[3]) continue;
-                if (!pointInPolygon2D(q, o.v)) continue;
-                if (!best || o.area < best.area) best = o;
-            }
-            if (best) best.holes.push(h);
-        }
-        for (const o of outer) {
-            const parts = [o, ...o.holes];
-            /** @type {THREE.Vector2[]} */ const V = [];
-            /** @type {number[]} */ const P = [];
-            /** @type {number[]} */ const C = [];
-            for (const part of parts) {
-                for (let i = 0; i < part.v.length; i++) {
-                    V.push(part.v[i]);
-                    P.push(part.loop.pts[i * 3], part.loop.pts[i * 3 + 1], part.loop.pts[i * 3 + 2]);
-                    if (this.col) {
-                        const cs = part.loop.cols;
-                        if (cs) C.push(cs[i * 3], cs[i * 3 + 1], cs[i * 3 + 2]); else C.push(1, 1, 1);
-                    }
-                }
-            }
-            // Copies: triangulateShape drops a closing duplicate in place,
-            // which would shift the index mapping built above.
-            const faces = THREE.ShapeUtils.triangulateShape(o.v.slice(), o.holes.map((h) => h.v.slice()));
-            for (const f of faces) {
-                let a = f[0], b = f[1], c = f[2];
-                const ccw = (V[b].x - V[a].x) * (V[c].y - V[a].y) - (V[b].y - V[a].y) * (V[c].x - V[a].x);
-                if (ccw > 0) { const t = b; b = c; c = t; }
-                for (const i of [a, b, c]) {
-                    this.pos.push(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
-                    if (this.col) this.col.push(C[i * 3], C[i * 3 + 1], C[i * 3 + 2]);
-                }
-            }
-        }
-    }
-
-    /** @returns {THREE.BufferGeometry | null} */
-    toGeometry() {
-        if (!this.pos.length) return null;
-        const g = new THREE.BufferGeometry();
-        const n = this.pos.length / 3;
-        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.pos), 3));
-        const normals = new Float32Array(n * 3);
-        for (let i = 0; i < n; i++) {
-            normals[i * 3] = -this.nx; normals[i * 3 + 1] = -this.ny; normals[i * 3 + 2] = -this.nz;
-        }
-        g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-        if (this.col) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.col), 3));
-        g.computeBoundingSphere();
-        return g;
     }
 }
 
@@ -9569,173 +9479,6 @@ function buildSweptClipCap(geometry, layout, out) {
 }
 
 /**
- * Slice the drawn triangles of a surface made of closed pieces and chain the
- * crossings into loops. A segment runs along n × N with N the outward vertex
- * normal, so an outer boundary turns counter-clockwise about +n and a hole
- * clockwise. Used for the torus primitive.
- * @param {THREE.BufferGeometry} geometry
- * @param {ClipCapBuilder} out
- */
-function buildSlicedClipCap(geometry, out) {
-    const pos = /** @type {ArrayLike<number>} */ (geometry.getAttribute('position').array);
-    const nAttr = geometry.getAttribute('normal');
-    const nrm = nAttr ? /** @type {ArrayLike<number>} */ (nAttr.array) : null;
-    const cAttr = geometry.getAttribute('color');
-    const col = out.col && cAttr && cAttr.itemSize === 3 ? /** @type {ArrayLike<number>} */ (cAttr.array) : null;
-    const index = geometry.getIndex();
-    const idx = index ? index.array : null;
-    const total = idx ? idx.length : pos.length / 3;
-    const start = Math.max(0, geometry.drawRange.start);
-    const end = Math.min(total, start + geometry.drawRange.count);
-    const t0 = Math.ceil(start / 3), t1 = Math.floor(end / 3);
-    if (t1 <= t0) return;
-    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
-    const radius = Math.max(geometry.boundingSphere ? geometry.boundingSphere.radius : 1, 1e-9);
-    const quant = radius * 1e-7;
-    const nx = out.nx, ny = out.ny, nz = out.nz;
-
-    // Welded crossing points and directed segments between them.
-    /** @type {Map<string, number>} */ const keyOf = new Map();
-    /** @type {number[]} */ const PX = [];
-    /** @type {number[]} */ const PC = [];
-    /** @type {number[]} */ const segFrom = [];
-    /** @type {number[]} */ const segTo = [];
-    /** @param {number} o */
-    const weld = (o) => {
-        const x = cross[o], y = cross[o + 1], z = cross[o + 2];
-        const key = `${Math.round(x / quant)},${Math.round(y / quant)},${Math.round(z / quant)}`;
-        let id = keyOf.get(key);
-        if (id === undefined) {
-            id = PX.length / 3;
-            keyOf.set(key, id);
-            PX.push(x, y, z);
-            PC.push(cross[o + 3], cross[o + 4], cross[o + 5]);
-        }
-        return id;
-    };
-    const cross = new Float64Array(18);
-    let nc = 0;
-    /** @param {number} a @param {number} b @param {number} sa @param {number} sb */
-    const crossing = (a, b, sa, sb) => {
-        // Canonical endpoint order, so a shared edge (or a duplicated rim
-        // vertex) gives the same bits from both of its triangles.
-        let a3 = a * 3, b3 = b * 3;
-        if (pos[a3] > pos[b3] || (pos[a3] === pos[b3] && (pos[a3 + 1] > pos[b3 + 1]
-            || (pos[a3 + 1] === pos[b3 + 1] && pos[a3 + 2] > pos[b3 + 2])))) {
-            const ti = a3; a3 = b3; b3 = ti;
-            const ts = sa; sa = sb; sb = ts;
-        }
-        const t = sa / (sa - sb);
-        const o = nc * 6;
-        cross[o] = pos[a3] + t * (pos[b3] - pos[a3]);
-        cross[o + 1] = pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]);
-        cross[o + 2] = pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]);
-        if (col) {
-            cross[o + 3] = col[a3] + t * (col[b3] - col[a3]);
-            cross[o + 4] = col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]);
-            cross[o + 5] = col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]);
-        } else {
-            cross[o + 3] = 1; cross[o + 4] = 1; cross[o + 5] = 1;
-        }
-        nc++;
-    };
-    for (let t = t0; t < t1; t++) {
-        const a = idx ? idx[t * 3] : t * 3;
-        const b = idx ? idx[t * 3 + 1] : t * 3 + 1;
-        const c = idx ? idx[t * 3 + 2] : t * 3 + 2;
-        const sa = out.dist(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]);
-        const sb = out.dist(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
-        const sc = out.dist(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
-        const pa = sa >= 0, pb = sb >= 0, pc = sc >= 0;
-        if (pa === pb && pb === pc) continue;
-        nc = 0;
-        if (pa !== pb) crossing(a, b, sa, sb);
-        if (pb !== pc) crossing(b, c, sb, sc);
-        if (pc !== pa) crossing(c, a, sc, sa);
-        if (nc !== 2) continue;
-        const i0 = weld(0), i1 = weld(6);
-        if (i0 === i1) continue;
-        // Outward normal: the vertex normals when present, else the winding.
-        let Nx, Ny, Nz;
-        if (nrm) {
-            Nx = nrm[a * 3] + nrm[b * 3] + nrm[c * 3];
-            Ny = nrm[a * 3 + 1] + nrm[b * 3 + 1] + nrm[c * 3 + 1];
-            Nz = nrm[a * 3 + 2] + nrm[b * 3 + 2] + nrm[c * 3 + 2];
-        } else {
-            const e1x = pos[b * 3] - pos[a * 3], e1y = pos[b * 3 + 1] - pos[a * 3 + 1], e1z = pos[b * 3 + 2] - pos[a * 3 + 2];
-            const e2x = pos[c * 3] - pos[a * 3], e2y = pos[c * 3 + 1] - pos[a * 3 + 1], e2z = pos[c * 3 + 2] - pos[a * 3 + 2];
-            Nx = e1y * e2z - e1z * e2y; Ny = e1z * e2x - e1x * e2z; Nz = e1x * e2y - e1y * e2x;
-        }
-        const mx = ny * Nz - nz * Ny, my = nz * Nx - nx * Nz, mz = nx * Ny - ny * Nx;
-        const dx = cross[6] - cross[0], dy = cross[7] - cross[1], dz = cross[8] - cross[2];
-        if (dx * mx + dy * my + dz * mz >= 0) { segFrom.push(i0); segTo.push(i1); }
-        else { segFrom.push(i1); segTo.push(i0); }
-    }
-    const nSeg = segFrom.length;
-    if (!nSeg) return;
-
-    // Chain: outgoing segment lists per point, walked until the loop closes.
-    const nPts = PX.length / 3;
-    const head = new Int32Array(nPts).fill(-1);
-    const next = new Int32Array(nSeg);
-    for (let s = nSeg - 1; s >= 0; s--) { next[s] = head[segFrom[s]]; head[segFrom[s]] = s; }
-    const used = new Uint8Array(nSeg);
-    /** @type {number[][]} */ const closed = [];
-    /** @type {number[][]} */ const open = [];
-    for (let s0 = 0; s0 < nSeg; s0++) {
-        if (used[s0]) continue;
-        const chain = [segFrom[s0]];
-        let s = s0;
-        let isClosed = false;
-        for (;;) {
-            used[s] = 1;
-            const to = segTo[s];
-            if (to === segFrom[s0]) { isClosed = true; break; }
-            chain.push(to);
-            let n2 = -1;
-            for (let q = head[to]; q >= 0; q = next[q]) if (!used[q]) { n2 = q; break; }
-            if (n2 < 0) break;
-            s = n2;
-        }
-        (isClosed ? closed : open).push(chain);
-    }
-    // A chain broken at a near-coincident point the weld missed: join its end
-    // to the closest chain start within tolerance, then close what is left.
-    const tol2 = (radius * 1e-4) ** 2;
-    /** @param {number} p @param {number} q */
-    const d2 = (p, q) => (PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
-        + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2;
-    let merged = true;
-    while (merged && open.length) {
-        merged = false;
-        for (let i = 0; i < open.length && !merged; i++) {
-            const tail = open[i][open[i].length - 1];
-            let best = -1, bestD = tol2;
-            for (let j = 0; j < open.length; j++) {
-                const d = d2(tail, open[j][0]);
-                if (d <= bestD) { bestD = d; best = j; }
-            }
-            if (best === i) { closed.push(open[i]); open.splice(i, 1); merged = true; }
-            else if (best >= 0) {
-                open[i] = open[i].concat(open[best]);
-                open.splice(best, 1);
-                merged = true;
-            }
-        }
-    }
-    for (const ch of open) closed.push(ch);
-    out.emitLoops(closed.map((ch) => {
-        /** @type {number[]} */ const pts = [];
-        /** @type {number[]} */ const cols = [];
-        for (const p of ch) {
-            pts.push(PX[p * 3], PX[p * 3 + 1], PX[p * 3 + 2]);
-            cols.push(PC[p * 3], PC[p * 3 + 1], PC[p * 3 + 2]);
-        }
-        return { pts, cols: col ? cols : null };
-    }));
-}
-
-/**
  * Tube clip cap, free of Three.js so the LOD worker runs the same code. A
  * tube's index buffer is a run of `block`-index bands (nCs * 6), each joining
  * two rings: ring pairs, revolution cap bands, joint bands and the relocated
@@ -9815,6 +9558,727 @@ function sliceTubeClipCap(pos, col, idx, end, planes, block) {
 }
 
 /**
+ * Polygon triangulation with holes (mapbox earcut 2.2.4, ISC licence),
+ * folded into one dependency-free function so the LOD worker gets it through
+ * toString(). `data` is flat [x, y, ...]; holes start at `holeIndices`
+ * (vertex indices). Returns vertex index triples.
+ * @param {ArrayLike<number>} data @param {number[]} holeIndices
+ * @returns {number[]}
+ */
+function earcut2D(data, holeIndices) {
+    /** @typedef {{i: number, x: number, y: number, prev: any, next: any, z: number, prevZ: any, nextZ: any, steiner: boolean}} EarNode */
+    /** @param {number} i @param {number} x @param {number} y @returns {EarNode} */
+    const node = (i, x, y) => ({ i, x, y, prev: null, next: null, z: 0, prevZ: null, nextZ: null, steiner: false });
+    /** @param {number} i @param {number} x @param {number} y @param {any} last */
+    const insertNode = (i, x, y, last) => {
+        const p = node(i, x, y);
+        if (!last) { p.prev = p; p.next = p; } else {
+            p.next = last.next; p.prev = last; last.next.prev = p; last.next = p;
+        }
+        return p;
+    };
+    /** @param {any} p */
+    const removeNode = (p) => {
+        p.next.prev = p.prev; p.prev.next = p.next;
+        if (p.prevZ) p.prevZ.nextZ = p.nextZ;
+        if (p.nextZ) p.nextZ.prevZ = p.prevZ;
+    };
+    /** @param {any} p @param {any} q @param {any} r */
+    const area = (p, q, r) => (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
+    /** @param {any} a @param {any} b */
+    const equals = (a, b) => a.x === b.x && a.y === b.y;
+    /** @param {number} v */
+    const sign = (v) => (v > 0 ? 1 : v < 0 ? -1 : 0);
+    /** @param {any} p @param {any} q @param {any} r */
+    const onSegment = (p, q, r) => q.x <= Math.max(p.x, r.x) && q.x >= Math.min(p.x, r.x)
+        && q.y <= Math.max(p.y, r.y) && q.y >= Math.min(p.y, r.y);
+    /** @param {any} p1 @param {any} q1 @param {any} p2 @param {any} q2 */
+    const intersects = (p1, q1, p2, q2) => {
+        const o1 = sign(area(p1, q1, p2)), o2 = sign(area(p1, q1, q2));
+        const o3 = sign(area(p2, q2, p1)), o4 = sign(area(p2, q2, q1));
+        if (o1 !== o2 && o3 !== o4) return true;
+        if (o1 === 0 && onSegment(p1, p2, q1)) return true;
+        if (o2 === 0 && onSegment(p1, q2, q1)) return true;
+        if (o3 === 0 && onSegment(p2, p1, q2)) return true;
+        if (o4 === 0 && onSegment(p2, q1, q2)) return true;
+        return false;
+    };
+    /** @param {number} ax @param {number} ay @param {number} bx @param {number} by @param {number} cx @param {number} cy @param {number} px @param {number} py */
+    const pointInTriangle = (ax, ay, bx, by, cx, cy, px, py) =>
+        (cx - px) * (ay - py) >= (ax - px) * (cy - py)
+        && (ax - px) * (by - py) >= (bx - px) * (ay - py)
+        && (bx - px) * (cy - py) >= (cx - px) * (by - py);
+    /** @param {any} a @param {any} b */
+    const locallyInside = (a, b) => (area(a.prev, a, a.next) < 0
+        ? area(a, b, a.next) >= 0 && area(a, a.prev, b) >= 0
+        : area(a, b, a.prev) < 0 || area(a, a.next, b) < 0);
+    /** @param {any} a @param {any} b */
+    const middleInside = (a, b) => {
+        let p = a, inside = false;
+        const px = (a.x + b.x) / 2, py = (a.y + b.y) / 2;
+        do {
+            if (((p.y > py) !== (p.next.y > py)) && p.next.y !== p.y
+                && (px < (p.next.x - p.x) * (py - p.y) / (p.next.y - p.y) + p.x)) inside = !inside;
+            p = p.next;
+        } while (p !== a);
+        return inside;
+    };
+    /** @param {any} a @param {any} b */
+    const intersectsPolygon = (a, b) => {
+        let p = a;
+        do {
+            if (p.i !== a.i && p.next.i !== a.i && p.i !== b.i && p.next.i !== b.i
+                && intersects(p, p.next, a, b)) return true;
+            p = p.next;
+        } while (p !== a);
+        return false;
+    };
+    /** @param {any} a @param {any} b */
+    const isValidDiagonal = (a, b) => a.next.i !== b.i && a.prev.i !== b.i && !intersectsPolygon(a, b)
+        && ((locallyInside(a, b) && locallyInside(b, a) && middleInside(a, b)
+            && !!(area(a.prev, a, b.prev) || area(a, b.prev, b)))
+            || (equals(a, b) && area(a.prev, a, a.next) > 0 && area(b.prev, b, b.next) > 0));
+    /** @param {any} a @param {any} b */
+    const splitPolygon = (a, b) => {
+        const a2 = node(a.i, a.x, a.y), b2 = node(b.i, b.x, b.y);
+        const an = a.next, bp = b.prev;
+        a.next = b; b.prev = a;
+        a2.next = an; an.prev = a2;
+        b2.next = a2; a2.prev = b2;
+        bp.next = b2; b2.prev = bp;
+        return b2;
+    };
+    /** @param {any} start @param {any} [end] */
+    const filterPoints = (start, end) => {
+        if (!start) return start;
+        if (!end) end = start;
+        let p = start, again;
+        do {
+            again = false;
+            if (!p.steiner && (equals(p, p.next) || area(p.prev, p, p.next) === 0)) {
+                removeNode(p);
+                p = end = p.prev;
+                if (p === p.next) break;
+                again = true;
+            } else {
+                p = p.next;
+            }
+        } while (again || p !== end);
+        return end;
+    };
+    /** @param {number} start @param {number} end @param {boolean} clockwise */
+    const linkedList = (start, end, clockwise) => {
+        let sum = 0;
+        for (let i = start, j = end - 2; i < end; i += 2) {
+            sum += (data[j] - data[i]) * (data[i + 1] + data[j + 1]);
+            j = i;
+        }
+        /** @type {any} */ let last = null;
+        if (clockwise === (sum > 0)) {
+            for (let i = start; i < end; i += 2) last = insertNode(i / 2, data[i], data[i + 1], last);
+        } else {
+            for (let i = end - 2; i >= start; i -= 2) last = insertNode(i / 2, data[i], data[i + 1], last);
+        }
+        if (last && equals(last, last.next)) { removeNode(last); last = last.next; }
+        return last;
+    };
+    /** @param {number} x @param {number} y @param {number} minX @param {number} minY @param {number} inv */
+    const zOrder = (x, y, minX, minY, inv) => {
+        x = ((x - minX) * inv) | 0; y = ((y - minY) * inv) | 0;
+        x = (x | (x << 8)) & 0x00FF00FF; x = (x | (x << 4)) & 0x0F0F0F0F;
+        x = (x | (x << 2)) & 0x33333333; x = (x | (x << 1)) & 0x55555555;
+        y = (y | (y << 8)) & 0x00FF00FF; y = (y | (y << 4)) & 0x0F0F0F0F;
+        y = (y | (y << 2)) & 0x33333333; y = (y | (y << 1)) & 0x55555555;
+        return x | (y << 1);
+    };
+    /** @param {any} list */
+    const sortLinked = (list) => {
+        let inSize = 1, numMerges;
+        do {
+            let p = list, tail = null;
+            list = null;
+            numMerges = 0;
+            while (p) {
+                numMerges++;
+                let q = p, pSize = 0;
+                for (let i = 0; i < inSize; i++) { pSize++; q = q.nextZ; if (!q) break; }
+                let qSize = inSize;
+                while (pSize > 0 || (qSize > 0 && q)) {
+                    let e;
+                    if (pSize !== 0 && (qSize === 0 || !q || p.z <= q.z)) { e = p; p = p.nextZ; pSize--; }
+                    else { e = q; q = q.nextZ; qSize--; }
+                    if (tail) tail.nextZ = e; else list = e;
+                    e.prevZ = tail;
+                    tail = e;
+                }
+                p = q;
+            }
+            tail.nextZ = null;
+            inSize *= 2;
+        } while (numMerges > 1);
+        return list;
+    };
+    /** @param {any} start @param {number} minX @param {number} minY @param {number} inv */
+    const indexCurve = (start, minX, minY, inv) => {
+        let p = start;
+        do {
+            if (p.z === 0) p.z = zOrder(p.x, p.y, minX, minY, inv);
+            p.prevZ = p.prev; p.nextZ = p.next; p = p.next;
+        } while (p !== start);
+        p.prevZ.nextZ = null;
+        p.prevZ = null;
+        sortLinked(p);
+    };
+    /** @param {any} ear */
+    const isEar = (ear) => {
+        const a = ear.prev, b = ear, c = ear.next;
+        if (area(a, b, c) >= 0) return false;
+        const x0 = Math.min(a.x, b.x, c.x), y0 = Math.min(a.y, b.y, c.y);
+        const x1 = Math.max(a.x, b.x, c.x), y1 = Math.max(a.y, b.y, c.y);
+        let p = c.next;
+        while (p !== a) {
+            if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1
+                && pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y)
+                && area(p.prev, p, p.next) >= 0) return false;
+            p = p.next;
+        }
+        return true;
+    };
+    /** @param {any} ear @param {number} minX @param {number} minY @param {number} inv */
+    const isEarHashed = (ear, minX, minY, inv) => {
+        const a = ear.prev, b = ear, c = ear.next;
+        if (area(a, b, c) >= 0) return false;
+        const x0 = Math.min(a.x, b.x, c.x), y0 = Math.min(a.y, b.y, c.y);
+        const x1 = Math.max(a.x, b.x, c.x), y1 = Math.max(a.y, b.y, c.y);
+        const minZ = zOrder(x0, y0, minX, minY, inv), maxZ = zOrder(x1, y1, minX, minY, inv);
+        /** @param {any} p */
+        const blocks = (p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p !== a && p !== c
+            && pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) && area(p.prev, p, p.next) >= 0;
+        let p = ear.prevZ, n = ear.nextZ;
+        while (p && p.z >= minZ && n && n.z <= maxZ) {
+            if (blocks(p)) return false;
+            p = p.prevZ;
+            if (blocks(n)) return false;
+            n = n.nextZ;
+        }
+        while (p && p.z >= minZ) { if (blocks(p)) return false; p = p.prevZ; }
+        while (n && n.z <= maxZ) { if (blocks(n)) return false; n = n.nextZ; }
+        return true;
+    };
+    /** @type {number[]} */ const triangles = [];
+    /** @param {any} start */
+    const cureLocalIntersections = (start) => {
+        let p = start;
+        do {
+            const a = p.prev, b = p.next.next;
+            if (!equals(a, b) && intersects(a, p, p.next, b) && locallyInside(a, b) && locallyInside(b, a)) {
+                triangles.push(a.i, p.i, b.i);
+                removeNode(p); removeNode(p.next);
+                p = start = b;
+            }
+            p = p.next;
+        } while (p !== start);
+        return filterPoints(p);
+    };
+    /** @param {any} ear @param {number} minX @param {number} minY @param {number} inv @param {number} pass */
+    const earcutLinked = (ear, minX, minY, inv, pass) => {
+        if (!ear) return;
+        if (!pass && inv) indexCurve(ear, minX, minY, inv);
+        let stop = ear;
+        while (ear.prev !== ear.next) {
+            const prev = ear.prev, next = ear.next;
+            if (inv ? isEarHashed(ear, minX, minY, inv) : isEar(ear)) {
+                triangles.push(prev.i, ear.i, next.i);
+                removeNode(ear);
+                ear = next.next;
+                stop = next.next;
+                continue;
+            }
+            ear = next;
+            if (ear === stop) {
+                if (!pass) earcutLinked(filterPoints(ear), minX, minY, inv, 1);
+                else if (pass === 1) earcutLinked(cureLocalIntersections(filterPoints(ear)), minX, minY, inv, 2);
+                else if (pass === 2) splitEarcut(ear, minX, minY, inv);
+                break;
+            }
+        }
+    };
+    /** @param {any} start @param {number} minX @param {number} minY @param {number} inv */
+    const splitEarcut = (start, minX, minY, inv) => {
+        let a = start;
+        do {
+            let b = a.next.next;
+            while (b !== a.prev) {
+                if (a.i !== b.i && isValidDiagonal(a, b)) {
+                    let c = splitPolygon(a, b);
+                    a = filterPoints(a, a.next);
+                    c = filterPoints(c, c.next);
+                    earcutLinked(a, minX, minY, inv, 0);
+                    earcutLinked(c, minX, minY, inv, 0);
+                    return;
+                }
+                b = b.next;
+            }
+            a = a.next;
+        } while (a !== start);
+    };
+    /** @param {any} m @param {any} p */
+    const sectorContainsSector = (m, p) => area(m.prev, m, p.prev) < 0 && area(p.next, m, m.next) < 0;
+    /** @param {any} hole @param {any} outerNode */
+    const findHoleBridge = (hole, outerNode) => {
+        let p = outerNode, qx = -Infinity, m = null;
+        const hx = hole.x, hy = hole.y;
+        do {
+            if (hy <= p.y && hy >= p.next.y && p.next.y !== p.y) {
+                const x = p.x + (hy - p.y) * (p.next.x - p.x) / (p.next.y - p.y);
+                if (x <= hx && x > qx) {
+                    qx = x;
+                    m = p.x < p.next.x ? p : p.next;
+                    if (x === hx) return m;
+                }
+            }
+            p = p.next;
+        } while (p !== outerNode);
+        if (!m) return null;
+        const stop = m, mx = m.x, my = m.y;
+        let tanMin = Infinity;
+        p = m;
+        do {
+            if (hx >= p.x && p.x >= mx && hx !== p.x
+                && pointInTriangle(hy < my ? hx : qx, hy, mx, my, hy < my ? qx : hx, hy, p.x, p.y)) {
+                const tan = Math.abs(hy - p.y) / (hx - p.x);
+                if (locallyInside(p, hole) && (tan < tanMin || (tan === tanMin
+                    && (p.x > m.x || (p.x === m.x && sectorContainsSector(m, p)))))) {
+                    m = p;
+                    tanMin = tan;
+                }
+            }
+            p = p.next;
+        } while (p !== stop);
+        return m;
+    };
+    const n = data.length;
+    const outerLen = holeIndices.length ? holeIndices[0] * 2 : n;
+    let outerNode = linkedList(0, outerLen, true);
+    if (!outerNode || outerNode.next === outerNode.prev) return triangles;
+    if (holeIndices.length) {
+        /** @type {any[]} */ const queue = [];
+        for (let i = 0; i < holeIndices.length; i++) {
+            const s = holeIndices[i] * 2;
+            const e = i < holeIndices.length - 1 ? holeIndices[i + 1] * 2 : n;
+            const list = linkedList(s, e, false);
+            if (!list) continue;
+            if (list === list.next) list.steiner = true;
+            let lp = list, left = list;
+            do { if (lp.x < left.x || (lp.x === left.x && lp.y < left.y)) left = lp; lp = lp.next; } while (lp !== list);
+            queue.push(left);
+        }
+        queue.sort((a, b) => a.x - b.x);
+        for (const hole of queue) {
+            const bridge = findHoleBridge(hole, outerNode);
+            if (!bridge) continue;
+            const rev = splitPolygon(bridge, hole);
+            filterPoints(rev, rev.next);
+            outerNode = filterPoints(bridge, bridge.next);
+        }
+    }
+    let minX = 0, minY = 0, inv = 0;
+    if (n > 160) {
+        minX = Infinity; minY = Infinity;
+        let maxX = -Infinity, maxY = -Infinity;
+        for (let i = 0; i < outerLen; i += 2) {
+            const x = data[i], y = data[i + 1];
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+        }
+        inv = Math.max(maxX - minX, maxY - minY);
+        inv = inv !== 0 ? 32767 / inv : 0;
+    }
+    earcutLinked(outerNode, minX, minY, inv, 0);
+    return triangles;
+}
+
+/**
+ * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
+ * torus), free of Three.js so the LOD worker runs the same code. Per plane
+ * the drawn triangles are sliced, the crossings welded on a grid (so
+ * unwelded UV or normal seams join), chain ends a hair apart joined, every
+ * chain that does not close pruned, and the closed loops filled by nesting
+ * depth (even depth fills, odd depth is a hole), so the result does not
+ * depend on winding or normals. An open sheet gets no cap. Pruning boxes
+ * per triangle chunk are cached on `src`.
+ * @param {{pos: ArrayLike<number>, idx: ArrayLike<number> | null, col: ArrayLike<number> | null, chunks?: Float32Array, radius?: number}} src
+ *   dense xyz positions, optional indices, optional dense rgb colours
+ * @param {number} start @param {number} end  drawn index range
+ * @param {number[][]} planes  [nx, ny, nz, c] per plane, local frame
+ * @returns {{pos: Float32Array, col: Float32Array | null}[]}
+ */
+function sliceMeshClipCap(src, start, end, planes) {
+    const pos = src.pos, idx = src.idx, col = src.col;
+    const CHUNK = 256;
+    const nTriAll = Math.floor((idx ? idx.length : pos.length / 3) / 3);
+    /** @param {number} t @param {number} e */
+    const vtx = idx ? (t, e) => idx[t * 3 + e] : (t, e) => t * 3 + e;
+    if (!src.chunks) {
+        const nCh = Math.ceil(nTriAll / CHUNK);
+        const box = new Float32Array(nCh * 6);
+        let gx0 = Infinity, gy0 = Infinity, gz0 = Infinity, gx1 = -Infinity, gy1 = -Infinity, gz1 = -Infinity;
+        for (let k = 0; k < nCh; k++) {
+            let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+            const tEnd = Math.min(nTriAll, (k + 1) * CHUNK);
+            for (let t = k * CHUNK; t < tEnd; t++) {
+                for (let e = 0; e < 3; e++) {
+                    const v = vtx(t, e) * 3;
+                    const x = pos[v], y = pos[v + 1], z = pos[v + 2];
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;
+                    if (y > y1) y1 = y;
+                    if (z < z0) z0 = z;
+                    if (z > z1) z1 = z;
+                }
+            }
+            box.set([x0, y0, z0, x1, y1, z1], k * 6);
+            if (x0 < gx0) gx0 = x0;
+            if (y0 < gy0) gy0 = y0;
+            if (z0 < gz0) gz0 = z0;
+            if (x1 > gx1) gx1 = x1;
+            if (y1 > gy1) gy1 = y1;
+            if (z1 > gz1) gz1 = z1;
+        }
+        src.chunks = box;
+        const r = Math.hypot(gx1 - gx0, gy1 - gy0, gz1 - gz0) / 2;
+        src.radius = r > 0 && isFinite(r) ? r : 1;
+    }
+    const chunks = src.chunks;
+    const radius = /** @type {number} */ (src.radius);
+    const quant = radius * 1e-7;
+    const tol = radius * 1e-4;
+    const t0 = Math.ceil(Math.max(0, start) / 3), t1 = Math.min(nTriAll, Math.floor(end / 3));
+    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ const out = [];
+    for (const plane of planes) {
+        const nx = plane[0], ny = plane[1], nz = plane[2], c0 = plane[3];
+        /** @type {Map<string, number>} */ const keyOf = new Map();
+        /** @type {number[]} */ const PX = [];
+        /** @type {number[]} */ const PC = [];
+        /** @type {number[]} */ const segA = [];
+        /** @type {number[]} */ const segB = [];
+        const cross = new Float64Array(18);
+        let nc = 0;
+        /** @param {number} a @param {number} b @param {number} sa @param {number} sb */
+        const crossing = (a, b, sa, sb) => {
+            // Canonical endpoint order, so a shared edge (or a duplicated
+            // seam vertex) gives the same bits from both of its triangles.
+            let a3 = a * 3, b3 = b * 3;
+            if (pos[a3] > pos[b3] || (pos[a3] === pos[b3] && (pos[a3 + 1] > pos[b3 + 1]
+                || (pos[a3 + 1] === pos[b3 + 1] && pos[a3 + 2] > pos[b3 + 2])))) {
+                const ti = a3; a3 = b3; b3 = ti;
+                const ts = sa; sa = sb; sb = ts;
+            }
+            const t = sa / (sa - sb);
+            const o = nc * 6;
+            cross[o] = pos[a3] + t * (pos[b3] - pos[a3]);
+            cross[o + 1] = pos[a3 + 1] + t * (pos[b3 + 1] - pos[a3 + 1]);
+            cross[o + 2] = pos[a3 + 2] + t * (pos[b3 + 2] - pos[a3 + 2]);
+            if (col) {
+                cross[o + 3] = col[a3] + t * (col[b3] - col[a3]);
+                cross[o + 4] = col[a3 + 1] + t * (col[b3 + 1] - col[a3 + 1]);
+                cross[o + 5] = col[a3 + 2] + t * (col[b3 + 2] - col[a3 + 2]);
+            }
+            nc++;
+        };
+        /** @param {number} o */
+        const weld = (o) => {
+            const x = cross[o], y = cross[o + 1], z = cross[o + 2];
+            const key = `${Math.round(x / quant)},${Math.round(y / quant)},${Math.round(z / quant)}`;
+            let id = keyOf.get(key);
+            if (id === undefined) {
+                id = PX.length / 3;
+                keyOf.set(key, id);
+                PX.push(x, y, z);
+                if (col) PC.push(cross[o + 3], cross[o + 4], cross[o + 5]);
+            }
+            return id;
+        };
+        const nCh = chunks.length / 6;
+        for (let k = Math.floor(t0 / CHUNK); k < nCh && k * CHUNK < t1; k++) {
+            const b = k * 6;
+            const cx = (chunks[b] + chunks[b + 3]) / 2, cy = (chunks[b + 1] + chunks[b + 4]) / 2;
+            const cz = (chunks[b + 2] + chunks[b + 5]) / 2;
+            const dc = nx * cx + ny * cy + nz * cz + c0;
+            const ext = Math.abs(nx) * (chunks[b + 3] - cx) + Math.abs(ny) * (chunks[b + 4] - cy)
+                + Math.abs(nz) * (chunks[b + 5] - cz);
+            if (dc - ext > quant || dc + ext < -quant) continue;
+            const ta = Math.max(t0, k * CHUNK), tb = Math.min(t1, (k + 1) * CHUNK);
+            for (let t = ta; t < tb; t++) {
+                const a = vtx(t, 0), bb = vtx(t, 1), cc = vtx(t, 2);
+                const sa = nx * pos[a * 3] + ny * pos[a * 3 + 1] + nz * pos[a * 3 + 2] + c0;
+                const sb = nx * pos[bb * 3] + ny * pos[bb * 3 + 1] + nz * pos[bb * 3 + 2] + c0;
+                const sc = nx * pos[cc * 3] + ny * pos[cc * 3 + 1] + nz * pos[cc * 3 + 2] + c0;
+                const pa = sa >= 0, pb = sb >= 0, pc = sc >= 0;
+                if (pa === pb && pb === pc) continue;
+                nc = 0;
+                if (pa !== pb) crossing(a, bb, sa, sb);
+                if (pb !== pc) crossing(bb, cc, sb, sc);
+                if (pc !== pa) crossing(cc, a, sc, sa);
+                if (nc !== 2) continue;
+                const i0 = weld(0), i1 = weld(6);
+                if (i0 !== i1) { segA.push(i0); segB.push(i1); }
+            }
+        }
+        const nPts = PX.length / 3;
+        let nSeg = segA.length;
+        if (!nSeg) { out.push({ pos: new Float32Array(0), col: col ? new Float32Array(0) : null }); continue; }
+
+        // A crossing that fell on the far side of a weld cell boundary leaves
+        // two chain ends a hair apart: join each odd-degree point to the
+        // nearest other one within tol.
+        const deg = new Int32Array(nPts);
+        for (let s = 0; s < nSeg; s++) { deg[segA[s]]++; deg[segB[s]]++; }
+        const rep = new Int32Array(nPts);
+        for (let p = 0; p < nPts; p++) rep[p] = p;
+        /** @type {Map<string, number[]>} */ const cells = new Map();
+        /** @param {number} x @param {number} y @param {number} z */
+        const cellKey = (x, y, z) => `${x},${y},${z}`;
+        for (let p = 0; p < nPts; p++) {
+            if (!(deg[p] & 1)) continue;
+            const k = cellKey(Math.floor(PX[p * 3] / tol), Math.floor(PX[p * 3 + 1] / tol), Math.floor(PX[p * 3 + 2] / tol));
+            const list = cells.get(k);
+            if (list) list.push(p); else cells.set(k, [p]);
+        }
+        if (cells.size) {
+            const matched = new Uint8Array(nPts);
+            for (let p = 0; p < nPts; p++) {
+                if (!(deg[p] & 1) || matched[p]) continue;
+                const gx = Math.floor(PX[p * 3] / tol), gy = Math.floor(PX[p * 3 + 1] / tol), gz = Math.floor(PX[p * 3 + 2] / tol);
+                let best = -1, bestD = tol * tol;
+                for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+                    const list = cells.get(cellKey(gx + dx, gy + dy, gz + dz));
+                    if (!list) continue;
+                    for (const q of list) {
+                        if (q === p || matched[q]) continue;
+                        const d = (PX[p * 3] - PX[q * 3]) ** 2 + (PX[p * 3 + 1] - PX[q * 3 + 1]) ** 2
+                            + (PX[p * 3 + 2] - PX[q * 3 + 2]) ** 2;
+                        if (d <= bestD) { bestD = d; best = q; }
+                    }
+                }
+                if (best >= 0) { matched[p] = 1; matched[best] = 1; rep[best] = p; }
+            }
+        }
+
+        // Undirected adjacency over the surviving segments.
+        const alive = new Uint8Array(nSeg);
+        deg.fill(0);
+        for (let s = 0; s < nSeg; s++) {
+            segA[s] = rep[segA[s]]; segB[s] = rep[segB[s]];
+            if (segA[s] === segB[s]) continue;
+            alive[s] = 1;
+            deg[segA[s]]++; deg[segB[s]]++;
+        }
+        const head = new Int32Array(nPts).fill(-1);
+        const next = new Int32Array(nSeg * 2);
+        for (let s = 0; s < nSeg; s++) {
+            if (!alive[s]) continue;
+            next[s * 2] = head[segA[s]]; head[segA[s]] = s * 2;
+            next[s * 2 + 1] = head[segB[s]]; head[segB[s]] = s * 2 + 1;
+        }
+        // Prune dangling chains: what is left can only be closed loops.
+        /** @type {number[]} */ const queue = [];
+        for (let p = 0; p < nPts; p++) if (deg[p] === 1) queue.push(p);
+        while (queue.length) {
+            const p = /** @type {number} */ (queue.pop());
+            if (deg[p] !== 1) continue;
+            for (let h = head[p]; h >= 0; h = next[h]) {
+                const s = h >> 1;
+                if (!alive[s]) continue;
+                alive[s] = 0;
+                const q = (h & 1) ? segA[s] : segB[s];
+                deg[p]--; deg[q]--;
+                if (deg[q] === 1) queue.push(q);
+                break;
+            }
+        }
+        // Walk the loops; a walk stuck at a non-manifold point is dropped.
+        /** @type {number[][]} */ const loops = [];
+        for (let s0 = 0; s0 < nSeg; s0++) {
+            if (!alive[s0]) continue;
+            alive[s0] = 0;
+            const first = segA[s0];
+            const chain = [first];
+            let cur = segB[s0];
+            let closed = false;
+            for (let guard = 0; guard <= nSeg; guard++) {
+                if (cur === first) { closed = true; break; }
+                chain.push(cur);
+                let h = head[cur];
+                while (h >= 0 && !alive[h >> 1]) h = next[h];
+                if (h < 0) break;
+                const s = h >> 1;
+                alive[s] = 0;
+                cur = (h & 1) ? segA[s] : segB[s];
+            }
+            if (closed && chain.length >= 3) loops.push(chain);
+        }
+        nSeg = 0;
+
+        // 2D loops in the plane basis, biggest first.
+        const basis = clipCapBasis(nx, ny, nz);
+        const minArea = radius * radius * 1e-12;
+        /** @type {{pts: number[], xy: Float64Array, area: number, box: number[], depth: number, holes: any[]}[]} */
+        const polys = [];
+        for (const chain of loops) {
+            const m = chain.length;
+            const xy = new Float64Array(m * 2);
+            let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+            for (let i = 0; i < m; i++) {
+                const p = chain[i] * 3;
+                const x = PX[p] * basis[0] + PX[p + 1] * basis[1] + PX[p + 2] * basis[2];
+                const y = PX[p] * basis[3] + PX[p + 1] * basis[4] + PX[p + 2] * basis[5];
+                xy[i * 2] = x; xy[i * 2 + 1] = y;
+                if (x < bx0) bx0 = x;
+                if (x > bx1) bx1 = x;
+                if (y < by0) by0 = y;
+                if (y > by1) by1 = y;
+            }
+            let a2 = 0;
+            for (let i = 0, j = m - 1; i < m; j = i++) a2 += (xy[j * 2] - xy[i * 2]) * (xy[j * 2 + 1] + xy[i * 2 + 1]);
+            const area = Math.abs(a2) / 2;
+            if (!(area > minArea)) continue;
+            polys.push({ pts: chain, xy, area, box: [bx0, by0, bx1, by1], depth: 0, holes: [] });
+        }
+        polys.sort((p, q) => q.area - p.area);
+        /** @param {number} qx @param {number} qy @param {Float64Array} xy */
+        const inside = (qx, qy, xy) => {
+            let inn = false;
+            const m = xy.length / 2;
+            for (let i = 0, j = m - 1; i < m; j = i++) {
+                const ax = xy[i * 2], ay = xy[i * 2 + 1], bx = xy[j * 2], by = xy[j * 2 + 1];
+                if ((ay > qy) !== (by > qy) && qx < (bx - ax) * (qy - ay) / (by - ay) + ax) inn = !inn;
+            }
+            return inn;
+        };
+        // Nesting depth from the smallest containing loop; even fills.
+        for (let i = 0; i < polys.length; i++) {
+            const P = polys[i];
+            // Test from the midpoint of the first edge: a vertex may sit on a touching loop.
+            const qx = (P.xy[0] + P.xy[2]) / 2, qy = (P.xy[1] + P.xy[3]) / 2;
+            for (let j = i - 1; j >= 0; j--) {
+                const O = polys[j], b = O.box;
+                if (qx < b[0] || qx > b[2] || qy < b[1] || qy > b[3]) continue;
+                if (!inside(qx, qy, O.xy)) continue;
+                P.depth = O.depth + 1;
+                if (P.depth & 1) O.holes.push(P);
+                break;
+            }
+        }
+        /** @type {number[]} */ const tp = [];
+        /** @type {number[]} */ const tc = [];
+        for (const O of polys) {
+            if (O.depth & 1) continue;
+            const parts = [O, ...O.holes];
+            let total = 0;
+            for (const part of parts) total += part.pts.length;
+            const data = new Float64Array(total * 2);
+            /** @type {number[]} */ const ids = [];
+            /** @type {number[]} */ const holeIdx = [];
+            for (const part of parts) {
+                if (part !== O) holeIdx.push(ids.length);
+                data.set(part.xy, ids.length * 2);
+                for (const p of part.pts) ids.push(p);
+            }
+            const tris = earcut2D(data, holeIdx);
+            for (let f = 0; f < tris.length; f += 3) {
+                const a = tris[f];
+                let b = tris[f + 1], cc = tris[f + 2];
+                const ccw = (data[b * 2] - data[a * 2]) * (data[cc * 2 + 1] - data[a * 2 + 1])
+                    - (data[b * 2 + 1] - data[a * 2 + 1]) * (data[cc * 2] - data[a * 2]);
+                // Counter-clockwise about +n; reversed it faces -n.
+                if (ccw > 0) { const t = b; b = cc; cc = t; }
+                for (const v of [a, b, cc]) {
+                    const p = ids[v] * 3;
+                    tp.push(PX[p], PX[p + 1], PX[p + 2]);
+                    if (col) tc.push(PC[p], PC[p + 1], PC[p + 2]);
+                }
+            }
+        }
+        out.push({ pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
+    }
+    return out;
+}
+
+/** @type {WeakMap<any, any>} position attribute -> unpacked slicer source */
+const MESH_CLIP_CAP_SOURCES = new WeakMap();
+
+/**
+ * Dense xyz positions, rgb colours and indices of a geometry for
+ * sliceMeshClipCap: interleaved and quantized (normalized integer)
+ * attributes are unpacked once, plain float arrays are used as they are.
+ * Cached per position attribute, so the clones of a cached model share one.
+ * @param {THREE.BufferGeometry} geometry @param {boolean} withColor
+ * @returns {{pos: ArrayLike<number>, idx: ArrayLike<number> | null, col: ArrayLike<number> | null, chunks?: Float32Array, radius?: number}}
+ */
+function meshClipCapSource(geometry, withColor) {
+    const p = /** @type {any} */ (geometry.getAttribute('position'));
+    const index = geometry.getIndex();
+    const c = withColor ? /** @type {any} */ (geometry.getAttribute('color')) : null;
+    /** @param {any} a */
+    const version = (a) => (a ? (a.isInterleavedBufferAttribute ? a.data.version : a.version) : -1);
+    const hit = MESH_CLIP_CAP_SOURCES.get(p);
+    if (hit && hit.posV === version(p) && hit.index === index && hit.idxV === version(index)
+        && hit.col === c && hit.colV === version(c)) return hit.src;
+    /** @param {any} a */
+    const plain = (a) => !a.isInterleavedBufferAttribute && !a.normalized && a.itemSize === 3
+        && a.array instanceof Float32Array;
+    /** @param {any} a */
+    const unpack = (a) => {
+        const n = a.count, outArr = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+            outArr[i * 3] = a.getX(i); outArr[i * 3 + 1] = a.getY(i); outArr[i * 3 + 2] = a.getZ(i);
+        }
+        return outArr;
+    };
+    const src = {
+        pos: plain(p) ? p.array : unpack(p),
+        idx: index ? index.array : null,
+        col: c ? (plain(c) ? c.array : unpack(c)) : null,
+    };
+    MESH_CLIP_CAP_SOURCES.set(p, { posV: version(p), index, idxV: version(index), col: c, colV: version(c), src });
+    return src;
+}
+
+/**
+ * Mark the meshes under a model or add_mesh root that the generic slicer may
+ * cap. Skinned and morphed meshes are left out: the CPU only sees their rest
+ * pose, so a cap would not match what is drawn.
+ * @param {THREE.Object3D} root @param {any} override  per-object clipCap
+ */
+function markMeshClipCapTargets(root, override) {
+    root.traverse((/** @type {any} */ o) => {
+        if (!o.isMesh || o.isSkinnedMesh || o.isInstancedMesh || o.userData.clipCapKind) return;
+        const g = o.geometry;
+        const p = g && g.getAttribute ? g.getAttribute('position') : null;
+        if (!p || p.itemSize < 3) return;
+        const morph = g.morphAttributes && g.morphAttributes.position;
+        if (morph && morph.length) return;
+        o.userData.clipCapKind = 'mesh';
+        if (typeof override === 'boolean') o.userData.clipCap = override;
+    });
+}
+
+/**
+ * Drawn index range [start, end) of a geometry over its slicer source.
+ * @param {THREE.BufferGeometry} geom @param {{pos: ArrayLike<number>, idx: ArrayLike<number> | null}} src
+ * @returns {number[]}
+ */
+function meshDrawnRange(geom, src) {
+    const total = src.idx ? src.idx.length : src.pos.length / 3;
+    const start = Math.max(0, geom.drawRange.start);
+    return [start, Math.min(total, start + geom.drawRange.count)];
+}
+
+/**
  * Cap geometry from flat triangle arrays; null when there is nothing to draw.
  * @param {Float32Array} pos @param {Float32Array | null} col
  * @param {number} nx @param {number} ny @param {number} nz
@@ -9840,7 +10304,7 @@ function clipCapGeometry(pos, col, nx, ny, nz) {
  * (plane, transform, geometry, draw range or colour layout changed), keeps
  * each cap's material in step with its owner, and removes caps when clipping
  * or the cap switch goes off. Caps are children of their owner mesh marked
- * `userData.__clipCap`, never in `_objects`. Tubes over
+ * `userData.__clipCap`, never in `_objects`. Tubes and meshes over
  * CLIP_CAP_WORKER_TRIANGLES drawn triangles are sliced on the LOD worker.
  */
 class ClipCapController {
@@ -9871,14 +10335,15 @@ class ClipCapController {
     }
 
     _collectTargets() {
-        /** @type {any[]} */ const out = [];
+        // A Set: a tracked child of a tracked group is reached twice.
+        /** @type {Set<any>} */ const kept = new Set();
         for (const obj of this.v._objects.values()) {
             obj.traverse((/** @type {any} */ node) => {
-                if (node.isMesh && node.userData.clipCapKind) out.push(node);
+                if (node.isMesh && node.userData.clipCapKind) kept.add(node);
             });
         }
+        const out = [...kept];
         // A target that left the scene drops its geometry copy on the worker.
-        const kept = new Set(out);
         for (const mesh of this._targets) {
             if (kept.has(mesh)) continue;
             const st = mesh.userData.__clipCapState;
@@ -10001,13 +10466,25 @@ class ClipCapController {
             const drawn = Math.min(total, geom.drawRange.count) / 3;
             const workerTris = typeof window !== 'undefined' && /** @type {any} */ (window).__clipCapWorkerTriangles != null
                 ? /** @type {any} */ (window).__clipCapWorkerTriangles : CLIP_CAP_WORKER_TRIANGLES;
-            if (mesh.userData.clipCapKind === 'tube' && index && drawn > workerTris && this.v._lodWorker) {
+            const kind = mesh.userData.clipCapKind;
+            if (((kind === 'tube' && index) || kind === 'mesh') && drawn > workerTris && this.v._lodWorker) {
                 this._request(mesh, st, sig, local, withColor);
             } else {
                 const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
                 if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
                     const t0 = performance.now();
-                    this._install(mesh, st, this._build(mesh, local, withColor), local);
+                    /** @type {{pos: Float32Array, col: Float32Array | null}[]} */ let caps;
+                    try {
+                        caps = this._build(mesh, local, withColor);
+                    } catch (e) {
+                        // Bad input skips this cap; the signature is kept so it is not retried every frame.
+                        if (!mesh.userData.__clipCapWarned) {
+                            mesh.userData.__clipCapWarned = true;
+                            console.warn(`Clip cap for '${mesh.userData.id || mesh.name}' failed:`, e);
+                        }
+                        caps = [];
+                    }
+                    this._install(mesh, st, caps, local);
                     st.sig = sig;
                     st.last = now;
                     st.cost = performance.now() - t0;
@@ -10033,11 +10510,15 @@ class ClipCapController {
             return sliceTubeClipCap(geom.getAttribute('position').array, withColor ? colAttr.array : null,
                 index.array, end, local, mesh.userData.tubeIndicesPerRingPair);
         }
+        if (kind === 'mesh') {
+            const src = meshClipCapSource(geom, withColor);
+            const [start, end] = meshDrawnRange(geom, src);
+            return sliceMeshClipCap(src, start, end, local);
+        }
         return local.map(([nx, ny, nz, c]) => {
             const out = new ClipCapBuilder(nx, ny, nz, c, withColor);
             if (kind === 'convex') buildConvexClipCap(geom, out);
             else if (kind === 'swept') buildSweptClipCap(geom, mesh.userData.sweptLayout, out);
-            else if (kind === 'sliced') buildSlicedClipCap(geom, out);
             return { pos: new Float32Array(out.pos), col: out.col ? new Float32Array(out.col) : null };
         });
     }
@@ -10051,25 +10532,41 @@ class ClipCapController {
     _request(mesh, st, sig, local, withColor) {
         const t0 = performance.now();
         const geom = mesh.geometry;
-        const posAttr = geom.getAttribute('position');
-        const index = geom.getIndex();
-        const colAttr = geom.getAttribute('color');
-        const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
         // Draw range is left out: a shorter reveal reuses the cached copy.
         const geomKey = [sig[0], sig[1], sig[2], sig[5], sig[6]].join(':');
-        /** @type {any} */ const msg = {
-            type: 'clipCap', capId: mesh.uuid, reqId: ++this._reqId, geomKey,
-            planes: local, end, block: mesh.userData.tubeIndicesPerRingPair,
-        };
+        /** @type {any} */ let msg;
         /** @type {ArrayBuffer[]} */ const transfer = [];
-        if (st.workerGeomKey !== geomKey || st.workerEnd < end) {
-            msg.positions = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
-            msg.indices = /** @type {Uint32Array} */ (index.array).slice(0, end);
-            msg.colors = withColor ? new Float32Array(/** @type {Float32Array} */ (colAttr.array)) : null;
-            transfer.push(msg.positions.buffer, msg.indices.buffer);
-            if (msg.colors) transfer.push(msg.colors.buffer);
-            st.workerGeomKey = geomKey;
-            st.workerEnd = end;
+        if (mesh.userData.clipCapKind === 'mesh') {
+            const src = meshClipCapSource(geom, withColor);
+            const [start, end] = meshDrawnRange(geom, src);
+            msg = { type: 'clipCap', kind: 'mesh', capId: mesh.uuid, reqId: ++this._reqId, geomKey, planes: local, start, end };
+            if (st.workerGeomKey !== geomKey) {
+                msg.positions = new Float32Array(src.pos);
+                msg.indices = src.idx ? Uint32Array.from(src.idx) : null;
+                msg.colors = src.col ? new Float32Array(src.col) : null;
+                transfer.push(msg.positions.buffer);
+                if (msg.indices) transfer.push(msg.indices.buffer);
+                if (msg.colors) transfer.push(msg.colors.buffer);
+                st.workerGeomKey = geomKey;
+            }
+        } else {
+            const posAttr = geom.getAttribute('position');
+            const index = geom.getIndex();
+            const colAttr = geom.getAttribute('color');
+            const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+            msg = {
+                type: 'clipCap', capId: mesh.uuid, reqId: ++this._reqId, geomKey,
+                planes: local, end, block: mesh.userData.tubeIndicesPerRingPair,
+            };
+            if (st.workerGeomKey !== geomKey || st.workerEnd < end) {
+                msg.positions = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
+                msg.indices = /** @type {Uint32Array} */ (index.array).slice(0, end);
+                msg.colors = withColor ? new Float32Array(/** @type {Float32Array} */ (colAttr.array)) : null;
+                transfer.push(msg.positions.buffer, msg.indices.buffer);
+                if (msg.colors) transfer.push(msg.colors.buffer);
+                st.workerGeomKey = geomKey;
+                st.workerEnd = end;
+            }
         }
         st.inflight = msg.reqId;
         st.inflightSig = sig;
@@ -16380,7 +16877,7 @@ export class ThreeJSViewer {
             const mesh = new THREE.Mesh(geometry, material);
             // Convex solids get the hull of their cut edges as a clip cap (issue #259).
             if (CLIP_CAP_CONVEX_PRIMITIVES.has(objData.primitive)) mesh.userData.clipCapKind = 'convex';
-            else if (objData.primitive === 'torus') mesh.userData.clipCapKind = 'sliced';
+            else if (objData.primitive === 'torus') mesh.userData.clipCapKind = 'mesh';
             if (typeof params.clipCap === 'boolean') mesh.userData.clipCap = params.clipCap;
             // A crisper accent over the translucent fill; opt-in, so every
             // other path stays the single Mesh it was.
@@ -16433,6 +16930,7 @@ export class ThreeJSViewer {
                     return undefined;
                 }
                 obj = this._instantiateModel(entry, format, objData.yUp === true);
+                markMeshClipCapTargets(obj, objData.clipCap);
                 if (entry.animations.length > 0) {
                     const mixerRoot = obj.userData.gltfScene || obj;
                     newMixer = new THREE.AnimationMixer(mixerRoot);
@@ -19027,6 +19525,7 @@ export class ThreeJSViewer {
                             format,
                             yUp: data.yUp === true,
                             visible: data.visible,
+                            clipCap: data.clipCap,
                         }, data.parent, { preserveInflight: true });
                         fetched = true;
                         if (obj) {
@@ -19683,6 +20182,7 @@ export class ThreeJSViewer {
                         // Click-to-pivot passthrough (issue #215).
                         if (data.pickable === false) mesh.userData.pickable = false;
                         mesh.userData.totalIndexCount = ni;
+                        markMeshClipCapTargets(mesh, data.clipCap);
                         // Paint order for a coplanar layer stack.
                         if (data.renderOrder !== undefined) mesh.renderOrder = data.renderOrder;
                         // Before _deleteObject, which prunes this id's recorded
@@ -22042,9 +22542,9 @@ export class ThreeJSViewer {
     }
 
     /**
-     * Cap the cut of clipped primitives, swept tools and parametric tubes
-     * (issue #259). A per-object `clipCap` boolean on the add message wins
-     * over this switch. Meshes and models always stay open.
+     * Cap the cut of clipped solids: primitives, swept tools, parametric
+     * tubes, meshes and loaded models, where the cut closes (issue #259). A
+     * per-object `clipCap` boolean on the add message wins over this switch.
      * @param {boolean} enabled
      */
     setClipCaps(enabled) {

@@ -1928,6 +1928,7 @@ class ViewerClient:
         parent: Optional[str] = None,
         y_up: bool = False,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """
         Add a 3D model to the scene.
@@ -1945,6 +1946,8 @@ class ViewerClient:
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
             visible: Initial visibility
+            clip_cap: Override :meth:`set_clipping_caps` for every mesh of
+                this model (``False`` keeps its cut open).
 
         The viewer caches the parsed model by URL for the page session, so
         adding the same URL again skips the fetch and the decode. Give a
@@ -1967,6 +1970,8 @@ class ViewerClient:
             obj_data["yUp"] = True
         if not visible:
             obj_data["visible"] = False
+        if clip_cap is not None:
+            obj_data["clipCap"] = bool(clip_cap)
 
         msg = {
             "type": "add_object",
@@ -2005,6 +2010,7 @@ class ViewerClient:
         parent: Optional[str] = None,
         y_up: bool = False,
         visible: bool = True,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """
         Add a 3D model to the scene by sending file bytes over WebSocket.
@@ -2023,6 +2029,8 @@ class ViewerClient:
                   Use True for standard Blender/Sketchfab exports; leave False for
                   Z-up CAD exports.
             visible: Initial visibility
+            clip_cap: Override :meth:`set_clipping_caps` for every mesh of
+                this model (``False`` keeps its cut open).
         """
         if isinstance(path_or_bytes, bytes):
             mesh_bytes = path_or_bytes
@@ -2046,6 +2054,8 @@ class ViewerClient:
             header["yUp"] = True
         if not visible:
             header["visible"] = False
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
@@ -2208,6 +2218,7 @@ class ViewerClient:
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
         polygon_offset_units: float = 1.0,
+        clip_cap: Optional[bool] = None,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -2236,6 +2247,8 @@ class ViewerClient:
                 survives ``set_opacity``/``set_color``.
             polygon_offset: With ``polygon_offset_units``, separates coplanar
                 overlays in depth (issue #227).
+            clip_cap: Override :meth:`set_clipping_caps` for this mesh
+                (``False`` keeps its cut open).
 
         Per-vertex alpha: pass ``colors`` as (N, 4); the header then carries
         ``vertexColorComponents: 4`` with RGBA interleaved per vertex.
@@ -2307,6 +2320,8 @@ class ViewerClient:
             header["visible"] = False
         if not pickable:
             header["pickable"] = False
+        if clip_cap is not None:
+            header["clipCap"] = bool(clip_cap)
         _apply_material_flags(
             header, False, None, depth_write, polygon_offset, polygon_offset_units
         )
@@ -4819,14 +4834,18 @@ class ViewerClient:
 
         With caps on, a clipping plane or slab closes the cut through
         primitives (box, sphere, cylinder, capsule), swept tool bodies
-        (:meth:`add_swept_tool`) and parametric tubes
-        (:meth:`add_parametric_tube`, :meth:`add_toolpath`) with a flat face
-        in the object's colour (per-vertex colours are interpolated along the
-        cut), so a solid no longer reads as a hollow shell. Meshes and loaded
-        models stay open, as do translucent and wireframe objects. A
-        per-object ``clip_cap=`` on the add call overrides this switch. Off by
-        default; also toggled by the "Cap cut solids" box in the clipping
-        panel (``C``).
+        (:meth:`add_swept_tool`), parametric tubes
+        (:meth:`add_parametric_tube`, :meth:`add_toolpath`), meshes
+        (:meth:`add_mesh`) and loaded models (:meth:`add_model`,
+        :meth:`add_model_binary`) with a flat face in the object's colour
+        (per-vertex colours are interpolated along the cut, textures are not
+        applied), so a solid no longer reads as a hollow shell. On a mesh or
+        model only the closed loops of the cut are filled, one mesh at a
+        time: an open sheet stays open, and a solid split across several
+        meshes is not closed. Skinned and morphing meshes, translucent and
+        wireframe objects stay open. A per-object ``clip_cap=`` on the add
+        call overrides this switch. Off by default; also toggled by the "Cap
+        cut solids" box in the clipping panel (``C``).
 
         Recorded and re-sent on reconnect; may be called before a viewer
         connects.
