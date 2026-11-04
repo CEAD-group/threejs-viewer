@@ -113,6 +113,19 @@
         .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
         .threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
         .threejs-viewer .tjsv-menu-btn-label { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.06em; }
+        .threejs-viewer .tjsv-cog { position: relative; display: block; width: 16px; height: 16px; }
+        .threejs-viewer .tjsv-cog > svg { display: block; }
+        /* The ring repeats the tab background so the badge reads as cut out of the cog. */
+        .threejs-viewer .tjsv-cog > .tjsv-status-dot {
+            position: absolute;
+            right: -3px;
+            top: -3px;
+            width: 7px;
+            height: 7px;
+            box-shadow: 0 0 0 2px var(--tjsv-tab-bg, var(--tjsv-menu-bg));
+        }
+        .threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn:hover { --tjsv-tab-bg: var(--tjsv-panel-3); }
+        .threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { --tjsv-tab-bg: var(--tjsv-primary); }
         .threejs-viewer .tjsv-status-dot {
             width: 8px;
             height: 8px;
@@ -8931,6 +8944,9 @@ class CameraController {
     }
 }
 
+// Settings cog for the built-in View tab (inline so embedders need no assets).
+const MENU_COG_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3.2"/></svg>';
+
 /**
  * Owns the M-key wireframe cycle and N-key shading-debug cycle.
  * Holds cached debug materials + per-mesh helpers.
@@ -9293,15 +9309,16 @@ class MenuController {
         if (this._resizeObs) this._resizeObs.observe(body);
 
         // The rail tab: a vertical label. The viewer's own menu is the top
-        // tab and shows only the connection-status dot.
+        // tab and shows a settings cog with the connection-status badge.
         const tab = document.createElement('button');
         tab.type = 'button';
         tab.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
         tab.title = spec.title || spec.label || '';
         tab.setAttribute('aria-expanded', 'false');
         tab.setAttribute('aria-label', spec.label || spec.id);
-        tab.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
-            + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
+        tab.innerHTML = spec.builtin
+            ? `<span class="tjsv-cog">${MENU_COG_SVG}<span class="tjsv-status-dot disconnected"></span></span>`
+            : `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
         tab.addEventListener('click', (e) => { e.stopPropagation(); this._setOpen(m, !m.open); });
         m.button = tab;
         root.appendChild(tab);
