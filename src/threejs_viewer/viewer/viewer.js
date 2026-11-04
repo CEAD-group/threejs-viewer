@@ -7383,6 +7383,9 @@ class CameraController {
     }
 }
 
+// Settings cog for the built-in View tab (inline so embedders need no assets).
+const MENU_COG_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3.2"/></svg>';
+
 /**
  * Owns the M-key wireframe cycle and N-key shading-debug cycle.
  * Holds cached debug materials + per-mesh helpers.
@@ -7745,15 +7748,16 @@ class MenuController {
         if (this._resizeObs) this._resizeObs.observe(body);
 
         // The rail tab: a vertical label. The viewer's own menu is the top
-        // tab and shows only the connection-status dot.
+        // tab and shows a settings cog with the connection-status badge.
         const tab = document.createElement('button');
         tab.type = 'button';
         tab.className = 'tjsv-menu-btn' + (spec.builtin ? ' tjsv-btn-menu' : '');
         tab.title = spec.title || spec.label || '';
         tab.setAttribute('aria-expanded', 'false');
         tab.setAttribute('aria-label', spec.label || spec.id);
-        tab.innerHTML = (spec.builtin ? '<span class="tjsv-status-dot disconnected"></span>' : '')
-            + `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
+        tab.innerHTML = spec.builtin
+            ? `<span class="tjsv-cog">${MENU_COG_SVG}<span class="tjsv-status-dot disconnected"></span></span>`
+            : `<span class="tjsv-menu-btn-label">${escapeHtml(spec.label || spec.id)}</span>`;
         tab.addEventListener('click', (e) => { e.stopPropagation(); this._setOpen(m, !m.open); });
         m.button = tab;
         root.appendChild(tab);

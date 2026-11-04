@@ -7549,8 +7549,7 @@ def test_toolbar_menu_lists_options_with_shortcuts(viewer_client, viewer_page):
     settle(viewer_client)
     assert (
         page.evaluate(
-            "() => document.querySelector('.tjsv-btn-menu .tjsv-menu-btn-label')"
-            ".textContent"
+            "() => document.querySelector('.tjsv-btn-menu').getAttribute('aria-label')"
         )
         == "View"
     )

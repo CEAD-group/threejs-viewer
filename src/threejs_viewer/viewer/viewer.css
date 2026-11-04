@@ -102,6 +102,19 @@
 .threejs-viewer .tjsv-menu-btn:focus { outline: none; }
 .threejs-viewer .tjsv-menu-btn:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 1px; }
 .threejs-viewer .tjsv-menu-btn-label { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.06em; }
+.threejs-viewer .tjsv-cog { position: relative; display: block; width: 16px; height: 16px; }
+.threejs-viewer .tjsv-cog > svg { display: block; }
+/* The ring repeats the tab background so the badge reads as cut out of the cog. */
+.threejs-viewer .tjsv-cog > .tjsv-status-dot {
+    position: absolute;
+    right: -3px;
+    top: -3px;
+    width: 7px;
+    height: 7px;
+    box-shadow: 0 0 0 2px var(--tjsv-tab-bg, var(--tjsv-menu-bg));
+}
+.threejs-viewer .tjsv-rail-panel > .tjsv-menu-btn:hover { --tjsv-tab-bg: var(--tjsv-panel-3); }
+.threejs-viewer .tjsv-rail-panel.open > .tjsv-menu-btn { --tjsv-tab-bg: var(--tjsv-primary); }
 .threejs-viewer .tjsv-status-dot {
     width: 8px;
     height: 8px;
