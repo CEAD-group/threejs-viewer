@@ -3,132 +3,123 @@
      against the right edge whose bodies slide out on click. -->
 <div class="tjsv-rail tjsv-toolbar"></div>
 
-<div class="tjsv-clipping-panel">
-    <h3>Clipping Plane <button class="tjsv-clip-close" title="Close (C)">&times;</button></h3>
-    <div class="clip-section">
-        <label>Axis</label>
-        <div class="clip-axis-buttons">
-            <button data-axis="x+" class="active">X+</button>
-            <button data-axis="y+">Y+</button>
-            <button data-axis="z+">Z+</button>
-            <button data-axis="x-">X&minus;</button>
-            <button data-axis="y-">Y&minus;</button>
-            <button data-axis="z-">Z&minus;</button>
-        </div>
+<!-- Clipping and Lighting controls. _initMenus mounts each into the body of
+     its own rail tab (Clipping, Lighting), stacked under the View tab. -->
+<div class="tjsv-clipping-panel tjsv-rail-form">
+    <button type="button" class="tjsv-menu-item tjsv-clip-enabled" title="Turn the cut on or off (C)">
+        <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
+        <span class="tjsv-menu-label">Clipping plane</span><kbd>C</kbd>
+    </button>
+    <div class="tjsv-clip-controls">
+    <div class="tjsv-menu-caption">Axis</div>
+    <div class="tjsv-seg-grid clip-axis-buttons">
+        <button type="button" class="tjsv-seg-btn active" data-axis="x+">X+</button>
+        <button type="button" class="tjsv-seg-btn" data-axis="y+">Y+</button>
+        <button type="button" class="tjsv-seg-btn" data-axis="z+">Z+</button>
+        <button type="button" class="tjsv-seg-btn" data-axis="x-">X&minus;</button>
+        <button type="button" class="tjsv-seg-btn" data-axis="y-">Y&minus;</button>
+        <button type="button" class="tjsv-seg-btn" data-axis="z-">Z&minus;</button>
     </div>
-    <div class="clip-section">
-        <label>Normal</label>
-        <div class="clip-normal-row">
-            <label>x</label><input type="number" class="tjsv-clip-nx" step="0.01" value="1">
-            <label>y</label><input type="number" class="tjsv-clip-ny" step="0.01" value="0">
-            <label>z</label><input type="number" class="tjsv-clip-nz" step="0.01" value="0">
-        </div>
+    <div class="tjsv-menu-caption">Normal</div>
+    <div class="tjsv-menu-row tjsv-num-row">
+        <span class="tjsv-menu-label">x</span><input type="number" class="tjsv-num-input tjsv-clip-nx" step="0.01" value="1">
+        <span class="tjsv-menu-label">y</span><input type="number" class="tjsv-num-input tjsv-clip-ny" step="0.01" value="0">
+        <span class="tjsv-menu-label">z</span><input type="number" class="tjsv-num-input tjsv-clip-nz" step="0.01" value="0">
     </div>
-    <div class="clip-section">
-        <label>Mode</label>
-        <div class="clip-toggle-row">
-            <button class="tjsv-clip-mode-single active">Single</button>
-            <button class="tjsv-clip-mode-slab">Slab</button>
+    <div class="tjsv-menu-row">
+        <span class="tjsv-menu-label">Mode</span>
+        <div class="tjsv-segmented">
+            <button type="button" class="tjsv-seg-btn tjsv-clip-mode-single active">Single</button>
+            <button type="button" class="tjsv-seg-btn tjsv-clip-mode-slab">Slab</button>
         </div>
-        <div class="clip-check-row">
-            <input type="checkbox" class="tjsv-clip-caps" id="tjsv-clip-caps">
-            <label for="tjsv-clip-caps" class="clip-check-label">Cap cut solids</label>
-        </div>
-        <div class="clip-check-row">
-            <input type="checkbox" class="tjsv-clip-show-plane" id="tjsv-clip-show-plane" checked>
-            <label for="tjsv-clip-show-plane" class="clip-check-label">Show plane</label>
-        </div>
+        <kbd title="S">S</kbd>
     </div>
-    <div class="clip-section">
-        <label>Position <span class="clip-key-hint">&larr;&rarr;</span></label>
-        <div class="clip-slider-row">
-            <input type="range" class="tjsv-clip-distance" min="-10" max="10" step="0.01" value="0">
-            <span class="clip-value tjsv-clip-distance-value">0.00</span>
-        </div>
+    <div class="tjsv-menu-caption tjsv-caption-row"><span>Position</span><kbd title="Arrow left / right">&larr;&rarr;</kbd></div>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <input type="range" class="tjsv-clip-distance" min="-10" max="10" step="0.01" value="0">
+        <span class="tjsv-slider-value tjsv-clip-distance-value">0.00</span>
     </div>
-    <div class="clip-section tjsv-clip-thickness-section" style="display: none;">
-        <label>Thickness <span class="clip-key-hint">&uarr;&darr;</span></label>
-        <div class="clip-slider-row">
-            <input type="range" class="tjsv-clip-thickness" min="0.01" max="20" step="0.01" value="2">
-            <span class="clip-value tjsv-clip-thickness-value">2.00</span>
-        </div>
+    <div class="tjsv-clip-thickness-section" style="display: none;">
+        <div class="tjsv-menu-caption tjsv-caption-row"><span>Thickness</span><kbd title="Arrow up / down">&uarr;&darr;</kbd></div>
+        <div class="tjsv-menu-row tjsv-slider-row">
+        <input type="range" class="tjsv-clip-thickness" min="0.01" max="20" step="0.01" value="2">
+        <span class="tjsv-slider-value tjsv-clip-thickness-value">2.00</span>
     </div>
-    <div class="clip-hint">C: toggle | S: slab | V: view normal | &larr;&rarr;: position | &uarr;&darr;: thickness</div>
+    </div>
+    <label class="tjsv-menu-item tjsv-switch-row">
+        <input type="checkbox" class="tjsv-switch-input tjsv-clip-caps">
+        <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
+        <span class="tjsv-menu-label">Cap cut solids</span>
+    </label>
+    <label class="tjsv-menu-item tjsv-switch-row">
+        <input type="checkbox" class="tjsv-switch-input tjsv-clip-show-plane" checked>
+        <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
+        <span class="tjsv-menu-label">Show plane</span>
+    </label>
+    <button type="button" class="tjsv-menu-action tjsv-clip-view-normal" title="Orthographic view along the plane normal (V)">
+        <span class="tjsv-menu-label">View along normal</span><kbd>V</kbd>
+    </button>
+    </div>
 </div>
 
-<div class="tjsv-lighting-panel">
-    <h3>Lighting <button class="tjsv-lighting-close" title="Close (E)">&times;</button></h3>
-    <div class="lighting-section">
-        <label>Tone mapping</label>
-        <div class="lighting-select-row">
-            <select class="tjsv-lighting-tone-mapping">
-                <option value="none">None</option>
-                <option value="linear">Linear</option>
-                <option value="reinhard">Reinhard</option>
-                <option value="cineon">Cineon</option>
-                <option value="aces" selected>ACES Filmic</option>
-                <option value="agx">AgX</option>
-                <option value="neutral">Neutral</option>
-            </select>
-        </div>
+<div class="tjsv-lighting-panel tjsv-rail-form">
+    <div class="tjsv-menu-row">
+        <span class="tjsv-menu-label">Tone mapping</span>
+        <select class="tjsv-menu-select tjsv-lighting-tone-mapping">
+            <option value="none">None</option>
+            <option value="linear">Linear</option>
+            <option value="reinhard">Reinhard</option>
+            <option value="cineon">Cineon</option>
+            <option value="aces" selected>ACES Filmic</option>
+            <option value="agx">AgX</option>
+            <option value="neutral">Neutral</option>
+        </select>
     </div>
-    <div class="lighting-section">
-        <label>Tone mapping exposure</label>
-        <div class="lighting-slider-row">
-            <input type="range" class="tjsv-lighting-exposure" min="0" max="3" step="0.05" value="1">
-            <span class="lighting-value tjsv-lighting-exposure-value">1.00</span>
-        </div>
+    <div class="tjsv-menu-row lighting-section">
+        <span class="tjsv-menu-label">Cubemap</span>
+        <select class="tjsv-menu-select tjsv-lighting-cubemap"></select>
     </div>
-    <div class="lighting-section">
-        <label>Cubemap</label>
-        <div class="lighting-select-row">
-            <select class="tjsv-lighting-cubemap"></select>
-        </div>
+    <div class="tjsv-menu-caption">Exposure</div>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <input type="range" class="tjsv-lighting-exposure" min="0" max="3" step="0.05" value="1">
+        <span class="tjsv-slider-value tjsv-lighting-exposure-value">1.00</span>
     </div>
-    <div class="lighting-section">
-        <label>Environment map</label>
-        <div class="lighting-check-row">
-            <input type="checkbox" class="tjsv-lighting-env-map" id="tjsv-lighting-env-map" checked>
-            <label for="tjsv-lighting-env-map" class="lighting-check-label">Reflections (off = faster)</label>
-        </div>
+    <div class="tjsv-menu-caption">Environment</div>
+    <label class="tjsv-menu-item tjsv-switch-row">
+        <input type="checkbox" class="tjsv-switch-input tjsv-lighting-env-map" checked>
+        <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
+        <span class="tjsv-menu-label">Reflections (off = faster)</span>
+    </label>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <span class="tjsv-menu-label">Intensity</span><input type="range" class="tjsv-lighting-env" min="0" max="4" step="0.05" value="2">
+        <span class="tjsv-slider-value tjsv-lighting-env-value">2.00</span>
     </div>
-    <div class="lighting-section">
-        <label>Environment intensity</label>
-        <div class="lighting-slider-row">
-            <input type="range" class="tjsv-lighting-env" min="0" max="4" step="0.05" value="2">
-            <span class="lighting-value tjsv-lighting-env-value">2.00</span>
-        </div>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <span class="tjsv-menu-label">Ambient</span><input type="range" class="tjsv-lighting-ambient" min="0" max="3" step="0.05" value="1.5">
+        <span class="tjsv-slider-value tjsv-lighting-ambient-value">1.50</span>
     </div>
-    <div class="lighting-section">
-        <label>Ambient intensity</label>
-        <div class="lighting-slider-row">
-            <input type="range" class="tjsv-lighting-ambient" min="0" max="3" step="0.05" value="1.5">
-            <span class="lighting-value tjsv-lighting-ambient-value">1.50</span>
-        </div>
+    <div class="tjsv-menu-caption">Sun</div>
+    <label class="tjsv-menu-item tjsv-switch-row">
+        <input type="checkbox" class="tjsv-switch-input tjsv-lighting-sun" checked>
+        <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
+        <span class="tjsv-menu-label">Sun light + shadows</span>
+    </label>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <span class="tjsv-menu-label">Intensity</span><input type="range" class="tjsv-lighting-sun-intensity" min="0" max="6" step="0.05" value="2" title="Sun intensity">
+        <span class="tjsv-slider-value tjsv-lighting-sun-intensity-value">2.00</span>
     </div>
-    <div class="lighting-section">
-        <label>Sun</label>
-        <div class="lighting-check-row">
-            <input type="checkbox" class="tjsv-lighting-sun" id="tjsv-lighting-sun" checked>
-            <label for="tjsv-lighting-sun" class="lighting-check-label">Sun light + shadows</label>
-        </div>
-        <div class="lighting-slider-row">
-            <input type="range" class="tjsv-lighting-sun-intensity" min="0" max="6" step="0.05" value="2" title="Sun intensity">
-            <span class="lighting-value tjsv-lighting-sun-intensity-value">2.00</span>
-        </div>
-        <div class="lighting-slider-row">
-            <input type="range" class="tjsv-lighting-sun-azimuth" min="-180" max="180" step="1" value="-80" title="Sun azimuth (degrees)">
-            <span class="lighting-value tjsv-lighting-sun-azimuth-value">-80°</span>
-        </div>
-        <div class="lighting-slider-row">
-            <input type="range" class="tjsv-lighting-sun-elevation" min="0" max="90" step="1" value="50" title="Sun elevation (degrees)">
-            <span class="lighting-value tjsv-lighting-sun-elevation-value">50°</span>
-        </div>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <span class="tjsv-menu-label">Azimuth</span><input type="range" class="tjsv-lighting-sun-azimuth" min="-180" max="180" step="1" value="-80" title="Sun azimuth (degrees)">
+        <span class="tjsv-slider-value tjsv-lighting-sun-azimuth-value">-80°</span>
     </div>
-    <div class="lighting-actions">
-        <button class="tjsv-lighting-reset" title="Reset to initial values">Reset</button>
+    <div class="tjsv-menu-row tjsv-slider-row">
+        <span class="tjsv-menu-label">Elevation</span><input type="range" class="tjsv-lighting-sun-elevation" min="0" max="90" step="1" value="50" title="Sun elevation (degrees)">
+        <span class="tjsv-slider-value tjsv-lighting-sun-elevation-value">50°</span>
     </div>
-    <div class="lighting-hint">E: toggle | values persist in localStorage</div>
+    <button type="button" class="tjsv-menu-action tjsv-lighting-reset" title="Reset to initial values">
+        <span class="tjsv-menu-label">Reset</span>
+    </button>
+    <div class="tjsv-panel-hint"><kbd>E</kbd> toggles this panel; values persist in this browser</div>
 </div>
 
 <div class="tjsv-animation-controls">
