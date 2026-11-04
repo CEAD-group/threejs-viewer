@@ -3,14 +3,7 @@
 `threejs-viewer` is licensed under the MIT license. It redistributes the
 following third-party material, which retains its own license.
 
-## Mesh-cap polygon operations and triangulation
-
-`src/threejs_viewer/viewer/polygon-clipping.js` wraps the bundled factory from
-[polygon-clipping 0.15.7](https://github.com/mfogel/polygon-clipping/tree/v0.15.7).
-It includes splaytree 3.1.2 and robust-predicates 3.0.2. Their full notices are
-retained inside the factory, so the standalone viewer and worker retain them.
-The bundled Microsoft TypeScript runtime helper retains its Apache-2.0 notice;
-the full Apache license below applies to that helper too.
+## Mesh-cap triangulation
 
 `earcut2D` in `viewer.js` adapts Mapbox earcut 2.2.4 and retains its ISC notice
 inside the function, including in the standalone viewer and worker source.
@@ -41,8 +34,8 @@ Draco is released under the **Apache License, Version 2.0**.
 Copyright 2017 The Draco Authors.
 
 A copy of the Apache License, Version 2.0 is included below, as required by
-sections 4(a)–4(d) of that license (it applies to the turbo colormap data,
-the Draco decoder above, and the TypeScript helpers bundled with polygon-clipping).
+sections 4(a)–4(d) of that license (it applies to both the turbo colormap data
+and the Draco decoder above).
 
 ---
 

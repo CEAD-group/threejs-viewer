@@ -1,4 +1,4 @@
-"""Serve or capture the PR #331 review cases. See README.md beside this file."""
+"""Serve or capture reproducible mesh clip-cap cases. See README.md beside this file."""
 
 import argparse
 import base64
@@ -20,21 +20,6 @@ from conftest import frames  # noqa: E402
 from test_clip_caps import _Glb, _box_arrays, _png, _three_box_glb  # noqa: E402
 
 CASES = {
-    "overlap": (
-        "Intersecting solids",
-        "Union area 6.5; no overlapping cap triangles",
-        6.5,
-    ),
-    "collinear": (
-        "Collinear boundaries",
-        "Union area 6; shared edges remain watertight",
-        6,
-    ),
-    "hollow": (
-        "A solid crossing a hollow shell",
-        "Area 13.75; uncovered hole and color gradient survive",
-        13.75,
-    ),
     "replacement": (
         "Replacement position buffer",
         "Width doubles without a version bump; cap area becomes 8",
@@ -127,23 +112,7 @@ def generate():
     pos, _, idx = _box_arrays()
     for name in CASES:
         p, i, c = pos, idx, None
-        if name in ("overlap", "collinear"):
-            p = np.concatenate([pos, pos + [1, 0.5 if name == "overlap" else 0, 0]])
-            i = np.concatenate([idx, idx + len(pos)])
-            c = np.repeat([[1, 0.3, 0.12], [0.12, 0.5, 1]], len(pos), axis=0)
-        elif name == "hollow":
-            p = np.concatenate([pos * 2, pos, pos + [1, 0.25, 0]])
-            i = np.concatenate(
-                [
-                    idx,
-                    idx.reshape(-1, 3)[:, ::-1].ravel() + len(pos),
-                    idx + 2 * len(pos),
-                ]
-            )
-            c = np.column_stack(
-                [(p[:, 0] + 2) / 4, np.full(len(p), 0.5), np.zeros(len(p))]
-            )
-        elif name == "texture":
+        if name == "texture":
             c = np.full_like(pos, 0.5)
         payload = (
             _three_box_glb()
@@ -187,7 +156,7 @@ def serve(args):
                 )
             elif req.path == "/":
                 query = parse_qs(req.query)
-                name = query.get("case", ["overlap"])[0]
+                name = query.get("case", ["replacement"])[0]
                 variant = query.get("variant", ["after"])[0]
                 if name not in cases or variant not in htmls:
                     self.send_error(404)

@@ -127,7 +127,6 @@ def _read_draco_b64(previous: dict) -> dict:
 def build():
     js_content = (VIEWER_DIR / "viewer.js").read_text(encoding="utf-8")
     controls_content = (VIEWER_DIR / "controls.js").read_text(encoding="utf-8")
-    polygon_content = (VIEWER_DIR / "polygon-clipping.js").read_text(encoding="utf-8")
     css_content = (VIEWER_DIR / "viewer.css").read_text(encoding="utf-8")
     html_template = (VIEWER_DIR / "template.html").read_text(encoding="utf-8")
     previous = _previous_blobs()
@@ -142,14 +141,6 @@ def build():
         count=1,
         flags=re.MULTILINE,
     )
-
-    js_content = re.sub(
-        r"^import \{ createPolygonClipper \} from './polygon-clipping\.js';\n",
-        "",
-        js_content,
-        flags=re.MULTILINE,
-    )
-    polygon_inlined = polygon_content.replace("export function ", "function ", 1)
 
     # Strip the `export { ... }` line from controls.js so it inlines as plain code.
     controls_inlined = re.sub(
@@ -173,7 +164,7 @@ def build():
     )
 
     # Prepend controls.js source so ViewerControls is in scope when ThreeJSViewer runs.
-    js_inlined = controls_inlined + "\n" + polygon_inlined + "\n" + js_inlined
+    js_inlined = controls_inlined + "\n" + js_inlined
 
     # Cubemap sets as a JS object literal: {name: {format, faces: {px: ...}}}
     cubemap_js_entries = []

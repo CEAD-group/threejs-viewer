@@ -1,7 +1,6 @@
 // @ts-check
 import * as THREE from 'three';
 import { ViewerControls, isPickTarget } from './controls.js';
-import { createPolygonClipper } from './polygon-clipping.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -5150,9 +5149,6 @@ ${sliceTubeClipCap.toString()}
 
 ${earcut2D.toString()}
 
-${createPolygonClipper.toString()}
-const meshCapPolygons = createPolygonClipper();
-
 const MESH_CAP_HOLE_RATIO = ${MESH_CAP_HOLE_RATIO};
 const MESH_CAP_BOUNDARY_RATIO = ${MESH_CAP_BOUNDARY_RATIO};
 ${sliceMeshClipCap.toString()}
@@ -10154,12 +10150,10 @@ THIS SOFTWARE.
     return triangles;
 }
 
-const meshCapPolygons = createPolygonClipper();
-
 /**
  * A cap's triangles and colours; mesh caps of textured owners add the uv samples per filled region.
  * @typedef {{pos: Float32Array, col: Float32Array | null, reg?: Int32Array, ruv?: Float32Array,
- *   ruvEnd?: Int32Array, rmat?: Uint16Array | null, warning?: string}} ClipCapPiece
+ *   ruvEnd?: Int32Array, rmat?: Uint16Array | null}} ClipCapPiece
  */
 /**
  * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
@@ -10605,53 +10599,38 @@ function sliceMeshClipCap(src, start, end, planes) {
             }
             return inn;
         };
+        /** True when a sample of P's vertices leaves O: P overlaps O's boundary. @param {any} P @param {any} O */
+        const leaves = (P, O) => {
+            const m = P.xy.length / 2, step = Math.max(1, Math.floor(m / 64));
+            for (let i = 0; i < m; i += step) if (!inside(P.xy[i * 2], P.xy[i * 2 + 1], O.xy)) return true;
+            return false;
+        };
         for (let i = 0; i < polys.length; i++) {
             const P = polys[i];
+            // Test from the midpoint of the first edge: a vertex may sit on a touching loop.
             const qx = (P.xy[0] + P.xy[2]) / 2, qy = (P.xy[1] + P.xy[3]) / 2;
             for (let j = i - 1; j >= 0; j--) {
                 const O = polys[j], b = O.box;
-                if (P.box[0] < b[0] || P.box[2] > b[2] || P.box[1] < b[1] || P.box[3] > b[3]) continue;
+                if (qx < b[0] || qx > b[2] || qy < b[1] || qy > b[3]) continue;
                 if (!inside(qx, qy, O.xy)) continue;
-                // Vertices alone miss edges crossing a concavity. Reject proper
-                // edge crossings too, without a costly boolean for every nesting.
-                let contained = true;
-                for (let k = 0; k < P.xy.length; k += 2) {
-                    if (!inside(P.xy[k], P.xy[k + 1], O.xy)) { contained = false; break; }
-                    const l = (k + 2) % P.xy.length;
-                    const ax = P.xy[k], ay = P.xy[k + 1], bx = P.xy[l], by = P.xy[l + 1];
-                    for (let m = 0; m < O.xy.length; m += 2) {
-                        const n = (m + 2) % O.xy.length;
-                        const cx = O.xy[m], cy = O.xy[m + 1], dx = O.xy[n], dy = O.xy[n + 1];
-                        if (Math.max(ax, bx) < Math.min(cx, dx) || Math.max(cx, dx) < Math.min(ax, bx)
-                            || Math.max(ay, by) < Math.min(cy, dy) || Math.max(cy, dy) < Math.min(ay, by)) continue;
-                        const a = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-                        const b = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
-                        const c = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
-                        const d = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
-                        if (a * b < 0 && c * d < 0) { contained = false; break; }
-                    }
-                    if (!contained) break;
-                }
-                if (!contained) continue;
                 P.parent = O;
                 break;
             }
             const O = P.parent;
             if (oriented) {
-                P.flip = O ? O.flip : P.sign;
-                P.outer = P.sign * P.flip > 0;
-                // Keep positive contours even inside another body: they may
-                // fill part of that body's hole. Overlaps are removed below.
-                if (!P.outer) {
-                    // Ownership is inferred from contour nesting, not source
-                    // solids. Multiple independently hollow bodies with nested
-                    // negative loops remain ambiguous after merging into one mesh.
-                    let host = O;
-                    while (host && !host.outer) host = host.parent;
-                    if (host) host.holes.push(P);
-                }
+                // Winding number, with a body wound inside out flipped by its outermost loop.
+                if (!O) { P.flip = P.sign; P.depth = 1; P.outer = true; continue; }
+                P.flip = O.flip;
+                P.depth = O.depth + P.sign * P.flip;
+                let host = O;
+                while (host && !host.outer) host = host.parent;
+                if (P.depth > 0) {
+                    // Inside filled area it is covered, unless it pokes out of its filler.
+                    P.outer = O.depth <= 0 || !host || leaves(P, host);
+                } else if (O.depth > 0 && host && !leaves(P, host)) host.holes.push(P);
             } else {
                 P.depth = O ? O.depth + 1 : 0;
+                if (P.depth & 1 && O && leaves(P, O)) P.depth = 0;
                 P.outer = !(P.depth & 1);
                 if (!P.outer && O) O.holes.push(P);
             }
@@ -10663,10 +10642,6 @@ function sliceMeshClipCap(src, start, end, planes) {
         /** @type {number[]} */ const ruv = [];
         /** @type {number[]} */ const ruvEnd = [];
         /** @type {number[]} */ const rmat = [];
-        // Each region keeps its own interpolated colors and texture samples.
-        // Subtract earlier filled regions so their shared area is drawn once.
-        /** @type {{shape: number[][][], box: number[], holes: any[]}[]} */ const covered = [];
-        let warning = '';
         for (const O of polys) {
             if (!O.outer) continue;
             const parts = [O, ...O.holes];
@@ -10681,129 +10656,7 @@ function sliceMeshClipCap(src, start, end, planes) {
                 for (const p of part.pts) ids.push(p);
             }
             const tris = earcut2D(data, holeIdx);
-            const shape = parts.map((part) => Array.from({ length: part.xy.length / 2 },
-                (_, i) => [part.xy[i * 2], part.xy[i * 2 + 1]]));
-            const b = O.box;
-            const clips = covered.filter((q) => q.box[0] < b[2] && q.box[2] > b[0]
-                && q.box[1] < b[3] && q.box[3] > b[1]
-                // An island wholly inside an earlier hole has no shared fill.
-                && !q.holes.some(h => {
-                    for (let p = O.parent; p; p = p.parent) if (p === h) return true;
-                    return false;
-                }));
-            covered.push({ shape, box: b, holes: O.holes });
-            let remainder = null;
-            if (clips.length) {
-                try {
-                    remainder = meshCapPolygons.difference(shape, ...clips.map((q) => q.shape));
-                } catch (error) {
-                    // Near-coincident intersections can defeat the sweep line.
-                    // Retry on a grid much finer than the slice weld tolerance.
-                    const step = radius * 1e-9;
-                    /** @param {number[][][]} polygon */
-                    const snapped = polygon => polygon.map(ring => ring.map(p => p.map(x => Math.round(x / step) * step)));
-                    try {
-                        remainder = meshCapPolygons.difference(snapped(shape), ...clips.map(q => snapped(q.shape)));
-                    } catch (_) {
-                        // Keep this region's original cap. Occasional overlapping
-                        // faces are preferable to losing every cap of the mesh.
-                        warning = `overlap subtraction failed; using unsubtracted region (${String(error)})`;
-                    }
-                }
-            }
-            if (remainder) {
-                // New intersection vertices inherit the original cap's piecewise
-                // linear colors, including where another region cuts its interior.
-                /** @type {Map<string, number[]>} */ const colorCache = new Map();
-                if (col) for (let i = 0; i < ids.length; i++) {
-                    colorCache.set(`${data[i * 2]},${data[i * 2 + 1]}`, PC.slice(ids[i] * 3, ids[i] * 3 + 3));
-                }
-                // A lazy AABB tree bounds triangle searches for newly introduced
-                // vertices. Unchanged loop points are constant-time map lookups.
-                /** @type {any} */ let colorTree;
-                /** @param {number[]} faces @returns {any} */
-                const buildTree = faces => {
-                    const box = [Infinity, Infinity, -Infinity, -Infinity];
-                    for (const f of faces) for (let k = 0; k < 3; k++) {
-                        const v = tris[f + k], x = data[v * 2], y = data[v * 2 + 1];
-                        box[0] = Math.min(box[0], x); box[1] = Math.min(box[1], y);
-                        box[2] = Math.max(box[2], x); box[3] = Math.max(box[3], y);
-                    }
-                    if (faces.length <= 8) return { box, faces };
-                    const axis = box[2] - box[0] > box[3] - box[1] ? 0 : 1;
-                    /** @param {number} f */
-                    const center = f => data[tris[f] * 2 + axis] + data[tris[f + 1] * 2 + axis] + data[tris[f + 2] * 2 + axis];
-                    faces.sort((a, b) => center(a) - center(b));
-                    const mid = faces.length >> 1;
-                    return { box, left: buildTree(faces.slice(0, mid)), right: buildTree(faces.slice(mid)) };
-                };
-                /** @param {number} x @param {number} y */
-                const colorAt = (x, y) => {
-                    const key = `${x},${y}`, known = colorCache.get(key);
-                    if (known) return known;
-                    if (!colorTree) colorTree = buildTree(Array.from({ length: tris.length / 3 }, (_, i) => i * 3));
-                    const stack = [colorTree];
-                    let result;
-                    while (stack.length && !result) {
-                        const node = stack.pop(), box = node.box;
-                        const e = radius * 1e-7;
-                        if (x < box[0] - e || y < box[1] - e || x > box[2] + e || y > box[3] + e) continue;
-                        if (!node.faces) { stack.push(node.left, node.right); continue; }
-                        for (const f of node.faces) {
-                            const a = tris[f], b = tris[f + 1], c = tris[f + 2];
-                            const ax = data[a * 2], ay = data[a * 2 + 1];
-                            const bx = data[b * 2], by = data[b * 2 + 1];
-                            const cx = data[c * 2], cy = data[c * 2 + 1];
-                            const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-                            if (!den) continue;
-                            const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / den;
-                            const v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / den;
-                            const w = 1 - u - v;
-                            if (u < -1e-7 || v < -1e-7 || w < -1e-7) continue;
-                            result = [0, 1, 2].map(k => u * PC[ids[a] * 3 + k]
-                                + v * PC[ids[b] * 3 + k] + w * PC[ids[c] * 3 + k]);
-                            break;
-                        }
-                    }
-                    if (!result) {
-                        // A rounded boundary point may lie outside the source.
-                        let best = 0, distance = Infinity;
-                        for (let i = 0; i < ids.length; i++) {
-                            const d = (data[i * 2] - x) ** 2 + (data[i * 2 + 1] - y) ** 2;
-                            if (d < distance) { best = i; distance = d; }
-                        }
-                        result = PC.slice(ids[best] * 3, ids[best] * 3 + 3);
-                    }
-                    colorCache.set(key, result);
-                    return result;
-                };
-                for (const polygon of remainder) {
-                    /** @type {number[]} */ const xy = [];
-                    /** @type {number[]} */ const holes = [];
-                    for (let r = 0; r < polygon.length; r++) {
-                        if (r) holes.push(xy.length / 2);
-                        // Boolean output rings repeat the starting point.
-                        for (let i = 0; i < polygon[r].length - 1; i++) xy.push(...polygon[r][i]);
-                    }
-                    const faces = earcut2D(xy, holes);
-                    const colors = col ? Array.from({ length: xy.length / 2 }, (_, i) => colorAt(xy[i * 2], xy[i * 2 + 1])) : null;
-                    for (let f = 0; f < faces.length; f += 3) {
-                        const a = faces[f];
-                        let b = faces[f + 1], c = faces[f + 2];
-                        if ((xy[b * 2] - xy[a * 2]) * (xy[c * 2 + 1] - xy[a * 2 + 1])
-                            - (xy[b * 2 + 1] - xy[a * 2 + 1]) * (xy[c * 2] - xy[a * 2]) > 0) {
-                            const swap = b; b = c; c = swap;
-                        }
-                        for (const v of [a, b, c]) {
-                            const x = xy[v * 2], y = xy[v * 2 + 1];
-                            tp.push(x * basis[0] + y * basis[3] - c0 * nx,
-                                x * basis[1] + y * basis[4] - c0 * ny,
-                                x * basis[2] + y * basis[5] - c0 * nz);
-                            if (colors) tc.push(...colors[v]);
-                        }
-                    }
-                }
-            } else for (let f = 0; f < tris.length; f += 3) {
+            for (let f = 0; f < tris.length; f += 3) {
                 const a = tris[f];
                 let b = tris[f + 1], cc = tris[f + 2];
                 const ccw = (data[b * 2] - data[a * 2]) * (data[cc * 2 + 1] - data[a * 2 + 1])
@@ -10830,7 +10683,6 @@ function sliceMeshClipCap(src, start, end, planes) {
                 reg: new Int32Array(reg), ruv: new Float32Array(ruv), ruvEnd: new Int32Array(ruvEnd),
                 rmat: tmat ? new Uint16Array(rmat) : null }
             : { pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
-        if (warning) out[out.length - 1].warning = warning;
     }
     return out;
 }
@@ -11339,8 +11191,6 @@ class ClipCapController {
      * @param {ClipCapPiece[]} results @param {number[][]} local
      */
     _install(mesh, st, results, local) {
-        const warning = results.find(r => r.warning)?.warning;
-        if (warning) this._warn(mesh, warning);
         const planes = this.v._clipPlanes;
         const n = Math.min(planes.length, results.length);
         for (let i = 0; i < n; i++) {

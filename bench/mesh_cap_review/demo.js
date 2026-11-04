@@ -86,9 +86,8 @@
     if (external && q.get('section') !== '1') v.handleMessage({type:'disable_clipping_plane'});
     v.getMenu('clip').close();
     const wide = DEMO.case === 'layouts';
-    const distance = wide ? 25 : DEMO.case === 'hollow' || external ? 17 : 13;
-    const x = ['overlap','collinear'].includes(DEMO.case) ? 0.5 : 0;
-    v.handleMessage({type:'set_camera',position:[x,-distance*0.36,distance],target:[x,0,0],up:[0,0,1],fov:25});
+    const distance = wide ? 25 : external ? 17 : 13;
+    v.handleMessage({type:'set_camera',position:[0,-distance*0.36,distance],target:[0,0,0],up:[0,0,1],fov:25});
     await frames(); await wait(() => v._clipCaps.settled()); await frames();
     if (DEMO.case === 'replacement') {
         for (const n of meshes) {

@@ -190,10 +190,10 @@ def test_touching_sheet_does_not_disable_solid_cap(viewer_client, viewer_page, w
 
 
 @pytest.mark.parametrize("worker", [False, True])
-@pytest.mark.parametrize("offset, expected", [([1, 0.5, 0], 6.5), ([1, 0, 0], 6.0)])
+@pytest.mark.parametrize("offset", [[1, 0.5, 0], [1, 0, 0]])
 @pytest.mark.parametrize("reversed_winding", [False, True])
-def test_overlapping_boxes_have_union_cap_area(
-    viewer_client, viewer_page, worker, offset, expected, reversed_winding
+def test_overlapping_boxes_both_keep_their_cap(
+    viewer_client, viewer_page, worker, offset, reversed_winding
 ):
     pos, _, idx = _box_arrays()
     if reversed_winding:
@@ -203,9 +203,9 @@ def test_overlapping_boxes_have_union_cap_area(
         "m", np.concatenate([pos, other]), np.concatenate([idx, idx + len(pos)])
     )
     _clip(viewer_client, viewer_page, worker)
-    # Account for the shared rectangle exactly, including collinear boundaries.
+    # Each solid keeps its full region; the shared area is drawn twice, not lost.
     cap = _caps(viewer_page, "m")[0]
-    assert cap["area"] == pytest.approx(expected)
+    assert cap["area"] == pytest.approx(8)
     assert cap["dist"][0] < 1e-5
 
 
@@ -225,15 +225,15 @@ def test_overlapping_cap_preserves_holes_and_vertex_colors(
             pi + len(outer) + len(inner),
         ]
     )
-    # A linear gradient has the same value whichever source triangle contains a
-    # newly created intersection vertex. The uncovered hole must remain empty.
+    # The uncovered hole must remain empty. The plug overlaps filled area, so
+    # without polygon booleans it is not drawn, including its part in the hole.
     colors = np.zeros_like(pos)
     colors[:, 0] = (pos[:, 0] + 2) / 4
     colors[:, 1] = 0.5
     viewer_client.add_mesh("m", pos, idx, colors=colors)
     _clip(viewer_client, viewer_page, worker)
     cap = _caps(viewer_page, "m")[0]
-    assert cap["area"] == pytest.approx(12 + 1.75)
+    assert cap["area"] == pytest.approx(12)
     error = viewer_page.evaluate("""() => {
         const cap = window.threejsViewer.getObject('m').userData.__clipCapState.caps[0];
         const p = cap.geometry.getAttribute('position'), c = cap.geometry.getAttribute('color');
