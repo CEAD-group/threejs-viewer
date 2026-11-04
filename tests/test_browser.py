@@ -10677,6 +10677,100 @@ def test_mesh_binary_honours_depth_fields(viewer_client, viewer_page):
     assert _material_flags(viewer_page, "ov")["depthWrite"] is False
 
 
+def _uv_sphere(radius=1.0, center=(0.0, 0.0, 0.0), n=48):
+    """Positions, normals and indices of a closed UV sphere."""
+    theta = np.linspace(0, np.pi, n + 1)
+    phi = np.linspace(0, 2 * np.pi, 2 * n + 1)
+    t, p = np.meshgrid(theta, phi, indexing="ij")
+    normals = np.stack([np.sin(t) * np.cos(p), np.sin(t) * np.sin(p), np.cos(t)], -1)
+    normals = normals.reshape(-1, 3).astype(np.float32)
+    positions = (normals * radius + np.asarray(center, np.float32)).astype(np.float32)
+    cols = 2 * n + 1
+    quads = []
+    for i in range(n):
+        for j in range(2 * n):
+            a, b = i * cols + j, i * cols + j + 1
+            c, d = a + cols, b + cols
+            quads += [a, c, b, b, c, d]
+    return positions, normals, np.asarray(quads, np.uint32)
+
+
+@pytest.mark.browser
+def test_mesh_grazing_opacity_is_introspectable_and_unset_is_unpatched(
+    viewer_client, viewer_page
+):
+    """grazing_opacity lands in material.userData and patches the program;
+    without it the program key carries no grazing patch, so nothing changes."""
+    pos, nrm, idx = _uv_sphere(n=8)
+    viewer_client.add_mesh("g", pos, idx, normals=nrm, opacity=0.2, grazing_opacity=0.9)
+    viewer_client.add_mesh("plain", pos, idx, normals=nrm, opacity=0.2)
+    settle(viewer_client)
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " const read = (id) => { const m = v.getObject(id).material;"
+        "  return {g: m.userData.grazingOpacity ?? null, p: m.userData.grazingPower ?? null,"
+        "   key: m.customProgramCacheKey(), transparent: m.transparent,"
+        "   depthWrite: m.depthWrite}; };"
+        " return {g: read('g'), plain: read('plain')}; }"
+    )
+    assert state["g"]["g"] == pytest.approx(0.9) and state["g"]["p"] == 2
+    assert "tjsv-grazing-opacity-v1" in state["g"]["key"]
+    assert state["g"]["transparent"] is True and state["g"]["depthWrite"] is False
+    assert state["plain"]["g"] is None
+    assert "grazing" not in state["plain"]["key"]
+
+    viewer_client.set_opacity("g", 0.4)
+    settle(viewer_client)
+    kept = viewer_page.evaluate(
+        "() => window.threejsViewer.getObject('g').material.userData.grazingOpacity"
+    )
+    assert kept == pytest.approx(0.9)
+
+
+@pytest.mark.browser
+def test_mesh_grazing_opacity_thickens_the_rim_only(viewer_client, viewer_page):
+    """Head-on the grazing sphere matches the constant-alpha one; near its
+    silhouette it is far more opaque."""
+    viewer_client.set_camera(position=[0, 0, 20], target=[0, 0, 5], up=[0, 1, 0])
+    red = 0xFF0000
+    for mesh_id, cx, grazing in (("plain", -1.6, None), ("g", 1.6, 0.95)):
+        pos, nrm, idx = _uv_sphere(center=(cx, 0.0, 5.0))
+        viewer_client.add_mesh(
+            mesh_id,
+            pos,
+            idx,
+            normals=nrm,
+            color=red,
+            opacity=0.1,
+            grazing_opacity=grazing,
+            grazing_power=1.0,
+            pickable=False,
+        )
+    settle(viewer_client)
+    frames(viewer_page)
+    # Head-on: the point facing the camera. Rim: a surface point near the
+    # silhouette (normal ~76 degrees from the view axis).
+    samples = []
+    for cx in (-1.6, 1.6):
+        samples += [[cx, 0.0, 6.0], [cx, 0.97, 5.0 + np.sqrt(1 - 0.97**2)]]
+    redness = viewer_page.evaluate(
+        "(pts) => { const v = window.threejsViewer;"
+        " v._renderer.render(v._scene, v._camera);"
+        " const gl = v._renderer.getContext();"
+        " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
+        " const px = new Uint8Array(4);"
+        " return pts.map(([x, y, z]) => {"
+        "  const p = v._camera.position.clone().set(x, y, z).project(v._camera);"
+        "  gl.readPixels(Math.round((p.x + 1) / 2 * w), Math.round((p.y + 1) / 2 * h),"
+        "                1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);"
+        "  return px[0] - (px[1] + px[2]) / 2; }); }",
+        samples,
+    )
+    plain_center, plain_rim, g_center, g_rim = redness
+    assert abs(g_center - plain_center) <= 6, redness
+    assert g_rim > plain_rim + 60, redness
+
+
 def _near_far(page):
     return page.evaluate(
         "() => { const v = window.threejsViewer;"

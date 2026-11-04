@@ -2208,6 +2208,8 @@ class ViewerClient:
         depth_write: Optional[bool] = None,
         polygon_offset: Optional[float] = None,
         polygon_offset_units: float = 1.0,
+        grazing_opacity: Optional[float] = None,
+        grazing_power: float = 2.0,
     ) -> None:
         """
         Add a pre-built triangle mesh to the scene.
@@ -2236,6 +2238,17 @@ class ViewerClient:
                 survives ``set_opacity``/``set_color``.
             polygon_offset: With ``polygon_offset_units``, separates coplanar
                 overlays in depth (issue #227).
+            grazing_opacity: Opacity (0-1) the surface reaches where it is
+                seen edge-on. Per fragment the alpha becomes
+                ``mix(alpha, grazing_opacity, (1 - |n.v|) ** grazing_power)``,
+                with ``n`` the surface normal and ``v`` the view direction, so
+                a translucent solid stays faint head-on and thickens toward
+                its silhouette. Only visible while the mesh is translucent;
+                ``transparent`` and the depth-write rule are unchanged, and
+                it survives ``set_opacity``. ``None`` (default) keeps constant
+                alpha.
+            grazing_power: Falloff exponent (> 0) of ``grazing_opacity``;
+                higher keeps the head-on alpha over more of the surface.
 
         Per-vertex alpha: pass ``colors`` as (N, 4); the header then carries
         ``vertexColorComponents: 4`` with RGBA interleaved per vertex.
@@ -2310,6 +2323,19 @@ class ViewerClient:
         _apply_material_flags(
             header, False, None, depth_write, polygon_offset, polygon_offset_units
         )
+        if grazing_opacity is not None:
+            grazing_opacity = float(grazing_opacity)
+            grazing_power = float(grazing_power)
+            if not (0.0 <= grazing_opacity <= 1.0):
+                raise ValueError(
+                    f"grazing_opacity must be in [0, 1], got {grazing_opacity}"
+                )
+            if not math.isfinite(grazing_power) or grazing_power <= 0:
+                raise ValueError(
+                    f"grazing_power must be finite and > 0, got {grazing_power}"
+                )
+            header["grazingOpacity"] = grazing_opacity
+            header["grazingPower"] = grazing_power
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
