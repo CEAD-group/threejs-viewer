@@ -16,6 +16,7 @@ from .animation import (
     merge_animation_points,
     toolpath_frame_times,
 )
+from . import vector
 from .client import ViewerClient, viewer
 from .toolpath import Toolpath
 
@@ -29,6 +30,7 @@ __all__ = [
     "merge_animation_points",
     "toolpath_frame_times",
     "Toolpath",
+    "vector",
 ]
 
 try:

@@ -4233,6 +4233,8 @@ function applyHighlight(obj, enabled, opts = {}) {
         // existing highlight outlines themselves (the hull is a Mesh too).
         if (child.userData.isGrid || child.userData.isWireOverlay
             || child.userData.__highlightOutline || child.userData.__clipCap) return;
+        // A vector bucket is a LineSegments2: its geometry is one instanced quad.
+        if (child.userData.__vectorLine) return;
         // An embedder overlay riding the object is not part of the selection.
         if (isUnderOverlay(child)) return;
         const style = resolveHighlightStyle(child, wantStyle);
@@ -10022,6 +10024,8 @@ class ShadingDebugController {
         if (!obj.isMesh) return;
         if (obj.userData.isWireOverlay) return;
         if (obj.userData.isGrid) return;
+        // Vector-entity lines are instanced quads, not a surface to wire.
+        if (obj.userData.__vectorLine) return;
         // Selection-silhouette hulls are Meshes (issue #165) — wireframing
         // one would draw the whole extruded shell as a wire cage.
         if (obj.userData.__highlightOutline) return;
@@ -10276,7 +10280,7 @@ class ShadingDebugController {
         // Selection-silhouette hulls are Meshes (issue #165): a material swap
         // would turn the outline into a solid shell. Same for primitive outlines.
         return !(ud.isWireOverlay || ud.isDebugHelper || ud.isGrid
-            || ud.__highlightOutline || ud.__primitiveOutline || ud.__clipCap)
+            || ud.__highlightOutline || ud.__primitiveOutline || ud.__clipCap || ud.__vectorLine)
             && !isUnderOverlay(obj);
     }
 
@@ -14942,6 +14946,1124 @@ class DimensionController {
     }
 }
 
+// ========== Vector entities (DXF-style curves) ==========
+// Exact curves — lines, polylines with DXF bulges, circles, arcs, ellipses
+// and NURBS splines — plus points, kept as their definitions and
+// re-tessellated as the camera moves, so a curve stays within about half a
+// pixel of its true shape at any zoom.
+//
+// Styling follows DXF. Every entity sits on a named layer (default "0");
+// colour, linetype and line width fall back to the layer's (BYLAYER), and a
+// linetype is a dash pattern in scene units (positive dash, negative gap,
+// 0 dot), restarted at the start of each entity. Layers and linetypes are
+// viewer-wide tables: toggling a layer hides it in every vector object.
+//
+// One `add_object` of kind `vector` holds any number of entities. Entities
+// that share layer, linetype and width share one LineSegments2 (a bucket),
+// so a drawing of thousands of entities is a handful of draw calls and a
+// layer toggle is a visibility flip.
+//
+// Refinement: each entity is tessellated for a chord tolerance quantised to
+// a power of two (`levels`, log2 of the tolerance in local units). A bucket
+// is rebuilt only when one of its entities needs a finer tolerance than it
+// has, or one at least four times coarser, never on every frame.
+
+const VECTOR_TOLERANCE_PX = 0.5;
+const VECTOR_MAX_SEGMENTS = 8192;   // per curve piece
+const VECTOR_MAX_DEGREE = 32;       // de Boor is O(degree²) per sample
+const VECTOR_RECHECK_MS = 250;      // re-check even when the camera is still (animated parents)
+const VECTOR_PATTERN_MAX = 12;
+const VECTOR_DEFAULT_COLOR = 0xffffff;
+const VECTOR_DEFAULT_WIDTH = 2;
+
+// acadiso.lin patterns (millimetres) expressed in metres, the viewer's unit.
+/** @type {Record<string, number[]>} */
+const VECTOR_BUILTIN_LINETYPES = {
+    CONTINUOUS: [],
+    DASHED: [12.7, -6.35],
+    HIDDEN: [6.35, -3.175],
+    CENTER: [31.75, -6.35, 6.35, -6.35],
+    PHANTOM: [31.75, -6.35, 6.35, -6.35, 6.35, -6.35],
+    DOT: [0, -6.35],
+    DASHDOT: [12.7, -6.35, 0, -6.35],
+    BORDER: [12.7, -6.35, 12.7, -6.35, 0, -6.35],
+    DIVIDE: [12.7, -6.35, 0, -6.35, 0, -6.35],
+};
+for (const k of Object.keys(VECTOR_BUILTIN_LINETYPES)) {
+    VECTOR_BUILTIN_LINETYPES[k] = VECTOR_BUILTIN_LINETYPES[k].map((v) => v / 1000);
+}
+
+/**
+ * AutoCAD Color Index → 0xRRGGBB. 1–9 are the named colours, 10–249 a
+ * hue wheel (24 hues × 5 values, odd indices half-saturated), 250–255 greys.
+ * @param {number} i @returns {number | undefined}
+ */
+function aciToHex(i) {
+    if (!Number.isInteger(i) || i < 1 || i > 255) return undefined;
+    const named = [0, 0xff0000, 0xffff00, 0x00ff00, 0x00ffff, 0x0000ff, 0xff00ff, 0xffffff, 0x808080, 0xc0c0c0];
+    if (i <= 9) return named[i];
+    if (i >= 250) return [0x333333, 0x505050, 0x696969, 0x828282, 0xbebebe, 0xffffff][i - 250];
+    const hue = (Math.floor(i / 10) - 1) * 15;
+    const sub = i % 10;
+    const value = [1, 0.65, 0.5, 0.3, 0.15][sub >> 1];
+    const sat = sub % 2 ? 0.5 : 1;
+    const f = (/** @type {number} */ n) => {
+        const k = (n + hue / 60) % 6;
+        // Truncating matches AutoCAD's table (ACI 12 = A50000, 13 = A55252).
+        return Math.floor(255 * value * (1 - sat * Math.max(0, Math.min(k, 4 - k, 1))));
+    };
+    return (f(5) << 16) | (f(3) << 8) | f(1);
+}
+
+/**
+ * A colour as entities and layers accept it: 0xRRGGBB, `{aci: n}`,
+ * `{rgb: [r, g, b]}` (0–1, sRGB) or `"BYBLOCK"`. Anything else (including
+ * `"BYLAYER"`) means unset.
+ * @param {any} c @returns {number | 'BYBLOCK' | undefined}
+ */
+function normalizeVectorColor(c) {
+    if (typeof c === 'number' && Number.isFinite(c)) return c;
+    if (typeof c === 'string') return c.toUpperCase() === 'BYBLOCK' ? 'BYBLOCK' : undefined;
+    if (c && typeof c === 'object') {
+        if ('aci' in c) return aciToHex(c.aci);
+        if (Array.isArray(c.rgb) && c.rgb.length === 3 && c.rgb.every((v) => Number.isFinite(v))) {
+            const [r, g, b] = c.rgb.map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255));
+            return (r << 16) | (g << 8) | b;
+        }
+    }
+    return undefined;
+}
+
+/** @param {any} v @param {string} what @returns {number} */
+function vectorNum(v, what) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`${what} must be a finite number`);
+    return v;
+}
+
+/** @param {any} v @param {string} what @returns {THREE.Vector3} */
+function vectorVec3(v, what) {
+    if (!Array.isArray(v) || v.length !== 3 || !v.every((x) => typeof x === 'number' && Number.isFinite(x))) {
+        throw new Error(`${what} must be three finite numbers`);
+    }
+    return new THREE.Vector3(v[0], v[1], v[2]);
+}
+
+/** Flat [x, y, z, x, y, z, ...] → points. @param {any} v @param {string} what @param {number} min */
+function vectorPointList(v, what, min) {
+    if (!Array.isArray(v) || v.length % 3 !== 0 || v.length / 3 < min) {
+        throw new Error(`${what} must be a flat list of at least ${min} xyz triples`);
+    }
+    const pts = [];
+    for (let i = 0; i < v.length; i += 3) {
+        const x = v[i], y = v[i + 1], z = v[i + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+            throw new Error(`${what} has a non-finite coordinate`);
+        }
+        pts.push(new THREE.Vector3(x, y, z));
+    }
+    return pts;
+}
+
+/**
+ * The plane basis DXF derives from an extrusion direction (the "arbitrary
+ * axis algorithm"), so arc angles here mean what they mean in a DXF file.
+ * @param {any} normal @returns {{n: THREE.Vector3, ax: THREE.Vector3, ay: THREE.Vector3}}
+ */
+function vectorPlaneBasis(normal) {
+    const n = normal === undefined || normal === null
+        ? new THREE.Vector3(0, 0, 1) : vectorVec3(normal, 'normal');
+    if (!(n.lengthSq() > 0)) throw new Error('normal must be non-zero');
+    n.normalize();
+    const ax = (Math.abs(n.x) < 1 / 64 && Math.abs(n.y) < 1 / 64)
+        ? new THREE.Vector3(0, 1, 0).cross(n) : new THREE.Vector3(0, 0, 1).cross(n);
+    ax.normalize();
+    const ay = new THREE.Vector3().crossVectors(n, ax);
+    return { n, ax, ay };
+}
+
+/**
+ * Segments for an elliptical/circular piece of radius `r` (the larger semi
+ * axis: parametric sampling of an ellipse has its worst chord error at the
+ * major axis, where it matches a circle of that radius).
+ * @param {number} r @param {number} sweep @param {number} tol
+ */
+function vectorArcSegments(r, sweep, tol) {
+    const s = Math.abs(sweep);
+    const floor = Math.max(1, Math.ceil(s / (Math.PI / 2)));
+    if (!(r > 0) || tol >= r) return floor;
+    const step = 2 * Math.acos(1 - tol / r);
+    return Math.min(VECTOR_MAX_SEGMENTS, Math.max(floor, Math.ceil(s / step)));
+}
+
+/**
+ * Prepare a NURBS curve: validated control points, weights and knots, plus
+ * per knot span a bound on the second derivative (in the span's normalised
+ * parameter) that sets its segment count for a chord tolerance.
+ * @param {any} e
+ */
+function prepareVectorNurbs(e) {
+    const p = e.degree === undefined ? 3 : e.degree;
+    if (!Number.isInteger(p) || p < 1 || p > VECTOR_MAX_DEGREE) {
+        throw new Error(`degree must be an integer from 1 to ${VECTOR_MAX_DEGREE}`);
+    }
+    let P = vectorPointList(e.controlPoints, 'controlPoints', p + 1);
+    let W;
+    if (e.weights !== undefined && e.weights !== null) {
+        if (!Array.isArray(e.weights) || e.weights.length !== P.length) {
+            throw new Error('weights must have one value per control point');
+        }
+        W = e.weights.map((w, i) => {
+            if (!(vectorNum(w, `weights[${i}]`) > 0)) throw new Error('weights must be positive');
+            return w;
+        });
+    } else {
+        W = P.map(() => 1);
+    }
+    let U;
+    if (e.knots !== undefined && e.knots !== null) {
+        if (!Array.isArray(e.knots) || e.knots.length !== P.length + p + 1) {
+            throw new Error(`knots must have controlPoints + degree + 1 = ${P.length + p + 1} values`);
+        }
+        U = e.knots.map((k, i) => vectorNum(k, `knots[${i}]`));
+        for (let i = 1; i < U.length; i++) {
+            if (U[i] < U[i - 1]) throw new Error('knots must be non-decreasing');
+        }
+    } else if (e.closed) {
+        // Periodic: wrap the first `degree` control points over a uniform
+        // unclamped knot vector, so the curve closes with full continuity.
+        P = P.concat(P.slice(0, p).map((v) => v.clone()));
+        W = W.concat(W.slice(0, p));
+        U = Array.from({ length: P.length + p + 1 }, (_, i) => i);
+    } else {
+        const n = P.length;
+        U = [];
+        for (let i = 0; i <= p; i++) U.push(0);
+        for (let i = 1; i < n - p; i++) U.push(i);
+        for (let i = 0; i <= p; i++) U.push(n - p);
+    }
+    const curve = { p, P, W, U, scratch: new Float64Array(4 * (p + 1)) };
+    const spans = [];
+    const q = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    const d2 = new THREE.Vector3();
+    const SAMPLES = 16;
+    for (let k = p; k < P.length; k++) {
+        const u0 = U[k], u1 = U[k + 1];
+        if (!(u1 > u0)) continue;
+        // Second differences of a fine sampling estimate max |C''| over the
+        // span in its normalised parameter; robust for rational curves too.
+        let m = 0;
+        nurbsPoint(curve, k, u0, q[0]);
+        nurbsPoint(curve, k, u0 + (u1 - u0) / SAMPLES, q[1]);
+        for (let s = 2; s <= SAMPLES; s++) {
+            nurbsPoint(curve, k, u0 + (u1 - u0) * s / SAMPLES, q[2]);
+            d2.copy(q[2]).sub(q[1]).sub(q[1]).add(q[0]);
+            m = Math.max(m, d2.length() * SAMPLES * SAMPLES);
+            q[0].copy(q[1]); q[1].copy(q[2]);
+        }
+        spans.push({ k, u0, u1, m });
+    }
+    if (spans.length === 0) throw new Error('knots leave the curve with an empty domain');
+    return { k: 'nurbs', curve, spans };
+}
+
+/**
+ * Evaluate a NURBS curve at `u` in knot span `k` (de Boor on homogeneous
+ * coordinates).
+ * @param {any} c @param {number} k @param {number} u @param {THREE.Vector3} out
+ */
+function nurbsPoint(c, k, u, out) {
+    const { p, P, W, U, scratch: d } = c;
+    for (let j = 0; j <= p; j++) {
+        const i = k - p + j, w = W[i], o = 4 * j;
+        d[o] = P[i].x * w; d[o + 1] = P[i].y * w; d[o + 2] = P[i].z * w; d[o + 3] = w;
+    }
+    for (let r = 1; r <= p; r++) {
+        for (let j = p; j >= r; j--) {
+            const i = k - p + j;
+            const den = U[i + p - r + 1] - U[i];
+            const a = den > 0 ? (u - U[i]) / den : 0;
+            const o = 4 * j, o1 = 4 * (j - 1);
+            for (let c4 = 0; c4 < 4; c4++) d[o + c4] = (1 - a) * d[o1 + c4] + a * d[o + c4];
+        }
+    }
+    const o = 4 * p;
+    return out.set(d[o] / d[o + 3], d[o + 1] / d[o + 3], d[o + 2] / d[o + 3]);
+}
+
+/**
+ * Validate one entity and turn it into pieces the tessellator walks:
+ * straight segments, elliptical arcs `c + u·cos t + v·sin t`, NURBS spans.
+ * Throws an Error naming the problem; the caller skips that entity.
+ * @param {any} e
+ */
+function prepareVectorEntity(e) {
+    if (!e || typeof e !== 'object') throw new Error('entity must be an object');
+    /** @type {any[]} */ const pieces = [];
+    /** @type {THREE.Vector3[] | null} */ let points = null;
+    const box = new THREE.Box3();
+    switch (e.type) {
+        case 'point':
+            points = [vectorVec3(e.position, 'position')];
+            break;
+        case 'points':
+            points = vectorPointList(e.positions, 'positions', 1);
+            break;
+        case 'line':
+            pieces.push({ k: 'seg', a: vectorVec3(e.start, 'start'), b: vectorVec3(e.end, 'end') });
+            break;
+        case 'polyline': {
+            const V = vectorPointList(e.vertices, 'vertices', 2);
+            const closed = e.closed === true;
+            const nEdges = closed ? V.length : V.length - 1;
+            let bulges = null;
+            if (e.bulges !== undefined && e.bulges !== null) {
+                if (!Array.isArray(e.bulges) || e.bulges.length < nEdges) {
+                    throw new Error(`bulges must have one value per edge (${nEdges})`);
+                }
+                bulges = e.bulges.map((b, i) => vectorNum(b, `bulges[${i}]`));
+            }
+            const { n } = vectorPlaneBasis(e.normal);
+            for (let i = 0; i < nEdges; i++) {
+                const a = V[i], b = V[(i + 1) % V.length];
+                const bulge = bulges ? bulges[i] : 0;
+                const chord = b.clone().sub(a);
+                const c = chord.length();
+                if (Math.abs(bulge) < 1e-12 || c === 0) {
+                    pieces.push({ k: 'seg', a, b });
+                    continue;
+                }
+                // Bulge = tan(θ/4); positive turns counter-clockwise about
+                // the normal. The centre sits on the chord's left (n × d)
+                // for |θ| < π and on its right beyond, which the sign of
+                // tan(θ/2) handles.
+                const theta = 4 * Math.atan(bulge);
+                const left = new THREE.Vector3().crossVectors(n, chord).normalize();
+                const centre = a.clone().add(b).multiplyScalar(0.5)
+                    .addScaledVector(left, (c / 2) / Math.tan(theta / 2));
+                const u = a.clone().sub(centre);
+                const v = new THREE.Vector3().crossVectors(n, u);
+                pieces.push({ k: 'arc', c: centre, u, v, t0: 0, sweep: theta, r: u.length() });
+            }
+            break;
+        }
+        case 'circle':
+        case 'arc': {
+            const c = vectorVec3(e.center, 'center');
+            const r = vectorNum(e.radius, 'radius');
+            if (!(r > 0)) throw new Error('radius must be positive');
+            const { ax, ay } = vectorPlaneBasis(e.normal);
+            let t0 = 0, sweep = 2 * Math.PI;
+            if (e.type === 'arc') {
+                t0 = vectorNum(e.startAngle, 'startAngle');
+                sweep = vectorNum(e.endAngle, 'endAngle') - t0;
+                sweep = ((sweep % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+                if (sweep === 0) sweep = 2 * Math.PI;
+            }
+            pieces.push({ k: 'arc', c, u: ax.multiplyScalar(r), v: ay.multiplyScalar(r), t0, sweep, r });
+            break;
+        }
+        case 'ellipse': {
+            const c = vectorVec3(e.center, 'center');
+            const major = vectorVec3(e.majorAxis, 'majorAxis');
+            const ratio = vectorNum(e.ratio, 'ratio');
+            if (!(ratio > 0 && ratio <= 1)) throw new Error('ratio must be in (0, 1]');
+            const { n } = vectorPlaneBasis(e.normal);
+            major.addScaledVector(n, -major.dot(n));
+            if (!(major.lengthSq() > 0)) throw new Error('majorAxis must not be parallel to the normal');
+            const minor = new THREE.Vector3().crossVectors(n, major).multiplyScalar(ratio);
+            const t0 = e.startParam === undefined ? 0 : vectorNum(e.startParam, 'startParam');
+            const t1 = e.endParam === undefined ? 2 * Math.PI : vectorNum(e.endParam, 'endParam');
+            let sweep = ((t1 - t0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+            if (sweep === 0) sweep = 2 * Math.PI;
+            pieces.push({ k: 'arc', c, u: major, v: minor, t0, sweep, r: major.length() });
+            break;
+        }
+        case 'spline':
+            pieces.push(prepareVectorNurbs(e));
+            break;
+        default:
+            throw new Error(`unknown entity type '${e.type}'`);
+    }
+    if (points) for (const pt of points) box.expandByPoint(pt);
+    for (const pc of pieces) {
+        if (pc.k === 'seg') { box.expandByPoint(pc.a); box.expandByPoint(pc.b); }
+        else if (pc.k === 'arc') {
+            const r = Math.max(pc.u.length(), pc.v.length());
+            box.expandByPoint(pc.c.clone().addScalar(r)); box.expandByPoint(pc.c.clone().addScalar(-r));
+        } else {
+            for (const cp of pc.curve.P) box.expandByPoint(cp);
+        }
+    }
+    const bound = box.getBoundingSphere(new THREE.Sphere());
+    // A lone circle or ellipse: the sphere about its centre is tighter than
+    // the box's (r·√3), which would put a camera near the curve inside it.
+    if (pieces.length === 1 && pieces[0].k === 'arc') {
+        const r = Math.max(pieces[0].u.length(), pieces[0].v.length());
+        if (r < bound.radius) bound.set(pieces[0].c, r);
+    }
+    const linetypeScale = e.linetypeScale === undefined ? 1 : vectorNum(e.linetypeScale, 'linetypeScale');
+    if (!(linetypeScale > 0)) throw new Error('linetypeScale must be positive');
+    return {
+        type: e.type, pieces, points,
+        curved: pieces.some((pc) => pc.k !== 'seg'),
+        bound,
+        layer: typeof e.layer === 'string' ? e.layer : undefined,
+        color: normalizeVectorColor(e.color),
+        linetype: typeof e.linetype === 'string' ? e.linetype : undefined,
+        lineWidth: Number.isFinite(e.lineWidth) && e.lineWidth > 0 ? e.lineWidth : undefined,
+        linetypeScale,
+    };
+}
+
+const GLTF_VECTOR_KEY = 'TJSV_vector_entities';
+
+// Parsed payload per model template. Not on `userData`, which every cached
+// instance would deep-copy through JSON.
+/** @type {WeakMap<object, any>} */
+const gltfVectorPayloads = new WeakMap();
+
+/**
+ * The vector payload of a parsed glTF document: root
+ * `extras.TJSV_vector_entities` (the only place that survives glTF-Transform),
+ * or the same object in the root extension for files that put it there.
+ * A marker extension (`{storage: 'extras'}`) is not a payload.
+ * @param {any} json @returns {any}
+ */
+function readGltfVectorPayload(json) {
+    if (!json || typeof json !== 'object') return null;
+    const fromExtras = json.extras && json.extras[GLTF_VECTOR_KEY];
+    if (fromExtras && typeof fromExtras === 'object') return fromExtras;
+    const ext = json.extensions && json.extensions[GLTF_VECTOR_KEY];
+    if (ext && typeof ext === 'object' && (ext.entitySets || ext.entities)) return ext;
+    return null;
+}
+
+const VECTOR_MAX_INSERT_DEPTH = 16;
+const VECTOR_MAX_RECORDS = 1000000;
+
+/**
+ * The placement matrices of one `insert` (DXF INSERT / MINSERT): for each of
+ * `positions`, translate · plane basis of `normal` · rotate about it ·
+ * scale, repeated over a `rows` × `columns` grid whose spacing runs along the
+ * rotated block axes.
+ * @param {any} e @returns {THREE.Matrix4[]}
+ */
+function vectorInsertMatrices(e) {
+    const positions = e.position !== undefined
+        ? [vectorVec3(e.position, 'position')]
+        : vectorPointList(e.positions, 'positions', 1);
+    const n = positions.length;
+    /** @param {any} v @param {string} what */
+    const perPlacement = (v, what) => {
+        if (!Array.isArray(v) || v.length !== n) throw new Error(`${what} needs one value per position (${n})`);
+        return v.map((x, i) => vectorNum(x, `${what}[${i}]`));
+    };
+    const rotations = e.rotations !== undefined && e.rotations !== null
+        ? perPlacement(e.rotations, 'rotations')
+        : new Array(n).fill(e.rotation === undefined ? 0 : vectorNum(e.rotation, 'rotation'));
+    let base = new THREE.Vector3(1, 1, 1);
+    if (typeof e.scale === 'number') base.setScalar(vectorNum(e.scale, 'scale'));
+    else if (e.scale !== undefined && e.scale !== null) base = vectorVec3(e.scale, 'scale');
+    if (base.x === 0 || base.y === 0 || base.z === 0) throw new Error('scale must be non-zero');
+    const scales = e.scales !== undefined && e.scales !== null ? perPlacement(e.scales, 'scales') : null;
+    if (scales && scales.some((x) => x === 0)) throw new Error('scales must be non-zero');
+    const rows = e.rows === undefined ? 1 : e.rows;
+    const cols = e.columns === undefined ? 1 : e.columns;
+    if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+        throw new Error('rows and columns must be integers >= 1');
+    }
+    const rowSp = e.rowSpacing === undefined ? 0 : vectorNum(e.rowSpacing, 'rowSpacing');
+    const colSp = e.columnSpacing === undefined ? 0 : vectorNum(e.columnSpacing, 'columnSpacing');
+    if (n * rows * cols > VECTOR_MAX_RECORDS) throw new Error('too many placements');
+    const { n: nz, ax, ay } = vectorPlaneBasis(e.normal);
+    const basis = new THREE.Matrix4().makeBasis(ax, ay, nz);
+    const rot = new THREE.Matrix4(), scl = new THREE.Matrix4(), off = new THREE.Vector3();
+    /** @type {THREE.Matrix4[]} */ const out = [];
+    for (let i = 0; i < n; i++) {
+        rot.multiplyMatrices(basis, new THREE.Matrix4().makeRotationZ(rotations[i]));
+        const k = scales ? scales[i] : 1;
+        scl.makeScale(base.x * k, base.y * k, base.z * k);
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                off.set(c * colSp, r * rowSp, 0).applyMatrix4(rot).add(positions[i]);
+                const m = new THREE.Matrix4().multiplyMatrices(rot, scl);
+                m.setPosition(off);
+                out.push(m);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * An entity placed by an insert: shares the block entity's prepared pieces
+ * (and its tessellation cache) and carries the placement matrix plus the
+ * style it inherits from the insert.
+ * @param {any} base @param {THREE.Matrix4} m @param {any} inh inherited style
+ */
+function vectorInstanceRecord(base, m, inh) {
+    const inheritLayer = !base.layer || base.layer === '0';
+    const byBlock = (/** @type {any} */ v) => typeof v === 'string' && v.toUpperCase() === 'BYBLOCK';
+    return {
+        base, type: base.type, pieces: base.pieces, points: base.points, curved: base.curved,
+        matrix: m, instScale: m.getMaxScaleOnAxis() || 1,
+        bound: base.bound.clone().applyMatrix4(m),
+        layer: inheritLayer ? inh.layer : base.layer,
+        // Unset or BYBLOCK style takes the insert's when it has one, so a
+        // pattern of plain circles can be coloured from the insert.
+        color: base.color === undefined || byBlock(base.color) ? inh.color : base.color,
+        linetype: base.linetype === undefined || byBlock(base.linetype) ? inh.linetype : base.linetype,
+        lineWidth: base.lineWidth ?? inh.lineWidth,
+        linetypeScale: base.linetypeScale * inh.linetypeScale,
+    };
+}
+
+/**
+ * Tessellate one prepared entity at chord tolerance `tol` (local units),
+ * appending segment pairs to `out.pos` and their pattern distances (reset to
+ * 0 at the entity's start, divided by its linetype scale) to `out.dist`.
+ * Returns the segment count added.
+ * @param {any} rec @param {number} tol @param {{pos: number[], dist: number[]}} out
+ */
+function tessellateVectorEntity(rec, tol, out) {
+    if (rec.base) return tessellateVectorInstance(rec, tol, out);
+    const { pos, dist } = out;
+    const before = pos.length;
+    const inv = 1 / rec.linetypeScale;
+    const cur = new THREE.Vector3(), nxt = new THREE.Vector3();
+    let d = 0, started = false;
+    const to = (/** @type {THREE.Vector3} */ v) => {
+        if (!started) { cur.copy(v); started = true; return; }
+        const len = cur.distanceTo(v);
+        if (len === 0) return;
+        pos.push(cur.x, cur.y, cur.z, v.x, v.y, v.z);
+        dist.push(d, d + len * inv);
+        d += len * inv;
+        cur.copy(v);
+    };
+    for (const pc of rec.pieces) {
+        if (pc.k === 'seg') {
+            to(pc.a); to(pc.b);
+        } else if (pc.k === 'arc') {
+            const n = vectorArcSegments(pc.r, pc.sweep, tol);
+            for (let j = 0; j <= n; j++) {
+                const t = pc.t0 + pc.sweep * j / n;
+                nxt.copy(pc.c).addScaledVector(pc.u, Math.cos(t)).addScaledVector(pc.v, Math.sin(t));
+                to(nxt);
+            }
+        } else {
+            for (const s of pc.spans) {
+                const n = Math.min(VECTOR_MAX_SEGMENTS, Math.max(1, Math.ceil(Math.sqrt(s.m / (8 * tol)))));
+                for (let j = 0; j <= n; j++) to(nurbsPoint(pc.curve, s.k, s.u0 + (s.u1 - s.u0) * j / n, nxt));
+            }
+        }
+    }
+    return (pos.length - before) / 6;
+}
+
+/**
+ * Tessellate an inserted entity: the block entity is tessellated once per
+ * level in block space and cached; each placement transforms that copy.
+ * Pattern distances stay in block units (a scaled insert scales its dashes,
+ * as in DXF), divided by the insert's extra linetype scale.
+ * @param {any} rec @param {number} tol @param {{pos: number[], dist: number[]}} out
+ */
+function tessellateVectorInstance(rec, tol, out) {
+    const base = rec.base;
+    if (!base.cache) base.cache = new Map();
+    let local = base.cache.get(tol);
+    if (!local) {
+        local = { pos: [], dist: [] };
+        tessellateVectorEntity(base, tol, local);
+        base.cache.set(tol, local);
+    }
+    const e = rec.matrix.elements;
+    const k = base.linetypeScale / rec.linetypeScale;
+    const { pos, dist } = out;
+    const lp = local.pos;
+    for (let i = 0; i < lp.length; i += 3) {
+        const x = lp[i], y = lp[i + 1], z = lp[i + 2];
+        pos.push(e[0] * x + e[4] * y + e[8] * z + e[12],
+            e[1] * x + e[5] * y + e[9] * z + e[13],
+            e[2] * x + e[6] * y + e[10] * z + e[14]);
+    }
+    for (const d of local.dist) dist.push(d * k);
+    return lp.length / 6;
+}
+
+// Replaces LineMaterial's single dash/gap test with a DXF pattern walk:
+// positive entries draw, negative entries are gaps, zeros are dots about one
+// line width long (fwidth turns device pixels into pattern distance, and the
+// width is in CSS pixels).
+const VECTOR_PATTERN_GLSL = /* glsl */`{
+        float vpLen = vectorPatternLength;
+        float vpD = mod( vLineDistance + dashOffset, vpLen );
+        float vpDot = 0.5 * linewidth * vectorPixelRatio * fwidth( vLineDistance );
+        float vpPos = 0.0;
+        bool vpOn = false;
+        for ( int i = 0; i < ${VECTOR_PATTERN_MAX}; i ++ ) {
+            if ( i >= vectorPatternCount ) break;
+            float e = vectorPattern[ i ];
+            float l = abs( e );
+            if ( e == 0.0 ) {
+                float dd = abs( vpD - vpPos );
+                dd = min( dd, vpLen - dd );
+                if ( dd <= vpDot ) vpOn = true;
+            } else if ( e > 0.0 && vpD >= vpPos && vpD < vpPos + l ) {
+                vpOn = true;
+            }
+            vpPos += l;
+        }
+        if ( ! vpOn ) discard;
+    }`;
+const VECTOR_DASH_LINE_RE = /if \( mod\( vLineDistance \+ dashOffset, dashSize \+ gapSize \) > dashSize \) discard;[^\n]*/;
+
+/**
+ * Make a LineMaterial draw a DXF linetype pattern.
+ * @param {any} mat @param {number[]} pattern @param {{value: number}} pixelRatio shared uniform
+ */
+function applyVectorLinetype(mat, pattern, pixelRatio) {
+    const values = new Float32Array(VECTOR_PATTERN_MAX);
+    pattern.slice(0, VECTOR_PATTERN_MAX).forEach((v, i) => { values[i] = v; });
+    const length = pattern.slice(0, VECTOR_PATTERN_MAX).reduce((s, v) => s + Math.abs(v), 0);
+    mat.dashed = true;
+    mat.uniforms.vectorPattern = { value: values };
+    mat.uniforms.vectorPatternCount = { value: Math.min(pattern.length, VECTOR_PATTERN_MAX) };
+    mat.uniforms.vectorPatternLength = { value: length };
+    mat.uniforms.vectorPixelRatio = pixelRatio;
+    mat.onBeforeCompile = (/** @type {any} */ shader) => {
+        if (!VECTOR_DASH_LINE_RE.test(shader.fragmentShader)) {
+            console.warn('Vector linetypes: LineMaterial dash code not found; drawing plain dashes');
+            return;
+        }
+        shader.fragmentShader = shader.fragmentShader
+            .replace('uniform float gapSize;', `uniform float gapSize;
+            uniform float vectorPattern[ ${VECTOR_PATTERN_MAX} ];
+            uniform int vectorPatternCount;
+            uniform float vectorPatternLength;
+            uniform float vectorPixelRatio;`)
+            .replace(VECTOR_DASH_LINE_RE, VECTOR_PATTERN_GLSL);
+    };
+    mat.customProgramCacheKey = () => 'tjsv-vector-linetype';
+}
+
+/**
+ * Owns the viewer-wide layer and linetype tables and keeps every vector
+ * object's tessellation matched to the camera.
+ */
+class VectorEntityController {
+    /** @param {any} viewer */
+    constructor(viewer) {
+        this.v = viewer;
+        /** @type {Map<string, {color?: number, linetype?: string, lineWidth?: number, visible?: boolean}>} */
+        this.layers = new Map([['0', {}]]);
+        /** @type {Map<string, number[]>} */
+        this.linetypes = new Map(Object.entries(VECTOR_BUILTIN_LINETYPES));
+        /** @type {Set<any>} vector object roots currently in the scene */
+        this.groups = new Set();
+        this._lastCheck = 0;
+        this._camKey = new Float64Array(34);
+        this._frustum = new THREE.Frustum();
+        this._m4 = new THREE.Matrix4();
+        this._c = new THREE.Vector3();
+        this._sphere = new THREE.Sphere();
+        // Shared by every patterned material: dots are sized in CSS pixels.
+        this._pixelRatio = { value: 1 };
+        /** @type {Set<string>} */
+        this._warned = new Set();
+        /** @type {Set<string>} layers / linetypes set by Python or an embedder */
+        this._explicitLayers = new Set();
+        /** @type {Set<string>} */
+        this._explicitLinetypes = new Set();
+    }
+
+    /**
+     * Build the vector object for a glTF payload (`extras.TJSV_vector_entities`
+     * on the root): merge its layer and linetype tables, then flatten its
+     * entity sets (each set's `layer` is the default for its entities) into
+     * one vector object in glTF scene space.
+     * @param {any} payload @param {string} label for warnings
+     */
+    buildFromGltf(payload, label) {
+        if (Array.isArray(payload.linetypes)) {
+            for (const lt of payload.linetypes) {
+                if (lt && typeof lt.name === 'string' && Array.isArray(lt.pattern)) this.setLinetype(lt, true);
+            }
+        }
+        if (Array.isArray(payload.layers)) {
+            for (const layer of payload.layers) if (layer && typeof layer.name === 'string') this.setLayer(layer, true);
+        }
+        const entities = [];
+        const sets = Array.isArray(payload.entitySets) ? payload.entitySets
+            : Array.isArray(payload.entities) ? [{ entities: payload.entities }] : [];
+        for (const set of sets) {
+            if (!set || !Array.isArray(set.entities)) continue;
+            const layer = typeof set.layer === 'string' ? set.layer : undefined;
+            for (const e of set.entities) {
+                entities.push(layer && e && typeof e === 'object' && e.layer === undefined ? { ...e, layer } : e);
+            }
+        }
+        const group = this.build(label, { entities, blocks: payload.blocks });
+        group.userData.vectorFromGltf = true;
+        return group;
+    }
+
+    /** @param {string} msg */
+    _warnOnce(msg) {
+        if (this._warned.has(msg)) return;
+        this._warned.add(msg);
+        console.warn(msg);
+    }
+
+    /**
+     * Create or update a layer. Omitted fields keep their value; `null`
+     * clears one back to the default.
+     * @param {{name: string, color?: any, linetype?: string|null, lineWidth?: number|null, visible?: boolean|null}} data
+     * @param {boolean} [fromFile] a glTF table entry, which never overrides an explicit one
+     */
+    setLayer(data, fromFile = false) {
+        if (typeof data.name !== 'string' || !data.name) return;
+        if (fromFile && this._explicitLayers.has(data.name)) return;
+        const before = this.layers.get(data.name) || {};
+        /** @type {Record<string, any>} */
+        const layer = { ...before };
+        for (const key of /** @type {const} */ (['color', 'linetype', 'lineWidth', 'visible'])) {
+            if (data[key] === null) delete layer[key];
+            else if (data[key] !== undefined) layer[key] = data[key];
+        }
+        if (layer.color !== undefined) {
+            const c = normalizeVectorColor(layer.color);
+            if (typeof c === 'number') layer.color = c; else delete layer.color;
+        }
+        // A file table is untrusted: a wrong type here would throw in _style.
+        if (typeof layer.linetype !== 'string') delete layer.linetype;
+        if (!(Number.isFinite(layer.lineWidth) && layer.lineWidth > 0)) delete layer.lineWidth;
+        if (typeof layer.visible !== 'boolean') delete layer.visible;
+        this.layers.set(data.name, layer);
+        if (!fromFile) this._explicitLayers.add(data.name);
+        if (layer.color !== before.color || layer.linetype !== before.linetype
+            || layer.lineWidth !== before.lineWidth) {
+            this._restyleAll();
+        } else if (layer.visible !== before.visible) {
+            // Buckets are per layer, so a toggle only flips their visibility.
+            for (const g of this.groups) this._applyLayerVisibility(g);
+            this.v._shadowDirty = true;
+        }
+    }
+
+    /** @param {{name: string, pattern: number[]}} data @param {boolean} [fromFile] */
+    setLinetype(data, fromFile = false) {
+        if (typeof data.name !== 'string' || !data.name || !Array.isArray(data.pattern)
+            || !data.pattern.every((x) => Number.isFinite(x))) {
+            console.warn('set_vector_linetype: needs a name and a list of finite numbers');
+            return;
+        }
+        if (data.pattern.length > VECTOR_PATTERN_MAX) {
+            this._warnOnce(`Linetype '${data.name}': only the first ${VECTOR_PATTERN_MAX} pattern elements are drawn`);
+        }
+        const key = data.name.toUpperCase();
+        if (fromFile && this._explicitLinetypes.has(key)) return;
+        if (!fromFile) this._explicitLinetypes.add(key);
+        this.linetypes.set(key, data.pattern.slice());
+        this._restyleAll();
+    }
+
+    /** All layer names in use or defined, with their settings (for embedders and tests). */
+    listLayers() {
+        const names = new Set(this.layers.keys());
+        for (const g of this.groups) for (const b of g.userData.vectorEntities.buckets.values()) names.add(b.layer);
+        return [...names].map((name) => ({ name, ...(this.layers.get(name) || {}) }));
+    }
+
+    /**
+     * Build the object for one `add_object` vector payload. Invalid entities
+     * are skipped with a warning; the rest still draw.
+     * @param {string} id @param {any} spec
+     */
+    build(id, spec) {
+        const group = new THREE.Group();
+        const defaults = {
+            layer: typeof spec.layer === 'string' ? spec.layer : undefined,
+            color: (() => { const c = normalizeVectorColor(spec.color); return typeof c === 'number' ? c : undefined; })(),
+            linetype: typeof spec.linetype === 'string' ? spec.linetype : undefined,
+            lineWidth: Number.isFinite(spec.lineWidth) && spec.lineWidth > 0 ? spec.lineWidth : undefined,
+        };
+        const ltScale = Number.isFinite(spec.linetypeScale) && spec.linetypeScale > 0 ? spec.linetypeScale : 1;
+        const blocks = spec.blocks && typeof spec.blocks === 'object' ? spec.blocks : {};
+        /** @type {Map<string, any[]>} block name -> prepared entities (records or raw inserts) */
+        const prepared = new Map();
+        /** @type {any[]} */ const records = [];
+        let skipped = 0;
+        // Thrown once and rethrown through the per-item catches, so a blown
+        // budget stops the expansion and not just one nested insert.
+        const overBudget = new Error(`more than ${VECTOR_MAX_RECORDS} block placements or entities`);
+        let placements = 0;
+        /** @param {string} where @param {any} err */
+        const skip = (where, err) => {
+            skipped++;
+            if (skipped <= 5) console.warn(`Vector '${id}': ${where} skipped: ${err.message || err}`);
+        };
+        /** @param {string} name */
+        const blockEntities = (name) => {
+            let list = prepared.get(name);
+            if (list) return list;
+            const raw = blocks[name];
+            if (!Array.isArray(raw)) throw new Error(`unknown block '${name}'`);
+            list = [];
+            raw.forEach((e, i) => {
+                if (e && e.type === 'insert') { list.push({ insert: e }); return; }
+                try { list.push({ rec: prepareVectorEntity(e) }); }
+                catch (err) { skip(`block '${name}' entity ${i}`, err); }
+            });
+            prepared.set(name, list);
+            return list;
+        };
+        /**
+         * @param {any} e raw insert @param {THREE.Matrix4|null} parentM
+         * @param {any} inh style inherited from an enclosing insert
+         * @param {string[]} stack block names being expanded (cycle guard)
+         */
+        const expandInsert = (e, parentM, inh, stack) => {
+            const name = e.block;
+            if (typeof name !== 'string') throw new Error('insert needs a block name');
+            if (stack.includes(name)) throw new Error(`block '${name}' inserts itself`);
+            if (stack.length >= VECTOR_MAX_INSERT_DEPTH) throw new Error('blocks nest too deeply');
+            if (placements > VECTOR_MAX_RECORDS) throw overBudget;
+            const list = blockEntities(name);
+            const mats = vectorInsertMatrices(e);
+            // Counted apart from records: an empty block adds placements only.
+            placements += mats.length;
+            if (placements > VECTOR_MAX_RECORDS) throw overBudget;
+            const insLt = e.linetypeScale === undefined ? 1 : vectorNum(e.linetypeScale, 'linetypeScale');
+            if (!(insLt > 0)) throw new Error('linetypeScale must be positive');
+            // The insert's own style, itself inheriting from an enclosing one.
+            const own = {
+                layer: typeof e.layer === 'string' && e.layer !== '0' ? e.layer : inh.layer,
+                color: (() => { const c = normalizeVectorColor(e.color); return typeof c === 'number' ? c : inh.color; })(),
+                linetype: typeof e.linetype === 'string' && e.linetype.toUpperCase() !== 'BYBLOCK' ? e.linetype : inh.linetype,
+                lineWidth: Number.isFinite(e.lineWidth) && e.lineWidth > 0 ? e.lineWidth : inh.lineWidth,
+                linetypeScale: inh.linetypeScale * insLt,
+            };
+            for (const local of mats) {
+                const m = parentM ? new THREE.Matrix4().multiplyMatrices(parentM, local) : local;
+                for (const item of list) {
+                    if (records.length >= VECTOR_MAX_RECORDS) throw overBudget;
+                    if (item.insert) {
+                        try { expandInsert(item.insert, m, own, [...stack, name]); }
+                        catch (err) {
+                            if (err === overBudget) throw err;
+                            skip(`insert of '${item.insert.block}' in block '${name}'`, err);
+                        }
+                    } else {
+                        records.push(vectorInstanceRecord(item.rec, m, own));
+                    }
+                }
+            }
+        };
+        const top = { layer: undefined, color: undefined, linetype: undefined, lineWidth: undefined, linetypeScale: ltScale };
+        const list = Array.isArray(spec.entities) ? spec.entities : [];
+        list.forEach((e, i) => {
+            try {
+                if (e && e.type === 'insert') { expandInsert(e, null, top, []); return; }
+                const rec = prepareVectorEntity(e);
+                if (rec.color === 'BYBLOCK') rec.color = undefined;
+                if (e.linetypeScale === undefined) rec.linetypeScale = ltScale;
+                records.push(rec);
+            } catch (err) {
+                skip(`entity ${i}`, err);
+            }
+        });
+        if (skipped > 5) console.warn(`Vector '${id}': ${skipped} entities skipped in total`);
+        group.userData.vectorEntities = {
+            records,
+            defaults,
+            levels: new Float64Array(records.length).fill(NaN),
+            /** @type {Map<string, any>} */ buckets: new Map(),
+            segmentCount: 0,
+            skipped,
+        };
+        if (spec.pickable === false) group.userData.pickable = false;
+        return group;
+    }
+
+    /** Start tracking a registered vector object and tessellate it for the current view. @param {any} group */
+    attach(group) {
+        this.groups.add(group);
+        this._assignBuckets(group);
+        group.updateWorldMatrix(true, false);
+        this._refine(group, this._viewParams(), true);
+    }
+
+    /** @param {any} group */
+    detach(group) { this.groups.delete(group); }
+
+    /** Effective style of one entity. @param {any} rec @param {any} defaults */
+    _style(rec, defaults) {
+        const layerName = rec.layer ?? defaults.layer ?? '0';
+        const layer = this.layers.get(layerName) || {};
+        const color = rec.color ?? defaults.color ?? layer.color ?? VECTOR_DEFAULT_COLOR;
+        let linetype = rec.linetype ?? defaults.linetype;
+        if (!linetype || ['BYLAYER', 'BYBLOCK'].includes(linetype.toUpperCase())) linetype = layer.linetype || 'CONTINUOUS';
+        linetype = linetype.toUpperCase();
+        if (!this.linetypes.has(linetype)) {
+            this._warnOnce(`Unknown linetype '${linetype}', drawing CONTINUOUS`);
+            linetype = 'CONTINUOUS';
+        }
+        const lineWidth = rec.lineWidth ?? defaults.lineWidth ?? layer.lineWidth ?? VECTOR_DEFAULT_WIDTH;
+        return { layerName, color, linetype, lineWidth };
+    }
+
+    /** Sort a group's entities into buckets, (re)creating bucket objects. @param {any} group */
+    _assignBuckets(group) {
+        const st = group.userData.vectorEntities;
+        const old = st.buckets;
+        st.buckets = new Map();
+        st.records.forEach((rec, i) => {
+            const s = this._style(rec, st.defaults);
+            const kind = rec.points ? 'points' : 'lines';
+            const key = kind === 'points'
+                ? `points|${s.layerName}|${s.lineWidth}`
+                : `lines|${s.layerName}|${s.linetype}|${s.lineWidth}`;
+            let b = st.buckets.get(key);
+            if (!b) {
+                b = old.get(key);
+                if (b) { old.delete(key); b.entities = []; b.colors = []; }
+                else b = this._newBucket(group, kind, s);
+                // The pattern may have changed under the same linetype name.
+                if (kind === 'lines') this._setBucketPattern(b, s.linetype);
+                st.buckets.set(key, b);
+            }
+            b.entities.push(i);
+            b.colors.push(s.color);
+            b.dirty = true;
+        });
+        for (const b of old.values()) {
+            group.remove(b.obj);
+            b.obj.geometry.dispose();
+            b.obj.material.dispose();
+        }
+        this._applyLayerVisibility(group);
+        if (this.v._clipEnabled) this.v._applyClipToObject(group);
+    }
+
+    /** @param {any} group @param {'lines'|'points'} kind @param {any} s */
+    _newBucket(group, kind, s) {
+        let obj;
+        if (kind === 'points') {
+            const mat = new THREE.PointsMaterial({
+                size: Math.max(4, s.lineWidth * 2), sizeAttenuation: false, vertexColors: true,
+            });
+            obj = new THREE.Points(new THREE.BufferGeometry(), mat);
+        } else {
+            const mat = new LineMaterial({ color: 0xffffff, vertexColors: true, linewidth: s.lineWidth });
+            // Shared by reference with the selection silhouettes; resize()
+            // keeps it at the canvas size.
+            mat.uniforms.resolution = this.v._highlightResolution;
+            obj = new LineSegments2(new LineSegmentsGeometry(), mat);
+        }
+        obj.userData.__vectorLine = true;
+        obj.userData.vectorLayer = s.layerName;
+        obj.frustumCulled = false;
+        group.add(obj);
+        return { kind, layer: s.layerName, linetype: s.linetype, obj, entities: [], colors: [], dirty: true, pattern: null, patternKey: '' };
+    }
+
+    /** @param {any} b @param {string} linetype */
+    _setBucketPattern(b, linetype) {
+        const pattern = this.linetypes.get(linetype) || [];
+        const drawable = pattern.length > 0 && pattern.some((v) => v !== 0 || pattern.length > 1)
+            && pattern.reduce((s, v) => s + Math.abs(v), 0) > 0;
+        const key = drawable ? pattern.join(',') : '';
+        if (b.patternKey === key) return;
+        b.patternKey = key;
+        const old = b.obj.material;
+        const mat = new LineMaterial({ color: 0xffffff, vertexColors: true, linewidth: old.linewidth });
+        mat.uniforms.resolution = this.v._highlightResolution;
+        if (drawable) applyVectorLinetype(mat, pattern, this._pixelRatio);
+        b.obj.material = mat;
+        old.dispose();
+    }
+
+    /** @param {any} group */
+    _applyLayerVisibility(group) {
+        const st = group.userData.vectorEntities;
+        for (const b of st.buckets.values()) {
+            const layer = this.layers.get(b.layer);
+            b.obj.visible = !(layer && layer.visible === false);
+        }
+        this.v._sceneBoundsDirty = true;
+    }
+
+    _restyleAll() {
+        for (const g of this.groups) {
+            this._assignBuckets(g);
+            this._refine(g, this._viewParams(), true);
+        }
+        this.v._shadowDirty = true;
+    }
+
+    /** Camera numbers the per-entity tolerance needs. */
+    _viewParams() {
+        const cam = this.v._camera;
+        const h = Math.max(1, this.v._renderer.domElement.clientHeight || this.v.container.clientHeight || 1);
+        cam.updateMatrixWorld();
+        this._m4.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+        this._frustum.setFromProjectionMatrix(this._m4);
+        return cam.isPerspectiveCamera
+            ? { persp: true, k: 2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) / h, near: cam.near, pos: cam.position, wpp: 0 }
+            : { persp: false, k: 0, near: 0, pos: cam.position, wpp: (cam.top - cam.bottom) / cam.zoom / h };
+    }
+
+    /**
+     * Re-pick each entity's tolerance level and rebuild buckets whose
+     * levels moved.
+     * @param {any} group @param {any} view @param {boolean} force rebuild dirty buckets now
+     */
+    _refine(group, view, force) {
+        const st = group.userData.vectorEntities;
+        const mw = group.matrixWorld;
+        const scale = mw.getMaxScaleOnAxis() || 1;
+        const c = this._c;
+        const sphere = this._sphere;
+        for (const b of st.buckets.values()) {
+            if (b.kind === 'points') continue;
+            for (const i of b.entities) {
+                const rec = st.records[i];
+                if (!rec.curved) {
+                    if (Number.isNaN(st.levels[i])) { st.levels[i] = 0; b.dirty = true; }
+                    continue;
+                }
+                c.copy(rec.bound.center).applyMatrix4(mw);
+                const r = rec.bound.radius * scale;
+                const cur = st.levels[i];
+                if (!Number.isNaN(cur)) {
+                    sphere.center.copy(c); sphere.radius = r;
+                    if (!this._frustum.intersectsSphere(sphere)) continue;
+                }
+                const wpp = view.persp ? view.k * Math.max(c.distanceTo(view.pos) - r, view.near) : view.wpp;
+                const lg = Math.log2(Math.max(VECTOR_TOLERANCE_PX * wpp / (scale * (rec.instScale || 1)), 1e-12));
+                if (Number.isNaN(cur) || lg < cur || lg >= cur + 2) {
+                    const next = Math.floor(lg);
+                    if (next !== cur) { st.levels[i] = next; b.dirty = true; }
+                }
+            }
+        }
+        let rebuilt = false;
+        for (const b of st.buckets.values()) {
+            if (!b.dirty) continue;
+            this._rebuildBucket(st, b);
+            rebuilt = true;
+        }
+        if (rebuilt) {
+            st.segmentCount = 0;
+            for (const b of st.buckets.values()) st.segmentCount += b.segments || 0;
+            if (force) this.v._sceneBoundsDirty = true;
+        }
+    }
+
+    /** @param {any} st @param {any} b */
+    _rebuildBucket(st, b) {
+        b.dirty = false;
+        const col = new THREE.Color();
+        if (b.kind === 'points') {
+            const pos = [], cols = [];
+            b.entities.forEach((i, j) => {
+                col.setHex(b.colors[j]);
+                const rec = st.records[i];
+                for (const p0 of rec.points) {
+                    const pt = rec.matrix ? p0.clone().applyMatrix4(rec.matrix) : p0;
+                    pos.push(pt.x, pt.y, pt.z); cols.push(col.r, col.g, col.b);
+                }
+            });
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+            geo.computeBoundingSphere();
+            b.obj.geometry.dispose();
+            b.obj.geometry = geo;
+            b.segments = 0;
+            return;
+        }
+        // Only entities whose level moved are tessellated again; the rest
+        // are copied from their cached arrays.
+        const parts = b.entities.map((/** @type {number} */ i) => this._tessellated(st.records[i], st.levels[i]));
+        let segments = 0;
+        for (const part of parts) segments += part.dist.length / 2;
+        const pos = new Float32Array(segments * 6), dist = new Float32Array(segments * 2);
+        const cols = new Float32Array(segments * 6);
+        let at = 0;
+        parts.forEach((/** @type {any} */ part, /** @type {number} */ j) => {
+            pos.set(part.pos, at * 6);
+            dist.set(part.dist, at * 2);
+            col.setHex(b.colors[j]);
+            const end = at + part.dist.length / 2;
+            for (let o = at * 6; o < end * 6; o += 3) { cols[o] = col.r; cols[o + 1] = col.g; cols[o + 2] = col.b; }
+            at = end;
+        });
+        const geo = new LineSegmentsGeometry();
+        if (segments) {
+            geo.setPositions(pos);
+            geo.setColors(cols);
+            const ib = new THREE.InstancedInterleavedBuffer(dist, 2, 1);
+            geo.setAttribute('instanceDistanceStart', new THREE.InterleavedBufferAttribute(ib, 1, 0));
+            geo.setAttribute('instanceDistanceEnd', new THREE.InterleavedBufferAttribute(ib, 1, 1));
+        }
+        b.obj.geometry.dispose();
+        b.obj.geometry = geo;
+        b.segments = segments;
+    }
+
+    /**
+     * One entity's segments at a level. A plain entity keeps its last result;
+     * a block copy is only a transform of its block's cached tessellation.
+     * @param {any} rec @param {number} level
+     * @returns {{pos: ArrayLike<number>, dist: ArrayLike<number>}}
+     */
+    _tessellated(rec, level) {
+        if (!rec.base && rec.tess && rec.tess.level === level) return rec.tess;
+        const out = { pos: /** @type {number[]} */ ([]), dist: /** @type {number[]} */ ([]) };
+        tessellateVectorEntity(rec, Math.pow(2, level), out);
+        if (rec.base) return out;
+        rec.tess = { level, pos: new Float32Array(out.pos), dist: new Float32Array(out.dist) };
+        return rec.tess;
+    }
+
+    /** Per-frame: refine when the camera or canvas changed, or periodically. */
+    update() {
+        if (this.groups.size === 0) return;
+        const cam = this.v._camera;
+        const key = this._camKey;
+        this._pixelRatio.value = this.v._renderer.getPixelRatio();
+        let changed = false;
+        /** @param {number} i @param {number} x */
+        const track = (i, x) => { if (key[i] !== x) { key[i] = x; changed = true; } };
+        const mw = cam.matrixWorld.elements, pm = cam.projectionMatrix.elements;
+        for (let i = 0; i < 16; i++) { track(i, mw[i]); track(16 + i, pm[i]); }
+        track(32, this.v._renderer.domElement.clientHeight);
+        track(33, cam.zoom);
+        const now = performance.now();
+        if (!changed && now - this._lastCheck < VECTOR_RECHECK_MS) return;
+        this._lastCheck = now;
+        const view = this._viewParams();
+        for (const g of this.groups) {
+            // With a still camera only an object that moved can need new levels.
+            if (this._moved(g) || changed) this._refine(g, view, false);
+        }
+    }
+
+    /** Whether a group's world matrix differs from the last one seen (and remember it). @param {any} group */
+    _moved(group) {
+        const st = group.userData.vectorEntities;
+        const e = group.matrixWorld.elements;
+        if (!st.world) st.world = new Float64Array(16).fill(NaN);
+        let moved = false;
+        for (let i = 0; i < 16; i++) if (st.world[i] !== e[i]) { st.world[i] = e[i]; moved = true; }
+        return moved;
+    }
+
+    dispose() { this.groups.clear(); }
+}
+
 // ========== Polyline / tube picking ==========
 // Opt-in interactive picking of points ALONG a polyline OR a parametric tube
 // (the "bead"). Enabled from Python via set_polyline_picking (see
@@ -18353,6 +19475,7 @@ class ThreeJSViewer {
         this._transformGizmo = new TransformGizmoController(this);
         this._axisControls = new AxisControlManager(this);
         this._dimensions = new DimensionController(this);
+        this._vectors = new VectorEntityController(this);
 
         // Lighting — kept as an instance ref so the Lighting panel can tune intensity at runtime.
         this._ambientLight = new THREE.AmbientLight(0xffffff, this._lightingDefaults.ambientIntensity);
@@ -19538,6 +20661,8 @@ class ThreeJSViewer {
             } else {
                 obj = mesh;
             }
+        } else if (objData.vector) {
+            obj = this._vectors.build(id, objData.vector);
         } else if (objData.model) {
             const format = objData.format || 'gltf';
             const loader = this._loaders[/** @type {keyof typeof this._loaders} */ (format)];
@@ -19586,6 +20711,7 @@ class ThreeJSViewer {
         if (newMixer) { this._mixers.set(id, newMixer); this._mixerGeneration++; }
         this._addToParentOrScene(obj, parentId);
         this._registerObject(id, obj);
+        obj.traverse(/** @param {any} o */ (o) => { if (o.userData.vectorEntities) this._vectors.attach(o); });
         if (this._clipEnabled) this._applyClipToObject(obj);
         return obj;
     }
@@ -19608,6 +20734,8 @@ class ThreeJSViewer {
                     let template;
                     let animations = [];
                     if (format === 'gltf' || format === 'glb') {
+                        const payload = readGltfVectorPayload(result.parser && result.parser.json);
+                        if (payload) gltfVectorPayloads.set(result.scene, payload);
                         template = result.scene;
                         animations = result.animations || [];
                         applyGltfDrawLayers(template);
@@ -19652,12 +20780,48 @@ class ThreeJSViewer {
                 obj.add(root);
             }
             obj.userData.gltfScene = root;
+            this._addGltfVectors(root, entry);
         }
         // Enable set_draw_range / draw_ranges on loaded models (issue #104):
         // stamp descendant meshes like add_mesh_binary does, and mark a group
         // root so the dispatchers traverse it.
         stampModelDrawRangeMeshes(obj);
         return obj;
+    }
+
+    /**
+     * Give one model instance its glTF vector entities: a vector object under
+     * the glTF scene root (the payload is in scene space, so it shares any
+     * Y-up correction) and hidden fallback primitives. Without a usable
+     * payload the fallback lines stay visible.
+     * @param {any} root @param {any} entry
+     */
+    _addGltfVectors(root, entry) {
+        const payload = entry.template && gltfVectorPayloads.get(entry.template);
+        if (!payload) return;
+        let group;
+        try {
+            group = this._vectors.buildFromGltf(payload, `${entry.key || 'model'} (glTF vectors)`);
+        } catch (err) {
+            console.warn('glTF vector entities could not be read; showing fallback lines:', err);
+            return;
+        }
+        group.name = '__vectors';
+        root.add(group);
+        // Nothing drawable: keep the fallback lines rather than show nothing.
+        if (group.userData.vectorEntities.records.length === 0) {
+            console.warn('glTF vector entities: no valid entities; showing fallback lines');
+            return;
+        }
+        root.traverse(/** @param {any} o */ (o) => {
+            const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+            if (mats.some((/** @type {any} */ m) => m.userData && m.userData[GLTF_VECTOR_KEY]
+                && m.userData[GLTF_VECTOR_KEY].fallback)) {
+                o.visible = false;
+                o.userData.pickable = false;
+                o.userData.vectorFallback = true;
+            }
+        });
     }
 
     /** @param {string} id @param {number} time */
@@ -20441,6 +21605,7 @@ class ThreeJSViewer {
             if (mixer) { mixer.stopAllAction(); this._mixers.delete(id); this._mixerGeneration++; }
             obj.traverse(/** @param {any} child */ (child) => {
                 if (child.userData.blobUrl) URL.revokeObjectURL(child.userData.blobUrl);
+                if (child.userData.vectorEntities) this._vectors.detach(child);
                 this._modelCache.release(child);
                 if (child.userData.tubeLOD) {
                     this._lodWorker.postMessage({ type: 'dispose', tubeId: child.userData.id });
@@ -21848,6 +23013,12 @@ class ThreeJSViewer {
             }
             case 'add_object':
                 await this._addObject(data.id, data.object, data.parent);
+                break;
+            case 'set_vector_layer':
+                this._vectors.setLayer(data);
+                break;
+            case 'set_vector_linetype':
+                this._vectors.setLinetype(data);
                 break;
             case 'update_transform':
                 this._withObject(data.id, 'update_transform', (obj) => this._applyTransform(obj, data.transform));
@@ -24190,6 +25361,9 @@ class ThreeJSViewer {
         // node fetches (no-op when no LOD cloud is in the scene).
         this._updatePointsLOD();
 
+        // Vector entities: re-tessellate curves whose on-screen size changed.
+        this._vectors.update();
+
         // Pivot marker: scale to a constant ~6px screen radius, ring faces camera,
         // hide 900ms after the pivot was set (but only once the user stops dragging).
         if (this._pivotMarker && this._pivotMarker.visible) {
@@ -26324,6 +27498,7 @@ class ThreeJSViewer {
         this._objectClickHooks.length = 0;
         this._axisControls.dispose();
         this._dimensions.dispose();
+        this._vectors.dispose();
         this._menus.dispose();
         if (this._depthCue) this._depthCue.dispose();
         // An in-flight _loadCubemap sees the bumped token and discards its result.

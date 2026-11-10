@@ -20,12 +20,12 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
 
-from . import kinematics
+from . import kinematics, vector
 from .points_lod import (
     DEFAULT_MAX_DEPTH,
     DEFAULT_NODE_CAPACITY,
@@ -921,6 +921,10 @@ class ViewerClient:
         # interactive gizmo above; any number can be active at once, each with its
         # own axis constraint. Re-sent on reconnect so they survive a refresh.
         self._gizmos: List[dict] = []
+        # Vector-entity linetypes and layers (set_linetype / set_layer),
+        # name -> merged message, replayed on reconnect (linetypes first).
+        self._vector_linetypes: Dict[str, dict] = {}
+        self._vector_layers: Dict[str, dict] = {}
 
     def connect(self, timeout: float = 30.0):
         """Start WebSocket server and wait for browser to connect.
@@ -1233,6 +1237,13 @@ class ViewerClient:
                 {"type": "set_dimension_display", "mode": self._dimension_display}
             )
         for spec in dimension_msgs:
+            try:
+                websocket.send(json.dumps(spec))
+            except Exception:
+                pass
+
+        # Re-declare vector linetypes, then the layers that may use them.
+        for spec in [*self._vector_linetypes.values(), *self._vector_layers.values()]:
             try:
                 websocket.send(json.dumps(spec))
             except Exception:
@@ -2196,6 +2207,423 @@ class ViewerClient:
         if transform:
             header["transform"] = transform
         self._send_binary(header, raw_bytes)
+
+    # === Vector entities ===
+
+    def add_vector_entities(
+        self,
+        id: str,
+        entities: List[dict],
+        *,
+        layer: Optional[str] = None,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        linetype_scale: Optional[float] = None,
+        blocks: Optional[Dict[str, List[dict]]] = None,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
+    ) -> None:
+        """Add (or replace) one object holding any number of vector entities.
+
+        Entities are exact curves built with :mod:`threejs_viewer.vector`
+        (``point``, ``points``, ``line``, ``polyline`` with DXF bulges,
+        ``circle``, ``arc``, ``ellipse``, ``spline``). The viewer keeps their
+        definitions and re-tessellates them as the camera moves, so curves
+        stay within about half a pixel of their true shape at any zoom.
+
+        Styling follows DXF: each entity sits on a layer (default ``"0"``),
+        and colour, linetype and line width fall back to the layer's settings
+        from :meth:`set_layer`. ``layer``, ``color``, ``linetype``,
+        ``line_width`` and ``linetype_scale`` given here apply to entities
+        that don't set their own. ``line_width`` is in screen pixels.
+
+        ``blocks`` maps a block name to a list of entities, drawn wherever a
+        :func:`threejs_viewer.vector.insert` places it (DXF ``BLOCK`` and
+        ``INSERT``). A block is tessellated once per detail level and its
+        placements are transformed copies, so a pattern of thousands of
+        identical holes costs about as much as one hole to refine.
+
+        Entities sharing a layer, linetype and width draw as one batch, so
+        thousands of entities in one call stay cheap. An invalid entity that
+        reaches the viewer is skipped with a console warning; the rest draw.
+
+        Args:
+            id: Object id; replaces an existing object with the same id.
+            entities: Entity dicts from :mod:`threejs_viewer.vector`.
+            parent: Optional parent group id.
+            position, rotation, scale: Object transform (Euler radians).
+            matrix: Column-major 4x4 transform instead of position/rotation/scale.
+            visible: Initial visibility.
+            pickable: When False, clicks pass through the object.
+        """
+        ents = list(entities)
+        for i, e in enumerate(ents):
+            if not isinstance(e, dict) or not isinstance(e.get("type"), str):
+                raise ValueError(f"entities[{i}] must be an entity dict with a 'type'")
+        spec: dict = vector._style(
+            {"entities": ents}, layer, color, linetype, line_width, linetype_scale
+        )
+        vector.check_blocks(ents, blocks or {})
+        if blocks:
+            spec["blocks"] = {name: list(b) for name, b in blocks.items()}
+        if not pickable:
+            spec["pickable"] = False
+        transform: dict = {}
+        if matrix is not None:
+            m = np.asarray(matrix, dtype=float).reshape(-1)
+            if m.shape != (16,) or not np.all(np.isfinite(m)):
+                raise ValueError("matrix must be 16 finite numbers")
+            transform["matrix"] = m.tolist()
+        else:
+            if position is not None:
+                transform["position"] = vector._vec3("position", position)
+            if rotation is not None:
+                transform["rotation"] = vector._vec3("rotation", rotation)
+            if scale is not None:
+                transform["scale"] = vector._vec3("scale", scale)
+        msg: dict = {
+            "type": "add_object",
+            "id": id,
+            "object": {"vector": spec, "transform": transform or None},
+        }
+        if parent:
+            msg["parent"] = parent
+        if not visible:
+            msg["visible"] = False
+            msg["object"]["visible"] = False
+        self._send(msg)
+
+    def add_line(
+        self,
+        id: str,
+        start: List[float],
+        end: List[float],
+        *,
+        layer: Optional[str] = None,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        linetype_scale: Optional[float] = None,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
+    ) -> None:
+        """Add a straight vector line. See :meth:`add_vector_entities` for
+        styling and for the ``parent``/``position``/``rotation``/``scale``/
+        ``matrix``/``visible``/``pickable`` placement keywords."""
+        entity = vector.line(
+            start,
+            end,
+            layer=layer,
+            color=color,
+            linetype=linetype,
+            line_width=line_width,
+            linetype_scale=linetype_scale,
+        )
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
+
+    def add_circle(
+        self,
+        id: str,
+        center: List[float] = (0.0, 0.0, 0.0),
+        radius: float = 1.0,
+        *,
+        normal: Optional[List[float]] = None,
+        layer: Optional[str] = None,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        linetype_scale: Optional[float] = None,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
+    ) -> None:
+        """Add a circle that stays smooth at any zoom.
+
+        The circle lies in the plane through ``center`` perpendicular to
+        ``normal`` (default +Z). See :meth:`add_vector_entities` for styling
+        and the placement keywords.
+        """
+        entity = vector.circle(
+            center,
+            radius,
+            normal=normal,
+            layer=layer,
+            color=color,
+            linetype=linetype,
+            line_width=line_width,
+            linetype_scale=linetype_scale,
+        )
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
+
+    def add_arc(
+        self,
+        id: str,
+        center: List[float],
+        radius: float,
+        start_angle: float,
+        end_angle: float,
+        *,
+        normal: Optional[List[float]] = None,
+        layer: Optional[str] = None,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        linetype_scale: Optional[float] = None,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
+    ) -> None:
+        """Add a circular arc, counter-clockwise about ``normal`` from
+        ``start_angle`` to ``end_angle`` (radians, DXF ``ARC`` convention).
+        See :meth:`add_vector_entities` for styling and placement."""
+        entity = vector.arc(
+            center,
+            radius,
+            start_angle,
+            end_angle,
+            normal=normal,
+            layer=layer,
+            color=color,
+            linetype=linetype,
+            line_width=line_width,
+            linetype_scale=linetype_scale,
+        )
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
+
+    def add_ellipse(
+        self,
+        id: str,
+        center: List[float],
+        major_axis: List[float],
+        ratio: float,
+        *,
+        start_param: float = 0.0,
+        end_param: float = 2 * math.pi,
+        normal: Optional[List[float]] = None,
+        layer: Optional[str] = None,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        linetype_scale: Optional[float] = None,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
+    ) -> None:
+        """Add an ellipse or elliptical arc (DXF ``ELLIPSE``); see
+        :func:`threejs_viewer.vector.ellipse` for the parameters and
+        :meth:`add_vector_entities` for styling and placement."""
+        entity = vector.ellipse(
+            center,
+            major_axis,
+            ratio,
+            start_param=start_param,
+            end_param=end_param,
+            normal=normal,
+            layer=layer,
+            color=color,
+            linetype=linetype,
+            line_width=line_width,
+            linetype_scale=linetype_scale,
+        )
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
+
+    def add_spline(
+        self,
+        id: str,
+        control_points,
+        *,
+        degree: int = 3,
+        knots: Optional[List[float]] = None,
+        weights: Optional[List[float]] = None,
+        closed: bool = False,
+        layer: Optional[str] = None,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        linetype_scale: Optional[float] = None,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
+    ) -> None:
+        """Add a NURBS curve (DXF ``SPLINE``); see
+        :func:`threejs_viewer.vector.spline` for the parameters and
+        :meth:`add_vector_entities` for styling and placement."""
+        entity = vector.spline(
+            control_points,
+            degree=degree,
+            knots=knots,
+            weights=weights,
+            closed=closed,
+            layer=layer,
+            color=color,
+            linetype=linetype,
+            line_width=line_width,
+            linetype_scale=linetype_scale,
+        )
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
+
+    def set_layer(
+        self,
+        name: str,
+        *,
+        color: Optional[int] = None,
+        linetype: Optional[str] = None,
+        line_width: Optional[float] = None,
+        visible: Optional[bool] = None,
+        reset: Sequence[str] = (),
+    ) -> None:
+        """Create or update a vector-entity layer (DXF ``LAYER``).
+
+        Entities that don't set their own colour, linetype or line width use
+        the layer's. ``visible=False`` hides the layer in every vector
+        object. Omitted arguments keep their current value; ``reset`` names
+        the ones to return to their default (any of ``"color"``,
+        ``"linetype"``, ``"line_width"``, ``"visible"``). Layers are viewer
+        settings, not scene objects, and shared by every vector object,
+        including those loaded from glTF files: :meth:`clear` leaves them and
+        a reconnect replays them.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("layer name must be a non-empty string")
+        fields = {
+            "color": "color",
+            "linetype": "linetype",
+            "line_width": "lineWidth",
+            "visible": "visible",
+        }
+        given = {
+            "color": color,
+            "linetype": linetype,
+            "line_width": line_width,
+            "visible": visible,
+        }
+        for key in reset:
+            if key not in fields:
+                raise ValueError(f"reset: unknown layer attribute {key!r}")
+            if given[key] is not None:
+                raise ValueError(f"{key} is both set and reset")
+        msg: dict = {"type": "set_vector_layer", "name": name}
+        if color is not None:
+            msg["color"] = vector._color(color)
+        if linetype is not None:
+            msg["linetype"] = str(linetype)
+        if line_width is not None:
+            if not vector._finite("line_width", line_width) > 0:
+                raise ValueError("line_width must be positive")
+            msg["lineWidth"] = float(line_width)
+        if visible is not None:
+            msg["visible"] = bool(visible)
+        stored = self._vector_layers.setdefault(
+            name, {"type": "set_vector_layer", "name": name}
+        )
+        stored.update(msg)
+        for key in reset:
+            # The viewer reads null as "back to the default"; the replay
+            # simply no longer carries the attribute.
+            stored.pop(fields[key], None)
+            msg[fields[key]] = None
+        if self._ws is not None:
+            self._send(msg)
+
+    def set_linetype(self, name: str, pattern: List[float]) -> None:
+        """Define (or redefine) a linetype (DXF ``LTYPE``).
+
+        ``pattern`` lists up to 12 lengths in scene units: positive draws a
+        dash, negative leaves a gap and ``0`` draws a dot. The pattern
+        restarts at the start of each entity and scales with the entity's
+        ``linetype_scale``. Names are case-insensitive. Built in, with
+        acadiso.lin lengths in metres: ``CONTINUOUS``, ``DASHED``, ``HIDDEN``,
+        ``CENTER``, ``PHANTOM``, ``DOT``, ``DASHDOT``, ``BORDER``, ``DIVIDE``.
+        Replayed on reconnect.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("linetype name must be a non-empty string")
+        values = [float(x) for x in np.asarray(pattern, dtype=float).reshape(-1)]
+        if not all(math.isfinite(x) for x in values):
+            raise ValueError("pattern must be finite")
+        if len(values) > 12:
+            raise ValueError("pattern supports at most 12 elements")
+        msg = {"type": "set_vector_linetype", "name": name.upper(), "pattern": values}
+        self._vector_linetypes[name.upper()] = msg
+        if self._ws is not None:
+            self._send(msg)
 
     def add_mesh(
         self,
