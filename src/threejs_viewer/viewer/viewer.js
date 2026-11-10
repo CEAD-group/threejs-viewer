@@ -12184,6 +12184,7 @@ class DepthCueController {
 
 const VECTOR_TOLERANCE_PX = 0.5;
 const VECTOR_MAX_SEGMENTS = 8192;   // per curve piece
+const VECTOR_MAX_DEGREE = 32;       // de Boor is O(degree²) per sample
 const VECTOR_RECHECK_MS = 250;      // re-check even when the camera is still (animated parents)
 const VECTOR_PATTERN_MAX = 12;
 const VECTOR_DEFAULT_COLOR = 0xffffff;
@@ -12316,7 +12317,9 @@ function vectorArcSegments(r, sweep, tol) {
  */
 function prepareVectorNurbs(e) {
     const p = e.degree === undefined ? 3 : e.degree;
-    if (!Number.isInteger(p) || p < 1) throw new Error('degree must be an integer >= 1');
+    if (!Number.isInteger(p) || p < 1 || p > VECTOR_MAX_DEGREE) {
+        throw new Error(`degree must be an integer from 1 to ${VECTOR_MAX_DEGREE}`);
+    }
     let P = vectorPointList(e.controlPoints, 'controlPoints', p + 1);
     let W;
     if (e.weights !== undefined && e.weights !== null) {
@@ -12505,12 +12508,19 @@ function prepareVectorEntity(e) {
             for (const cp of pc.curve.P) box.expandByPoint(cp);
         }
     }
+    const bound = box.getBoundingSphere(new THREE.Sphere());
+    // A lone circle or ellipse: the sphere about its centre is tighter than
+    // the box's (r·√3), which would put a camera near the curve inside it.
+    if (pieces.length === 1 && pieces[0].k === 'arc') {
+        const r = Math.max(pieces[0].u.length(), pieces[0].v.length());
+        if (r < bound.radius) bound.set(pieces[0].c, r);
+    }
     const linetypeScale = e.linetypeScale === undefined ? 1 : vectorNum(e.linetypeScale, 'linetypeScale');
     if (!(linetypeScale > 0)) throw new Error('linetypeScale must be positive');
     return {
         type: e.type, pieces, points,
         curved: pieces.some((pc) => pc.k !== 'seg'),
-        bound: box.getBoundingSphere(new THREE.Sphere()),
+        bound,
         layer: typeof e.layer === 'string' ? e.layer : undefined,
         color: normalizeVectorColor(e.color),
         linetype: typeof e.linetype === 'string' ? e.linetype : undefined,
@@ -12520,6 +12530,11 @@ function prepareVectorEntity(e) {
 }
 
 const GLTF_VECTOR_KEY = 'TJSV_vector_entities';
+
+// Parsed payload per model template. Not on `userData`, which every cached
+// instance would deep-copy through JSON.
+/** @type {WeakMap<object, any>} */
+const gltfVectorPayloads = new WeakMap();
 
 /**
  * The vector payload of a parsed glTF document: root
@@ -12692,11 +12707,12 @@ function tessellateVectorInstance(rec, tol, out) {
 
 // Replaces LineMaterial's single dash/gap test with a DXF pattern walk:
 // positive entries draw, negative entries are gaps, zeros are dots about one
-// line width long (fwidth turns pixels into pattern distance).
+// line width long (fwidth turns device pixels into pattern distance, and the
+// width is in CSS pixels).
 const VECTOR_PATTERN_GLSL = /* glsl */`{
         float vpLen = vectorPatternLength;
         float vpD = mod( vLineDistance + dashOffset, vpLen );
-        float vpDot = 0.5 * linewidth * fwidth( vLineDistance );
+        float vpDot = 0.5 * linewidth * vectorPixelRatio * fwidth( vLineDistance );
         float vpPos = 0.0;
         bool vpOn = false;
         for ( int i = 0; i < ${VECTOR_PATTERN_MAX}; i ++ ) {
@@ -12718,9 +12734,9 @@ const VECTOR_DASH_LINE_RE = /if \( mod\( vLineDistance \+ dashOffset, dashSize \
 
 /**
  * Make a LineMaterial draw a DXF linetype pattern.
- * @param {any} mat @param {number[]} pattern
+ * @param {any} mat @param {number[]} pattern @param {{value: number}} pixelRatio shared uniform
  */
-function applyVectorLinetype(mat, pattern) {
+function applyVectorLinetype(mat, pattern, pixelRatio) {
     const values = new Float32Array(VECTOR_PATTERN_MAX);
     pattern.slice(0, VECTOR_PATTERN_MAX).forEach((v, i) => { values[i] = v; });
     const length = pattern.slice(0, VECTOR_PATTERN_MAX).reduce((s, v) => s + Math.abs(v), 0);
@@ -12728,6 +12744,7 @@ function applyVectorLinetype(mat, pattern) {
     mat.uniforms.vectorPattern = { value: values };
     mat.uniforms.vectorPatternCount = { value: Math.min(pattern.length, VECTOR_PATTERN_MAX) };
     mat.uniforms.vectorPatternLength = { value: length };
+    mat.uniforms.vectorPixelRatio = pixelRatio;
     mat.onBeforeCompile = (/** @type {any} */ shader) => {
         if (!VECTOR_DASH_LINE_RE.test(shader.fragmentShader)) {
             console.warn('Vector linetypes: LineMaterial dash code not found; drawing plain dashes');
@@ -12737,7 +12754,8 @@ function applyVectorLinetype(mat, pattern) {
             .replace('uniform float gapSize;', `uniform float gapSize;
             uniform float vectorPattern[ ${VECTOR_PATTERN_MAX} ];
             uniform int vectorPatternCount;
-            uniform float vectorPatternLength;`)
+            uniform float vectorPatternLength;
+            uniform float vectorPixelRatio;`)
             .replace(VECTOR_DASH_LINE_RE, VECTOR_PATTERN_GLSL);
     };
     mat.customProgramCacheKey = () => 'tjsv-vector-linetype';
@@ -12762,6 +12780,9 @@ class VectorEntityController {
         this._frustum = new THREE.Frustum();
         this._m4 = new THREE.Matrix4();
         this._c = new THREE.Vector3();
+        this._sphere = new THREE.Sphere();
+        // Shared by every patterned material: dots are sized in CSS pixels.
+        this._pixelRatio = { value: 1 };
         /** @type {Set<string>} */
         this._warned = new Set();
         /** @type {Set<string>} layers / linetypes set by Python or an embedder */
@@ -12817,8 +12838,9 @@ class VectorEntityController {
     setLayer(data, fromFile = false) {
         if (typeof data.name !== 'string' || !data.name) return;
         if (fromFile && this._explicitLayers.has(data.name)) return;
+        const before = this.layers.get(data.name) || {};
         /** @type {Record<string, any>} */
-        const layer = { ...(this.layers.get(data.name) || {}) };
+        const layer = { ...before };
         for (const key of /** @type {const} */ (['color', 'linetype', 'lineWidth', 'visible'])) {
             if (data[key] === null) delete layer[key];
             else if (data[key] !== undefined) layer[key] = data[key];
@@ -12833,7 +12855,14 @@ class VectorEntityController {
         if (typeof layer.visible !== 'boolean') delete layer.visible;
         this.layers.set(data.name, layer);
         if (!fromFile) this._explicitLayers.add(data.name);
-        this._restyleAll();
+        if (layer.color !== before.color || layer.linetype !== before.linetype
+            || layer.lineWidth !== before.lineWidth) {
+            this._restyleAll();
+        } else if (layer.visible !== before.visible) {
+            // Buckets are per layer, so a toggle only flips their visibility.
+            for (const g of this.groups) this._applyLayerVisibility(g);
+            this.v._shadowDirty = true;
+        }
     }
 
     /** @param {{name: string, pattern: number[]}} data @param {boolean} [fromFile] */
@@ -13064,7 +13093,7 @@ class VectorEntityController {
         const old = b.obj.material;
         const mat = new LineMaterial({ color: 0xffffff, vertexColors: true, linewidth: old.linewidth });
         mat.uniforms.resolution = this.v._highlightResolution;
-        if (drawable) applyVectorLinetype(mat, pattern);
+        if (drawable) applyVectorLinetype(mat, pattern, this._pixelRatio);
         b.obj.material = mat;
         old.dispose();
     }
@@ -13109,7 +13138,7 @@ class VectorEntityController {
         const mw = group.matrixWorld;
         const scale = mw.getMaxScaleOnAxis() || 1;
         const c = this._c;
-        const sphere = new THREE.Sphere();
+        const sphere = this._sphere;
         for (const b of st.buckets.values()) {
             if (b.kind === 'points') continue;
             for (const i of b.entities) {
@@ -13169,24 +13198,48 @@ class VectorEntityController {
             b.segments = 0;
             return;
         }
-        const out = { pos: /** @type {number[]} */ ([]), dist: /** @type {number[]} */ ([]) };
-        const cols = [];
-        b.entities.forEach((i, j) => {
-            const n = tessellateVectorEntity(st.records[i], Math.pow(2, st.levels[i]), out);
+        // Only entities whose level moved are tessellated again; the rest
+        // are copied from their cached arrays.
+        const parts = b.entities.map((/** @type {number} */ i) => this._tessellated(st.records[i], st.levels[i]));
+        let segments = 0;
+        for (const part of parts) segments += part.dist.length / 2;
+        const pos = new Float32Array(segments * 6), dist = new Float32Array(segments * 2);
+        const cols = new Float32Array(segments * 6);
+        let at = 0;
+        parts.forEach((/** @type {any} */ part, /** @type {number} */ j) => {
+            pos.set(part.pos, at * 6);
+            dist.set(part.dist, at * 2);
             col.setHex(b.colors[j]);
-            for (let s = 0; s < n; s++) cols.push(col.r, col.g, col.b, col.r, col.g, col.b);
+            const end = at + part.dist.length / 2;
+            for (let o = at * 6; o < end * 6; o += 3) { cols[o] = col.r; cols[o + 1] = col.g; cols[o + 2] = col.b; }
+            at = end;
         });
         const geo = new LineSegmentsGeometry();
-        if (out.pos.length) {
-            geo.setPositions(out.pos);
+        if (segments) {
+            geo.setPositions(pos);
             geo.setColors(cols);
-            const ib = new THREE.InstancedInterleavedBuffer(new Float32Array(out.dist), 2, 1);
+            const ib = new THREE.InstancedInterleavedBuffer(dist, 2, 1);
             geo.setAttribute('instanceDistanceStart', new THREE.InterleavedBufferAttribute(ib, 1, 0));
             geo.setAttribute('instanceDistanceEnd', new THREE.InterleavedBufferAttribute(ib, 1, 1));
         }
         b.obj.geometry.dispose();
         b.obj.geometry = geo;
-        b.segments = out.pos.length / 6;
+        b.segments = segments;
+    }
+
+    /**
+     * One entity's segments at a level. A plain entity keeps its last result;
+     * a block copy is only a transform of its block's cached tessellation.
+     * @param {any} rec @param {number} level
+     * @returns {{pos: ArrayLike<number>, dist: ArrayLike<number>}}
+     */
+    _tessellated(rec, level) {
+        if (!rec.base && rec.tess && rec.tess.level === level) return rec.tess;
+        const out = { pos: /** @type {number[]} */ ([]), dist: /** @type {number[]} */ ([]) };
+        tessellateVectorEntity(rec, Math.pow(2, level), out);
+        if (rec.base) return out;
+        rec.tess = { level, pos: new Float32Array(out.pos), dist: new Float32Array(out.dist) };
+        return rec.tess;
     }
 
     /** Per-frame: refine when the camera or canvas changed, or periodically. */
@@ -13194,17 +13247,32 @@ class VectorEntityController {
         if (this.groups.size === 0) return;
         const cam = this.v._camera;
         const key = this._camKey;
-        const h = this.v._renderer.domElement.clientHeight;
+        this._pixelRatio.value = this.v._renderer.getPixelRatio();
         let changed = false;
-        const vals = [...cam.matrixWorld.elements, ...cam.projectionMatrix.elements, h, cam.zoom];
-        for (let i = 0; i < vals.length; i++) {
-            if (key[i] !== vals[i]) { key[i] = vals[i]; changed = true; }
-        }
+        /** @param {number} i @param {number} x */
+        const track = (i, x) => { if (key[i] !== x) { key[i] = x; changed = true; } };
+        const mw = cam.matrixWorld.elements, pm = cam.projectionMatrix.elements;
+        for (let i = 0; i < 16; i++) { track(i, mw[i]); track(16 + i, pm[i]); }
+        track(32, this.v._renderer.domElement.clientHeight);
+        track(33, cam.zoom);
         const now = performance.now();
         if (!changed && now - this._lastCheck < VECTOR_RECHECK_MS) return;
         this._lastCheck = now;
         const view = this._viewParams();
-        for (const g of this.groups) this._refine(g, view, false);
+        for (const g of this.groups) {
+            // With a still camera only an object that moved can need new levels.
+            if (this._moved(g) || changed) this._refine(g, view, false);
+        }
+    }
+
+    /** Whether a group's world matrix differs from the last one seen (and remember it). @param {any} group */
+    _moved(group) {
+        const st = group.userData.vectorEntities;
+        const e = group.matrixWorld.elements;
+        if (!st.world) st.world = new Float64Array(16).fill(NaN);
+        let moved = false;
+        for (let i = 0; i < 16; i++) if (st.world[i] !== e[i]) { st.world[i] = e[i]; moved = true; }
+        return moved;
     }
 
     dispose() { this.groups.clear(); }
@@ -18952,7 +19020,7 @@ export class ThreeJSViewer {
                         template = result.scene;
                         animations = result.animations || [];
                         const payload = readGltfVectorPayload(result.parser && result.parser.json);
-                        if (payload) template.userData.__vectorPayload = payload;
+                        if (payload) gltfVectorPayloads.set(template, payload);
                     } else if (format === 'dae') {
                         template = new THREE.Group();
                         result.scene.traverse(/** @param {any} child */ (child) => {
@@ -19011,9 +19079,7 @@ export class ThreeJSViewer {
      * @param {any} root @param {any} entry
      */
     _addGltfVectors(root, entry) {
-        const payload = entry.template && entry.template.userData.__vectorPayload;
-        // Instances are clones; the payload stays on the shared template.
-        delete root.userData.__vectorPayload;
+        const payload = entry.template && gltfVectorPayloads.get(entry.template);
         if (!payload) return;
         let group;
         try {

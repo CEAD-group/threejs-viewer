@@ -71,6 +71,13 @@ def _finite(name: str, v) -> float:
     return f
 
 
+def _color(color) -> int:
+    c = int(color)
+    if c != color or not 0 <= c <= 0xFFFFFF:
+        raise ValueError("color must be an integer 0xRRGGBB")
+    return c
+
+
 def _normal(entity: dict, normal) -> None:
     if normal is None:
         return
@@ -91,7 +98,7 @@ def _style(
     if layer is not None:
         entity["layer"] = str(layer)
     if color is not None:
-        entity["color"] = int(color)
+        entity["color"] = _color(color)
     if linetype is not None:
         entity["linetype"] = str(linetype)
     if line_width is not None:
@@ -309,8 +316,8 @@ def spline(
     ``knots`` need ``len(control_points) + degree + 1`` non-decreasing
     values. ``weights`` (positive, one per control point) make it rational.
     """
-    if int(degree) != degree or degree < 1:
-        raise ValueError("degree must be an integer >= 1")
+    if int(degree) != degree or not 1 <= degree <= 32:
+        raise ValueError("degree must be an integer from 1 to 32")
     degree = int(degree)
     cps = _flat_points("control_points", control_points, degree + 1)
     n = len(cps) // 3
@@ -385,6 +392,8 @@ def insert(
     entity["positions"] = _flat_points("positions", pos, 1)
     n = pos.shape[0]
     if rotations is not None:
+        if rotation:
+            raise ValueError("give rotation or rotations, not both")
         r = np.asarray(rotations, dtype=float).reshape(-1)
         if r.size != n or not np.all(np.isfinite(r)):
             raise ValueError(f"rotations needs one finite value per position ({n})")
@@ -412,6 +421,8 @@ def insert(
     for name, value in (("rows", rows), ("columns", columns)):
         if int(value) != value or value < 1:
             raise ValueError(f"{name} must be an integer >= 1")
+    if rows == 1 and columns == 1 and (row_spacing or column_spacing):
+        raise ValueError("row_spacing and column_spacing need rows or columns > 1")
     if rows != 1 or columns != 1:
         entity["rows"] = int(rows)
         entity["columns"] = int(columns)

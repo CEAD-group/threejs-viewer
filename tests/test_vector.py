@@ -598,7 +598,7 @@ def test_insert_grid_rotation_scale_and_inheritance(viewer_client, viewer_page):
     # The nested dot sits 0.5 along the rotated, scaled block X axis: +Y * 2.
     dot_centers = sorted(tuple(r["center"]) for r in dots)
     assert dot_centers == sorted((x, y + 1.0, 0.0) for x, y, _ in want)
-    assert all(abs(r["radius"] - 0.1 * math.sqrt(3)) < 1e-6 for r in dots)
+    assert all(abs(r["radius"] - 0.1) < 1e-6 for r in dots)  # tight circle bound
 
 
 @pytest.mark.browser
@@ -885,3 +885,179 @@ def test_highlight_does_not_outline_the_line_quads(viewer_client, viewer_page):
         }"""
     )
     assert n == 0
+
+
+# === Review follow-ups ===
+
+
+def test_shortcuts_take_explicit_placement_keywords(client):
+    client.add_circle("c", [0, 0, 0], 1, parent="g", position=[0, 0, 1], pickable=False)
+    msg = client._messages[-1]
+    assert msg["parent"] == "g"
+    assert msg["object"]["transform"] == {"position": [0.0, 0.0, 1.0]}
+    assert msg["object"]["vector"]["pickable"] is False
+    with pytest.raises(TypeError):
+        client.add_line("l", [0, 0, 0], [1, 0, 0], blocks={})
+
+
+def test_set_layer_reset_returns_attributes_to_their_default(client):
+    client._ws = object()
+    client.set_layer("A", color=0xFF0000, linetype="DASHED", visible=False)
+    client.set_layer("A", reset=["color", "visible"])
+    assert client._messages[-1] == {
+        "type": "set_vector_layer",
+        "name": "A",
+        "color": None,
+        "visible": None,
+    }
+    assert client._vector_layers["A"] == {
+        "type": "set_vector_layer",
+        "name": "A",
+        "linetype": "DASHED",
+    }
+    with pytest.raises(ValueError, match="unknown"):
+        client.set_layer("A", reset=["colour"])
+    with pytest.raises(ValueError, match="both"):
+        client.set_layer("A", color=1, reset=["color"])
+
+
+@pytest.mark.parametrize(
+    "build, match",
+    [
+        (lambda: vector.line([0, 0, 0], [1, 0, 0], color=-5), "color"),
+        (lambda: vector.line([0, 0, 0], [1, 0, 0], color=0x1FFFFFF), "color"),
+        (lambda: vector.insert("A", [0, 0, 0], rotation=1, rotations=[2]), "not both"),
+        (lambda: vector.insert("A", [0, 0, 0], row_spacing=1), "rows or columns"),
+        (lambda: vector.spline([[0, 0, 0]] * 40, degree=33), "degree"),
+    ],
+)
+def test_builders_reject_ambiguous_or_out_of_range_input(build, match):
+    with pytest.raises(ValueError, match=match):
+        build()
+
+
+def test_set_layer_rejects_out_of_range_color(client):
+    with pytest.raises(ValueError, match="color"):
+        client.set_layer("A", color=-1)
+
+
+_BUCKET_GEOMETRY_JS = """(id) => {
+    const st = window.threejsViewer._objects.get(id).userData.vectorEntities;
+    const out = {};
+    for (const b of st.buckets.values()) out[b.layer] = b.obj.geometry.uuid;
+    return out;
+}"""
+
+
+@pytest.mark.browser
+def test_layer_toggle_keeps_geometry_and_reset_restores_defaults(
+    viewer_client, viewer_page
+):
+    viewer_client.add_vector_entities(
+        "d",
+        [
+            vector.circle([0, 0, 0], 1, layer="A"),
+            vector.circle([0, 0, 0], 2, layer="B"),
+        ],
+    )
+    viewer_client.set_layer("A", color=0xFF0000)
+    settle(viewer_client)
+    before = viewer_page.evaluate(_BUCKET_GEOMETRY_JS, "d")
+
+    # Visibility only: the buckets flip, nothing is tessellated again.
+    viewer_client.set_layer("A", visible=False)
+    settle(viewer_client)
+    assert viewer_page.evaluate(_BUCKET_GEOMETRY_JS, "d") == before
+    vis = {b["layer"]: b["visible"] for b in _stats(viewer_page, "d")["buckets"]}
+    assert vis == {"A": False, "B": True}
+
+    viewer_client.set_layer("A", reset=["visible", "color"])
+    settle(viewer_client)
+    vis = {b["layer"]: b["visible"] for b in _stats(viewer_page, "d")["buckets"]}
+    assert vis == {"A": True, "B": True}
+    layers = viewer_page.evaluate("() => window.threejsViewer._vectors.listLayers()")
+    assert {"name": "A"} in layers
+
+    # Layers are viewer settings: clear() removes the object, not the table.
+    viewer_client.set_layer("A", color=0x00FF00)
+    viewer_client.clear()
+    settle(viewer_client)
+    layers = viewer_page.evaluate("() => window.threejsViewer._vectors.listLayers()")
+    assert {"name": "A", "color": 0x00FF00} in layers
+
+
+@pytest.mark.browser
+def test_rebuild_reuses_cached_tessellation_of_unchanged_entities(
+    viewer_client, viewer_page
+):
+    # Same bucket; the camera closes in on the first circle only.
+    viewer_client.add_vector_entities(
+        "d", [vector.circle([0, 0, 0], 1), vector.circle([500, 0, 0], 1)]
+    )
+    viewer_client.set_camera(position=[0, 0, 50], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    tag = """() => {
+        const st = window.threejsViewer._objects.get('d').userData.vectorEntities;
+        st.records.forEach((r, i) => { r.tess.tag = r.tess.tag || 'first'; });
+        return st.records.map((r) => [r.tess.tag || null, r.tess.level]);
+    }"""
+    far = viewer_page.evaluate(tag)
+    viewer_client.set_camera(position=[1, 0, 0.05], target=[1, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    near = viewer_page.evaluate(
+        """() => window.threejsViewer._objects.get('d').userData.vectorEntities
+            .records.map((r) => [r.tess.tag || null, r.tess.level])"""
+    )
+    assert near[0][0] is None and near[0][1] < far[0][1]  # tessellated again, finer
+    assert near[1] == far[1]  # untouched: same cached arrays
+
+
+@pytest.mark.browser
+def test_still_camera_only_rechecks_objects_that_moved(viewer_client, viewer_page):
+    viewer_client.add_circle("c", [0, 0, 0], 1.0)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(
+        """() => {
+            const vec = window.threejsViewer._vectors;
+            window.__refines = 0;
+            const refine = vec._refine.bind(vec);
+            vec._refine = (...a) => { window.__refines++; return refine(...a); };
+        }"""
+    )
+    viewer_page.wait_for_timeout(700)  # several 250 ms recheck periods
+    assert viewer_page.evaluate("() => window.__refines") == 0
+    viewer_page.evaluate(
+        "() => { window.threejsViewer._objects.get('c').position.x = 3; }"
+    )
+    viewer_page.wait_for_timeout(700)
+    assert viewer_page.evaluate("() => window.__refines") >= 1
+
+
+@pytest.mark.browser
+def test_patterned_lines_know_the_pixel_ratio_and_empty_pattern_is_continuous(
+    viewer_client, viewer_page
+):
+    viewer_client.set_linetype("NONE", [])
+    viewer_client.add_vector_entities(
+        "d",
+        [
+            vector.circle([0, 0, 0], 1, linetype="DOT", layer="A"),
+            vector.circle([0, 0, 0], 2, linetype="NONE", layer="B"),
+        ],
+    )
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    dashed = {b["layer"]: b["dashed"] for b in _stats(viewer_page, "d")["buckets"]}
+    assert dashed == {"A": True, "B": False}
+    ratios = viewer_page.evaluate(
+        """() => {
+            const v = window.threejsViewer;
+            const st = v._objects.get('d').userData.vectorEntities;
+            const b = [...st.buckets.values()].find((x) => x.layer === 'A');
+            return [b.obj.material.uniforms.vectorPixelRatio.value, v._renderer.getPixelRatio()];
+        }"""
+    )
+    assert ratios[0] == ratios[1]

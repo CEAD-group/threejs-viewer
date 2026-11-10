@@ -5,14 +5,13 @@ A small DXF-style drawing: a flange outline with bolt holes placed as a
 block (DXF BLOCK/INSERT), slots made of bulged polylines, centre lines, an
 elliptical recess and a NURBS cam profile.
 Curves keep their exact definitions and refine as you zoom in: get close to
-any edge and it stays smooth. Layers set colour, linetype and width, and the
-last few lines toggle the HIDDEN layer on and off.
+any edge and it stays smooth. Layers set colour, linetype and width; try
+v.set_layer("HIDDEN", visible=False).
 
 Run: uv run python examples/42_vector_entities.py
 """
 
 import math
-import time
 
 from threejs_viewer import vector, viewer
 
@@ -90,21 +89,6 @@ cam = [
     [0.19, -0.06, 0],
 ]
 v.add_spline("cam", cam, degree=3, weights=[1, 2, 1, 3, 1, 1], closed=True, layer="CAM")
-# Its control polygon, dotted, with the control points.
-v.add_vector_entities(
-    "cam_ctrl",
-    [
-        vector.points(cam, color=0x777777),
-        vector.polyline(cam, closed=True, color=0x555555, linetype="DOT"),
-    ],
-)
 
 v.set_view("top", animate=False)
 v.frame_points([[-0.12, -0.12, 0], [0.34, 0.12, 0]])
-
-# Toggle the hidden lines a few times.
-for _ in range(3):
-    time.sleep(1.5)
-    v.set_layer("HIDDEN", visible=False)
-    time.sleep(1.5)
-    v.set_layer("HIDDEN", visible=True)

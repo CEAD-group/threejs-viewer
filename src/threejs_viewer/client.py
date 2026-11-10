@@ -20,7 +20,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from websockets.sync.server import serve as sync_serve
@@ -2310,7 +2310,13 @@ class ViewerClient:
         linetype: Optional[str] = None,
         line_width: Optional[float] = None,
         linetype_scale: Optional[float] = None,
-        **placement,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """Add a straight vector line. See :meth:`add_vector_entities` for
         styling and for the ``parent``/``position``/``rotation``/``scale``/
@@ -2324,7 +2330,17 @@ class ViewerClient:
             line_width=line_width,
             linetype_scale=linetype_scale,
         )
-        self.add_vector_entities(id, [entity], **placement)
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
 
     def add_circle(
         self,
@@ -2338,7 +2354,13 @@ class ViewerClient:
         linetype: Optional[str] = None,
         line_width: Optional[float] = None,
         linetype_scale: Optional[float] = None,
-        **placement,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """Add a circle that stays smooth at any zoom.
 
@@ -2356,7 +2378,17 @@ class ViewerClient:
             line_width=line_width,
             linetype_scale=linetype_scale,
         )
-        self.add_vector_entities(id, [entity], **placement)
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
 
     def add_arc(
         self,
@@ -2372,7 +2404,13 @@ class ViewerClient:
         linetype: Optional[str] = None,
         line_width: Optional[float] = None,
         linetype_scale: Optional[float] = None,
-        **placement,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """Add a circular arc, counter-clockwise about ``normal`` from
         ``start_angle`` to ``end_angle`` (radians, DXF ``ARC`` convention).
@@ -2389,7 +2427,17 @@ class ViewerClient:
             line_width=line_width,
             linetype_scale=linetype_scale,
         )
-        self.add_vector_entities(id, [entity], **placement)
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
 
     def add_ellipse(
         self,
@@ -2406,7 +2454,13 @@ class ViewerClient:
         linetype: Optional[str] = None,
         line_width: Optional[float] = None,
         linetype_scale: Optional[float] = None,
-        **placement,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """Add an ellipse or elliptical arc (DXF ``ELLIPSE``); see
         :func:`threejs_viewer.vector.ellipse` for the parameters and
@@ -2424,7 +2478,17 @@ class ViewerClient:
             line_width=line_width,
             linetype_scale=linetype_scale,
         )
-        self.add_vector_entities(id, [entity], **placement)
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
 
     def add_spline(
         self,
@@ -2440,7 +2504,13 @@ class ViewerClient:
         linetype: Optional[str] = None,
         line_width: Optional[float] = None,
         linetype_scale: Optional[float] = None,
-        **placement,
+        parent: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        matrix: Optional[List[float]] = None,
+        visible: bool = True,
+        pickable: bool = True,
     ) -> None:
         """Add a NURBS curve (DXF ``SPLINE``); see
         :func:`threejs_viewer.vector.spline` for the parameters and
@@ -2457,7 +2527,17 @@ class ViewerClient:
             line_width=line_width,
             linetype_scale=linetype_scale,
         )
-        self.add_vector_entities(id, [entity], **placement)
+        self.add_vector_entities(
+            id,
+            [entity],
+            parent=parent,
+            position=position,
+            rotation=rotation,
+            scale=scale,
+            matrix=matrix,
+            visible=visible,
+            pickable=pickable,
+        )
 
     def set_layer(
         self,
@@ -2467,20 +2547,41 @@ class ViewerClient:
         linetype: Optional[str] = None,
         line_width: Optional[float] = None,
         visible: Optional[bool] = None,
+        reset: Sequence[str] = (),
     ) -> None:
         """Create or update a vector-entity layer (DXF ``LAYER``).
 
         Entities that don't set their own colour, linetype or line width use
         the layer's. ``visible=False`` hides the layer in every vector
-        object. Omitted arguments keep their current value. Layers are viewer
-        settings, not scene objects: :meth:`clear` leaves them and a reconnect
-        replays them.
+        object. Omitted arguments keep their current value; ``reset`` names
+        the ones to return to their default (any of ``"color"``,
+        ``"linetype"``, ``"line_width"``, ``"visible"``). Layers are viewer
+        settings, not scene objects, and shared by every vector object,
+        including those loaded from glTF files: :meth:`clear` leaves them and
+        a reconnect replays them.
         """
         if not isinstance(name, str) or not name:
             raise ValueError("layer name must be a non-empty string")
+        fields = {
+            "color": "color",
+            "linetype": "linetype",
+            "line_width": "lineWidth",
+            "visible": "visible",
+        }
+        given = {
+            "color": color,
+            "linetype": linetype,
+            "line_width": line_width,
+            "visible": visible,
+        }
+        for key in reset:
+            if key not in fields:
+                raise ValueError(f"reset: unknown layer attribute {key!r}")
+            if given[key] is not None:
+                raise ValueError(f"{key} is both set and reset")
         msg: dict = {"type": "set_vector_layer", "name": name}
         if color is not None:
-            msg["color"] = int(color)
+            msg["color"] = vector._color(color)
         if linetype is not None:
             msg["linetype"] = str(linetype)
         if line_width is not None:
@@ -2493,6 +2594,11 @@ class ViewerClient:
             name, {"type": "set_vector_layer", "name": name}
         )
         stored.update(msg)
+        for key in reset:
+            # The viewer reads null as "back to the default"; the replay
+            # simply no longer carries the attribute.
+            stored.pop(fields[key], None)
+            msg[fields[key]] = None
         if self._ws is not None:
             self._send(msg)
 

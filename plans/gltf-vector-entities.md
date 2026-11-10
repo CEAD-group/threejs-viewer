@@ -190,26 +190,39 @@ Python: `add_vector_entities(id, entities, ...)` with entity builders in
 `add_ellipse` and `add_spline`, plus `set_layer` and `set_linetype`.
 Objects are ordinary scene objects (`delete`, `set_visible`, parenting and
 transforms work). Layers and linetypes are viewer-wide settings, replayed
-on reconnect and kept by `clear()`.
+on reconnect and kept by `clear()`. The tables are shared on purpose, as in
+one DXF document: `set_layer("HIDDEN", visible=False)` acts on every object.
+The cost is that two glTF files defining the same layer name share one
+entry (the last one loaded wins, tables set from Python win over both), and
+a file's entries stay after its model is deleted. Per-model tables are an
+open question below.
 
 JavaScript: `VectorEntityController` in `viewer.js`.
 
 - **Batching:** one `LineSegments2` per (layer, linetype, line width) bucket
   per object, with per-vertex colour; one `THREE.Points` per (layer, size)
-  for points. A layer toggle flips bucket visibility.
+  for points. A layer toggle flips bucket visibility without tessellating;
+  a colour, linetype or width change re-buckets every object.
 - **Refinement:** each entity has a bounding sphere. When the camera or
   canvas changes (and every 250 ms, for animated parents), the viewer
   computes world units per pixel at the entity (constant under orthographic
   projection) and a chord tolerance of 0.5 px, quantised to a power of two.
   It rebuilds a bucket only when an entity needs a finer level, or one at
-  least four times coarser. Off-screen entities keep their level.
+  least four times coarser. Off-screen entities keep their level. A rebuild
+  re-tessellates only the entities whose level moved; the others are copied
+  from their cached arrays. With a still camera, only objects whose world
+  matrix changed are checked.
   - Arcs, circles, ellipses and bulges: `n = sweep / (2·acos(1 − tol/r))`,
     using the major radius for ellipses (where parametric sampling has its
     largest chord error).
   - Splines: de Boor on homogeneous coordinates; each knot span's count
     comes from a sampled bound on its second derivative,
     `n = sqrt(M / (8·tol))`.
-  - At most 8192 segments per curve piece.
+  - At most 8192 segments per curve piece. A curve is always tessellated
+    whole, so beyond a radius of about 1.3e7 tolerances (a 5 km arc viewed
+    at 1 mm per pixel) facets become visible.
+  - Limits on untrusted input: spline degree at most 32, at most 1e6 block
+    placements and 1e6 entities per object, insert nesting at most 16 deep.
 - **Linetypes:** a `LineMaterial` `onBeforeCompile` patch replaces the
   single dash/gap test with a walk over the pattern (uniform array of 12).
   Pattern distances restart at 0 for each entity and are divided by its
@@ -242,11 +255,13 @@ wire (only in the glTF payload, phase 2).
 - Not yet: `components` (parenting entity sets to individual parts so they
   follow part animation, and layer toggles hiding part meshes), and a
   committed glTF-Transform-processed fixture. Tests build a GLB in Python;
-  the exporter in `cell-setup-description/tools/add_vector_features.py`
-  was checked by hand on a Draco GLB (76 circles).
+  an external exporter was checked by hand on a Draco GLB (76 circles).
 
 ## Open questions
 
+- Per-model layer and linetype tables for glTF files, instead of merging
+  them into the viewer-wide ones.
+- Highlighting: `set_highlight` on a vector object currently draws nothing.
 - Final vendor prefix.
 - DXF `lineweight` (1/100 mm) in the glTF payload, mapped to pixels?
 - Text (`TEXT`/`MTEXT`), hatches and dimensions: v2?
