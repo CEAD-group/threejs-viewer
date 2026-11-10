@@ -150,6 +150,54 @@ v.set_opacity("box1", 0.5)
 v.set_color("ball", 0xFF0000, opacity=0.3)
 ```
 
+### Vector entities (DXF-style curves)
+
+Circles, arcs, ellipses, NURBS splines, polylines with DXF bulges, lines and
+points keep their exact definitions in the viewer and re-tessellate as the
+camera moves, so they stay smooth at any zoom. Layers and linetypes work as
+in DXF: entities default to their layer's colour, linetype and width.
+
+```python
+import math
+from threejs_viewer import vector
+
+v.set_layer("CENTER", color=0xFF6E6E, linetype="CENTER", line_width=1)
+v.set_linetype("MYDASH", [0.01, -0.005, 0, -0.005])   # dash, gap, dot, gap (scene units)
+
+v.add_circle("hole", [0, 0, 0], 0.035, color=0x5AB4FF)
+v.add_arc("arc", [0, 0, 0], 0.09, 0, math.pi / 2, layer="CENTER")
+v.add_spline("cam", control_points, degree=3, weights=w, closed=True)
+
+# Many entities in one object, batched into a few draw calls per layer
+v.add_vector_entities("drawing", [
+    vector.line([-0.1, 0, 0], [0.1, 0, 0], layer="CENTER"),
+    vector.polyline(slot_corners, bulges=[0, 1, 0, 1], closed=True),
+    vector.ellipse([0, 0, 0], [0.02, 0, 0], 0.5, linetype="MYDASH"),
+])
+v.set_layer("CENTER", visible=False)   # hides the layer in every object
+
+# Blocks and inserts (DXF BLOCK / INSERT / MINSERT): define once, place many
+# times. The block is tessellated once per detail level; copies are transformed.
+v.add_vector_entities(
+    "bolt_pattern",
+    [vector.insert("HOLE", bolt_centres, layer="HOLES"),
+     vector.insert("HOLE", [0, 0, 0], rows=4, columns=6,
+                   row_spacing=0.02, column_spacing=0.02, scale=0.5)],
+    blocks={"HOLE": [vector.circle([0, 0, 0], 0.004), vector.circle([0, 0, 0], 0.006, linetype="HIDDEN")]},
+)
+```
+
+`examples/42_vector_entities.py` draws a flange with bolt holes, slots, centre
+lines and a NURBS cam.
+
+glTF and GLB files can carry the same entities in root
+`extras.TJSV_vector_entities` (the only place that survives glTF-Transform,
+Draco included). `add_model` / `add_model_binary` draw them with the model,
+merge the file's layers and linetypes (tables set from Python win), and hide
+fallback line primitives whose material extras carry
+`{"TJSV_vector_entities": {"fallback": true}}`. The format is described in
+`plans/gltf-vector-entities.md`.
+
 ### USD BRep geometry
 
 ```python
