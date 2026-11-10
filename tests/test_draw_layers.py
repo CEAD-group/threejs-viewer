@@ -8,9 +8,10 @@ import pytest
 from conftest import frames, settle
 
 
-def _glb_with_draw_layers(layers) -> bytes:
+def _glb_with_draw_layers(layers, group_layer=None) -> bytes:
     """Coplanar one-triangle meshes sharing one material, one node per entry of
-    ``layers`` (name -> ``extras.draw_layer`` value, or None for no extras)."""
+    ``layers`` (name -> ``extras.draw_layer`` value, or None for no extras).
+    With ``group_layer`` the nodes sit under a parent node on that layer."""
     import struct
 
     tri = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32)
@@ -21,10 +22,16 @@ def _glb_with_draw_layers(layers) -> bytes:
         if layer is not None:
             node["extras"] = {"draw_layer": layer}
         nodes.append(node)
+    roots = list(range(len(nodes)))
+    if group_layer is not None:
+        nodes.append(
+            {"name": "GROUP", "children": roots, "extras": {"draw_layer": group_layer}}
+        )
+        roots = [len(nodes) - 1]
     doc = {
         "asset": {"version": "2.0"},
         "scene": 0,
-        "scenes": [{"nodes": list(range(len(nodes)))}],
+        "scenes": [{"nodes": roots}],
         "nodes": nodes,
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
         "materials": [{"name": "shared"}],
@@ -97,3 +104,27 @@ def test_gltf_draw_layers_offset_coplanar_meshes(viewer_client, viewer_page):
     settle(viewer_client)
     frames(viewer_page, 2)
     assert viewer_page.evaluate(_DRAW_LAYERS_JS, "plan") == r
+
+
+@pytest.mark.browser
+def test_gltf_draw_layer_inherits_from_nearest_ancestor(viewer_client, viewer_page):
+    glb = _glb_with_draw_layers({"INHERIT": None, "OWN": 3, "RESET": 0}, group_layer=2)
+    viewer_client.add_model_binary("plan", glb, format="glb")
+    settle(viewer_client)
+    r = viewer_page.evaluate(_DRAW_LAYERS_JS, "plan")
+    assert r["INHERIT"]["factor"] == -2
+    assert r["OWN"]["factor"] == -3
+    assert not r["RESET"]["offset"]  # an explicit 0 overrides the parent's layer
+
+
+@pytest.mark.browser
+def test_gltf_draw_layers_survive_cached_instances(viewer_client, viewer_page):
+    glb = _glb_with_draw_layers({"FLOOR": 0, "PATH": 1})
+    viewer_client.add_model_binary("a", glb, format="glb")
+    viewer_client.add_model_binary("b", glb, format="glb")
+    settle(viewer_client)
+    a = viewer_page.evaluate(_DRAW_LAYERS_JS, "a")
+    b = viewer_page.evaluate(_DRAW_LAYERS_JS, "b")
+    assert a["PATH"]["offset"] and b["PATH"]["offset"]
+    assert b["PATH"]["units"] == a["PATH"]["units"] < 0
+    assert not b["FLOOR"]["offset"]

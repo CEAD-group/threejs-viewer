@@ -8362,6 +8362,9 @@ class ShadingDebugController {
         this._normalMat = null;
         this._uvMat = null;
         this._uvTex = null;
+        // Offset copies of the swap materials, keyed `${uuid}:${drawLayer}`.
+        /** @type {Map<string, any>} */
+        this._drawLayerVariants = new Map();
     }
 
     cycleWireframe() { this.setWireframeMode(this.wireframeMode + 1); }
@@ -8548,7 +8551,6 @@ class ShadingDebugController {
      * @param {any} mat @param {number} layer
      */
     _drawLayerVariant(mat, layer) {
-        if (!this._drawLayerVariants) this._drawLayerVariants = new Map();
         const key = `${mat.uuid}:${layer}`;
         let c = this._drawLayerVariants.get(key);
         if (!c) {
