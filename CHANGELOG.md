@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.77
+
+### Vector entities: DXF-style curves (#333)
+
+- New object kind `vector`: points, lines, polylines with DXF bulges, circles, arcs, ellipses and NURBS splines (rational, clamped or closed). Entities keep their definitions and re-tessellate as the camera moves, to a chord error of about half a pixel, so curves stay smooth at any zoom. A curve piece is drawn with at most 8192 segments.
+- `add_vector_entities(id, entities, ...)` adds any number of entities as one object, batched into one draw call per layer, linetype and width. `add_line`, `add_circle`, `add_arc`, `add_ellipse` and `add_spline` add a single entity. `threejs_viewer.vector` holds the entity builders (`point`, `points`, `line`, `polyline`, `circle`, `arc`, `ellipse`, `spline`, `insert`), which validate their input in Python.
+- Layers and linetypes work as in DXF. `set_layer(name, color=, linetype=, line_width=, visible=, reset=)` and `set_linetype(name, pattern)` are viewer-wide settings shared by every vector object; they survive `clear()` and a reconnect. Built-in linetypes: `CONTINUOUS`, `DASHED`, `HIDDEN`, `CENTER`, `PHANTOM`, `DOT`, `DASHDOT`, `BORDER`, `DIVIDE`. Hiding a layer does not tessellate anything again.
+- Blocks and inserts: `vector.insert` places a block at one or many positions or on a rows by columns grid, with rotation, scale and an optional normal. Block entities on layer `0` or without a layer take the insert's layer, and BYBLOCK colour and linetype take the insert's. Blocks may nest.
+- glTF and GLB files can carry the same entities in root `extras.TJSV_vector_entities`, which survives glTF-Transform and Draco. `add_model` and `add_model_binary` draw them with the model, merge the file's layers and linetypes (tables set from Python win) and hide line primitives flagged as fallback. The format is described in `plans/gltf-vector-entities.md`.
+- Invalid entities are skipped with a console warning; the rest draw. `set_highlight` draws nothing on vector objects.
+- New example `examples/42_vector_entities.py`.
+
+### Draw layers for coplanar glTF meshes (#332)
+
+- A glTF node's integer `extras.draw_layer` (0 to 15; in Blender, an object custom property exported with "Include > Custom Properties") orders surfaces that share a plane in one model, such as a floor, a path painted on it and borders on the path. A higher layer always draws over a lower one, for opaque and transparent materials, while depth testing against the rest of the scene stays on. Nodes inherit the layer of their nearest ancestor that sets one.
+- Layer 0, a missing property or an invalid value (one warning per model) draw as before. The order holds in clay and the debug views.
+
 ## 0.0.76
 
 ### Tool panels on a left rail (#324, issue #323)
