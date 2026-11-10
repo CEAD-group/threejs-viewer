@@ -65,7 +65,7 @@ _DRAW_LAYERS_JS = """(id) => {
     window.threejsViewer._objects.get(id).traverse((o) => {
         if (!o.isMesh) return;
         const m = o.material;
-        out[o.name] = { offset: m.polygonOffset, factor: m.polygonOffsetFactor,
+        out[o.name] = { offset: m.polygonOffset, factor: m.polygonOffsetFactor, order: o.renderOrder,
             units: m.polygonOffsetUnits, mat: m.uuid, clay: m.isMeshLambertMaterial === true };
     });
     return out;
@@ -75,18 +75,21 @@ _DRAW_LAYERS_JS = """(id) => {
 @pytest.mark.browser
 def test_gltf_draw_layers_offset_coplanar_meshes(viewer_client, viewer_page):
     glb = _glb_with_draw_layers(
-        {"FLOOR": 0, "PATH": 1, "BORDERS": 2, "WALLS": None, "BAD": 1.5}
+        {"FLOOR": 0, "PATH": 1, "BORDERS": 2, "WALLS": None, "BAD": 1.5, "TEXT": "2"}
     )
     viewer_client.add_model_binary("plan", glb, format="glb")
     settle(viewer_client)
     r = viewer_page.evaluate(_DRAW_LAYERS_JS, "plan")
     # Layer 0, no extras and an invalid value draw without offset.
-    for name in ("FLOOR", "WALLS", "BAD"):
+    for name in ("FLOOR", "WALLS", "BAD", "TEXT"):
         assert not r[name]["offset"], name
     assert r["FLOOR"]["mat"] == r["WALLS"]["mat"]  # untouched meshes keep sharing
     assert r["PATH"]["offset"] and r["BORDERS"]["offset"]
-    assert r["BORDERS"]["factor"] < r["PATH"]["factor"] < 0
+    # One slope factor for all layers; the units order them.
+    assert r["BORDERS"]["factor"] == r["PATH"]["factor"] < 0
     assert r["BORDERS"]["units"] < r["PATH"]["units"] < 0
+    # renderOrder orders transparent layers, which polygon offset cannot.
+    assert [r[n]["order"] for n in ("FLOOR", "PATH", "BORDERS")] == [0, 1, 2]
     # The shared material was cloned per layer, never modified in place.
     assert len({r[n]["mat"] for n in ("FLOOR", "PATH", "BORDERS")}) == 3
 
@@ -97,7 +100,7 @@ def test_gltf_draw_layers_offset_coplanar_meshes(viewer_client, viewer_page):
     low = viewer_page.evaluate(_DRAW_LAYERS_JS, "plan")
     assert all(low[n]["clay"] for n in ("FLOOR", "PATH", "BORDERS", "WALLS"))
     assert not low["FLOOR"]["offset"]
-    assert low["PATH"]["factor"] == r["PATH"]["factor"]
+    assert low["PATH"]["units"] == r["PATH"]["units"]
     assert low["BORDERS"]["units"] == r["BORDERS"]["units"]
 
     viewer_client.set_display_quality("high")
@@ -112,8 +115,8 @@ def test_gltf_draw_layer_inherits_from_nearest_ancestor(viewer_client, viewer_pa
     viewer_client.add_model_binary("plan", glb, format="glb")
     settle(viewer_client)
     r = viewer_page.evaluate(_DRAW_LAYERS_JS, "plan")
-    assert r["INHERIT"]["factor"] == -2
-    assert r["OWN"]["factor"] == -3
+    assert r["INHERIT"]["units"] == 2 * r["OWN"]["units"] / 3 < 0
+    assert (r["INHERIT"]["order"], r["OWN"]["order"]) == (2, 3)
     assert not r["RESET"]["offset"]  # an explicit 0 overrides the parent's layer
 
 

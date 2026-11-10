@@ -12207,7 +12207,10 @@ const DRAW_LAYER_MAX = 15;
  * @param {number} layer
  */
 function drawLayerOffset(layer) {
-    return { polygonOffset: true, polygonOffsetFactor: -layer,
+    // One slope factor for every layer: coplanar layers share a slope, so the
+    // units alone order them, and a high layer is not pulled through geometry
+    // standing on it at grazing angles.
+    return { polygonOffset: true, polygonOffsetFactor: -1,
         polygonOffsetUnits: -layer * DRAW_LAYER_OFFSET_UNITS };
 }
 
@@ -12228,8 +12231,7 @@ function applyGltfDrawLayers(root) {
         let layer = inherited;
         const raw = o.userData && o.userData.draw_layer;
         if (raw !== undefined) {
-            const n = Number(raw);
-            if (Number.isInteger(n) && n >= 0 && n <= DRAW_LAYER_MAX) layer = n;
+            if (Number.isInteger(raw) && raw >= 0 && raw <= DRAW_LAYER_MAX) layer = raw;
             else if (!warned) {
                 warned = true;
                 console.warn(`glTF draw_layer must be an integer 0..${DRAW_LAYER_MAX}; '${o.name}' has`, raw);
@@ -12251,6 +12253,9 @@ function applyGltfDrawLayers(root) {
             };
             o.material = Array.isArray(o.material) ? o.material.map(layered) : layered(o.material);
             o.userData.drawLayer = layer;
+            // Polygon offset cannot order blended surfaces that do not write
+            // depth; within the transparent pass renderOrder does.
+            o.renderOrder = layer;
         }
         for (const c of o.children) walk(c, layer);
     };

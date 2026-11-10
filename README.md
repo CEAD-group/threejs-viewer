@@ -315,8 +315,10 @@ Surfaces that share a plane in one model (a floor, a path painted on it,
 borders on the path) flicker against each other. Give each node an integer
 `extras.draw_layer` from 0 to 15 (in Blender, an object custom property with
 "Include > Custom Properties" ticked on export). A higher layer always draws
-over a lower one in the same plane. Depth testing against the rest of the
-scene stays on, so a wall in front still hides the floor. Nodes inherit the
+over a lower one in the same plane, for opaque and for transparent materials.
+Depth testing against the rest of the scene stays on, so a wall in front still
+hides the floor. The value must be a number; anything else is ignored with a
+console warning. Nodes inherit the
 layer of their nearest ancestor that sets one, and nodes without the property
 draw as before.
 
