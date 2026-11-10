@@ -80,6 +80,11 @@ def test_spline_accepts_knots_and_weights():
         (lambda: vector.arc([0, 0, 0], 1, 0, float("inf")), "end_angle"),
         (lambda: vector.ellipse([0, 0, 0], [1, 0, 0], 1.5), "ratio"),
         (lambda: vector.ellipse([0, 0, 0], [0, 0, 0], 0.5), "major_axis"),
+        (lambda: vector.ellipse([0, 0, 0], [0, 0, 2], 0.5), "parallel"),
+        (
+            lambda: vector.ellipse([0, 0, 0], [1, 0, 0], 0.5, normal=[3, 0, 0]),
+            "parallel",
+        ),
         (lambda: vector.polyline([[0, 0, 0]]), "vertices"),
         (lambda: vector.polyline([[0, 0, 0], [1, 0, 0]], bulges=[]), "bulges"),
         (lambda: vector.spline([[0, 0, 0], [1, 0, 0]], degree=3), "control_points"),
@@ -90,6 +95,10 @@ def test_spline_accepts_knots_and_weights():
         ),
         (lambda: vector.spline([[0, 0, 0]] * 4, weights=[1, 1, 0, 1]), "weights"),
         (lambda: vector.line([0, 0, 0], [1, 0, 0], line_width=0), "line_width"),
+        (
+            lambda: vector.line([0, 0, 0], [1, 0, 0], line_width=float("inf")),
+            "line_width",
+        ),
         (
             lambda: vector.line([0, 0, 0], [1, 0, 0], linetype_scale=-1),
             "linetype_scale",
@@ -155,7 +164,21 @@ def test_add_vector_entities_rejects_non_entities(client):
         client.add_vector_entities("d", [vector.point([0, 0, 0]), {"radius": 1}])
     with pytest.raises(ValueError, match="matrix"):
         client.add_vector_entities("d", [], matrix=[1, 2, 3])
+    with pytest.raises(ValueError, match="position"):
+        client.add_vector_entities("d", [], position=[0, float("nan"), 0])
     assert client._messages == []
+
+
+def test_add_vector_entities_accepts_numpy_transform(client):
+    client.add_vector_entities(
+        "d",
+        [vector.point([0, 0, 0])],
+        position=np.zeros(3, np.float32),
+        scale=np.ones(3, np.float32),
+    )
+    transform = client._messages[-1]["object"]["transform"]
+    json.dumps(transform)
+    assert transform == {"position": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]}
 
 
 def test_convenience_methods_build_one_entity(client):
@@ -190,6 +213,8 @@ def test_layers_and_linetypes_merge_and_record_without_connection(client):
         client.set_linetype("long", [0.1, -0.1] * 7)
     with pytest.raises(ValueError, match="name"):
         client.set_layer("")
+    with pytest.raises(ValueError, match="line_width"):
+        client.set_layer("A", line_width=float("inf"))
 
 
 def test_set_layer_sends_only_changed_fields_when_connected(client):
@@ -805,3 +830,58 @@ def test_gltf_without_payload_keeps_fallback_and_bad_payload_degrades(
     badr = viewer_page.evaluate(_MODEL_VECTORS_JS, "bad")
     assert badr["groups"] == 1 and badr["records"] == [] and badr["skipped"] == 2
     assert badr["fallbackVisible"] is True  # nothing drawable: keep the fallback
+
+
+@pytest.mark.browser
+def test_nested_grid_inserts_stop_at_the_placement_budget(viewer_client, viewer_page):
+    # 100^6 placements of an empty block: no record is ever added, so only the
+    # placement budget ends the expansion.
+    grid = dict(rows=100, columns=100, row_spacing=1, column_spacing=1)
+    viewer_client.add_vector_entities(
+        "d",
+        [vector.insert("B", [0, 0, 0], **grid), vector.circle([0, 0, 0], 1)],
+        blocks={
+            "B": [vector.insert("C", [0, 0, 0], **grid)],
+            "C": [vector.insert("D", [0, 0, 0], **grid)],
+            "D": [],
+        },
+    )
+    settle(viewer_client)
+    st = _stats(viewer_page, "d")
+    assert st["skipped"] == 1 and len(st["levels"]) == 1  # the circle still draws
+
+
+@pytest.mark.browser
+def test_gltf_layer_table_with_wrong_types_is_ignored(viewer_client, viewer_page):
+    payload = {
+        "layers": [{"name": "A", "linetype": 5, "lineWidth": "x", "visible": "no"}],
+        "entitySets": [
+            {
+                "layer": "A",
+                "entities": [{"type": "circle", "center": [0, 0, 0], "radius": 1}],
+            },
+        ],
+    }
+    viewer_client.add_model_binary("m", _glb_with_vectors(payload), format="glb")
+    settle(viewer_client)
+    r = viewer_page.evaluate(_MODEL_VECTORS_JS, "m")
+    assert r["groups"] == 1 and len(r["records"]) == 1 and r["skipped"] == 0
+    assert r["segments"] > 0 and r["layers"]["A"] == {"name": "A"}
+
+
+@pytest.mark.browser
+def test_highlight_does_not_outline_the_line_quads(viewer_client, viewer_page):
+    viewer_client.add_circle("c", [0, 0, 0], 1.0)
+    viewer_client.set_highlight("c", True)
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    n = viewer_page.evaluate(
+        """() => {
+            let n = 0;
+            window.threejsViewer._objects.get('c').traverse((o) => {
+                if (o.userData.__highlightEdge || o.userData.__highlightOutline) n++;
+            });
+            return n;
+        }"""
+    )
+    assert n == 0

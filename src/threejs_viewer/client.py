@@ -2282,11 +2282,11 @@ class ViewerClient:
             transform["matrix"] = m.tolist()
         else:
             if position is not None:
-                transform["position"] = list(position)
+                transform["position"] = vector._vec3("position", position)
             if rotation is not None:
-                transform["rotation"] = list(rotation)
+                transform["rotation"] = vector._vec3("rotation", rotation)
             if scale is not None:
-                transform["scale"] = list(scale)
+                transform["scale"] = vector._vec3("scale", scale)
         msg: dict = {
             "type": "add_object",
             "id": id,
@@ -2484,7 +2484,7 @@ class ViewerClient:
         if linetype is not None:
             msg["linetype"] = str(linetype)
         if line_width is not None:
-            if not float(line_width) > 0:
+            if not vector._finite("line_width", line_width) > 0:
                 raise ValueError("line_width must be positive")
             msg["lineWidth"] = float(line_width)
         if visible is not None:

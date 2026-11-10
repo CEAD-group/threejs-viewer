@@ -95,7 +95,7 @@ def _style(
     if linetype is not None:
         entity["linetype"] = str(linetype)
     if line_width is not None:
-        if not float(line_width) > 0:
+        if not _finite("line_width", line_width) > 0:
             raise ValueError("line_width must be positive")
         entity["lineWidth"] = float(line_width)
     if linetype_scale is not None:
@@ -112,7 +112,7 @@ def point(
     color: Optional[int] = None,
     line_width: Optional[float] = None,
 ) -> dict:
-    """A single point (DXF ``POINT``). Drawn ``2 * line_width`` pixels wide."""
+    """A single point (DXF ``POINT``). Drawn ``2 * line_width`` pixels wide, at least 4."""
     return _style(
         {"type": "point", "position": _vec3("position", position)},
         layer,
@@ -283,6 +283,8 @@ def ellipse(
     if end_param != 2 * math.pi:
         entity["endParam"] = _finite("end_param", end_param)
     _normal(entity, normal)
+    if not np.any(np.cross(entity.get("normal", [0.0, 0.0, 1.0]), entity["majorAxis"])):
+        raise ValueError("major_axis must not be parallel to the normal")
     return _style(entity, layer, color, linetype, line_width, linetype_scale)
 
 
