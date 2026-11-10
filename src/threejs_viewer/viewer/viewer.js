@@ -8362,6 +8362,9 @@ class ShadingDebugController {
         this._normalMat = null;
         this._uvMat = null;
         this._uvTex = null;
+        // Offset copies of the swap materials, keyed `${uuid}:${drawLayer}`.
+        /** @type {Map<string, any>} */
+        this._drawLayerVariants = new Map();
     }
 
     cycleWireframe() { this.setWireframeMode(this.wireframeMode + 1); }
@@ -8535,7 +8538,36 @@ class ShadingDebugController {
     _clayEligible(obj) {
         return ownMaterials(obj).every((/** @type {any} */ m) => m
             && (m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshLambertMaterial)
-            && !m.transparent && m.opacity >= 1 && !m.vertexColors && !m.polygonOffset);
+            && !m.transparent && m.opacity >= 1 && !m.vertexColors
+            // A glTF draw layer is ordinary furniture, not a data overlay.
+            && (!m.polygonOffset || m.userData.drawLayer));
+    }
+
+    /**
+     * The swap material as a mesh on glTF draw layer `layer` must wear it: a
+     * cached copy with the layer's polygon offset, kept in step with the
+     * shared one's clip and side state, so coplanar layers stay ordered in
+     * clay and debug views.
+     * @param {any} mat @param {number} layer
+     */
+    _drawLayerVariant(mat, layer) {
+        const key = `${mat.uuid}:${layer}`;
+        let c = this._drawLayerVariants.get(key);
+        if (!c) {
+            c = mat.clone();
+            Object.assign(c, drawLayerOffset(layer));
+            c.userData.drawLayer = layer;
+            this._drawLayerVariants.set(key, c);
+        }
+        if (c.clippingPlanes !== mat.clippingPlanes || c.side !== mat.side
+            || c.clipShadows !== mat.clipShadows || c.wireframe !== mat.wireframe) {
+            c.clippingPlanes = mat.clippingPlanes;
+            c.side = mat.side;
+            c.clipShadows = mat.clipShadows;
+            c.wireframe = mat.wireframe;
+            c.needsUpdate = true;
+        }
+        return c;
     }
 
     /** @param {any} obj @param {number} mode */
@@ -8550,6 +8582,7 @@ class ShadingDebugController {
             obj.userData.originalMaterial = obj.material;
         }
         const orig = obj.userData.originalMaterial;
+        if (obj.userData.drawLayer) mat = this._drawLayerVariant(mat, obj.userData.drawLayer);
         // Mirror the original's shape: a tube chunked for the per-draw index
         // cap (#113) is already an array, while a single material over a
         // grouped geometry (BoxGeometry's six faces) draws in one call, and a
@@ -12154,6 +12187,79 @@ class DepthCueController {
         this._toastEl.style.opacity = '1';
         this._toastTimer = performance.now() + 1400;
     }
+}
+
+// ========== glTF draw layers ==========
+//
+// Coplanar surfaces in one model (a floor, a path painted on it, borders on
+// the path) z-fight. A node's `extras.draw_layer` (a Blender object custom
+// property) orders them: each layer above 0 is drawn with a polygon offset
+// toward the camera, so a higher layer always wins against a lower one in the
+// same plane, while depth testing against everything else stays on.
+// Polygon-offset units per draw layer. Clip caps start at CLIP_CAP_OFFSET_BASE
+// with CLIP_CAP_OFFSET_STEP between ranks; caps only sit on closed meshes in
+// the clip plane, so the two never compete for the same pixels.
+const DRAW_LAYER_OFFSET_UNITS = 4;
+const DRAW_LAYER_MAX = 15;
+
+/**
+ * Polygon-offset fields for a draw layer.
+ * @param {number} layer
+ */
+function drawLayerOffset(layer) {
+    // One slope factor for every layer: coplanar layers share a slope, so the
+    // units alone order them, and a high layer is not pulled through geometry
+    // standing on it at grazing angles.
+    return { polygonOffset: true, polygonOffsetFactor: -1,
+        polygonOffsetUnits: -layer * DRAW_LAYER_OFFSET_UNITS };
+}
+
+/**
+ * Apply `extras.draw_layer` of glTF nodes (GLTFLoader puts node extras in
+ * `userData`) to the meshes under them. The nearest node with the property
+ * wins, so a multi-primitive node's child meshes inherit it. Materials are
+ * cloned per (material, layer), since one material is often shared with
+ * meshes on another layer or none.
+ * @param {any} root
+ */
+function applyGltfDrawLayers(root) {
+    /** @type {Map<string, any>} */
+    const clones = new Map();
+    let warned = false;
+    /** @param {any} o @param {number|null} inherited */
+    const walk = (o, inherited) => {
+        let layer = inherited;
+        const raw = o.userData && o.userData.draw_layer;
+        if (raw !== undefined) {
+            if (Number.isInteger(raw) && raw >= 0 && raw <= DRAW_LAYER_MAX) layer = raw;
+            else if (!warned) {
+                warned = true;
+                console.warn(`glTF draw_layer must be an integer 0..${DRAW_LAYER_MAX}; '${o.name}' has`, raw);
+            }
+        }
+        if (o.isMesh && layer) {
+            /** @param {any} m */
+            const layered = (m) => {
+                if (!m) return m;
+                const key = `${m.uuid}:${layer}`;
+                let c = clones.get(key);
+                if (!c) {
+                    c = m.clone();
+                    Object.assign(c, drawLayerOffset(/** @type {number} */ (layer)));
+                    c.userData.drawLayer = layer;
+                    clones.set(key, c);
+                }
+                return c;
+            };
+            o.material = Array.isArray(o.material) ? o.material.map(layered) : layered(o.material);
+            o.userData.drawLayer = layer;
+            // Polygon offset cannot order blended surfaces that do not write
+            // depth; within the transparent pass renderOrder does.
+            o.renderOrder = layer;
+        }
+        for (const c of o.children) walk(c, layer);
+    };
+    walk(root, null);
 }
 
 // ========== Dimension annotations ==========
@@ -17893,6 +17999,7 @@ export class ThreeJSViewer {
                     if (format === 'gltf' || format === 'glb') {
                         template = result.scene;
                         animations = result.animations || [];
+                        applyGltfDrawLayers(template);
                     } else if (format === 'dae') {
                         template = new THREE.Group();
                         result.scene.traverse(/** @param {any} child */ (child) => {
