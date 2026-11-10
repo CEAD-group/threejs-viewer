@@ -194,8 +194,9 @@ on reconnect and kept by `clear()`. The tables are shared on purpose, as in
 one DXF document: `set_layer("HIDDEN", visible=False)` acts on every object.
 The cost is that two glTF files defining the same layer name share one
 entry (the last one loaded wins, tables set from Python win over both), and
-a file's entries stay after its model is deleted. Per-model tables are an
-open question below.
+a file's entries stay after its model is deleted. Per-model tables were
+considered and rejected: one table per name is what a DXF user expects.
+`set_highlight` deliberately draws nothing on vector objects.
 
 JavaScript: `VectorEntityController` in `viewer.js`.
 
@@ -259,9 +260,6 @@ wire (only in the glTF payload, phase 2).
 
 ## Open questions
 
-- Per-model layer and linetype tables for glTF files, instead of merging
-  them into the viewer-wide ones.
-- Highlighting: `set_highlight` on a vector object currently draws nothing.
 - Final vendor prefix.
 - DXF `lineweight` (1/100 mm) in the glTF payload, mapped to pixels?
 - Text (`TEXT`/`MTEXT`), hatches and dimensions: v2?

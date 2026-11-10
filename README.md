@@ -193,8 +193,8 @@ lines and a NURBS cam.
 Layers and linetypes are viewer-wide: every vector object, including those
 loaded from glTF files, shares one table per name. A curve piece is drawn with
 at most 8192 segments, so a very large arc viewed at extreme zoom (radius above
-roughly ten million pixels) shows facets. `set_highlight` does not yet draw
-anything on vector objects.
+roughly ten million pixels) shows facets. `set_highlight` draws nothing on
+vector objects.
 
 glTF and GLB files can carry the same entities in root
 `extras.TJSV_vector_entities` (the only place that survives glTF-Transform,
