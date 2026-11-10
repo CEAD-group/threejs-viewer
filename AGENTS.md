@@ -4,8 +4,12 @@
 
 - Open every issue or PR comment and review an agent writes with an author line:
   `Comment by Claude (bot)` for Claude, `Review by **Codex (OpenAI)**` (or
-  `**Codex (OpenAI)**` on an inline comment) for Codex. They post from Thijs's
-  account, so the line is the only attribution a reader sees.
+  `**Codex (OpenAI)**` on an inline comment) for Codex. Agents post from the
+  account of whoever runs them, so the line is the only attribution a reader
+  sees. Do not name a person in it ("on behalf of ..."): the posting account
+  already shows who ran the agent.
+- When an agent pushes to someone else's PR, it leaves the PR body alone and
+  lists its own commits and changes in a comment.
 - Every PR with a visible effect (rendering, UI, gizmos, picking, colour,
   README media) gets before/after screenshots in its body, unasked. Capture
   "before" from `origin/main` and "after" from the branch with headless
