@@ -1,0 +1,54 @@
+{
+	"name": "threejs-viewer-webview",
+	"displayName": "Three.js Viewer (webview)",
+	"description": "Opens threejs-viewer's viewer.html in a VS Code tab, themed to the editor background.",
+	"version": "0.0.3",
+	"publisher": "local",
+	"license": "UNLICENSED",
+	"private": true,
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"main": "./extension.js",
+	"activationEvents": [],
+	"contributes": {
+		"commands": [
+			{
+				"command": "threejsViewer.open",
+				"title": "Open Three.js Viewer",
+				"category": "Three.js"
+			},
+			{
+				"command": "threejsViewer.clearScene",
+				"title": "Clear All Objects",
+				"category": "Three.js",
+				"icon": "$(clear-all)"
+			}
+		],
+		"configuration": {
+			"title": "Three.js Viewer",
+			"properties": {
+				"threejsViewer.viewerHtml": {
+					"type": "string",
+					"default": "",
+					"description": "Path to viewer.html. Empty uses src/threejs_viewer/viewer.html from the repo this extension is linked from."
+				}
+			}
+		},
+		"menus": {
+			"editor/title": [
+				{
+					"command": "threejsViewer.clearScene",
+					"when": "activeWebviewPanelId == 'threejsViewer'",
+					"group": "navigation"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "threejsViewer.clearScene",
+					"when": "activeWebviewPanelId == 'threejsViewer'"
+				}
+			]
+		}
+	}
+}
