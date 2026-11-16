@@ -7293,10 +7293,12 @@ class CameraController {
     /**
      * Solve the camera pose that frames world `points` along the current view
      * direction (never changed): the projected extent spans `fill` of the
-     * view on the tighter screen axis, in both projections. Perspective
-     * solves the distance and the lateral shift exactly per screen axis (the
-     * tightest frustum wedge around the points); ortho solves the zoom and
-     * the shift. Returns null for an empty point set.
+     * view on the tighter screen axis, in both projections. The target, which
+     * the camera orbits, is the centre of the points' world bounding box, so a
+     * deep scene seen at an angle orbits about its middle rather than about
+     * whatever the tightest perspective wedge would centre on screen.
+     * Perspective solves the distance along the view direction; ortho solves
+     * the zoom. Returns null for an empty point set.
      * @param {ArrayLike<THREE.Vector3>} points world-space points
      * @param {number} fill fraction of the half-view on the tighter axis, (0, 1]
      * @returns {{position: THREE.Vector3, target: THREE.Vector3, zoom: number | null} | null}
@@ -7317,66 +7319,46 @@ class CameraController {
         }
         right.normalize();
         const up = new THREE.Vector3().crossVectors(dir, right);
+        const box = new THREE.Box3();
+        for (let i = 0; i < n; i++) box.expandByPoint(points[i]);
+        const centre = box.getCenter(new THREE.Vector3());
+        const tx = centre.dot(right), ty = centre.dot(up), tz = centre.dot(dir);
+        // Each point relative to the centre, in the camera basis.
         const xs = new Float64Array(n), ys = new Float64Array(n), zs = new Float64Array(n);
-        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        let ax = 0, ay = 0, z1 = -Infinity;
         for (let i = 0; i < n; i++) {
             const p = points[i];
-            xs[i] = p.dot(right); ys[i] = p.dot(up); zs[i] = p.dot(dir);
-            x0 = Math.min(x0, xs[i]); x1 = Math.max(x1, xs[i]);
-            y0 = Math.min(y0, ys[i]); y1 = Math.max(y1, ys[i]);
-            z0 = Math.min(z0, zs[i]); z1 = Math.max(z1, zs[i]);
+            xs[i] = p.dot(right) - tx; ys[i] = p.dot(up) - ty; zs[i] = p.dot(dir) - tz;
+            ax = Math.max(ax, Math.abs(xs[i])); ay = Math.max(ay, Math.abs(ys[i]));
+            z1 = Math.max(z1, zs[i]);
         }
-        const span = Math.max(x1 - x0, y1 - y0, z1 - z0);
-        const zMid = (z0 + z1) / 2;
-        const at = (/** @type {number} */ cx, /** @type {number} */ cy, /** @type {number} */ cz) =>
-            new THREE.Vector3().addScaledVector(right, cx).addScaledVector(up, cy).addScaledVector(dir, cz);
+        const span = 2 * Math.max(ax, ay, z1, box.getSize(new THREE.Vector3()).length() / 2);
+        const at = (/** @type {number} */ cz) =>
+            new THREE.Vector3().addScaledVector(right, tx).addScaledVector(up, ty).addScaledVector(dir, tz + cz);
         if (!(span > 1e-9)) {
             // A single point (or coincident ones): centre it, keep the distance.
             const dist = v._camera.position.distanceTo(v._controls.target);
-            return { position: at(x0, y0, z0 + dist), target: at(x0, y0, z0), zoom: null };
+            return { position: at(dist), target: at(0), zoom: null };
         }
         if (v._isOrtho) {
             const w = v.container.clientWidth;
             const h = v.container.clientHeight;
             // A container not laid out yet falls back to aspect 1 rather than no-opping.
             const aspect = (w > 0 && h > 0) ? (w / h) : 1;
-            const halfH = Math.max((y1 - y0) / 2, (x1 - x0) / 2 / aspect, 1e-9) / f;
-            const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-            return {
-                position: at(cx, cy, zMid + span * 2),
-                target: at(cx, cy, zMid),
-                zoom: ORTHO_FRUSTUM / halfH,
-            };
+            const halfH = Math.max(ay, ax / aspect, 1e-9) / f;
+            return { position: at(span * 2), target: at(0), zoom: ORTHO_FRUSTUM / halfH };
         }
         const tanV = Math.tan(THREE.MathUtils.degToRad(v._perspCamera.fov / 2));
         const tanH = tanV * (v._perspCamera.aspect || 1);
-        // Per screen axis with slope k = fill * tan(halfFov), a point fits when
-        // |c - u| <= k * (cz - z); the least cz satisfying both sides of every
-        // point is the apex of the wedge through the two binding points.
-        const wedge = (/** @type {Float64Array} */ us, /** @type {number} */ k) => {
-            let a = -Infinity, b = -Infinity;
-            for (let i = 0; i < n; i++) {
-                a = Math.max(a, zs[i] + us[i] / k);
-                b = Math.max(b, zs[i] - us[i] / k);
-            }
-            return { c: k * (a - b) / 2, cz: (a + b) / 2 };
-        };
-        // The looser axis has slack at the chosen depth: centre it in its feasible interval.
-        const centre = (/** @type {Float64Array} */ us, /** @type {number} */ k, /** @type {number} */ cz) => {
-            let lo = -Infinity, hi = Infinity;
-            for (let i = 0; i < n; i++) {
-                lo = Math.max(lo, us[i] - k * (cz - zs[i]));
-                hi = Math.min(hi, us[i] + k * (cz - zs[i]));
-            }
-            return (lo + hi) / 2;
-        };
+        // With the camera at distance d along `dir` from the centre and slope
+        // k = fill * tan(halfFov), a point fits when |u| <= k * (d - z): the
+        // least d is set by the point that needs it most, on either screen axis.
         const kx = f * tanH, ky = f * tanV;
-        const wx = wedge(xs, kx), wy = wedge(ys, ky);
-        // Keep every point a sliver in front of the camera (a flat face-on set).
-        const cz = Math.max(wx.cz, wy.cz, z1 + span * 1e-3);
-        const cx = wx.cz >= wy.cz ? wx.c : centre(xs, kx, cz);
-        const cy = wy.cz > wx.cz ? wy.c : centre(ys, ky, cz);
-        return { position: at(cx, cy, cz), target: at(cx, cy, Math.min(zMid, cz - span * 1e-3)), zoom: null };
+        let d = z1 + span * 1e-3;
+        for (let i = 0; i < n; i++) {
+            d = Math.max(d, zs[i] + Math.abs(xs[i]) / kx, zs[i] + Math.abs(ys[i]) / ky);
+        }
+        return { position: at(d), target: at(0), zoom: null };
     }
 
     /**

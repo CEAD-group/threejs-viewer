@@ -10614,6 +10614,31 @@ def test_home_fits_diagonal_parts_tighter_than_one_world_box(
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize("ortho", [False, True])
+def test_framing_orbits_the_centre_of_what_it_frames(viewer_client, viewer_page, ortho):
+    """A long scene seen at an angle orbits about the centre of its boxes, not
+    about the middle of the tightest perspective fit, which lands metres off
+    on a 16 m track; every part still fits within the fill."""
+    track = [
+        [[-2, -0.6, 0], [14, 0.6, 0.4]],
+        [[14.4, -1, -0.5], [16, 1, 1.2]],
+        [[-0.9, -0.8, 0.7], [1.2, 0.6, 2.3]],
+    ]
+    viewer_client.add_box("box")
+    settle(viewer_client)
+    viewer_page.evaluate(_FRAME_HELPERS)
+    target, ndc = viewer_page.evaluate(
+        "([ortho, boxes]) => { const f = window.__frame, v = window.threejsViewer;"
+        " f.pose(ortho, [1, -1, 1]);"
+        " v.frameBoxes(boxes.map(([min, max]) => ({min, max})));"
+        " return [v._controls.target.toArray(), f.ndc(boxes)]; }",
+        [ortho, track],
+    )
+    assert target == pytest.approx([7, 0, 0.9], abs=1e-6)
+    assert max(ndc) == pytest.approx(0.9, rel=0.01)
+
+
+@pytest.mark.browser
 def test_object_click_pointercancel_drops_press(viewer_client, viewer_page):
     """A pointercancel between press and release (a cancelled touch or pen)
     clears the pending press, so the later pointerup is not a click."""
