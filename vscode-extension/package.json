@@ -1,8 +1,8 @@
 {
 	"name": "threejs-viewer-webview",
 	"displayName": "Three.js Viewer (webview)",
-	"description": "Opens threejs-viewer's viewer.html in a VS Code tab, themed to the editor background.",
-	"version": "0.0.3",
+	"description": "Opens threejs-viewer's viewer.html in a VS Code tab, themed to the editor background, and previews .glb/.gltf files.",
+	"version": "0.0.4",
 	"publisher": "local",
 	"license": "UNLICENSED",
 	"private": true,
@@ -15,7 +15,7 @@
 		"commands": [
 			{
 				"command": "threejsViewer.open",
-				"title": "Open Three.js Viewer",
+				"title": "Open Viewer",
 				"category": "Three.js"
 			},
 			{
@@ -23,6 +23,12 @@
 				"title": "Clear All Objects",
 				"category": "Three.js",
 				"icon": "$(clear-all)"
+			},
+			{
+				"command": "threejsViewer.showModel",
+				"title": "Show in Viewer",
+				"category": "Three.js",
+				"icon": "$(eye)"
 			}
 		],
 		"configuration": {
@@ -32,6 +38,11 @@
 					"type": "string",
 					"default": "",
 					"description": "Path to viewer.html. Empty uses src/threejs_viewer/viewer.html from the repo this extension is linked from."
+				},
+				"threejsViewer.gltfYUp": {
+					"type": "boolean",
+					"default": false,
+					"description": "Rotate glTF models from Y-up to the viewer's Z-up (like add_model(y_up=True)). Leave off for Z-up CAD exports."
 				}
 			}
 		},
@@ -41,14 +52,52 @@
 					"command": "threejsViewer.clearScene",
 					"when": "activeWebviewPanelId == 'threejsViewer'",
 					"group": "navigation"
+				},
+				{
+					"command": "threejsViewer.showModel",
+					"when": "resourceExtname =~ /^\\.(gltf|glb)$/i",
+					"group": "navigation"
 				}
 			],
 			"commandPalette": [
 				{
 					"command": "threejsViewer.clearScene",
 					"when": "activeWebviewPanelId == 'threejsViewer'"
+				},
+				{
+					"command": "threejsViewer.showModel",
+					"when": "resourceExtname =~ /^\\.(gltf|glb)$/i"
+				}
+			],
+			"explorer/context": [
+				{
+					"command": "threejsViewer.showModel",
+					"when": "resourceExtname =~ /^\\.(gltf|glb)$/i",
+					"group": "navigation"
 				}
 			]
-		}
+		},
+		"customEditors": [
+			{
+				"viewType": "threejsViewer.modelPreview",
+				"displayName": "Three.js Model Preview",
+				"selector": [
+					{
+						"filenamePattern": "*.glb"
+					}
+				],
+				"priority": "default"
+			},
+			{
+				"viewType": "threejsViewer.modelPreviewGltf",
+				"displayName": "Three.js Model Preview",
+				"selector": [
+					{
+						"filenamePattern": "*.gltf"
+					}
+				],
+				"priority": "option"
+			}
+		]
 	}
 }
