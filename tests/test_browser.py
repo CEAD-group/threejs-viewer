@@ -13956,3 +13956,96 @@ def test_polyline_exact_colors_flat_color_is_untone_mapped(viewer_client, viewer
     frames(viewer_page)
     px = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
     assert np.abs(px - [93, 156, 116]).max() <= 3, px
+
+
+# --- Off-screen rendering, text scale and context loss (web guidance audit) ---
+
+
+@pytest.mark.browser
+def test_render_loop_skips_while_scrolled_out_of_view(viewer_client, viewer_page):
+    """A container outside the viewport renders nothing and holds the playback
+    clock; bringing it back resumes rendering (#340)."""
+    _load_long_animation(viewer_client, viewer_page)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(
+        "() => { window.threejsViewer.container.style.transform = 'translateY(-200vh)'; }"
+    )
+    _wait_for(viewer_page, "() => window.threejsViewer._containerOffscreen === true")
+    frames(viewer_page)
+    before = viewer_page.evaluate(_RENDER_STATE_JS)
+    frames(viewer_page, 5)
+    off = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert off["frame"] == before["frame"], "rendered while off-screen"
+    assert off["time"] == before["time"], "playback clock ran while off-screen"
+
+    viewer_page.evaluate(
+        "() => { window.threejsViewer.container.style.transform = ''; }"
+    )
+    _wait_for(viewer_page, "() => window.threejsViewer._containerOffscreen === false")
+    frames(viewer_page, 3)
+    on = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert on["frame"] > off["frame"], "rendering did not resume"
+    assert on["playing"] is True
+
+
+@pytest.mark.browser
+def test_ui_text_follows_root_font_size(viewer_client, viewer_page):
+    """UI text is sized in rem: unchanged at the 16 px default, scaled with the
+    root font size, and pinned again through --tjsv-rem (#341)."""
+    size_js = (
+        "() => parseFloat(getComputedStyle("
+        " window.threejsViewer.el.querySelector('.tjsv-panel-hint')).fontSize)"
+    )
+    assert viewer_page.evaluate(size_js) == pytest.approx(10.0)
+    viewer_page.evaluate("() => { document.documentElement.style.fontSize = '20px'; }")
+    assert viewer_page.evaluate(size_js) == pytest.approx(12.5)
+    viewer_page.evaluate(
+        "() => window.threejsViewer.el.style.setProperty('--tjsv-rem', '16px')"
+    )
+    assert viewer_page.evaluate(size_js) == pytest.approx(10.0)
+
+
+@pytest.mark.browser
+def test_webgl_context_restore_rebuilds_environment(viewer_client, viewer_page):
+    """After a lost and restored WebGL context the environment map is rebuilt,
+    the shadow map is redrawn and the scene renders again (#342)."""
+    viewer_client.add_box("ctx_box", width=2, height=2, depth=2, color=0xCC2222)
+    settle(viewer_client)
+    viewer_client.frame_object("ctx_box")
+    _wait_for(viewer_page, "() => !!window.threejsViewer._envMap")
+    viewer_page.evaluate(
+        """() => new Promise(resolve => {
+            const v = window.threejsViewer;
+            const canvas = v._renderer.domElement;
+            const ext = v._renderer.getContext().getExtension('WEBGL_lose_context');
+            window.__envBefore = v._envMap;
+            canvas.addEventListener('webglcontextlost', () => {
+                v._shadowDirty = false;
+                setTimeout(() => ext.restoreContext(), 50);
+            }, {once: true});
+            // Registered after the viewer's own listener, so it sees the state that left.
+            canvas.addEventListener('webglcontextrestored', () => {
+                window.__shadowAfterRestore = v._shadowDirty;
+                resolve();
+            }, {once: true});
+            ext.loseContext();
+        })"""
+    )
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return {rebuilt: v._envMap !== window.__envBefore,"
+        "  env: v._scene.environment === v._envMap || v._scene.environment === null,"
+        "  shadow: window.__shadowAfterRestore}; }"
+    )
+    assert state == {"rebuilt": True, "env": True, "shadow": True}
+    red = viewer_page.evaluate(
+        "() => {"
+        " const v = window.threejsViewer;"
+        " v._renderer.render(v._scene, v._camera);"
+        " const gl = v._renderer.getContext();"
+        " const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;"
+        " const px = new Uint8Array(4);"
+        " gl.readPixels(w >> 1, h >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);"
+        " return px[0] > 2 * px[2] && px[0] > 60; }"
+    )
+    assert red, "the scene did not render after the context came back"

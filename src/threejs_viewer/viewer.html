@@ -46,7 +46,10 @@
             --tjsv-input-text: var(--tjsv-text);
             --tjsv-input-focus: var(--tjsv-primary);
             --tjsv-radius: 4px;
-            --tjsv-font-size: 12px;
+            /* Text sizes are in rem so they follow the user's font-size setting. An
+               embedder whose root font size is not the browser default can set this to 16px. */
+            --tjsv-rem: 1rem;
+            --tjsv-font-size: calc(0.75 * var(--tjsv-rem));
         }
 
         /* ---- Menus ----
@@ -96,7 +99,7 @@
             margin: 0;
             cursor: pointer;
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             color: var(--tjsv-text);
             background: var(--tjsv-menu-bg);
             border: 1px solid var(--tjsv-border);
@@ -151,7 +154,7 @@
             border-radius: 0 0 0 4px;
             padding: 6px 8px 8px;
             color: var(--tjsv-text);
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             /* A touch scroll that reaches the end of the body must not chain to the page. */
             overscroll-behavior: contain;
             touch-action: pan-y;
@@ -159,14 +162,14 @@
         .threejs-viewer .tjsv-side-left > .tjsv-menu { border-right: 1px solid var(--tjsv-border); border-left: none; border-radius: 0 0 4px 0; }
         .threejs-viewer .tjsv-menu-status {
             color: var(--tjsv-text-dim);
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             margin: 2px 0 5px;
             border-bottom: 1px solid var(--tjsv-border);
             padding-bottom: 3px;
             white-space: nowrap;
         }
         .threejs-viewer .tjsv-menu-title {
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--tjsv-text-dim);
@@ -175,7 +178,7 @@
             padding-bottom: 3px;
         }
         .threejs-viewer .tjsv-menu-caption {
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--tjsv-text-dim);
@@ -218,7 +221,7 @@
             background: none;
             color: var(--tjsv-text);
             font: inherit;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             text-align: left;
             cursor: pointer;
             white-space: nowrap;
@@ -230,10 +233,10 @@
         .threejs-viewer .tjsv-menu-item:focus { outline: none; }
         .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: -2px; }
         .threejs-viewer .tjsv-menu-label { flex: 1; }
-        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
+        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: calc(0.6875 * var(--tjsv-rem)); }
         .threejs-viewer .tjsv-menu kbd {
             font-family: inherit;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             font-weight: 600;
             color: var(--tjsv-text-dim);
             background: var(--tjsv-panel-2);
@@ -299,7 +302,7 @@
             margin: 2px 0;
             padding: 4px 8px;
             font: inherit;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             color: var(--tjsv-button-text);
             background: var(--tjsv-button-bg);
             border: 1px solid var(--tjsv-button-border);
@@ -327,7 +330,7 @@
             margin: 1px 0;
             white-space: nowrap;
         }
-        .threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 11px; }
+        .threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: calc(0.6875 * var(--tjsv-rem)); }
         .threejs-viewer .tjsv-menu-row.disabled { color: var(--tjsv-text-faint); }
         .threejs-viewer .tjsv-menu-row[hidden] { display: none; }
         .threejs-viewer .tjsv-menu-select {
@@ -336,7 +339,7 @@
             border-radius: 3px;
             color: var(--tjsv-input-text);
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             padding: 2px 4px;
             min-width: 0;
             flex: 1;
@@ -352,7 +355,7 @@
             color: var(--tjsv-text-dim);
             padding: 2px 6px;
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             cursor: pointer;
             transition: background 0.1s, color 0.1s;
         }
@@ -369,7 +372,7 @@
             display: block;
             padding: 3px 5px 1px;
             color: var(--tjsv-text-dim);
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
         }
         /* Same 0.4s and easing as the eye glyph's SMIL sweep; selecting overshoots slightly. */
         .threejs-viewer .tjsv-radio-dot {
@@ -457,7 +460,7 @@
             height: 20px;
             padding: 0;
             line-height: 1;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             display: flex;
             align-items: center;
             justify-content: center;
@@ -551,7 +554,7 @@
             color: white;
             padding: 2px 6px;
             border-radius: 3px;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             white-space: nowrap;
             opacity: 0;
             transition: opacity 0.2s;
@@ -560,7 +563,7 @@
         .threejs-viewer .timeline-marker:hover { background: #ffaa00; box-shadow: 0 0 6px #ffaa0088; }
         .threejs-viewer .time-display {
             font-family: monospace;
-            font-size: 13px;
+            font-size: calc(0.8125 * var(--tjsv-rem));
             min-width: 120px;
             text-align: center;
         }
@@ -571,19 +574,19 @@
         }
         .threejs-viewer .speed-control span {
             font-family: monospace;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             min-width: 50px;
             text-align: center;
         }
-        .threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: 11px; }
+        .threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: calc(0.6875 * var(--tjsv-rem)); }
         .threejs-viewer .frame-display {
             font-family: monospace;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             color: #aaa;
             min-width: 100px;
         }
         .threejs-viewer .keyboard-hint {
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             color: #666;
             text-align: center;
         }
@@ -613,7 +616,7 @@
             border-radius: 3px;
             color: var(--tjsv-input-text);
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             font-variant-numeric: tabular-nums;
             padding: 2px 4px;
             text-align: right;
@@ -633,7 +636,7 @@
             flex: 0 0 auto;
             min-width: 34px;
             text-align: right;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             font-variant-numeric: tabular-nums;
             color: var(--tjsv-text-dim);
         }
@@ -655,7 +658,7 @@
         .threejs-viewer .tjsv-rail-form .tjsv-menu-action { margin-top: 6px; }
         .threejs-viewer .tjsv-panel-hint {
             margin-top: 6px;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             color: var(--tjsv-text-faint);
             white-space: normal;
         }
@@ -681,7 +684,7 @@
             background: rgba(30, 30, 30, 0.72);
             border: 1px solid rgba(255, 255, 255, 0.18);
             color: #ddd;
-            font-size: calc(9px * var(--tjsv-view-scale, 1));
+            font-size: calc(0.5625 * var(--tjsv-rem) * var(--tjsv-view-scale, 1));
             font-weight: 600;
             letter-spacing: 0.5px;
             cursor: pointer;
@@ -733,7 +736,7 @@
             background: rgba(30, 30, 30, 0.85);
             color: #eee;
             font-family: monospace;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             padding: 6px 12px;
             border-radius: 6px;
             pointer-events: none;
@@ -750,7 +753,7 @@
             background: rgba(30, 30, 30, 0.85);
             color: #eee;
             font-family: monospace;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             padding: 3px 7px;
             border-radius: 5px;
             pointer-events: none;
@@ -777,7 +780,7 @@
            (only bubble-snap-entered ortho auto-exits on orbit). */
         .threejs-viewer .tjsv-view-proj {
             bottom: calc(50px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
-            font-size: calc(11px * var(--tjsv-view-scale, 1));
+            font-size: calc(0.6875 * var(--tjsv-rem) * var(--tjsv-view-scale, 1));
         }
         /* Home (reset view): third item of the stack, below P. */
         .threejs-viewer .tjsv-view-home {
@@ -823,7 +826,7 @@
             border: 1px solid var(--tjsv-button-border);
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
             font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             font-variant-numeric: tabular-nums;
             padding: 4px 9px;
             border-radius: 6px;
@@ -19094,6 +19097,10 @@ class ThreeJSViewer {
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
         this.el.appendChild(this._renderer.domElement);
+        // three.js handles webglcontextlost and re-uploads buffers and textures on
+        // restore; render-to-texture results it cannot recreate are rebuilt here.
+        this._onContextRestored = () => this._rebuildAfterContextRestore();
+        this._renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored);
 
         // Environment cubemap. Intensity is set up front (not when the async
         // load lands) so it is right immediately and survives cubemap switches.
@@ -19582,6 +19589,17 @@ class ThreeJSViewer {
             });
         });
         this._resizeObserver.observe(this.container);
+        // True while the container is scrolled out of the viewport; _animate
+        // skips the frame like a hidden container, so an off-screen viewer in
+        // a long page or notebook does no GPU work.
+        this._containerOffscreen = false;
+        this._intersectionObserver = typeof IntersectionObserver === 'undefined' ? null
+            : new IntersectionObserver(entries => {
+                const offscreen = !entries[entries.length - 1].isIntersecting;
+                if (this._containerOffscreen && !offscreen) this._resetFrameClocks();
+                this._containerOffscreen = offscreen;
+            });
+        this._intersectionObserver?.observe(this.container);
     }
 
     /**
@@ -19663,6 +19681,25 @@ class ThreeJSViewer {
         } finally {
             blobUrls.forEach(u => URL.revokeObjectURL(u));
         }
+    }
+
+    /**
+     * After a WebGL context restore: regenerate the PMREM environment from the
+     * kept raw cube (its render target came back empty) and redraw the shadow map,
+     * which only renders when marked dirty.
+     */
+    _rebuildAfterContextRestore() {
+        if (this._destroyed) return;
+        if (this._envCube) {
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const target = pmremGenerator.fromCubemap(this._envCube);
+            pmremGenerator.dispose();
+            this._envTarget?.dispose();
+            this._envTarget = target;
+            this._envMap = target.texture;
+            this._syncEnvironment();
+        }
+        this.requestShadowUpdate();
     }
 
     /** @returns {string[]} names of the available cubemap sets (build.py order, default first) */
@@ -25302,8 +25339,8 @@ class ThreeJSViewer {
 
     _animate() {
         this._animationFrameId = requestAnimationFrame(this._animate);
-        // Hidden container: keep the loop alive but do no work (issue #237).
-        if (this._containerHidden) return;
+        // Hidden or off-screen container: keep the loop alive but do no work (issue #237).
+        if (this._containerHidden || this._containerOffscreen) return;
         // Pixel ratio changes when the window moves to another monitor
         // without any size change, so the ResizeObserver never sees it.
         if (this._renderer.getPixelRatio() !== this._effectivePixelRatio()) this.resize();
@@ -27487,6 +27524,8 @@ class ThreeJSViewer {
         if (this._onVisibilityChange) document.removeEventListener('visibilitychange', this._onVisibilityChange);
         cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
+        this._intersectionObserver?.disconnect();
+        this._renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored);
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);

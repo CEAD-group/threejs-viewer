@@ -17483,6 +17483,10 @@ export class ThreeJSViewer {
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
         this.el.appendChild(this._renderer.domElement);
+        // three.js handles webglcontextlost and re-uploads buffers and textures on
+        // restore; render-to-texture results it cannot recreate are rebuilt here.
+        this._onContextRestored = () => this._rebuildAfterContextRestore();
+        this._renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored);
 
         // Environment cubemap. Intensity is set up front (not when the async
         // load lands) so it is right immediately and survives cubemap switches.
@@ -17971,6 +17975,17 @@ export class ThreeJSViewer {
             });
         });
         this._resizeObserver.observe(this.container);
+        // True while the container is scrolled out of the viewport; _animate
+        // skips the frame like a hidden container, so an off-screen viewer in
+        // a long page or notebook does no GPU work.
+        this._containerOffscreen = false;
+        this._intersectionObserver = typeof IntersectionObserver === 'undefined' ? null
+            : new IntersectionObserver(entries => {
+                const offscreen = !entries[entries.length - 1].isIntersecting;
+                if (this._containerOffscreen && !offscreen) this._resetFrameClocks();
+                this._containerOffscreen = offscreen;
+            });
+        this._intersectionObserver?.observe(this.container);
     }
 
     /**
@@ -18052,6 +18067,25 @@ export class ThreeJSViewer {
         } finally {
             blobUrls.forEach(u => URL.revokeObjectURL(u));
         }
+    }
+
+    /**
+     * After a WebGL context restore: regenerate the PMREM environment from the
+     * kept raw cube (its render target came back empty) and redraw the shadow map,
+     * which only renders when marked dirty.
+     */
+    _rebuildAfterContextRestore() {
+        if (this._destroyed) return;
+        if (this._envCube) {
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const target = pmremGenerator.fromCubemap(this._envCube);
+            pmremGenerator.dispose();
+            this._envTarget?.dispose();
+            this._envTarget = target;
+            this._envMap = target.texture;
+            this._syncEnvironment();
+        }
+        this.requestShadowUpdate();
     }
 
     /** @returns {string[]} names of the available cubemap sets (build.py order, default first) */
@@ -23691,8 +23725,8 @@ export class ThreeJSViewer {
 
     _animate() {
         this._animationFrameId = requestAnimationFrame(this._animate);
-        // Hidden container: keep the loop alive but do no work (issue #237).
-        if (this._containerHidden) return;
+        // Hidden or off-screen container: keep the loop alive but do no work (issue #237).
+        if (this._containerHidden || this._containerOffscreen) return;
         // Pixel ratio changes when the window moves to another monitor
         // without any size change, so the ResizeObserver never sees it.
         if (this._renderer.getPixelRatio() !== this._effectivePixelRatio()) this.resize();
@@ -25876,6 +25910,8 @@ export class ThreeJSViewer {
         if (this._onVisibilityChange) document.removeEventListener('visibilitychange', this._onVisibilityChange);
         cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
+        this._intersectionObserver?.disconnect();
+        this._renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored);
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('mousemove', this._onDocMouseMove);
