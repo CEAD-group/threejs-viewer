@@ -192,6 +192,7 @@ class ViewerControls extends THREE.EventDispatcher {
         this.domElement.removeEventListener('contextmenu', this._onContextMenu);
         window.removeEventListener('pointermove', this._onPointerMove);
         window.removeEventListener('pointerup', this._onPointerUp);
+        window.removeEventListener('pointercancel', this._onPointerUp);
         window.removeEventListener('keydown', this._onKeyDown);
         window.removeEventListener('keyup', this._onKeyUp);
     }
@@ -259,6 +260,8 @@ class ViewerControls extends THREE.EventDispatcher {
 
         window.addEventListener('pointermove', this._onPointerMove);
         window.addEventListener('pointerup', this._onPointerUp);
+        // A touch or pen gesture the browser takes over ends with pointercancel, not pointerup.
+        window.addEventListener('pointercancel', this._onPointerUp);
 
         // Stop further damping motion that might be lingering.
         this._rotDeltaTheta = 0;
@@ -308,6 +311,7 @@ class ViewerControls extends THREE.EventDispatcher {
         this._dragMode = null;
         window.removeEventListener('pointermove', this._onPointerMove);
         window.removeEventListener('pointerup', this._onPointerUp);
+        window.removeEventListener('pointercancel', this._onPointerUp);
     }
 
     _onWheel(e) {

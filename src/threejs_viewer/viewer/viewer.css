@@ -478,7 +478,12 @@
     position: relative;
     height: 16px;
     cursor: pointer;
+    /* A touch or pen drag scrubs instead of scrolling the page. */
+    touch-action: none;
+    user-select: none;
 }
+.threejs-viewer .tjsv-timeline-container:focus { outline: none; }
+.threejs-viewer .tjsv-timeline-container:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 2px; }
 .threejs-viewer .tjsv-timeline-container::before,
 .threejs-viewer .tjsv-timeline-progress {
     position: absolute;
