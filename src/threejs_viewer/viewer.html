@@ -1120,7 +1120,8 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
 //   the same `q`. No lookAt is performed anywhere. Therefore at dt=0 (no rotation)
 //   the camera position and orientation are unchanged regardless of where target is.
 //   Moving target alone (click-to-pivot) is a no-op for the rendered view.
-const STATE = { NONE: 0, ROTATE: 1, PAN: 2 };
+// TOUCH is a two-finger gesture: pinch zooms about the fingers' midpoint and moving it pans.
+const STATE = { NONE: 0, ROTATE: 1, PAN: 2, TOUCH: 3 };
 
 const ROTATE_SPEED = 1.0;          // radians per (delta / element height)
 const PAN_SPEED = 1.0;
@@ -1196,6 +1197,9 @@ class ViewerControls extends THREE.EventDispatcher {
         this._worldZ = new THREE.Vector3(0, 0, 1);
 
         this._lastPointer = { x: 0, y: 0 };
+        // Active touch points by pointerId, so a second finger can start a pinch.
+        this._touches = new Map();
+        this._pinch = { dist: 0, x: 0, y: 0 };
 
         // Bind handlers so we can remove later
         this._onPointerDown = this._onPointerDown.bind(this);
@@ -1305,6 +1309,11 @@ class ViewerControls extends THREE.EventDispatcher {
 
     _onPointerDown(e) {
         if (!this.enabled) return;
+        if (e.pointerType === 'touch') {
+            this._touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (this._touches.size === 2) { this._startPinch(); return; }
+            if (this._touches.size > 2) return;
+        }
 
         // Decide intent. Shift+left = pan (existing). Alt+left = rotate, but with
         // the OPPOSITE rotation mode (temporary flip — released when Alt comes up).
@@ -1351,8 +1360,62 @@ class ViewerControls extends THREE.EventDispatcher {
         // Don't preventDefault — let focus / other listeners proceed.
     }
 
+    _startPinch() {
+        this._state = STATE.TOUCH;
+        this._activePointerId = null;
+        this._dragMode = null;
+        // A rotate begun by the first finger must not keep spinning under the pinch.
+        this._rotDeltaTheta = 0;
+        this._rotDeltaPhi = 0;
+        this._pinchSample(this._pinch);
+    }
+
+    /** Distance and midpoint of the first two touch points, written into `out`. */
+    _pinchSample(out) {
+        const [a, b] = this._touches.values();
+        out.dist = Math.hypot(b.x - a.x, b.y - a.y);
+        out.x = (a.x + b.x) / 2;
+        out.y = (a.y + b.y) / 2;
+        return out;
+    }
+
+    _onPinchMove() {
+        const prev = this._pinch;
+        const next = this._pinchSample({ dist: 0, x: 0, y: 0 });
+        const rect = this.domElement.getBoundingClientRect();
+        if (prev.dist > 0 && next.dist > 0) {
+            const ndcX = ((next.x - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+            const ndcY = -((next.y - rect.top) / Math.max(1, rect.height)) * 2 + 1;
+            this._applyZoom(next.dist / prev.dist, ndcX, ndcY);
+        }
+        this._addPan(next.x - prev.x, next.y - prev.y, Math.max(1, rect.height));
+        this._pinch = next;
+        this.dispatchEvent(_changeEvent);
+    }
+
+    // Screen-pixel drag into pending pan, scaled so the scene follows the pointer.
+    _addPan(dx, dy, h) {
+        const cam = this.camera;
+        let worldPerPxY;
+        if (cam.isPerspectiveCamera) {
+            const dist = this._tmpV1.copy(cam.position).sub(this.target).length();
+            worldPerPxY = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
+        } else {
+            worldPerPxY = (cam.top - cam.bottom) / cam.zoom / h;
+        }
+        // Negative Y because clientY grows downward but world up is +Y screen-up.
+        this._panDeltaX += -dx * worldPerPxY * PAN_SPEED;
+        this._panDeltaY += dy * worldPerPxY * PAN_SPEED;
+    }
+
     _onPointerMove(e) {
         if (!this.enabled) return;
+        const touch = this._touches.get(e.pointerId);
+        if (touch) {
+            touch.x = e.clientX;
+            touch.y = e.clientY;
+            if (this._state === STATE.TOUCH) { this._onPinchMove(); return; }
+        }
         if (e.pointerId !== this._activePointerId) return;
 
         const dx = e.clientX - this._lastPointer.x;
@@ -1368,23 +1431,31 @@ class ViewerControls extends THREE.EventDispatcher {
             this._rotDeltaTheta += (dx / h) * Math.PI * ROTATE_SPEED;
             this._rotDeltaPhi += (dy / h) * Math.PI * ROTATE_SPEED;
         } else if (this._state === STATE.PAN) {
-            const cam = this.camera;
-            let worldPerPxY;
-            if (cam.isPerspectiveCamera) {
-                const dist = this._tmpV1.copy(cam.position).sub(this.target).length();
-                worldPerPxY = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
-            } else {
-                // Ortho
-                worldPerPxY = (cam.top - cam.bottom) / cam.zoom / h;
-            }
-            // Negative Y because clientY grows downward but world up is +Y screen-up.
-            this._panDeltaX += -dx * worldPerPxY * PAN_SPEED;
-            this._panDeltaY += dy * worldPerPxY * PAN_SPEED;
+            this._addPan(dx, dy, h);
         }
     }
 
     _onPointerUp(e) {
-        if (e.pointerId !== this._activePointerId) return;
+        if (this._touches.delete(e.pointerId)) {
+            if (this._state === STATE.TOUCH) {
+                if (this._touches.size >= 2) { this._pinchSample(this._pinch); return; }
+                if (this._touches.size === 1) {
+                    // The finger left behind rotates from where it is, so the view does not jump.
+                    const [[id, t]] = this._touches;
+                    this._state = STATE.ROTATE;
+                    this._activePointerId = id;
+                    this._altHeld = false;
+                    this._dragMode = this._effectiveMode();
+                    this._lastPointer.x = t.x;
+                    this._lastPointer.y = t.y;
+                    return;
+                }
+            } else if (this._touches.size > 0 && e.pointerId !== this._activePointerId) {
+                return;
+            }
+        }
+        if (e.pointerId !== this._activePointerId && this._state !== STATE.TOUCH) return;
+        this._touches.clear();
         this._state = STATE.NONE;
         this._activePointerId = null;
         this._dragMode = null;
