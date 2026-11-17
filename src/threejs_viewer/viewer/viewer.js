@@ -17279,8 +17279,15 @@ export class ThreeJSViewer {
         this._lastUIUpdate = 0;
         // Explicit pause (pause()/resume()); the rAF is cancelled while set.
         this._paused = false;
+        // Scrolled out of view (issue #340); held apart from _paused so neither overrides the other.
+        this._offscreen = false;
+        this._cvSkipped = false;
+        this._ioHidden = false;
+        // Set while the WebGL context is lost; holds the loop like _offscreen.
+        this._contextLost = false;
         this._animate = this._animate.bind(this);
         this._animationFrameId = requestAnimationFrame(this._animate);
+        this._initOffscreenPause();
 
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
     }
@@ -17507,6 +17514,20 @@ export class ThreeJSViewer {
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
         this.el.appendChild(this._renderer.domElement);
+        // GPU reset or driver eviction (issue #342). three.js re-initialises its
+        // own state on restore; the loop stops meanwhile and GPU-generated data is rebuilt.
+        this._onContextLost = /** @param {Event} e */ (e) => {
+            e.preventDefault();
+            this._contextLost = true;
+            this._syncLoop();
+        };
+        this._onContextRestored = () => {
+            this._contextLost = false;
+            this._rebuildAfterContextRestore();
+            this._syncLoop();
+        };
+        this._renderer.domElement.addEventListener('webglcontextlost', this._onContextLost);
+        this._renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored);
 
         // Environment cubemap. Intensity is set up front (not when the async
         // load lands) so it is right immediately and survives cubemap switches.
@@ -23959,6 +23980,27 @@ export class ThreeJSViewer {
         return Math.min(window.devicePixelRatio || 1, this._maxPixelRatio);
     }
 
+    /**
+     * Recreate what only ever lived on the GPU after a context restore. Meshes,
+     * textures and buffers re-upload from their CPU copies on the next draw;
+     * the PMREM environment was rendered, so it is generated again from the
+     * kept cube, and the shadow map is redrawn.
+     */
+    _rebuildAfterContextRestore() {
+        if (this._destroyed) return;
+        if (this._envCube) {
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const target = pmremGenerator.fromCubemap(this._envCube);
+            pmremGenerator.dispose();
+            this._envTarget?.dispose();
+            this._envTarget = target;
+            this._envMap = target.texture;
+            this._syncEnvironment();
+            this._applyBackground();
+        }
+        this.requestShadowUpdate();
+    }
+
     /** Restart the frame and playback clocks at now, so leaving a hidden or
      *  paused state does not count the gap as elapsed playback. */
     _resetFrameClocks() {
@@ -23976,16 +24018,53 @@ export class ThreeJSViewer {
     pause() {
         if (this._paused || this._destroyed) return;
         this._paused = true;
-        cancelAnimationFrame(this._animationFrameId);
-        this._animationFrameId = 0;
+        this._syncLoop();
     }
 
     /** Restart a loop stopped by pause(); playback continues where it froze. */
     resume() {
         if (!this._paused || this._destroyed) return;
         this._paused = false;
-        this._resetFrameClocks();
-        this._animationFrameId = requestAnimationFrame(this._animate);
+        this._syncLoop();
+    }
+
+    /**
+     * Run the rAF loop exactly when nothing holds it: an explicit pause(), the
+     * viewer being off-screen, or a lost WebGL context. A restart skips the gap.
+     */
+    _syncLoop() {
+        const run = !this._paused && !this._offscreen && !this._contextLost && !this._destroyed;
+        if (run && !this._animationFrameId) {
+            this._resetFrameClocks();
+            this._animationFrameId = requestAnimationFrame(this._animate);
+        } else if (!run && this._animationFrameId) {
+            cancelAnimationFrame(this._animationFrameId);
+            this._animationFrameId = 0;
+        }
+    }
+
+    /**
+     * Stop the loop while the viewer is scrolled out of view (issue #340).
+     * `content-visibility: auto` (viewer.css) lets the browser skip the overlay
+     * DOM and reports it; the IntersectionObserver covers what it cannot see:
+     * an open top-layer menu body or focus inside keeps the element "relevant"
+     * and never skipped, and older browsers lack the event.
+     */
+    _initOffscreenPause() {
+        const sync = () => {
+            const off = this._cvSkipped || this._ioHidden;
+            if (off === this._offscreen) return;
+            this._offscreen = off;
+            this._syncLoop();
+        };
+        this._onContentVisibility = /** @param {any} e */ (e) => { this._cvSkipped = !!e.skipped; sync(); };
+        this.el.addEventListener('contentvisibilityautostatechange', this._onContentVisibility);
+        this._offscreenObserver = typeof IntersectionObserver === 'undefined' ? null
+            : new IntersectionObserver((entries) => {
+                this._ioHidden = !entries[entries.length - 1].isIntersecting;
+                sync();
+            });
+        this._offscreenObserver?.observe(this.el);
     }
 
     /** @returns {boolean} whether pause() has stopped the render loop */
@@ -25904,6 +25983,8 @@ export class ThreeJSViewer {
         if (this._onVisibilityChange) document.removeEventListener('visibilitychange', this._onVisibilityChange);
         cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
+        this._offscreenObserver?.disconnect();
+        this.el.removeEventListener('contentvisibilityautostatechange', this._onContentVisibility);
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
         this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
@@ -25923,6 +26004,8 @@ export class ThreeJSViewer {
         this._envTarget?.dispose();
         this._envCube?.dispose();
         this._envTarget = this._envCube = this._envMap = null;
+        this._renderer.domElement.removeEventListener('webglcontextlost', this._onContextLost);
+        this._renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored);
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();

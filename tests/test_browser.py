@@ -14049,6 +14049,93 @@ def test_camera_drag_ends_on_pointercancel(viewer_client, viewer_page):
     viewer_page.mouse.up()
 
 
+_TOUCH_JS = """
+(steps) => {
+    const v = window.threejsViewer, c = v._controls, el = c.domElement;
+    const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const fire = (target, type, id, x, y) => target.dispatchEvent(new PointerEvent(type, {
+        pointerId: id, pointerType: 'touch', isPrimary: id === 11, button: 0, buttons: 1,
+        clientX: cx + x, clientY: cy + y, bubbles: true }));
+    const out = [];
+    for (const [type, id, x, y] of steps) {
+        fire(type === 'pointerdown' ? el : window, type, id, x, y);
+        c.update();
+        out.push({ state: c._state, dist: v._camera.position.distanceTo(c.target),
+                   target: c.target.toArray(), zoom: v._camera.zoom });
+    }
+    return out;
+}
+"""
+
+
+@pytest.mark.browser
+def test_touch_pinch_zooms_and_two_finger_drag_pans(viewer_client, viewer_page):
+    """Two fingers spreading zoom in about their midpoint, moving together pan,
+    and lifting one hands the gesture back to a one-finger rotate."""
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [0, -10, 10], target: [0, 0, 0], up: [0, 0, 1]})"
+    )
+    viewer_page.evaluate("() => window.threejsViewer._controls.cancelInertia()")
+    out = viewer_page.evaluate(
+        _TOUCH_JS,
+        [
+            ["pointerdown", 11, -50, 0],
+            ["pointerdown", 12, 50, 0],
+            ["pointermove", 11, -100, 0],
+            ["pointermove", 12, 100, 0],
+        ],
+    )
+    assert out[0]["state"] == 1  # one finger: rotate
+    assert out[1]["state"] == 3  # second finger: pinch
+    # Spread from 100 to 200 px: the camera is about half as far from its target.
+    assert out[3]["dist"] == pytest.approx(out[1]["dist"] / 2, rel=0.05)
+
+    before = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    viewer_page.evaluate(
+        _TOUCH_JS, [["pointermove", 11, -100, 80], ["pointermove", 12, 100, 80]]
+    )
+    for _ in range(30):  # let pan damping drain
+        viewer_page.evaluate("() => window.threejsViewer._controls.update()")
+        frames(viewer_page, 1)
+    after = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    assert after != pytest.approx(before, abs=1e-3), "a two-finger drag must pan"
+
+    out = viewer_page.evaluate(
+        _TOUCH_JS, [["pointerup", 12, 100, 80], ["pointermove", 11, -90, 80]]
+    )
+    c = "window.threejsViewer._controls"
+    assert out[0]["state"] == 1, "the remaining finger rotates"
+    assert viewer_page.evaluate(f"() => {c}._activePointerId") == 11
+    viewer_page.evaluate(_TOUCH_JS, [["pointerup", 11, -90, 80]])
+    assert viewer_page.evaluate(f"() => {c}.isDragging()") is False
+    assert viewer_page.evaluate(f"() => {c}._touches.size") == 0
+
+
+@pytest.mark.browser
+def test_touch_pinch_zooms_ortho_camera(viewer_client, viewer_page):
+    """Under an orthographic projection a pinch changes the camera zoom."""
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page)
+    z0 = viewer_page.evaluate("() => window.threejsViewer._camera.zoom")
+    viewer_page.evaluate(
+        _TOUCH_JS,
+        [
+            ["pointerdown", 11, -50, 0],
+            ["pointerdown", 12, 50, 0],
+            ["pointermove", 12, 150, 0],
+            ["pointerup", 12, 150, 0],
+            ["pointerup", 11, -50, 0],
+        ],
+    )
+    z1 = viewer_page.evaluate("() => window.threejsViewer._camera.zoom")
+    assert z1 == pytest.approx(z0 * 2, rel=0.05)
+
+
 @pytest.mark.browser
 def test_viewer_controls_have_accessible_names_and_states(viewer_client, viewer_page):
     """Every panel input has a name, switches say so, and segmented and loop
@@ -14124,3 +14211,91 @@ def test_menu_items_expose_state_to_assistive_tech(viewer_client, viewer_page):
         "segName": "Side",
         "selName": "Units",
     }
+
+
+@pytest.mark.browser
+def test_render_loop_stops_while_scrolled_off_screen(viewer_client, viewer_page):
+    """Scrolled out of view the loop stops without reporting a pause and the
+    viewer keeps its size; back in view it runs again, unless pause() was
+    called meanwhile, which a visibility change never overrides."""
+    result = viewer_page.evaluate(
+        "async () => {"
+        " const v = window.threejsViewer;"
+        " const until = async (f) => { for (let i = 0; i < 100 && !f(); i++)"
+        "   await new Promise(r => setTimeout(r, 20)); return f(); };"
+        " document.documentElement.style.overflow = 'auto';"
+        " document.body.style.overflow = 'visible'; document.body.style.height = '400vh';"
+        " const c = document.getElementById('viewer-container'); c.style.height = '100vh';"
+        " const h0 = v.el.getBoundingClientRect().height;"
+        " window.scrollTo(0, 3 * innerHeight);"
+        " const stopped = await until(() => v._animationFrameId === 0);"
+        " const out = {stopped, paused: v.isPaused(),"
+        "  height: Math.round(v.el.getBoundingClientRect().height - h0)};"
+        " window.scrollTo(0, 0);"
+        " out.restarted = await until(() => v._animationFrameId !== 0);"
+        " window.scrollTo(0, 3 * innerHeight); await until(() => v._animationFrameId === 0);"
+        " v.pause(); window.scrollTo(0, 0);"
+        " await until(() => !v._offscreen);"
+        " out.heldByPause = v._animationFrameId === 0 && v.isPaused();"
+        " v.resume(); out.resumed = v._animationFrameId !== 0;"
+        " return out; }"
+    )
+    assert result == {
+        "stopped": True,
+        "paused": False,
+        "height": 0,
+        "restarted": True,
+        "heldByPause": True,
+        "resumed": True,
+    }
+
+
+@pytest.mark.browser
+def test_ui_font_sizes_follow_root_font_size(viewer_client, viewer_page):
+    """UI text is sized in rem: identical px at the default 16px root, and it
+    scales with the user's root font size."""
+    sizes = viewer_page.evaluate(
+        "() => { const el = window.threejsViewer.el;"
+        " const read = () => ['.tjsv-rail-panel > .tjsv-menu', '.tjsv-rail-panel > .tjsv-menu-btn']"
+        "  .map(q => getComputedStyle(el.querySelector(q)).fontSize)"
+        "  .concat(getComputedStyle(el).getPropertyValue('--tjsv-font-size').trim());"
+        " const base = read();"
+        " document.documentElement.style.fontSize = '20px';"
+        " const big = read(); document.documentElement.style.fontSize = '';"
+        " return {base, big}; }"
+    )
+    assert sizes == {
+        "base": ["12px", "11px", "0.75rem"],
+        "big": ["15px", "13.75px", "0.75rem"],
+    }
+
+
+@pytest.mark.browser
+def test_webgl_context_loss_stops_loop_and_restore_renders_again(
+    viewer_client, viewer_page
+):
+    """A lost WebGL context stops the loop without reporting a pause; once
+    restored the loop runs again and the scene draws as before, environment
+    map included."""
+    viewer_client.add_box("box", width=2, height=2, depth=2, color=0xCC3333)
+    viewer_client.set_camera(position=[6, 6, 4], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    before = viewer_page.evaluate(_CENTRE_PIXEL_JS)
+    lost = viewer_page.evaluate(
+        "async () => { const v = window.threejsViewer;"
+        " const gl = v._renderer.getContext(), ext = gl.getExtension('WEBGL_lose_context');"
+        " const until = async (f) => { for (let i = 0; i < 250 && !f(); i++)"
+        "   await new Promise(r => setTimeout(r, 20)); return f(); };"
+        " ext.loseContext(); await until(() => v._contextLost);"
+        " const out = {stopped: v._animationFrameId === 0, paused: v.isPaused()};"
+        " ext.restoreContext();"
+        " out.running = await until(() => !v._contextLost && v._animationFrameId !== 0);"
+        " out.env = !!v._scene.environment === (v._envEnabled && v._displayQuality !== 'low');"
+        " return out; }"
+    )
+    assert lost == {"stopped": True, "paused": False, "running": True, "env": True}
+    frames(viewer_page, 3)
+    after = viewer_page.evaluate(_CENTRE_PIXEL_JS)
+    assert before[0] > before[2] + 40, before
+    assert all(abs(a - b) <= 2 for a, b in zip(after, before)), (before, after)
