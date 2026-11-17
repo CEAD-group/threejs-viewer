@@ -14124,3 +14124,40 @@ def test_menu_items_expose_state_to_assistive_tech(viewer_client, viewer_page):
         "segName": "Side",
         "selName": "Units",
     }
+
+
+@pytest.mark.browser
+def test_render_loop_stops_while_scrolled_off_screen(viewer_client, viewer_page):
+    """Scrolled out of view the loop stops without reporting a pause and the
+    viewer keeps its size; back in view it runs again, unless pause() was
+    called meanwhile, which a visibility change never overrides."""
+    result = viewer_page.evaluate(
+        "async () => {"
+        " const v = window.threejsViewer;"
+        " const until = async (f) => { for (let i = 0; i < 100 && !f(); i++)"
+        "   await new Promise(r => setTimeout(r, 20)); return f(); };"
+        " document.documentElement.style.overflow = 'auto';"
+        " document.body.style.overflow = 'visible'; document.body.style.height = '400vh';"
+        " const c = document.getElementById('viewer-container'); c.style.height = '100vh';"
+        " const h0 = v.el.getBoundingClientRect().height;"
+        " window.scrollTo(0, 3 * innerHeight);"
+        " const stopped = await until(() => v._animationFrameId === 0);"
+        " const out = {stopped, paused: v.isPaused(),"
+        "  height: Math.round(v.el.getBoundingClientRect().height - h0)};"
+        " window.scrollTo(0, 0);"
+        " out.restarted = await until(() => v._animationFrameId !== 0);"
+        " window.scrollTo(0, 3 * innerHeight); await until(() => v._animationFrameId === 0);"
+        " v.pause(); window.scrollTo(0, 0);"
+        " await until(() => !v._offscreen);"
+        " out.heldByPause = v._animationFrameId === 0 && v.isPaused();"
+        " v.resume(); out.resumed = v._animationFrameId !== 0;"
+        " return out; }"
+    )
+    assert result == {
+        "stopped": True,
+        "paused": False,
+        "height": 0,
+        "restarted": True,
+        "heldByPause": True,
+        "resumed": True,
+    }

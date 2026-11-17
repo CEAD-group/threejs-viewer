@@ -17279,8 +17279,15 @@ export class ThreeJSViewer {
         this._lastUIUpdate = 0;
         // Explicit pause (pause()/resume()); the rAF is cancelled while set.
         this._paused = false;
+        // Scrolled out of view (issue #340); held apart from _paused so neither overrides the other.
+        this._offscreen = false;
+        this._cvSkipped = false;
+        this._ioHidden = false;
+        // Set while the WebGL context is lost; holds the loop like _offscreen.
+        this._contextLost = false;
         this._animate = this._animate.bind(this);
         this._animationFrameId = requestAnimationFrame(this._animate);
+        this._initOffscreenPause();
 
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
     }
@@ -23976,16 +23983,53 @@ export class ThreeJSViewer {
     pause() {
         if (this._paused || this._destroyed) return;
         this._paused = true;
-        cancelAnimationFrame(this._animationFrameId);
-        this._animationFrameId = 0;
+        this._syncLoop();
     }
 
     /** Restart a loop stopped by pause(); playback continues where it froze. */
     resume() {
         if (!this._paused || this._destroyed) return;
         this._paused = false;
-        this._resetFrameClocks();
-        this._animationFrameId = requestAnimationFrame(this._animate);
+        this._syncLoop();
+    }
+
+    /**
+     * Run the rAF loop exactly when nothing holds it: an explicit pause(), the
+     * viewer being off-screen, or a lost WebGL context. A restart skips the gap.
+     */
+    _syncLoop() {
+        const run = !this._paused && !this._offscreen && !this._contextLost && !this._destroyed;
+        if (run && !this._animationFrameId) {
+            this._resetFrameClocks();
+            this._animationFrameId = requestAnimationFrame(this._animate);
+        } else if (!run && this._animationFrameId) {
+            cancelAnimationFrame(this._animationFrameId);
+            this._animationFrameId = 0;
+        }
+    }
+
+    /**
+     * Stop the loop while the viewer is scrolled out of view (issue #340).
+     * `content-visibility: auto` (viewer.css) lets the browser skip the overlay
+     * DOM and reports it; the IntersectionObserver covers what it cannot see:
+     * an open top-layer menu body or focus inside keeps the element "relevant"
+     * and never skipped, and older browsers lack the event.
+     */
+    _initOffscreenPause() {
+        const sync = () => {
+            const off = this._cvSkipped || this._ioHidden;
+            if (off === this._offscreen) return;
+            this._offscreen = off;
+            this._syncLoop();
+        };
+        this._onContentVisibility = /** @param {any} e */ (e) => { this._cvSkipped = !!e.skipped; sync(); };
+        this.el.addEventListener('contentvisibilityautostatechange', this._onContentVisibility);
+        this._offscreenObserver = typeof IntersectionObserver === 'undefined' ? null
+            : new IntersectionObserver((entries) => {
+                this._ioHidden = !entries[entries.length - 1].isIntersecting;
+                sync();
+            });
+        this._offscreenObserver?.observe(this.el);
     }
 
     /** @returns {boolean} whether pause() has stopped the render loop */
@@ -25904,6 +25948,8 @@ export class ThreeJSViewer {
         if (this._onVisibilityChange) document.removeEventListener('visibilitychange', this._onVisibilityChange);
         cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
+        this._offscreenObserver?.disconnect();
+        this.el.removeEventListener('contentvisibilityautostatechange', this._onContentVisibility);
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
         this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);

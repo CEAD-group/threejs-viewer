@@ -1,6 +1,11 @@
 .threejs-viewer {
     position: relative;
     overflow: hidden;
+    /* Off-screen the browser skips the overlay DOM and the render loop stops
+       (ThreeJSViewer._initOffscreenPause). While skipped the size is contained,
+       so the last rendered size holds it in place. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 300px auto 150px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 .threejs-viewer:focus { outline: none; }
