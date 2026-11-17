@@ -40,7 +40,7 @@
     --tjsv-input-text: var(--tjsv-text);
     --tjsv-input-focus: var(--tjsv-primary);
     --tjsv-radius: 4px;
-    --tjsv-font-size: 12px;
+    --tjsv-font-size: 0.75rem;
 }
 
 /* ---- Menus ----
@@ -90,7 +90,7 @@
     margin: 0;
     cursor: pointer;
     font: inherit;
-    font-size: 11px;
+    font-size: 0.6875rem;
     color: var(--tjsv-text);
     background: var(--tjsv-menu-bg);
     border: 1px solid var(--tjsv-border);
@@ -145,7 +145,7 @@
     border-radius: 0 0 0 4px;
     padding: 6px 8px 8px;
     color: var(--tjsv-text);
-    font-size: 12px;
+    font-size: 0.75rem;
     /* A touch scroll that reaches the end of the body must not chain to the page. */
     overscroll-behavior: contain;
     touch-action: pan-y;
@@ -153,14 +153,14 @@
 .threejs-viewer .tjsv-side-left > .tjsv-menu { border-right: 1px solid var(--tjsv-border); border-left: none; border-radius: 0 0 4px 0; }
 .threejs-viewer .tjsv-menu-status {
     color: var(--tjsv-text-dim);
-    font-size: 11px;
+    font-size: 0.6875rem;
     margin: 2px 0 5px;
     border-bottom: 1px solid var(--tjsv-border);
     padding-bottom: 3px;
     white-space: nowrap;
 }
 .threejs-viewer .tjsv-menu-title {
-    font-size: 10px;
+    font-size: 0.625rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--tjsv-text-dim);
@@ -169,7 +169,7 @@
     padding-bottom: 3px;
 }
 .threejs-viewer .tjsv-menu-caption {
-    font-size: 10px;
+    font-size: 0.625rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--tjsv-text-dim);
@@ -212,7 +212,7 @@
     background: none;
     color: var(--tjsv-text);
     font: inherit;
-    font-size: 12px;
+    font-size: 0.75rem;
     text-align: left;
     cursor: pointer;
     white-space: nowrap;
@@ -224,10 +224,10 @@
 .threejs-viewer .tjsv-menu-item:focus { outline: none; }
 .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: -2px; }
 .threejs-viewer .tjsv-menu-label { flex: 1; }
-.threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
+.threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 0.6875rem; }
 .threejs-viewer .tjsv-menu kbd {
     font-family: inherit;
-    font-size: 10px;
+    font-size: 0.625rem;
     font-weight: 600;
     color: var(--tjsv-text-dim);
     background: var(--tjsv-panel-2);
@@ -293,7 +293,7 @@
     margin: 2px 0;
     padding: 4px 8px;
     font: inherit;
-    font-size: 12px;
+    font-size: 0.75rem;
     color: var(--tjsv-button-text);
     background: var(--tjsv-button-bg);
     border: 1px solid var(--tjsv-button-border);
@@ -321,7 +321,7 @@
     margin: 1px 0;
     white-space: nowrap;
 }
-.threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 11px; }
+.threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 0.6875rem; }
 .threejs-viewer .tjsv-menu-row.disabled { color: var(--tjsv-text-faint); }
 .threejs-viewer .tjsv-menu-row[hidden] { display: none; }
 .threejs-viewer .tjsv-menu-select {
@@ -330,7 +330,7 @@
     border-radius: 3px;
     color: var(--tjsv-input-text);
     font: inherit;
-    font-size: 11px;
+    font-size: 0.6875rem;
     padding: 2px 4px;
     min-width: 0;
     flex: 1;
@@ -346,7 +346,7 @@
     color: var(--tjsv-text-dim);
     padding: 2px 6px;
     font: inherit;
-    font-size: 11px;
+    font-size: 0.6875rem;
     cursor: pointer;
     transition: background 0.1s, color 0.1s;
 }
@@ -363,7 +363,7 @@
     display: block;
     padding: 3px 5px 1px;
     color: var(--tjsv-text-dim);
-    font-size: 11px;
+    font-size: 0.6875rem;
 }
 /* Same 0.4s and easing as the eye glyph's SMIL sweep; selecting overshoots slightly. */
 .threejs-viewer .tjsv-radio-dot {
@@ -451,7 +451,7 @@
     height: 20px;
     padding: 0;
     line-height: 1;
-    font-size: 10px;
+    font-size: 0.625rem;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -550,7 +550,7 @@
     color: white;
     padding: 2px 6px;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: 0.625rem;
     white-space: nowrap;
     opacity: 0;
     transition: opacity 0.2s;
@@ -559,7 +559,7 @@
 .threejs-viewer .timeline-marker:hover { background: #ffaa00; box-shadow: 0 0 6px #ffaa0088; }
 .threejs-viewer .time-display {
     font-family: monospace;
-    font-size: 13px;
+    font-size: 0.8125rem;
     min-width: 120px;
     text-align: center;
 }
@@ -570,19 +570,19 @@
 }
 .threejs-viewer .speed-control span {
     font-family: monospace;
-    font-size: 12px;
+    font-size: 0.75rem;
     min-width: 50px;
     text-align: center;
 }
-.threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: 11px; }
+.threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: 0.6875rem; }
 .threejs-viewer .frame-display {
     font-family: monospace;
-    font-size: 11px;
+    font-size: 0.6875rem;
     color: #aaa;
     min-width: 100px;
 }
 .threejs-viewer .keyboard-hint {
-    font-size: 10px;
+    font-size: 0.625rem;
     color: #666;
     text-align: center;
 }
@@ -612,7 +612,7 @@
     border-radius: 3px;
     color: var(--tjsv-input-text);
     font: inherit;
-    font-size: 11px;
+    font-size: 0.6875rem;
     font-variant-numeric: tabular-nums;
     padding: 2px 4px;
     text-align: right;
@@ -632,7 +632,7 @@
     flex: 0 0 auto;
     min-width: 34px;
     text-align: right;
-    font-size: 11px;
+    font-size: 0.6875rem;
     font-variant-numeric: tabular-nums;
     color: var(--tjsv-text-dim);
 }
@@ -654,7 +654,7 @@
 .threejs-viewer .tjsv-rail-form .tjsv-menu-action { margin-top: 6px; }
 .threejs-viewer .tjsv-panel-hint {
     margin-top: 6px;
-    font-size: 10px;
+    font-size: 0.625rem;
     color: var(--tjsv-text-faint);
     white-space: normal;
 }
@@ -680,6 +680,7 @@
     background: rgba(30, 30, 30, 0.72);
     border: 1px solid rgba(255, 255, 255, 0.18);
     color: #ddd;
+    /* px like the fixed-size view button it labels. */
     font-size: calc(9px * var(--tjsv-view-scale, 1));
     font-weight: 600;
     letter-spacing: 0.5px;
@@ -732,7 +733,7 @@
     background: rgba(30, 30, 30, 0.85);
     color: #eee;
     font-family: monospace;
-    font-size: 12px;
+    font-size: 0.75rem;
     padding: 6px 12px;
     border-radius: 6px;
     pointer-events: none;
@@ -749,7 +750,7 @@
     background: rgba(30, 30, 30, 0.85);
     color: #eee;
     font-family: monospace;
-    font-size: 12px;
+    font-size: 0.75rem;
     padding: 3px 7px;
     border-radius: 5px;
     pointer-events: none;
@@ -776,6 +777,7 @@
    (only bubble-snap-entered ortho auto-exits on orbit). */
 .threejs-viewer .tjsv-view-proj {
     bottom: calc(50px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
+    /* px like the fixed-size view button it labels. */
     font-size: calc(11px * var(--tjsv-view-scale, 1));
 }
 /* Home (reset view): third item of the stack, below P. */
@@ -822,7 +824,7 @@
     border: 1px solid var(--tjsv-button-border);
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    font-size: 12px;
+    font-size: 0.75rem;
     font-variant-numeric: tabular-nums;
     padding: 4px 9px;
     border-radius: 6px;

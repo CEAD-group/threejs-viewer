@@ -14161,3 +14161,23 @@ def test_render_loop_stops_while_scrolled_off_screen(viewer_client, viewer_page)
         "heldByPause": True,
         "resumed": True,
     }
+
+
+@pytest.mark.browser
+def test_ui_font_sizes_follow_root_font_size(viewer_client, viewer_page):
+    """UI text is sized in rem: identical px at the default 16px root, and it
+    scales with the user's root font size."""
+    sizes = viewer_page.evaluate(
+        "() => { const el = window.threejsViewer.el;"
+        " const read = () => ['.tjsv-rail-panel > .tjsv-menu', '.tjsv-rail-panel > .tjsv-menu-btn']"
+        "  .map(q => getComputedStyle(el.querySelector(q)).fontSize)"
+        "  .concat(getComputedStyle(el).getPropertyValue('--tjsv-font-size').trim());"
+        " const base = read();"
+        " document.documentElement.style.fontSize = '20px';"
+        " const big = read(); document.documentElement.style.fontSize = '';"
+        " return {base, big}; }"
+    )
+    assert sizes == {
+        "base": ["12px", "11px", "0.75rem"],
+        "big": ["15px", "13.75px", "0.75rem"],
+    }
