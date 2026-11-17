@@ -13956,3 +13956,171 @@ def test_polyline_exact_colors_flat_color_is_untone_mapped(viewer_client, viewer
     frames(viewer_page)
     px = np.array(viewer_page.evaluate(_CENTRE_PIXEL_JS))
     assert np.abs(px - [93, 156, 116]).max() <= 3, px
+
+
+# --- Pointer input and accessible names (web guidance audit) ---
+
+
+def _timeline_box(page):
+    return page.locator(".tjsv-timeline-container").bounding_box()
+
+
+@pytest.mark.browser
+def test_timeline_scrub_uses_pointer_capture(viewer_client, viewer_page):
+    """The scrubber follows a drag past its edge, through pointer capture, and
+    restores the play state when the capture ends (#336)."""
+    _load_long_animation(viewer_client, viewer_page)
+    box = _timeline_box(viewer_page)
+    y = box["y"] + box["height"] / 2
+    viewer_page.mouse.move(box["x"] + box["width"] * 0.25, y)
+    viewer_page.mouse.down()
+    state = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer, tl = v._timelineContainer;"
+        " return {scrubbing: v._scrubbing, playing: v._animationPlaying,"
+        "  touchAction: getComputedStyle(tl).touchAction}; }"
+    )
+    assert state == {"scrubbing": True, "playing": False, "touchAction": "none"}
+    # Far past the right edge: capture keeps the drag on the scrubber.
+    viewer_page.mouse.move(box["x"] + box["width"] + 400, y)
+    t = viewer_page.evaluate("() => window.threejsViewer.getAnimationState().time")
+    assert t == pytest.approx(100.0)
+    # Back to the middle, so the resumed playback does not stop at the end at once.
+    viewer_page.mouse.move(box["x"] + box["width"] / 2, y)
+    viewer_page.mouse.up()
+    _wait_for(viewer_page, "() => window.threejsViewer._scrubbing === false")
+    assert viewer_page.evaluate("() => window.threejsViewer._animationPlaying") is True
+
+
+@pytest.mark.browser
+def test_timeline_marker_press_seeks_to_marker(viewer_client, viewer_page):
+    """A press on a marker lands on the marker's time, not the pixel under it."""
+    viewer_client.add_box("marker_box")
+    settle(viewer_client)
+    anim = Animation(
+        frames=[Frame(time=0, transforms={}), Frame(time=100, transforms={})],
+        loop=False,
+    )
+    anim.add_marker(37.5, "m")
+    viewer_client.load_animation(anim)
+    _wait_for_animation_loaded(viewer_page)
+    viewer_page.evaluate("() => window.threejsViewer.setAnimationPlaying(false)")
+    marker = viewer_page.locator(".timeline-marker").bounding_box()
+    # Press the marker's right edge; its 2 px width maps to a different time.
+    viewer_page.mouse.move(marker["x"] + marker["width"], marker["y"] + 2)
+    viewer_page.mouse.down()
+    t = viewer_page.evaluate("() => window.threejsViewer.getAnimationState().time")
+    viewer_page.mouse.up()
+    assert t == pytest.approx(37.5)
+
+
+@pytest.mark.browser
+def test_timeline_has_slider_semantics(viewer_client, viewer_page):
+    """The scrubber is a focusable slider whose value tracks the playhead."""
+    _load_long_animation(viewer_client, viewer_page)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; v.setAnimationPlaying(false);"
+        " v._seekToTime(25); v._updateAnimationUI(); }"
+    )
+    attrs = viewer_page.evaluate(
+        "() => { const tl = window.threejsViewer._timelineContainer;"
+        " return ['role', 'tabindex', 'aria-label', 'aria-valuemin', 'aria-valuemax',"
+        "  'aria-valuenow'].map(a => tl.getAttribute(a)); }"
+    )
+    assert attrs == ["slider", "0", "Timeline", "0", "100.00", "25.00"]
+
+
+@pytest.mark.browser
+def test_camera_drag_ends_on_pointercancel(viewer_client, viewer_page):
+    """An orbit drag the browser cancels (a touch gesture it takes over) does
+    not leave the controls stuck in a drag (#337)."""
+    box = viewer_page.locator(".threejs-viewer canvas").first.bounding_box()
+    viewer_page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    viewer_page.mouse.down()
+    assert viewer_page.evaluate("() => window.threejsViewer._controls.isDragging()")
+    pid = viewer_page.evaluate("() => window.threejsViewer._controls._activePointerId")
+    viewer_page.evaluate(
+        "(pid) => window.dispatchEvent(new PointerEvent('pointercancel', {pointerId: pid}))",
+        pid,
+    )
+    assert (
+        viewer_page.evaluate("() => window.threejsViewer._controls.isDragging()")
+        is False
+    )
+    viewer_page.mouse.up()
+
+
+@pytest.mark.browser
+def test_viewer_controls_have_accessible_names_and_states(viewer_client, viewer_page):
+    """Every panel input has a name, switches say so, and segmented and loop
+    buttons expose their selection through aria-pressed (#338)."""
+    unnamed = viewer_page.evaluate(
+        "() => [...window.threejsViewer.el.querySelectorAll('input, select')]"
+        " .filter(el => !el.getAttribute('aria-label') && !el.labels?.length"
+        "   && !el.getAttribute('aria-labelledby'))"
+        " .map(el => el.className)"
+    )
+    assert unnamed == []
+    switches = viewer_page.evaluate(
+        "() => [...window.threejsViewer.el.querySelectorAll('.tjsv-switch-input')]"
+        " .map(el => el.getAttribute('role'))"
+    )
+    assert switches and set(switches) == {"switch"}
+
+    pressed_js = (
+        "() => { const el = window.threejsViewer.el;"
+        " return {axis: [...el.querySelectorAll('.clip-axis-buttons button')]"
+        "   .map(b => b.getAttribute('aria-pressed')),"
+        "  single: el.querySelector('.tjsv-clip-mode-single').getAttribute('aria-pressed'),"
+        "  slab: el.querySelector('.tjsv-clip-mode-slab').getAttribute('aria-pressed'),"
+        "  loop: el.querySelector('.tjsv-btn-loop').getAttribute('aria-pressed'),"
+        "  clip: el.querySelector('.tjsv-clip-enabled').getAttribute('aria-checked')}; }"
+    )
+    before = viewer_page.evaluate(pressed_js)
+    assert before["axis"] == ["true", "false", "false", "false", "false", "false"]
+    assert (before["single"], before["slab"], before["loop"]) == (
+        "true",
+        "false",
+        "true",
+    )
+    viewer_page.evaluate(
+        "() => window.threejsViewer.el.querySelector('[data-axis=\"z-\"]').click()"
+    )
+    axis = viewer_page.evaluate(pressed_js)["axis"]
+    assert axis == ["false", "false", "false", "false", "false", "true"]
+    viewer_page.evaluate(
+        "() => { const el = window.threejsViewer.el;"
+        " el.querySelector('.tjsv-clip-mode-slab').click();"
+        " el.querySelector('.tjsv-btn-loop').click();"
+        " el.querySelector('.tjsv-clip-enabled').click(); }"
+    )
+    after = viewer_page.evaluate(pressed_js)
+    assert (after["single"], after["slab"], after["loop"]) == ("false", "true", "false")
+    assert after["clip"] != before["clip"]
+
+
+@pytest.mark.browser
+def test_menu_items_expose_state_to_assistive_tech(viewer_client, viewer_page):
+    """Client menu toggles are switches, segmented buttons carry aria-pressed,
+    and select and segmented controls are named after their item label."""
+    viewer_page.evaluate(
+        "() => window.threejsViewer.addMenu({id: 'a11y', label: 'A11y', mode: 'panel', items: ["
+        " {type: 'toggle', id: 't', label: 'Grid', checked: true},"
+        " {type: 'segmented', id: 's', label: 'Side', options: ['left', 'right'], value: 'right'},"
+        " {type: 'select', id: 'sel', label: 'Units', options: ['mm', 'm'], value: 'mm'}]})"
+    )
+    info = viewer_page.evaluate(
+        "() => { const r = document.querySelector('[data-menu=a11y]');"
+        " const t = r.querySelector('[data-item=t]');"
+        " const s = r.querySelector('[data-item=s] .tjsv-segmented');"
+        " return {role: t.getAttribute('role'), checked: t.getAttribute('aria-checked'),"
+        "  seg: [...s.querySelectorAll('.tjsv-seg-btn')].map(b => b.getAttribute('aria-pressed')),"
+        "  segName: s.getAttribute('aria-label'),"
+        "  selName: r.querySelector('[data-item=sel] select').getAttribute('aria-label')}; }"
+    )
+    assert info == {
+        "role": "switch",
+        "checked": "true",
+        "seg": ["false", "true"],
+        "segName": "Side",
+        "selName": "Units",
+    }
