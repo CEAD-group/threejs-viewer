@@ -19141,6 +19141,20 @@ class ThreeJSViewer {
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
         this.el.appendChild(this._renderer.domElement);
+        // GPU reset or driver eviction (issue #342). three.js re-initialises its
+        // own state on restore; the loop stops meanwhile and GPU-generated data is rebuilt.
+        this._onContextLost = /** @param {Event} e */ (e) => {
+            e.preventDefault();
+            this._contextLost = true;
+            this._syncLoop();
+        };
+        this._onContextRestored = () => {
+            this._contextLost = false;
+            this._rebuildAfterContextRestore();
+            this._syncLoop();
+        };
+        this._renderer.domElement.addEventListener('webglcontextlost', this._onContextLost);
+        this._renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored);
 
         // Environment cubemap. Intensity is set up front (not when the async
         // load lands) so it is right immediately and survives cubemap switches.
@@ -25593,6 +25607,27 @@ class ThreeJSViewer {
         return Math.min(window.devicePixelRatio || 1, this._maxPixelRatio);
     }
 
+    /**
+     * Recreate what only ever lived on the GPU after a context restore. Meshes,
+     * textures and buffers re-upload from their CPU copies on the next draw;
+     * the PMREM environment was rendered, so it is generated again from the
+     * kept cube, and the shadow map is redrawn.
+     */
+    _rebuildAfterContextRestore() {
+        if (this._destroyed) return;
+        if (this._envCube) {
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const target = pmremGenerator.fromCubemap(this._envCube);
+            pmremGenerator.dispose();
+            this._envTarget?.dispose();
+            this._envTarget = target;
+            this._envMap = target.texture;
+            this._syncEnvironment();
+            this._applyBackground();
+        }
+        this.requestShadowUpdate();
+    }
+
     /** Restart the frame and playback clocks at now, so leaving a hidden or
      *  paused state does not count the gap as elapsed playback. */
     _resetFrameClocks() {
@@ -27596,6 +27631,8 @@ class ThreeJSViewer {
         this._envTarget?.dispose();
         this._envCube?.dispose();
         this._envTarget = this._envCube = this._envMap = null;
+        this._renderer.domElement.removeEventListener('webglcontextlost', this._onContextLost);
+        this._renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored);
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();

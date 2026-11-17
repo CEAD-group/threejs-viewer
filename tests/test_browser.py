@@ -14181,3 +14181,34 @@ def test_ui_font_sizes_follow_root_font_size(viewer_client, viewer_page):
         "base": ["12px", "11px", "0.75rem"],
         "big": ["15px", "13.75px", "0.75rem"],
     }
+
+
+@pytest.mark.browser
+def test_webgl_context_loss_stops_loop_and_restore_renders_again(
+    viewer_client, viewer_page
+):
+    """A lost WebGL context stops the loop without reporting a pause; once
+    restored the loop runs again and the scene draws as before, environment
+    map included."""
+    viewer_client.add_box("box", width=2, height=2, depth=2, color=0xCC3333)
+    viewer_client.set_camera(position=[6, 6, 4], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    before = viewer_page.evaluate(_CENTRE_PIXEL_JS)
+    lost = viewer_page.evaluate(
+        "async () => { const v = window.threejsViewer;"
+        " const gl = v._renderer.getContext(), ext = gl.getExtension('WEBGL_lose_context');"
+        " const until = async (f) => { for (let i = 0; i < 250 && !f(); i++)"
+        "   await new Promise(r => setTimeout(r, 20)); return f(); };"
+        " ext.loseContext(); await until(() => v._contextLost);"
+        " const out = {stopped: v._animationFrameId === 0, paused: v.isPaused()};"
+        " ext.restoreContext();"
+        " out.running = await until(() => !v._contextLost && v._animationFrameId !== 0);"
+        " out.env = !!v._scene.environment === (v._envEnabled && v._displayQuality !== 'low');"
+        " return out; }"
+    )
+    assert lost == {"stopped": True, "paused": False, "running": True, "env": True}
+    frames(viewer_page, 3)
+    after = viewer_page.evaluate(_CENTRE_PIXEL_JS)
+    assert before[0] > before[2] + 40, before
+    assert all(abs(a - b) <= 2 for a, b in zip(after, before)), (before, after)
