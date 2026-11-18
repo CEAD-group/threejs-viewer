@@ -14049,6 +14049,140 @@ def test_camera_drag_ends_on_pointercancel(viewer_client, viewer_page):
     viewer_page.mouse.up()
 
 
+_TOUCH_JS = """
+(steps) => {
+    const v = window.threejsViewer, c = v._controls, el = c.domElement;
+    const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const fire = (target, type, id, x, y) => target.dispatchEvent(new PointerEvent(type, {
+        pointerId: id, pointerType: 'touch', isPrimary: id === 11, button: 0, buttons: 1,
+        clientX: cx + x, clientY: cy + y, bubbles: true }));
+    const out = [];
+    for (const [type, id, x, y] of steps) {
+        fire(type === 'pointerdown' ? el : window, type, id, x, y);
+        c.update();
+        out.push({ state: c._state, dist: v._camera.position.distanceTo(c.target),
+                   target: c.target.toArray(), zoom: v._camera.zoom });
+    }
+    return out;
+}
+"""
+
+
+@pytest.mark.browser
+def test_touch_pinch_zooms_and_two_finger_drag_pans(viewer_client, viewer_page):
+    """Two fingers spreading zoom in about their midpoint, moving together pan,
+    and lifting one hands the gesture back to a one-finger rotate."""
+    viewer_page.evaluate(
+        "() => window.threejsViewer.setCameraPose("
+        "{position: [0, -10, 10], target: [0, 0, 0], up: [0, 0, 1]})"
+    )
+    viewer_page.evaluate("() => window.threejsViewer._controls.cancelInertia()")
+    out = viewer_page.evaluate(
+        _TOUCH_JS,
+        [
+            ["pointerdown", 11, -50, 0],
+            ["pointerdown", 12, 50, 0],
+            ["pointermove", 11, -100, 0],
+            ["pointermove", 12, 100, 0],
+        ],
+    )
+    assert out[0]["state"] == 1  # one finger: rotate
+    assert out[1]["state"] == 3  # second finger: pinch
+    # Spread from 100 to 200 px: the camera is about half as far from its target.
+    assert out[3]["dist"] == pytest.approx(out[1]["dist"] / 2, rel=0.05)
+
+    before = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    viewer_page.evaluate(
+        _TOUCH_JS, [["pointermove", 11, -100, 80], ["pointermove", 12, 100, 80]]
+    )
+    for _ in range(30):  # let pan damping drain
+        viewer_page.evaluate("() => window.threejsViewer._controls.update()")
+        frames(viewer_page, 1)
+    after = viewer_page.evaluate(
+        "() => window.threejsViewer._controls.target.toArray()"
+    )
+    assert after != pytest.approx(before, abs=1e-3), "a two-finger drag must pan"
+
+    out = viewer_page.evaluate(
+        _TOUCH_JS, [["pointerup", 12, 100, 80], ["pointermove", 11, -90, 80]]
+    )
+    c = "window.threejsViewer._controls"
+    assert out[0]["state"] == 1, "the remaining finger rotates"
+    assert viewer_page.evaluate(f"() => {c}._activePointerId") == 11
+    viewer_page.evaluate(_TOUCH_JS, [["pointerup", 11, -90, 80]])
+    assert viewer_page.evaluate(f"() => {c}.isDragging()") is False
+    assert viewer_page.evaluate(f"() => {c}._touches.size") == 0
+
+
+@pytest.mark.browser
+def test_touch_pinch_zooms_ortho_camera(viewer_client, viewer_page):
+    """Under an orthographic projection a pinch changes the camera zoom."""
+    viewer_page.evaluate("() => window.threejsViewer._switchCamera(true)")
+    frames(viewer_page)
+    z0 = viewer_page.evaluate("() => window.threejsViewer._camera.zoom")
+    viewer_page.evaluate(
+        _TOUCH_JS,
+        [
+            ["pointerdown", 11, -50, 0],
+            ["pointerdown", 12, 50, 0],
+            ["pointermove", 12, 150, 0],
+            ["pointerup", 12, 150, 0],
+            ["pointerup", 11, -50, 0],
+        ],
+    )
+    z1 = viewer_page.evaluate("() => window.threejsViewer._camera.zoom")
+    assert z1 == pytest.approx(z0 * 2, rel=0.05)
+
+
+_TOUCH_AT_JS = """
+(steps) => {
+    const el = window.threejsViewer._renderer.domElement;
+    for (const [type, id, x, y] of steps) {
+        (type === 'pointerdown' ? el : window).dispatchEvent(new PointerEvent(type, {
+            pointerId: id, pointerType: 'touch', isPrimary: id === 21, button: 0,
+            buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, bubbles: true }));
+    }
+}
+"""
+
+
+@pytest.mark.browser
+def test_touch_pinch_never_fires_an_object_click(viewer_client, viewer_page):
+    """A pinch whose second finger stays still on an object and lifts first is
+    not a click, for the JS hook or for Python; a one-finger tap still is."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.evaluate(
+        "() => { window.__clicks = [];"
+        " window.threejsViewer.onObjectClick((p) => window.__clicks.push(p.id)); }"
+    )
+    x, y = proj["x"], proj["y"]
+    viewer_page.evaluate(
+        _TOUCH_AT_JS,
+        [
+            ["pointerdown", 21, x - 60, y],
+            ["pointerdown", 22, x, y],
+            ["pointermove", 21, x - 120, y],
+            ["pointerup", 22, x, y],
+            ["pointerup", 21, x - 120, y],
+        ],
+    )
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.__clicks") == []
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4), clicks
+
+    # The same synthetic touch path still produces a click for a single tap.
+    viewer_page.evaluate(
+        _TOUCH_AT_JS, [["pointerdown", 21, x, y], ["pointerup", 21, x, y]]
+    )
+    assert viewer_page.evaluate("() => window.__clicks") == ["box"]
+    assert _wait_until(lambda: len(clicks) == 1), "a tap no longer reaches Python"
+
+
 @pytest.mark.browser
 def test_viewer_controls_have_accessible_names_and_states(viewer_client, viewer_page):
     """Every panel input has a name, switches say so, and segmented and loop
