@@ -24047,8 +24047,8 @@ export class ThreeJSViewer {
      * Stop the loop while the viewer is scrolled out of view (issue #340).
      * `content-visibility: auto` (viewer.css) lets the browser skip the overlay
      * DOM and reports it; the IntersectionObserver covers what it cannot see:
-     * an open top-layer menu body or focus inside keeps the element "relevant"
-     * and never skipped, and older browsers lack the event.
+     * focus inside keeps the element "relevant" and never skipped, and older
+     * browsers lack the event.
      */
     _initOffscreenPause() {
         const sync = () => {

@@ -14165,22 +14165,99 @@ def test_render_loop_stops_while_scrolled_off_screen(viewer_client, viewer_page)
 
 @pytest.mark.browser
 def test_ui_font_sizes_follow_root_font_size(viewer_client, viewer_page):
-    """UI text is sized in rem: identical px at the default 16px root, and it
-    scales with the user's root font size."""
+    """UI text is sized in rem: identical px at the default 16px root, it
+    scales with the user's root font size, and --tjsv-rem pins it again."""
     sizes = viewer_page.evaluate(
         "() => { const el = window.threejsViewer.el;"
         " const read = () => ['.tjsv-rail-panel > .tjsv-menu', '.tjsv-rail-panel > .tjsv-menu-btn']"
-        "  .map(q => getComputedStyle(el.querySelector(q)).fontSize)"
-        "  .concat(getComputedStyle(el).getPropertyValue('--tjsv-font-size').trim());"
+        "  .map(q => getComputedStyle(el.querySelector(q)).fontSize);"
         " const base = read();"
         " document.documentElement.style.fontSize = '20px';"
-        " const big = read(); document.documentElement.style.fontSize = '';"
-        " return {base, big}; }"
+        " const big = read();"
+        " el.style.setProperty('--tjsv-rem', '16px');"
+        " const pinned = read();"
+        " el.style.removeProperty('--tjsv-rem'); document.documentElement.style.fontSize = '';"
+        " return {base, big, pinned}; }"
     )
     assert sizes == {
-        "base": ["12px", "11px", "0.75rem"],
-        "big": ["15px", "13.75px", "0.75rem"],
+        "base": ["12px", "11px"],
+        "big": ["15px", "13.75px"],
+        "pinned": ["12px", "11px"],
     }
+
+
+@pytest.mark.browser
+def test_playback_clock_holds_while_off_screen(viewer_client, viewer_page):
+    """Playback does not advance while the viewer is scrolled out of view, and
+    it resumes from the same time without a jump."""
+    _load_long_animation(viewer_client, viewer_page)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(
+        "() => { window.threejsViewer.container.style.transform = 'translateY(-200vh)'; }"
+    )
+    _wait_for(viewer_page, "() => window.threejsViewer._animationFrameId === 0")
+    before = viewer_page.evaluate(_RENDER_STATE_JS)
+    # Wall-clock wait on purpose: the gap must exceed the 0.25 s stall cap.
+    time.sleep(0.6)
+    held = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert held["frame"] == before["frame"], "rendered while off-screen"
+    assert held["time"] == before["time"], "playback clock ran while off-screen"
+    assert held["playing"] is True
+    resumed = viewer_page.evaluate(
+        """() => new Promise(resolve => {
+            const v = window.threejsViewer;
+            const original = v._resetFrameClocks;
+            const before = v.getAnimationState().time;
+            let resetTime = null;
+            v._resetFrameClocks = function () {
+                original.call(this);
+                resetTime = this._lastAnimationUpdate;
+            };
+            const off = v.onAnimationTime(state => {
+                off();
+                v._resetFrameClocks = original;
+                resolve({reset: resetTime !== null,
+                         jump: state.time - before,
+                         elapsed: (v._lastAnimationUpdate - resetTime) / 1000});
+            });
+            v.container.style.transform = '';
+        })"""
+    )
+    assert resumed["reset"], "coming back into view did not reset the playback clock"
+    assert resumed["jump"] == pytest.approx(min(resumed["elapsed"], 0.25)), resumed
+    frames(viewer_page, 3)
+    assert viewer_page.evaluate(_RENDER_STATE_JS)["frame"] > held["frame"]
+
+
+@pytest.mark.browser
+def test_webgl_context_restore_rebuilds_environment_and_shadows(
+    viewer_client, viewer_page
+):
+    """A restore builds a new environment target from the kept cube and marks
+    the shadow map for redraw."""
+    viewer_client.add_box("ctx_box", width=2, height=2, depth=2, color=0xCC2222)
+    settle(viewer_client)
+    _wait_for(viewer_page, "() => !!window.threejsViewer._envMap")
+    state = viewer_page.evaluate(
+        """() => new Promise(resolve => {
+            const v = window.threejsViewer;
+            const canvas = v._renderer.domElement;
+            const ext = v._renderer.getContext().getExtension('WEBGL_lose_context');
+            const envBefore = v._envTarget;
+            canvas.addEventListener('webglcontextlost', () => {
+                v._shadowDirty = false;
+                setTimeout(() => ext.restoreContext(), 50);
+            }, {once: true});
+            // Registered after the viewer's own listener, so it sees what that left.
+            canvas.addEventListener('webglcontextrestored', () => resolve({
+                newTarget: !!v._envTarget && v._envTarget !== envBefore,
+                envMap: v._envMap === v._envTarget.texture,
+                shadow: v._shadowDirty,
+            }), {once: true});
+            ext.loseContext();
+        })"""
+    )
+    assert state == {"newTarget": True, "envMap": True, "shadow": True}
 
 
 @pytest.mark.browser
