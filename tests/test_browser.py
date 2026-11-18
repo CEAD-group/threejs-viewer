@@ -14124,3 +14124,168 @@ def test_menu_items_expose_state_to_assistive_tech(viewer_client, viewer_page):
         "segName": "Side",
         "selName": "Units",
     }
+
+
+@pytest.mark.browser
+def test_render_loop_stops_while_scrolled_off_screen(viewer_client, viewer_page):
+    """Scrolled out of view the loop stops without reporting a pause and the
+    viewer keeps its size; back in view it runs again, unless pause() was
+    called meanwhile, which a visibility change never overrides."""
+    result = viewer_page.evaluate(
+        "async () => {"
+        " const v = window.threejsViewer;"
+        " const until = async (f) => { for (let i = 0; i < 100 && !f(); i++)"
+        "   await new Promise(r => setTimeout(r, 20)); return f(); };"
+        " document.documentElement.style.overflow = 'auto';"
+        " document.body.style.overflow = 'visible'; document.body.style.height = '400vh';"
+        " const c = document.getElementById('viewer-container'); c.style.height = '100vh';"
+        " const h0 = v.el.getBoundingClientRect().height;"
+        " window.scrollTo(0, 3 * innerHeight);"
+        " const stopped = await until(() => v._animationFrameId === 0);"
+        " const out = {stopped, paused: v.isPaused(),"
+        "  height: Math.round(v.el.getBoundingClientRect().height - h0)};"
+        " window.scrollTo(0, 0);"
+        " out.restarted = await until(() => v._animationFrameId !== 0);"
+        " window.scrollTo(0, 3 * innerHeight); await until(() => v._animationFrameId === 0);"
+        " v.pause(); window.scrollTo(0, 0);"
+        " await until(() => !v._offscreen);"
+        " out.heldByPause = v._animationFrameId === 0 && v.isPaused();"
+        " v.resume(); out.resumed = v._animationFrameId !== 0;"
+        " return out; }"
+    )
+    assert result == {
+        "stopped": True,
+        "paused": False,
+        "height": 0,
+        "restarted": True,
+        "heldByPause": True,
+        "resumed": True,
+    }
+
+
+@pytest.mark.browser
+def test_ui_font_sizes_follow_root_font_size(viewer_client, viewer_page):
+    """UI text is sized in rem: identical px at the default 16px root, it
+    scales with the user's root font size, and --tjsv-rem pins it again."""
+    sizes = viewer_page.evaluate(
+        "() => { const el = window.threejsViewer.el;"
+        " const read = () => ['.tjsv-rail-panel > .tjsv-menu', '.tjsv-rail-panel > .tjsv-menu-btn']"
+        "  .map(q => getComputedStyle(el.querySelector(q)).fontSize);"
+        " const base = read();"
+        " document.documentElement.style.fontSize = '20px';"
+        " const big = read();"
+        " el.style.setProperty('--tjsv-rem', '16px');"
+        " const pinned = read();"
+        " el.style.removeProperty('--tjsv-rem'); document.documentElement.style.fontSize = '';"
+        " return {base, big, pinned}; }"
+    )
+    assert sizes == {
+        "base": ["12px", "11px"],
+        "big": ["15px", "13.75px"],
+        "pinned": ["12px", "11px"],
+    }
+
+
+@pytest.mark.browser
+def test_playback_clock_holds_while_off_screen(viewer_client, viewer_page):
+    """Playback does not advance while the viewer is scrolled out of view, and
+    it resumes from the same time without a jump."""
+    _load_long_animation(viewer_client, viewer_page)
+    frames(viewer_page, 3)
+    viewer_page.evaluate(
+        "() => { window.threejsViewer.container.style.transform = 'translateY(-200vh)'; }"
+    )
+    _wait_for(viewer_page, "() => window.threejsViewer._animationFrameId === 0")
+    before = viewer_page.evaluate(_RENDER_STATE_JS)
+    # Wall-clock wait on purpose: the gap must exceed the 0.25 s stall cap.
+    time.sleep(0.6)
+    held = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert held["frame"] == before["frame"], "rendered while off-screen"
+    assert held["time"] == before["time"], "playback clock ran while off-screen"
+    assert held["playing"] is True
+    resumed = viewer_page.evaluate(
+        """() => new Promise(resolve => {
+            const v = window.threejsViewer;
+            const original = v._resetFrameClocks;
+            const before = v.getAnimationState().time;
+            let resetTime = null;
+            v._resetFrameClocks = function () {
+                original.call(this);
+                resetTime = this._lastAnimationUpdate;
+            };
+            const off = v.onAnimationTime(state => {
+                off();
+                v._resetFrameClocks = original;
+                resolve({reset: resetTime !== null,
+                         jump: state.time - before,
+                         elapsed: (v._lastAnimationUpdate - resetTime) / 1000});
+            });
+            v.container.style.transform = '';
+        })"""
+    )
+    assert resumed["reset"], "coming back into view did not reset the playback clock"
+    assert resumed["jump"] == pytest.approx(min(resumed["elapsed"], 0.25)), resumed
+    frames(viewer_page, 3)
+    assert viewer_page.evaluate(_RENDER_STATE_JS)["frame"] > held["frame"]
+
+
+@pytest.mark.browser
+def test_webgl_context_restore_rebuilds_environment_and_shadows(
+    viewer_client, viewer_page
+):
+    """A restore builds a new environment target from the kept cube and marks
+    the shadow map for redraw."""
+    viewer_client.add_box("ctx_box", width=2, height=2, depth=2, color=0xCC2222)
+    settle(viewer_client)
+    _wait_for(viewer_page, "() => !!window.threejsViewer._envMap")
+    state = viewer_page.evaluate(
+        """() => new Promise(resolve => {
+            const v = window.threejsViewer;
+            const canvas = v._renderer.domElement;
+            const ext = v._renderer.getContext().getExtension('WEBGL_lose_context');
+            const envBefore = v._envTarget;
+            canvas.addEventListener('webglcontextlost', () => {
+                v._shadowDirty = false;
+                setTimeout(() => ext.restoreContext(), 50);
+            }, {once: true});
+            // Registered after the viewer's own listener, so it sees what that left.
+            canvas.addEventListener('webglcontextrestored', () => resolve({
+                newTarget: !!v._envTarget && v._envTarget !== envBefore,
+                envMap: v._envMap === v._envTarget.texture,
+                shadow: v._shadowDirty,
+            }), {once: true});
+            ext.loseContext();
+        })"""
+    )
+    assert state == {"newTarget": True, "envMap": True, "shadow": True}
+
+
+@pytest.mark.browser
+def test_webgl_context_loss_stops_loop_and_restore_renders_again(
+    viewer_client, viewer_page
+):
+    """A lost WebGL context stops the loop without reporting a pause; once
+    restored the loop runs again and the scene draws as before, environment
+    map included."""
+    viewer_client.add_box("box", width=2, height=2, depth=2, color=0xCC3333)
+    viewer_client.set_camera(position=[6, 6, 4], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    before = viewer_page.evaluate(_CENTRE_PIXEL_JS)
+    lost = viewer_page.evaluate(
+        "async () => { const v = window.threejsViewer;"
+        " const gl = v._renderer.getContext(), ext = gl.getExtension('WEBGL_lose_context');"
+        " const until = async (f) => { for (let i = 0; i < 250 && !f(); i++)"
+        "   await new Promise(r => setTimeout(r, 20)); return f(); };"
+        " ext.loseContext(); await until(() => v._contextLost);"
+        " const out = {stopped: v._animationFrameId === 0, paused: v.isPaused()};"
+        " ext.restoreContext();"
+        " out.running = await until(() => !v._contextLost && v._animationFrameId !== 0);"
+        " out.env = !!v._scene.environment === (v._envEnabled && v._displayQuality !== 'low');"
+        " return out; }"
+    )
+    assert lost == {"stopped": True, "paused": False, "running": True, "env": True}
+    frames(viewer_page, 3)
+    after = viewer_page.evaluate(_CENTRE_PIXEL_JS)
+    assert before[0] > before[2] + 40, before
+    assert all(abs(a - b) <= 2 for a, b in zip(after, before)), (before, after)

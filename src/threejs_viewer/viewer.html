@@ -12,6 +12,11 @@
         .threejs-viewer {
             position: relative;
             overflow: hidden;
+            /* Off-screen the browser skips the overlay DOM and the render loop stops
+               (ThreeJSViewer._initOffscreenPause). While skipped the size is contained,
+               so the last rendered size holds it in place. */
+            content-visibility: auto;
+            contain-intrinsic-size: auto 300px auto 150px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
         .threejs-viewer:focus { outline: none; }
@@ -46,7 +51,10 @@
             --tjsv-input-text: var(--tjsv-text);
             --tjsv-input-focus: var(--tjsv-primary);
             --tjsv-radius: 4px;
-            --tjsv-font-size: 12px;
+            /* Text sizes are in rem so they follow the user's font-size setting. An
+               embedder whose root font size is not the browser default sets this to 16px. */
+            --tjsv-rem: 1rem;
+            --tjsv-font-size: calc(0.75 * var(--tjsv-rem));
         }
 
         /* ---- Menus ----
@@ -96,7 +104,7 @@
             margin: 0;
             cursor: pointer;
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             color: var(--tjsv-text);
             background: var(--tjsv-menu-bg);
             border: 1px solid var(--tjsv-border);
@@ -151,7 +159,7 @@
             border-radius: 0 0 0 4px;
             padding: 6px 8px 8px;
             color: var(--tjsv-text);
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             /* A touch scroll that reaches the end of the body must not chain to the page. */
             overscroll-behavior: contain;
             touch-action: pan-y;
@@ -159,14 +167,14 @@
         .threejs-viewer .tjsv-side-left > .tjsv-menu { border-right: 1px solid var(--tjsv-border); border-left: none; border-radius: 0 0 4px 0; }
         .threejs-viewer .tjsv-menu-status {
             color: var(--tjsv-text-dim);
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             margin: 2px 0 5px;
             border-bottom: 1px solid var(--tjsv-border);
             padding-bottom: 3px;
             white-space: nowrap;
         }
         .threejs-viewer .tjsv-menu-title {
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--tjsv-text-dim);
@@ -175,7 +183,7 @@
             padding-bottom: 3px;
         }
         .threejs-viewer .tjsv-menu-caption {
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--tjsv-text-dim);
@@ -218,7 +226,7 @@
             background: none;
             color: var(--tjsv-text);
             font: inherit;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             text-align: left;
             cursor: pointer;
             white-space: nowrap;
@@ -230,10 +238,10 @@
         .threejs-viewer .tjsv-menu-item:focus { outline: none; }
         .threejs-viewer .tjsv-menu-item:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: -2px; }
         .threejs-viewer .tjsv-menu-label { flex: 1; }
-        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: 11px; }
+        .threejs-viewer .tjsv-menu-state { color: var(--tjsv-text-dim); font-size: calc(0.6875 * var(--tjsv-rem)); }
         .threejs-viewer .tjsv-menu kbd {
             font-family: inherit;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             font-weight: 600;
             color: var(--tjsv-text-dim);
             background: var(--tjsv-panel-2);
@@ -299,7 +307,7 @@
             margin: 2px 0;
             padding: 4px 8px;
             font: inherit;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             color: var(--tjsv-button-text);
             background: var(--tjsv-button-bg);
             border: 1px solid var(--tjsv-button-border);
@@ -327,7 +335,7 @@
             margin: 1px 0;
             white-space: nowrap;
         }
-        .threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: 11px; }
+        .threejs-viewer .tjsv-menu-row .tjsv-menu-label { color: var(--tjsv-text-dim); font-size: calc(0.6875 * var(--tjsv-rem)); }
         .threejs-viewer .tjsv-menu-row.disabled { color: var(--tjsv-text-faint); }
         .threejs-viewer .tjsv-menu-row[hidden] { display: none; }
         .threejs-viewer .tjsv-menu-select {
@@ -336,7 +344,7 @@
             border-radius: 3px;
             color: var(--tjsv-input-text);
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             padding: 2px 4px;
             min-width: 0;
             flex: 1;
@@ -352,7 +360,7 @@
             color: var(--tjsv-text-dim);
             padding: 2px 6px;
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             cursor: pointer;
             transition: background 0.1s, color 0.1s;
         }
@@ -369,7 +377,7 @@
             display: block;
             padding: 3px 5px 1px;
             color: var(--tjsv-text-dim);
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
         }
         /* Same 0.4s and easing as the eye glyph's SMIL sweep; selecting overshoots slightly. */
         .threejs-viewer .tjsv-radio-dot {
@@ -457,7 +465,7 @@
             height: 20px;
             padding: 0;
             line-height: 1;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             display: flex;
             align-items: center;
             justify-content: center;
@@ -556,7 +564,7 @@
             color: white;
             padding: 2px 6px;
             border-radius: 3px;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             white-space: nowrap;
             opacity: 0;
             transition: opacity 0.2s;
@@ -565,7 +573,7 @@
         .threejs-viewer .timeline-marker:hover { background: #ffaa00; box-shadow: 0 0 6px #ffaa0088; }
         .threejs-viewer .time-display {
             font-family: monospace;
-            font-size: 13px;
+            font-size: calc(0.8125 * var(--tjsv-rem));
             min-width: 120px;
             text-align: center;
         }
@@ -576,19 +584,19 @@
         }
         .threejs-viewer .speed-control span {
             font-family: monospace;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             min-width: 50px;
             text-align: center;
         }
-        .threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: 11px; }
+        .threejs-viewer .loop-toggle { width: auto; padding: 0 8px; font-size: calc(0.6875 * var(--tjsv-rem)); }
         .threejs-viewer .frame-display {
             font-family: monospace;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             color: #aaa;
             min-width: 100px;
         }
         .threejs-viewer .keyboard-hint {
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             color: #666;
             text-align: center;
         }
@@ -618,7 +626,7 @@
             border-radius: 3px;
             color: var(--tjsv-input-text);
             font: inherit;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             font-variant-numeric: tabular-nums;
             padding: 2px 4px;
             text-align: right;
@@ -638,7 +646,7 @@
             flex: 0 0 auto;
             min-width: 34px;
             text-align: right;
-            font-size: 11px;
+            font-size: calc(0.6875 * var(--tjsv-rem));
             font-variant-numeric: tabular-nums;
             color: var(--tjsv-text-dim);
         }
@@ -660,7 +668,7 @@
         .threejs-viewer .tjsv-rail-form .tjsv-menu-action { margin-top: 6px; }
         .threejs-viewer .tjsv-panel-hint {
             margin-top: 6px;
-            font-size: 10px;
+            font-size: calc(0.625 * var(--tjsv-rem));
             color: var(--tjsv-text-faint);
             white-space: normal;
         }
@@ -686,6 +694,7 @@
             background: rgba(30, 30, 30, 0.72);
             border: 1px solid rgba(255, 255, 255, 0.18);
             color: #ddd;
+            /* px like the fixed-size view button it labels. */
             font-size: calc(9px * var(--tjsv-view-scale, 1));
             font-weight: 600;
             letter-spacing: 0.5px;
@@ -738,7 +747,7 @@
             background: rgba(30, 30, 30, 0.85);
             color: #eee;
             font-family: monospace;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             padding: 6px 12px;
             border-radius: 6px;
             pointer-events: none;
@@ -755,7 +764,7 @@
             background: rgba(30, 30, 30, 0.85);
             color: #eee;
             font-family: monospace;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             padding: 3px 7px;
             border-radius: 5px;
             pointer-events: none;
@@ -782,6 +791,7 @@
            (only bubble-snap-entered ortho auto-exits on orbit). */
         .threejs-viewer .tjsv-view-proj {
             bottom: calc(50px * var(--tjsv-view-scale, 1) + var(--tjsv-anim-lift, 0px));
+            /* px like the fixed-size view button it labels. */
             font-size: calc(11px * var(--tjsv-view-scale, 1));
         }
         /* Home (reset view): third item of the stack, below P. */
@@ -828,7 +838,7 @@
             border: 1px solid var(--tjsv-button-border);
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
             font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-            font-size: 12px;
+            font-size: calc(0.75 * var(--tjsv-rem));
             font-variant-numeric: tabular-nums;
             padding: 4px 9px;
             border-radius: 6px;
@@ -18899,8 +18909,15 @@ class ThreeJSViewer {
         this._lastUIUpdate = 0;
         // Explicit pause (pause()/resume()); the rAF is cancelled while set.
         this._paused = false;
+        // Scrolled out of view (issue #340); held apart from _paused so neither overrides the other.
+        this._offscreen = false;
+        this._cvSkipped = false;
+        this._ioHidden = false;
+        // Set while the WebGL context is lost; holds the loop like _offscreen.
+        this._contextLost = false;
         this._animate = this._animate.bind(this);
         this._animationFrameId = requestAnimationFrame(this._animate);
+        this._initOffscreenPause();
 
         console.log(`threejs-viewer v${VIEWER_VERSION}`);
     }
@@ -19127,6 +19144,20 @@ class ThreeJSViewer {
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
         this.el.appendChild(this._renderer.domElement);
+        // GPU reset or driver eviction (issue #342). three.js re-initialises its
+        // own state on restore; the loop stops meanwhile and GPU-generated data is rebuilt.
+        this._onContextLost = /** @param {Event} e */ (e) => {
+            e.preventDefault();
+            this._contextLost = true;
+            this._syncLoop();
+        };
+        this._onContextRestored = () => {
+            this._contextLost = false;
+            this._rebuildAfterContextRestore();
+            this._syncLoop();
+        };
+        this._renderer.domElement.addEventListener('webglcontextlost', this._onContextLost);
+        this._renderer.domElement.addEventListener('webglcontextrestored', this._onContextRestored);
 
         // Environment cubemap. Intensity is set up front (not when the async
         // load lands) so it is right immediately and survives cubemap switches.
@@ -25579,6 +25610,27 @@ class ThreeJSViewer {
         return Math.min(window.devicePixelRatio || 1, this._maxPixelRatio);
     }
 
+    /**
+     * Recreate what only ever lived on the GPU after a context restore. Meshes,
+     * textures and buffers re-upload from their CPU copies on the next draw;
+     * the PMREM environment was rendered, so it is generated again from the
+     * kept cube, and the shadow map is redrawn.
+     */
+    _rebuildAfterContextRestore() {
+        if (this._destroyed) return;
+        if (this._envCube) {
+            const pmremGenerator = new THREE.PMREMGenerator(this._renderer);
+            const target = pmremGenerator.fromCubemap(this._envCube);
+            pmremGenerator.dispose();
+            this._envTarget?.dispose();
+            this._envTarget = target;
+            this._envMap = target.texture;
+            this._syncEnvironment();
+            this._applyBackground();
+        }
+        this.requestShadowUpdate();
+    }
+
     /** Restart the frame and playback clocks at now, so leaving a hidden or
      *  paused state does not count the gap as elapsed playback. */
     _resetFrameClocks() {
@@ -25596,16 +25648,53 @@ class ThreeJSViewer {
     pause() {
         if (this._paused || this._destroyed) return;
         this._paused = true;
-        cancelAnimationFrame(this._animationFrameId);
-        this._animationFrameId = 0;
+        this._syncLoop();
     }
 
     /** Restart a loop stopped by pause(); playback continues where it froze. */
     resume() {
         if (!this._paused || this._destroyed) return;
         this._paused = false;
-        this._resetFrameClocks();
-        this._animationFrameId = requestAnimationFrame(this._animate);
+        this._syncLoop();
+    }
+
+    /**
+     * Run the rAF loop exactly when nothing holds it: an explicit pause(), the
+     * viewer being off-screen, or a lost WebGL context. A restart skips the gap.
+     */
+    _syncLoop() {
+        const run = !this._paused && !this._offscreen && !this._contextLost && !this._destroyed;
+        if (run && !this._animationFrameId) {
+            this._resetFrameClocks();
+            this._animationFrameId = requestAnimationFrame(this._animate);
+        } else if (!run && this._animationFrameId) {
+            cancelAnimationFrame(this._animationFrameId);
+            this._animationFrameId = 0;
+        }
+    }
+
+    /**
+     * Stop the loop while the viewer is scrolled out of view (issue #340).
+     * `content-visibility: auto` (viewer.css) lets the browser skip the overlay
+     * DOM and reports it; the IntersectionObserver covers what it cannot see:
+     * focus inside keeps the element "relevant" and never skipped, and older
+     * browsers lack the event.
+     */
+    _initOffscreenPause() {
+        const sync = () => {
+            const off = this._cvSkipped || this._ioHidden;
+            if (off === this._offscreen) return;
+            this._offscreen = off;
+            this._syncLoop();
+        };
+        this._onContentVisibility = /** @param {any} e */ (e) => { this._cvSkipped = !!e.skipped; sync(); };
+        this.el.addEventListener('contentvisibilityautostatechange', this._onContentVisibility);
+        this._offscreenObserver = typeof IntersectionObserver === 'undefined' ? null
+            : new IntersectionObserver((entries) => {
+                this._ioHidden = !entries[entries.length - 1].isIntersecting;
+                sync();
+            });
+        this._offscreenObserver?.observe(this.el);
     }
 
     /** @returns {boolean} whether pause() has stopped the render loop */
@@ -27524,6 +27613,8 @@ class ThreeJSViewer {
         if (this._onVisibilityChange) document.removeEventListener('visibilitychange', this._onVisibilityChange);
         cancelAnimationFrame(this._pendingResizeRaf);
         this._resizeObserver.disconnect();
+        this._offscreenObserver?.disconnect();
+        this.el.removeEventListener('contentvisibilityautostatechange', this._onContentVisibility);
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
         this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
@@ -27543,6 +27634,8 @@ class ThreeJSViewer {
         this._envTarget?.dispose();
         this._envCube?.dispose();
         this._envTarget = this._envCube = this._envMap = null;
+        this._renderer.domElement.removeEventListener('webglcontextlost', this._onContextLost);
+        this._renderer.domElement.removeEventListener('webglcontextrestored', this._onContextRestored);
         this._renderer.dispose();
         this._controls.dispose();
         this._clipGizmo.dispose();
