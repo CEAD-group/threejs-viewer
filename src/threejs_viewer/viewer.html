@@ -489,7 +489,12 @@
             position: relative;
             height: 16px;
             cursor: pointer;
+            /* A touch or pen drag scrubs instead of scrolling the page. */
+            touch-action: none;
+            user-select: none;
         }
+        .threejs-viewer .tjsv-timeline-container:focus { outline: none; }
+        .threejs-viewer .tjsv-timeline-container:focus-visible { outline: 2px solid var(--tjsv-primary); outline-offset: 2px; }
         .threejs-viewer .tjsv-timeline-container::before,
         .threejs-viewer .tjsv-timeline-progress {
             position: absolute;
@@ -897,53 +902,53 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
 <!-- Clipping and Lighting controls. _initMenus mounts each into the body of
      its own rail tab (Clipping, Lighting), stacked under the View tab. -->
 <div class="tjsv-clipping-panel tjsv-rail-form">
-    <button type="button" class="tjsv-menu-item tjsv-clip-enabled" title="Turn the cut on or off (C)">
+    <button type="button" class="tjsv-menu-item tjsv-clip-enabled" role="switch" aria-checked="false" title="Turn the cut on or off (C)">
         <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
         <span class="tjsv-menu-label">Clipping plane</span><kbd>C</kbd>
     </button>
     <div class="tjsv-clip-controls">
     <div class="tjsv-menu-caption">Axis</div>
-    <div class="tjsv-seg-grid clip-axis-buttons">
-        <button type="button" class="tjsv-seg-btn active" data-axis="x+">X+</button>
-        <button type="button" class="tjsv-seg-btn" data-axis="y+">Y+</button>
-        <button type="button" class="tjsv-seg-btn" data-axis="z+">Z+</button>
-        <button type="button" class="tjsv-seg-btn" data-axis="x-">X&minus;</button>
-        <button type="button" class="tjsv-seg-btn" data-axis="y-">Y&minus;</button>
-        <button type="button" class="tjsv-seg-btn" data-axis="z-">Z&minus;</button>
+    <div class="tjsv-seg-grid clip-axis-buttons" role="group" aria-label="Clip axis">
+        <button type="button" class="tjsv-seg-btn active" aria-pressed="true" data-axis="x+">X+</button>
+        <button type="button" class="tjsv-seg-btn" aria-pressed="false" data-axis="y+">Y+</button>
+        <button type="button" class="tjsv-seg-btn" aria-pressed="false" data-axis="z+">Z+</button>
+        <button type="button" class="tjsv-seg-btn" aria-pressed="false" data-axis="x-">X&minus;</button>
+        <button type="button" class="tjsv-seg-btn" aria-pressed="false" data-axis="y-">Y&minus;</button>
+        <button type="button" class="tjsv-seg-btn" aria-pressed="false" data-axis="z-">Z&minus;</button>
     </div>
     <div class="tjsv-menu-caption">Normal</div>
     <div class="tjsv-menu-row tjsv-num-row">
-        <span class="tjsv-menu-label">x</span><input type="number" class="tjsv-num-input tjsv-clip-nx" step="0.01" value="1">
-        <span class="tjsv-menu-label">y</span><input type="number" class="tjsv-num-input tjsv-clip-ny" step="0.01" value="0">
-        <span class="tjsv-menu-label">z</span><input type="number" class="tjsv-num-input tjsv-clip-nz" step="0.01" value="0">
+        <span class="tjsv-menu-label">x</span><input type="number" class="tjsv-num-input tjsv-clip-nx" aria-label="Normal x" step="0.01" value="1">
+        <span class="tjsv-menu-label">y</span><input type="number" class="tjsv-num-input tjsv-clip-ny" aria-label="Normal y" step="0.01" value="0">
+        <span class="tjsv-menu-label">z</span><input type="number" class="tjsv-num-input tjsv-clip-nz" aria-label="Normal z" step="0.01" value="0">
     </div>
     <div class="tjsv-menu-row">
         <span class="tjsv-menu-label">Mode</span>
-        <div class="tjsv-segmented">
-            <button type="button" class="tjsv-seg-btn tjsv-clip-mode-single active">Single</button>
-            <button type="button" class="tjsv-seg-btn tjsv-clip-mode-slab">Slab</button>
+        <div class="tjsv-segmented" role="group" aria-label="Clip mode">
+            <button type="button" class="tjsv-seg-btn tjsv-clip-mode-single active" aria-pressed="true">Single</button>
+            <button type="button" class="tjsv-seg-btn tjsv-clip-mode-slab" aria-pressed="false">Slab</button>
         </div>
         <kbd title="S">S</kbd>
     </div>
     <div class="tjsv-menu-caption tjsv-caption-row"><span>Position</span><kbd title="Arrow left / right">&larr;&rarr;</kbd></div>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <input type="range" class="tjsv-clip-distance" min="-10" max="10" step="0.01" value="0">
+        <input type="range" class="tjsv-clip-distance" aria-label="Clip position" min="-10" max="10" step="0.01" value="0">
         <span class="tjsv-slider-value tjsv-clip-distance-value">0.00</span>
     </div>
     <div class="tjsv-clip-thickness-section" style="display: none;">
         <div class="tjsv-menu-caption tjsv-caption-row"><span>Thickness</span><kbd title="Arrow up / down">&uarr;&darr;</kbd></div>
         <div class="tjsv-menu-row tjsv-slider-row">
-        <input type="range" class="tjsv-clip-thickness" min="0.01" max="20" step="0.01" value="2">
+        <input type="range" class="tjsv-clip-thickness" aria-label="Slab thickness" min="0.01" max="20" step="0.01" value="2">
         <span class="tjsv-slider-value tjsv-clip-thickness-value">2.00</span>
     </div>
     </div>
     <label class="tjsv-menu-item tjsv-switch-row">
-        <input type="checkbox" class="tjsv-switch-input tjsv-clip-caps">
+        <input type="checkbox" role="switch" class="tjsv-switch-input tjsv-clip-caps">
         <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
         <span class="tjsv-menu-label">Cap cut solids</span>
     </label>
     <label class="tjsv-menu-item tjsv-switch-row">
-        <input type="checkbox" class="tjsv-switch-input tjsv-clip-show-plane" checked>
+        <input type="checkbox" role="switch" class="tjsv-switch-input tjsv-clip-show-plane" checked>
         <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
         <span class="tjsv-menu-label">Show plane</span>
     </label>
@@ -956,7 +961,7 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
 <div class="tjsv-lighting-panel tjsv-rail-form">
     <div class="tjsv-menu-row">
         <span class="tjsv-menu-label">Tone mapping</span>
-        <select class="tjsv-menu-select tjsv-lighting-tone-mapping">
+        <select class="tjsv-menu-select tjsv-lighting-tone-mapping" aria-label="Tone mapping">
             <option value="none">None</option>
             <option value="linear">Linear</option>
             <option value="reinhard">Reinhard</option>
@@ -968,43 +973,43 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
     </div>
     <div class="tjsv-menu-row lighting-section">
         <span class="tjsv-menu-label">Cubemap</span>
-        <select class="tjsv-menu-select tjsv-lighting-cubemap"></select>
+        <select class="tjsv-menu-select tjsv-lighting-cubemap" aria-label="Cubemap"></select>
     </div>
     <div class="tjsv-menu-caption">Exposure</div>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <input type="range" class="tjsv-lighting-exposure" min="0" max="3" step="0.05" value="1">
+        <input type="range" class="tjsv-lighting-exposure" aria-label="Exposure" min="0" max="3" step="0.05" value="1">
         <span class="tjsv-slider-value tjsv-lighting-exposure-value">1.00</span>
     </div>
     <div class="tjsv-menu-caption">Environment</div>
     <label class="tjsv-menu-item tjsv-switch-row">
-        <input type="checkbox" class="tjsv-switch-input tjsv-lighting-env-map" checked>
+        <input type="checkbox" role="switch" class="tjsv-switch-input tjsv-lighting-env-map" checked>
         <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
         <span class="tjsv-menu-label">Reflections (off = faster)</span>
     </label>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <span class="tjsv-menu-label">Intensity</span><input type="range" class="tjsv-lighting-env" min="0" max="4" step="0.05" value="2">
+        <span class="tjsv-menu-label">Intensity</span><input type="range" class="tjsv-lighting-env" aria-label="Environment intensity" min="0" max="4" step="0.05" value="2">
         <span class="tjsv-slider-value tjsv-lighting-env-value">2.00</span>
     </div>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <span class="tjsv-menu-label">Ambient</span><input type="range" class="tjsv-lighting-ambient" min="0" max="3" step="0.05" value="1.5">
+        <span class="tjsv-menu-label">Ambient</span><input type="range" class="tjsv-lighting-ambient" aria-label="Ambient intensity" min="0" max="3" step="0.05" value="1.5">
         <span class="tjsv-slider-value tjsv-lighting-ambient-value">1.50</span>
     </div>
     <div class="tjsv-menu-caption">Sun</div>
     <label class="tjsv-menu-item tjsv-switch-row">
-        <input type="checkbox" class="tjsv-switch-input tjsv-lighting-sun" checked>
+        <input type="checkbox" role="switch" class="tjsv-switch-input tjsv-lighting-sun" checked>
         <span class="tjsv-toggle-track"><span class="tjsv-toggle-thumb"></span></span>
         <span class="tjsv-menu-label">Sun light + shadows</span>
     </label>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <span class="tjsv-menu-label">Intensity</span><input type="range" class="tjsv-lighting-sun-intensity" min="0" max="6" step="0.05" value="2" title="Sun intensity">
+        <span class="tjsv-menu-label">Intensity</span><input type="range" class="tjsv-lighting-sun-intensity" aria-label="Sun intensity" min="0" max="6" step="0.05" value="2" title="Sun intensity">
         <span class="tjsv-slider-value tjsv-lighting-sun-intensity-value">2.00</span>
     </div>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <span class="tjsv-menu-label">Azimuth</span><input type="range" class="tjsv-lighting-sun-azimuth" min="-180" max="180" step="1" value="-80" title="Sun azimuth (degrees)">
+        <span class="tjsv-menu-label">Azimuth</span><input type="range" class="tjsv-lighting-sun-azimuth" aria-label="Sun azimuth" min="-180" max="180" step="1" value="-80" title="Sun azimuth (degrees)">
         <span class="tjsv-slider-value tjsv-lighting-sun-azimuth-value">-80°</span>
     </div>
     <div class="tjsv-menu-row tjsv-slider-row">
-        <span class="tjsv-menu-label">Elevation</span><input type="range" class="tjsv-lighting-sun-elevation" min="0" max="90" step="1" value="50" title="Sun elevation (degrees)">
+        <span class="tjsv-menu-label">Elevation</span><input type="range" class="tjsv-lighting-sun-elevation" aria-label="Sun elevation" min="0" max="90" step="1" value="50" title="Sun elevation (degrees)">
         <span class="tjsv-slider-value tjsv-lighting-sun-elevation-value">50°</span>
     </div>
     <button type="button" class="tjsv-menu-action tjsv-lighting-reset" title="Reset to initial values">
@@ -1025,7 +1030,7 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
             <button class="tjsv-btn-next-frame" title="Next frame (&rarr;)" aria-label="Next frame"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="8.5 5 15.5 12 8.5 19"/></svg></button>
             <button class="tjsv-btn-end" title="Jump to end (End)" aria-label="Jump to end"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="12 5 19 12 12 19"/><polyline points="5 19 12 12 5 5"/></svg></button>
         </div>
-        <div class="tjsv-timeline-container">
+        <div class="tjsv-timeline-container" role="slider" tabindex="0" aria-label="Timeline" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
             <div class="tjsv-timeline-progress"></div>
             <div class="tjsv-timeline-thumb"></div>
             <div class="tjsv-timeline-markers"></div>
@@ -1038,7 +1043,7 @@ const HTML_TEMPLATE = `<!-- Menu hosts. The MenuController (viewer.js) builds ev
             <span class="tjsv-speed-display">1x</span>
             <button class="tjsv-btn-faster" title="Faster (&uarr;)" aria-label="Faster">+</button>
         </div>
-        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)">Loop</button>
+        <button class="loop-toggle active tjsv-btn-loop" title="Toggle loop (L)" aria-pressed="true">Loop</button>
         <div class="frame-display">Frame <span class="tjsv-current-frame">0</span>/<span class="tjsv-total-frames">0</span></div>
     </div>
     <div class="keyboard-hint">Space: Play/Pause | &larr;&rarr;: Step frames | Shift+&larr;&rarr;: Step 10 | Home/End: Jump | L: Loop | T: Track | &uarr;&darr;: Speed</div>
@@ -1259,6 +1264,7 @@ class ViewerControls extends THREE.EventDispatcher {
         this.domElement.removeEventListener('contextmenu', this._onContextMenu);
         window.removeEventListener('pointermove', this._onPointerMove);
         window.removeEventListener('pointerup', this._onPointerUp);
+        window.removeEventListener('pointercancel', this._onPointerUp);
         window.removeEventListener('keydown', this._onKeyDown);
         window.removeEventListener('keyup', this._onKeyUp);
     }
@@ -1326,6 +1332,8 @@ class ViewerControls extends THREE.EventDispatcher {
 
         window.addEventListener('pointermove', this._onPointerMove);
         window.addEventListener('pointerup', this._onPointerUp);
+        // A touch or pen gesture the browser takes over ends with pointercancel, not pointerup.
+        window.addEventListener('pointercancel', this._onPointerUp);
 
         // Stop further damping motion that might be lingering.
         this._rotDeltaTheta = 0;
@@ -1375,6 +1383,7 @@ class ViewerControls extends THREE.EventDispatcher {
         this._dragMode = null;
         window.removeEventListener('pointermove', this._onPointerMove);
         window.removeEventListener('pointerup', this._onPointerUp);
+        window.removeEventListener('pointercancel', this._onPointerUp);
     }
 
     _onWheel(e) {
@@ -9158,6 +9167,19 @@ function shortcutMatches(e, sc) {
 /** @param {any} v @param {any} arg */
 function evalProp(v, arg) { return typeof v === 'function' ? v(arg) : v; }
 
+/** Name a menu control after its item label; the visible caption is a plain span.
+ * @param {Element} el @param {string | undefined} label */
+function labelInput(el, label) {
+    if (label) el.setAttribute('aria-label', label); else el.removeAttribute('aria-label');
+}
+
+/** Mark a toggle or segmented button selected: the `.active` look plus `aria-pressed` for assistive tech.
+ * @param {Element} el @param {boolean} on */
+function setPressed(el, on) {
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-pressed', String(on));
+}
+
 /** Accept bare option values next to `{value, label}` objects. @param {any[]|undefined} options */
 function normalizeOptions(options) {
     return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
@@ -9513,6 +9535,7 @@ class MenuController {
             lab.textContent = it.label || '';
             const seg = document.createElement('div');
             seg.className = 'tjsv-segmented';
+            seg.setAttribute('role', 'group');
             rec.input = seg;
             this._fillOptions(m, rec);
             if (it.label) el.appendChild(lab);
@@ -9808,13 +9831,21 @@ class MenuController {
         el.classList.toggle('disabled', disabled);
         if (el instanceof HTMLButtonElement) el.disabled = disabled;
         if (type === 'button') {
-            el.classList.toggle('active', !!evalProp(it.active, it));
+            if (it.active !== undefined) setPressed(el, !!evalProp(it.active, it));
+            else el.classList.remove('active');
             const st = el.querySelector('.tjsv-menu-state');
             if (st) st.textContent = evalProp(it.state, it) ?? '';
         } else if (type === 'toggle' || type === 'eye') {
             const on = !!this._valueOf(m, it);
             el.classList.toggle('active', on);
             el.classList.toggle('off', !on);
+            // A toggle is drawn as a switch; an eye is a pressed/unpressed visibility button.
+            if (type === 'toggle') {
+                el.setAttribute('role', 'switch');
+                el.setAttribute('aria-checked', String(on));
+            } else {
+                el.setAttribute('aria-pressed', String(on));
+            }
             if (type === 'eye') {
                 const mark = el.querySelector('.tjsv-menu-mark');
                 if (mark) {
@@ -9830,13 +9861,15 @@ class MenuController {
             el.setAttribute('aria-expanded', String(!collapsed));
             el.classList.toggle('collapsed', collapsed);
         } else if (type === 'select') {
+            labelInput(rec.input, it.label);
             const v = this._valueOf(m, it);
             if (rec.input && v !== undefined) rec.input.value = String(v);
             rec.input.disabled = disabled;
         } else if (type === 'segmented') {
+            labelInput(rec.input, it.label);
             const v = this._valueOf(m, it);
             for (const b of rec.input.querySelectorAll('.tjsv-seg-btn')) {
-                b.classList.toggle('active', String(b.dataset.value) === String(v));
+                setPressed(b, String(b.dataset.value) === String(v));
                 b.disabled = disabled;
             }
         } else if (type === 'radio') {
@@ -19834,7 +19867,7 @@ class ThreeJSViewer {
         this._clipDistanceSlider.value = this._clipPosition;
         this._clipDistanceValue.textContent = this._clipPosition.toFixed(2);
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {Element} btn */ (btn) => {
-            btn.classList.remove('active');
+            setPressed(btn, false);
         });
         this._clipAxis = null;
         this._syncNormalInputs();
@@ -19865,7 +19898,7 @@ class ThreeJSViewer {
         this._syncNormalInputs();
         this._updateClipSliderRange();
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
-            btn.classList.toggle('active', btn.dataset.axis === axis);
+            setPressed(btn, btn.dataset.axis === axis);
         });
     }
 
@@ -20098,7 +20131,7 @@ class ThreeJSViewer {
     _syncClipEnabledUI() {
         this._clipEnabledBtn.classList.toggle('active', this._clipEnabled);
         this._clipEnabledBtn.classList.toggle('off', !this._clipEnabled);
-        this._clipEnabledBtn.setAttribute('aria-pressed', String(this._clipEnabled));
+        this._clipEnabledBtn.setAttribute('aria-checked', String(this._clipEnabled));
         this._clipPanelEl.classList.toggle('tjsv-clip-off', !this._clipEnabled);
     }
 
@@ -20134,7 +20167,7 @@ class ThreeJSViewer {
         this._updateClipMaterials();
         this._clipAxis = null;
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
-            btn.classList.remove('active');
+            setPressed(btn, false);
         });
     }
 
@@ -21815,7 +21848,7 @@ class ThreeJSViewer {
         this._totalTimeEl.textContent = this._formatTime(this._animation.duration);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
-        this._btnLoop.classList.toggle('active', this._animationLoop);
+        setPressed(this._btnLoop, this._animationLoop);
         this._updateAnimationUI();
 
         this._timelineMarkersEl.innerHTML = '';
@@ -21825,10 +21858,7 @@ class ThreeJSViewer {
                 el.className = 'timeline-marker';
                 el.style.left = `${(marker.time / this._animation.duration) * 100}%`;
                 el.setAttribute('data-label', marker.label);
-                el.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this._seekToTime(marker.time);
-                });
+                el.dataset.time = String(marker.time);
                 this._timelineMarkersEl.appendChild(el);
             }
         }
@@ -22262,6 +22292,10 @@ class ThreeJSViewer {
         const pct = Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
         this._timelineProgressEl.style.width = `${pct}%`;
         this._timelineThumbEl.style.left = `${pct}%`;
+        const tl = this._timelineContainer;
+        tl.setAttribute('aria-valuemax', this._formatTime(this._animation.duration));
+        tl.setAttribute('aria-valuenow', this._formatTime(this._animationTime));
+        tl.setAttribute('aria-valuetext', `${this._formatTime(this._animationTime)} s, frame ${frameIndex + 1}`);
         this._currentTimeEl.textContent = this._formatTime(this._animationTime);
         this._currentFrameEl.textContent = frameIndex + 1;
         this._btnPlay.classList.toggle('playing', !!this._animationPlaying);
@@ -22362,7 +22396,7 @@ class ThreeJSViewer {
         this._setSpeed(SPEED_STEPS[this._speedIndex]);
     }
 
-    /** @param {MouseEvent} e */
+    /** @param {PointerEvent} e */
     _scrubFromEvent(e) {
         if (!this._animation) return;
         const rect = this._timelineContainer.getBoundingClientRect();
@@ -22475,8 +22509,8 @@ class ThreeJSViewer {
         // Slab mode toggles
         this._clipModeSingle.addEventListener('click', /** @param {MouseEvent} e */ (e) => {
             this._clipSlabMode = false;
-            /** @type {HTMLElement} */ (e.currentTarget).classList.add('active');
-            this._clipModeSlab.classList.remove('active');
+            setPressed(/** @type {HTMLElement} */ (e.currentTarget), true);
+            setPressed(this._clipModeSlab, false);
             this._clipThicknessSection.style.display = 'none';
             this._clipPlanes = [this._clipPlane];
             this._updatePlaneConstants();
@@ -22485,8 +22519,8 @@ class ThreeJSViewer {
         });
         this._clipModeSlab.addEventListener('click', /** @param {MouseEvent} e */ (e) => {
             this._clipSlabMode = true;
-            /** @type {HTMLElement} */ (e.currentTarget).classList.add('active');
-            this._clipModeSingle.classList.remove('active');
+            setPressed(/** @type {HTMLElement} */ (e.currentTarget), true);
+            setPressed(this._clipModeSingle, false);
             this._clipThicknessSection.style.display = '';
             this._clipPlanes = [this._clipPlane, this._clipPlane2];
             this._updatePlaneConstants();
@@ -22524,7 +22558,7 @@ class ThreeJSViewer {
         this._btnPlay.addEventListener('click', () => this._togglePlay());
         this._btnLoop.addEventListener('click', () => {
             this._animationLoop = !this._animationLoop;
-            this._btnLoop.classList.toggle('active', this._animationLoop);
+            setPressed(this._btnLoop, this._animationLoop);
         });
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
@@ -22554,31 +22588,34 @@ class ThreeJSViewer {
             this._updateProjButton();
         }
 
-        // Timeline scrubbing
-        this._timelineContainer.addEventListener('mousedown', /** @param {MouseEvent} e */ (e) => {
-            if (!this._animation) return;
+        // Timeline scrubbing. Pointer capture keeps the drag on the scrubber
+        // outside its box and works for mouse, touch and pen alike.
+        const tl = this._timelineContainer;
+        tl.addEventListener('pointerdown', /** @param {PointerEvent} e */ (e) => {
+            if (!this._animation || e.button !== 0) return;
+            tl.setPointerCapture(e.pointerId);
             this._scrubbing = true;
             this._wasPlayingBeforeScrub = this._animationPlaying;
             this._animationPlaying = false;
-            this._scrubFromEvent(e);
+            // A press on a marker lands exactly on its time; dragging from there scrubs.
+            const marker = /** @type {HTMLElement} */ (e.target).closest?.('.timeline-marker');
+            const markerTime = marker ? Number(/** @type {HTMLElement} */ (marker).dataset.time) : NaN;
+            if (Number.isFinite(markerTime)) this._seekToTime(markerTime);
+            else this._scrubFromEvent(e);
         });
-
-        // Document-level listeners for scrubbing (stored for cleanup)
-        this._onDocMouseMove = /** @param {MouseEvent} e */ (e) => {
-            if (this._scrubbing) this._scrubFromEvent(e);
-        };
-        this._onDocMouseUp = () => {
-            if (this._scrubbing) {
-                this._scrubbing = false;
-                if (this._wasPlayingBeforeScrub) {
-                    this._animationPlaying = true;
-                    this._lastAnimationUpdate = performance.now();
-                }
-                this._updateAnimationUI();
+        tl.addEventListener('pointermove', /** @param {PointerEvent} e */ (e) => {
+            if (this._scrubbing && tl.hasPointerCapture(e.pointerId)) this._scrubFromEvent(e);
+        });
+        // Capture is released after pointerup and pointercancel alike.
+        tl.addEventListener('lostpointercapture', () => {
+            if (!this._scrubbing) return;
+            this._scrubbing = false;
+            if (this._wasPlayingBeforeScrub) {
+                this._animationPlaying = true;
+                this._lastAnimationUpdate = performance.now();
             }
-        };
-        document.addEventListener('mousemove', this._onDocMouseMove);
-        document.addEventListener('mouseup', this._onDocMouseUp);
+            this._updateAnimationUI();
+        });
 
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
@@ -22713,7 +22750,7 @@ class ThreeJSViewer {
                     break;
                 case 'KeyL':
                     this._animationLoop = !this._animationLoop;
-                    this._btnLoop.classList.toggle('active', this._animationLoop);
+                    setPressed(this._btnLoop, this._animationLoop);
                     break;
                 case 'KeyT':
                     this._cycleTrackMode();
@@ -24987,8 +25024,8 @@ class ThreeJSViewer {
                 this._clipEnabled = true;
                 this._clipSlabMode = false;
                 this._clipPlanes = [this._clipPlane];
-                this._clipModeSingle.classList.add('active');
-                this._clipModeSlab.classList.remove('active');
+                setPressed(this._clipModeSingle, true);
+                setPressed(this._clipModeSlab, false);
                 this._clipThicknessSection.style.display = 'none';
                 if (data.normal) {
                     this._clipPlane.normal.fromArray(data.normal).normalize();
@@ -25014,8 +25051,8 @@ class ThreeJSViewer {
                 this._clipEnabled = true;
                 this._clipSlabMode = true;
                 this._clipPlanes = [this._clipPlane, this._clipPlane2];
-                this._clipModeSlab.classList.add('active');
-                this._clipModeSingle.classList.remove('active');
+                setPressed(this._clipModeSlab, true);
+                setPressed(this._clipModeSingle, false);
                 this._clipThicknessSection.style.display = '';
                 if (data.normal) {
                     this._clipPlane.normal.fromArray(data.normal).normalize();
@@ -27489,8 +27526,6 @@ class ThreeJSViewer {
         this._resizeObserver.disconnect();
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
-        document.removeEventListener('mousemove', this._onDocMouseMove);
-        document.removeEventListener('mouseup', this._onDocMouseUp);
         this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
         window.removeEventListener('pointerup', this._onObjectClickUp);
         window.removeEventListener('pointercancel', this._onObjectClickCancel);

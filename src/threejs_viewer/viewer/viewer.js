@@ -7547,6 +7547,19 @@ function shortcutMatches(e, sc) {
 /** @param {any} v @param {any} arg */
 function evalProp(v, arg) { return typeof v === 'function' ? v(arg) : v; }
 
+/** Name a menu control after its item label; the visible caption is a plain span.
+ * @param {Element} el @param {string | undefined} label */
+function labelInput(el, label) {
+    if (label) el.setAttribute('aria-label', label); else el.removeAttribute('aria-label');
+}
+
+/** Mark a toggle or segmented button selected: the `.active` look plus `aria-pressed` for assistive tech.
+ * @param {Element} el @param {boolean} on */
+function setPressed(el, on) {
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-pressed', String(on));
+}
+
 /** Accept bare option values next to `{value, label}` objects. @param {any[]|undefined} options */
 function normalizeOptions(options) {
     return (options || []).map(o => (o !== null && typeof o === 'object') ? o : { value: o });
@@ -7902,6 +7915,7 @@ class MenuController {
             lab.textContent = it.label || '';
             const seg = document.createElement('div');
             seg.className = 'tjsv-segmented';
+            seg.setAttribute('role', 'group');
             rec.input = seg;
             this._fillOptions(m, rec);
             if (it.label) el.appendChild(lab);
@@ -8197,13 +8211,21 @@ class MenuController {
         el.classList.toggle('disabled', disabled);
         if (el instanceof HTMLButtonElement) el.disabled = disabled;
         if (type === 'button') {
-            el.classList.toggle('active', !!evalProp(it.active, it));
+            if (it.active !== undefined) setPressed(el, !!evalProp(it.active, it));
+            else el.classList.remove('active');
             const st = el.querySelector('.tjsv-menu-state');
             if (st) st.textContent = evalProp(it.state, it) ?? '';
         } else if (type === 'toggle' || type === 'eye') {
             const on = !!this._valueOf(m, it);
             el.classList.toggle('active', on);
             el.classList.toggle('off', !on);
+            // A toggle is drawn as a switch; an eye is a pressed/unpressed visibility button.
+            if (type === 'toggle') {
+                el.setAttribute('role', 'switch');
+                el.setAttribute('aria-checked', String(on));
+            } else {
+                el.setAttribute('aria-pressed', String(on));
+            }
             if (type === 'eye') {
                 const mark = el.querySelector('.tjsv-menu-mark');
                 if (mark) {
@@ -8219,13 +8241,15 @@ class MenuController {
             el.setAttribute('aria-expanded', String(!collapsed));
             el.classList.toggle('collapsed', collapsed);
         } else if (type === 'select') {
+            labelInput(rec.input, it.label);
             const v = this._valueOf(m, it);
             if (rec.input && v !== undefined) rec.input.value = String(v);
             rec.input.disabled = disabled;
         } else if (type === 'segmented') {
+            labelInput(rec.input, it.label);
             const v = this._valueOf(m, it);
             for (const b of rec.input.querySelectorAll('.tjsv-seg-btn')) {
-                b.classList.toggle('active', String(b.dataset.value) === String(v));
+                setPressed(b, String(b.dataset.value) === String(v));
                 b.disabled = disabled;
             }
         } else if (type === 'radio') {
@@ -18223,7 +18247,7 @@ export class ThreeJSViewer {
         this._clipDistanceSlider.value = this._clipPosition;
         this._clipDistanceValue.textContent = this._clipPosition.toFixed(2);
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {Element} btn */ (btn) => {
-            btn.classList.remove('active');
+            setPressed(btn, false);
         });
         this._clipAxis = null;
         this._syncNormalInputs();
@@ -18254,7 +18278,7 @@ export class ThreeJSViewer {
         this._syncNormalInputs();
         this._updateClipSliderRange();
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
-            btn.classList.toggle('active', btn.dataset.axis === axis);
+            setPressed(btn, btn.dataset.axis === axis);
         });
     }
 
@@ -18487,7 +18511,7 @@ export class ThreeJSViewer {
     _syncClipEnabledUI() {
         this._clipEnabledBtn.classList.toggle('active', this._clipEnabled);
         this._clipEnabledBtn.classList.toggle('off', !this._clipEnabled);
-        this._clipEnabledBtn.setAttribute('aria-pressed', String(this._clipEnabled));
+        this._clipEnabledBtn.setAttribute('aria-checked', String(this._clipEnabled));
         this._clipPanelEl.classList.toggle('tjsv-clip-off', !this._clipEnabled);
     }
 
@@ -18523,7 +18547,7 @@ export class ThreeJSViewer {
         this._updateClipMaterials();
         this._clipAxis = null;
         this._clipPanelEl.querySelectorAll('.clip-axis-buttons button').forEach(/** @param {any} btn */ btn => {
-            btn.classList.remove('active');
+            setPressed(btn, false);
         });
     }
 
@@ -20204,7 +20228,7 @@ export class ThreeJSViewer {
         this._totalTimeEl.textContent = this._formatTime(this._animation.duration);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
-        this._btnLoop.classList.toggle('active', this._animationLoop);
+        setPressed(this._btnLoop, this._animationLoop);
         this._updateAnimationUI();
 
         this._timelineMarkersEl.innerHTML = '';
@@ -20214,10 +20238,7 @@ export class ThreeJSViewer {
                 el.className = 'timeline-marker';
                 el.style.left = `${(marker.time / this._animation.duration) * 100}%`;
                 el.setAttribute('data-label', marker.label);
-                el.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this._seekToTime(marker.time);
-                });
+                el.dataset.time = String(marker.time);
                 this._timelineMarkersEl.appendChild(el);
             }
         }
@@ -20651,6 +20672,10 @@ export class ThreeJSViewer {
         const pct = Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
         this._timelineProgressEl.style.width = `${pct}%`;
         this._timelineThumbEl.style.left = `${pct}%`;
+        const tl = this._timelineContainer;
+        tl.setAttribute('aria-valuemax', this._formatTime(this._animation.duration));
+        tl.setAttribute('aria-valuenow', this._formatTime(this._animationTime));
+        tl.setAttribute('aria-valuetext', `${this._formatTime(this._animationTime)} s, frame ${frameIndex + 1}`);
         this._currentTimeEl.textContent = this._formatTime(this._animationTime);
         this._currentFrameEl.textContent = frameIndex + 1;
         this._btnPlay.classList.toggle('playing', !!this._animationPlaying);
@@ -20751,7 +20776,7 @@ export class ThreeJSViewer {
         this._setSpeed(SPEED_STEPS[this._speedIndex]);
     }
 
-    /** @param {MouseEvent} e */
+    /** @param {PointerEvent} e */
     _scrubFromEvent(e) {
         if (!this._animation) return;
         const rect = this._timelineContainer.getBoundingClientRect();
@@ -20864,8 +20889,8 @@ export class ThreeJSViewer {
         // Slab mode toggles
         this._clipModeSingle.addEventListener('click', /** @param {MouseEvent} e */ (e) => {
             this._clipSlabMode = false;
-            /** @type {HTMLElement} */ (e.currentTarget).classList.add('active');
-            this._clipModeSlab.classList.remove('active');
+            setPressed(/** @type {HTMLElement} */ (e.currentTarget), true);
+            setPressed(this._clipModeSlab, false);
             this._clipThicknessSection.style.display = 'none';
             this._clipPlanes = [this._clipPlane];
             this._updatePlaneConstants();
@@ -20874,8 +20899,8 @@ export class ThreeJSViewer {
         });
         this._clipModeSlab.addEventListener('click', /** @param {MouseEvent} e */ (e) => {
             this._clipSlabMode = true;
-            /** @type {HTMLElement} */ (e.currentTarget).classList.add('active');
-            this._clipModeSingle.classList.remove('active');
+            setPressed(/** @type {HTMLElement} */ (e.currentTarget), true);
+            setPressed(this._clipModeSingle, false);
             this._clipThicknessSection.style.display = '';
             this._clipPlanes = [this._clipPlane, this._clipPlane2];
             this._updatePlaneConstants();
@@ -20913,7 +20938,7 @@ export class ThreeJSViewer {
         this._btnPlay.addEventListener('click', () => this._togglePlay());
         this._btnLoop.addEventListener('click', () => {
             this._animationLoop = !this._animationLoop;
-            this._btnLoop.classList.toggle('active', this._animationLoop);
+            setPressed(this._btnLoop, this._animationLoop);
         });
         this.el.querySelector('.tjsv-btn-slower').addEventListener('click', () => this._stepSpeed(-1));
         this.el.querySelector('.tjsv-btn-faster').addEventListener('click', () => this._stepSpeed(1));
@@ -20943,31 +20968,34 @@ export class ThreeJSViewer {
             this._updateProjButton();
         }
 
-        // Timeline scrubbing
-        this._timelineContainer.addEventListener('mousedown', /** @param {MouseEvent} e */ (e) => {
-            if (!this._animation) return;
+        // Timeline scrubbing. Pointer capture keeps the drag on the scrubber
+        // outside its box and works for mouse, touch and pen alike.
+        const tl = this._timelineContainer;
+        tl.addEventListener('pointerdown', /** @param {PointerEvent} e */ (e) => {
+            if (!this._animation || e.button !== 0) return;
+            tl.setPointerCapture(e.pointerId);
             this._scrubbing = true;
             this._wasPlayingBeforeScrub = this._animationPlaying;
             this._animationPlaying = false;
-            this._scrubFromEvent(e);
+            // A press on a marker lands exactly on its time; dragging from there scrubs.
+            const marker = /** @type {HTMLElement} */ (e.target).closest?.('.timeline-marker');
+            const markerTime = marker ? Number(/** @type {HTMLElement} */ (marker).dataset.time) : NaN;
+            if (Number.isFinite(markerTime)) this._seekToTime(markerTime);
+            else this._scrubFromEvent(e);
         });
-
-        // Document-level listeners for scrubbing (stored for cleanup)
-        this._onDocMouseMove = /** @param {MouseEvent} e */ (e) => {
-            if (this._scrubbing) this._scrubFromEvent(e);
-        };
-        this._onDocMouseUp = () => {
-            if (this._scrubbing) {
-                this._scrubbing = false;
-                if (this._wasPlayingBeforeScrub) {
-                    this._animationPlaying = true;
-                    this._lastAnimationUpdate = performance.now();
-                }
-                this._updateAnimationUI();
+        tl.addEventListener('pointermove', /** @param {PointerEvent} e */ (e) => {
+            if (this._scrubbing && tl.hasPointerCapture(e.pointerId)) this._scrubFromEvent(e);
+        });
+        // Capture is released after pointerup and pointercancel alike.
+        tl.addEventListener('lostpointercapture', () => {
+            if (!this._scrubbing) return;
+            this._scrubbing = false;
+            if (this._wasPlayingBeforeScrub) {
+                this._animationPlaying = true;
+                this._lastAnimationUpdate = performance.now();
             }
-        };
-        document.addEventListener('mousemove', this._onDocMouseMove);
-        document.addEventListener('mouseup', this._onDocMouseUp);
+            this._updateAnimationUI();
+        });
 
         // Keyboard shortcuts — scoped to container
         this._onKeyDown = /** @param {KeyboardEvent} e */ (e) => {
@@ -21102,7 +21130,7 @@ export class ThreeJSViewer {
                     break;
                 case 'KeyL':
                     this._animationLoop = !this._animationLoop;
-                    this._btnLoop.classList.toggle('active', this._animationLoop);
+                    setPressed(this._btnLoop, this._animationLoop);
                     break;
                 case 'KeyT':
                     this._cycleTrackMode();
@@ -23376,8 +23404,8 @@ export class ThreeJSViewer {
                 this._clipEnabled = true;
                 this._clipSlabMode = false;
                 this._clipPlanes = [this._clipPlane];
-                this._clipModeSingle.classList.add('active');
-                this._clipModeSlab.classList.remove('active');
+                setPressed(this._clipModeSingle, true);
+                setPressed(this._clipModeSlab, false);
                 this._clipThicknessSection.style.display = 'none';
                 if (data.normal) {
                     this._clipPlane.normal.fromArray(data.normal).normalize();
@@ -23403,8 +23431,8 @@ export class ThreeJSViewer {
                 this._clipEnabled = true;
                 this._clipSlabMode = true;
                 this._clipPlanes = [this._clipPlane, this._clipPlane2];
-                this._clipModeSlab.classList.add('active');
-                this._clipModeSingle.classList.remove('active');
+                setPressed(this._clipModeSlab, true);
+                setPressed(this._clipModeSingle, false);
                 this._clipThicknessSection.style.display = '';
                 if (data.normal) {
                     this._clipPlane.normal.fromArray(data.normal).normalize();
@@ -25878,8 +25906,6 @@ export class ThreeJSViewer {
         this._resizeObserver.disconnect();
         this._animLiftObserver.disconnect();
         this.container.removeEventListener('keydown', this._onKeyDown);
-        document.removeEventListener('mousemove', this._onDocMouseMove);
-        document.removeEventListener('mouseup', this._onDocMouseUp);
         this._renderer.domElement.removeEventListener('pointerdown', this._onObjectClickDown);
         window.removeEventListener('pointerup', this._onObjectClickUp);
         window.removeEventListener('pointercancel', this._onObjectClickCancel);
