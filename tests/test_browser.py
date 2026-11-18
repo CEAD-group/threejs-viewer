@@ -14136,6 +14136,53 @@ def test_touch_pinch_zooms_ortho_camera(viewer_client, viewer_page):
     assert z1 == pytest.approx(z0 * 2, rel=0.05)
 
 
+_TOUCH_AT_JS = """
+(steps) => {
+    const el = window.threejsViewer._renderer.domElement;
+    for (const [type, id, x, y] of steps) {
+        (type === 'pointerdown' ? el : window).dispatchEvent(new PointerEvent(type, {
+            pointerId: id, pointerType: 'touch', isPrimary: id === 21, button: 0,
+            buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, bubbles: true }));
+    }
+}
+"""
+
+
+@pytest.mark.browser
+def test_touch_pinch_never_fires_an_object_click(viewer_client, viewer_page):
+    """A pinch whose second finger stays still on an object and lifts first is
+    not a click, for the JS hook or for Python; a one-finger tap still is."""
+    proj = _object_click_setup(viewer_client, viewer_page)
+    clicks = []
+    viewer_client.on_object_click(clicks.append)
+    _wait_for(viewer_page, "() => window.threejsViewer._objectClickEnabled === true")
+    viewer_page.evaluate(
+        "() => { window.__clicks = [];"
+        " window.threejsViewer.onObjectClick((p) => window.__clicks.push(p.id)); }"
+    )
+    x, y = proj["x"], proj["y"]
+    viewer_page.evaluate(
+        _TOUCH_AT_JS,
+        [
+            ["pointerdown", 21, x - 60, y],
+            ["pointerdown", 22, x, y],
+            ["pointermove", 21, x - 120, y],
+            ["pointerup", 22, x, y],
+            ["pointerup", 21, x - 120, y],
+        ],
+    )
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.__clicks") == []
+    assert not _wait_until(lambda: bool(clicks), timeout=0.4), clicks
+
+    # The same synthetic touch path still produces a click for a single tap.
+    viewer_page.evaluate(
+        _TOUCH_AT_JS, [["pointerdown", 21, x, y], ["pointerup", 21, x, y]]
+    )
+    assert viewer_page.evaluate("() => window.__clicks") == ["box"]
+    assert _wait_until(lambda: len(clicks) == 1), "a tap no longer reaches Python"
+
+
 @pytest.mark.browser
 def test_viewer_controls_have_accessible_names_and_states(viewer_client, viewer_page):
     """Every panel input has a name, switches say so, and segmented and loop

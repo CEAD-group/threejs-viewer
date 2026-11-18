@@ -17850,18 +17850,36 @@ export class ThreeJSViewer {
         // re-raycasting into a moving camera.
         // Handlers are stored so destroy() can remove them; a cancelled touch
         // or pen press is dropped so a later pointerup cannot turn it into a click.
+        // A gesture that ever had two pointers down (a pinch) is never a click.
         this._objectClickDown = null;
+        this._objectClickPointers = new Set();
+        this._objectClickMulti = false;
+        /** @param {PointerEvent} e */
+        this._releaseObjectClickPointer = (e) => {
+            this._objectClickPointers.delete(e.pointerId);
+            const multi = this._objectClickMulti;
+            if (!this._objectClickPointers.size) this._objectClickMulti = false;
+            return multi;
+        };
         this._onObjectClickDown = (e) => {
-            this._objectClickDown = this.isGizmoHandleActive()
+            // A primary pointer starts a new gesture; this also drops ids whose release was missed.
+            if (e.isPrimary) { this._objectClickPointers.clear(); this._objectClickMulti = false; }
+            this._objectClickPointers.add(e.pointerId);
+            if (this._objectClickPointers.size > 1) this._objectClickMulti = true;
+            this._objectClickDown = this._objectClickMulti || this.isGizmoHandleActive()
                 ? null
                 : { x: e.clientX, y: e.clientY, button: e.button, pointerId: e.pointerId };
         };
-        this._onObjectClickCancel = () => { this._objectClickDown = null; };
+        this._onObjectClickCancel = (e) => {
+            this._releaseObjectClickPointer(e);
+            this._objectClickDown = null;
+        };
         this._onObjectClickUp = (e) => {
+            const multi = this._releaseObjectClickPointer(e);
             const down = this._objectClickDown;
             if (!down) return;
             this._objectClickDown = null;
-            if (this._destroyed) return;
+            if (multi || this._destroyed) return;
             if (e.pointerId !== down.pointerId || e.button !== down.button) return;
             const wsOpen = this.isConnected();
             if (!this._objectClickHooks.length && !(this._objectClickEnabled && wsOpen)) return;
@@ -25991,6 +26009,7 @@ export class ThreeJSViewer {
         window.removeEventListener('pointerup', this._onObjectClickUp);
         window.removeEventListener('pointercancel', this._onObjectClickCancel);
         this._objectClickDown = null;
+        this._objectClickPointers.clear();
         this._objectClickHooks.length = 0;
         this._axisControls.dispose();
         this._dimensions.dispose();
