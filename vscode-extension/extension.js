@@ -471,13 +471,14 @@ class ViewerWebview {
 /** @type {ViewerWebview | undefined} the shared, Python-connected viewer tab */
 let mainViewer;
 
-function openMainViewer(column = vscode.ViewColumn.Active) {
+// `column` undefined: reveal the viewer where it is, or create it in the active column.
+function openMainViewer(column) {
     if (mainViewer) {
         mainViewer.panel.reveal(column, true);
         return mainViewer;
     }
     const panel = vscode.window.createWebviewPanel(
-        'threejsViewer', 'Viewer', { viewColumn: column, preserveFocus: true },
+        'threejsViewer', 'Viewer', { viewColumn: column ?? vscode.ViewColumn.Active, preserveFocus: true },
         { enableScripts: true, retainContextWhenHidden: true },
     );
     const viewer = new ViewerWebview(panel, false);
@@ -551,7 +552,7 @@ class ModelPreviewProvider {
 
 function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('threejsViewer.open', () => {
-        openMainViewer();
+        openMainViewer(vscode.ViewColumn.Active);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('threejsViewer.clearScene', () => {
         if (mainViewer) mainViewer.clear();
