@@ -27527,7 +27527,10 @@ window.threejsViewer = new ThreeJSViewer(container, {
     cubemaps: CUBEMAPS,
     dracoDecoder: DRACO_DECODER_DATA,
     // Tests keep a short cutoff with ?handshake_timeout_ms=5000 (issue #273).
-    handshakeTimeoutMs: new URLSearchParams(location.search).get('handshake_timeout_ms') ?? undefined
+    handshakeTimeoutMs: new URLSearchParams(location.search).get('handshake_timeout_ms') ?? undefined,
+    // A host page can set options before this script runs, e.g. the VS Code
+    // extension's previews: window.threejsViewerOptions = { autoConnect: false }.
+    ...(window.threejsViewerOptions || {})
 });
     </script>
 </body>

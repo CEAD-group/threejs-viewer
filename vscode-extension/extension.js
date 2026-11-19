@@ -1,7 +1,7 @@
 const vscode = require('vscode');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { sceneState, diffScene } = require('./scene_diff');
 
 // The extension runs from the repo checkout (vscode-extension/ is linked into
 // ~/.vscode/extensions, see README.md), so the generated viewer sits next door.
@@ -9,6 +9,9 @@ const path = require('path');
 const DEFAULT_VIEWER_HTML = path.join(__dirname, '..', 'src', 'threejs_viewer', 'viewer.html');
 
 const MODEL_FORMATS = { '.glb': 'glb', '.gltf': 'gltf' };
+
+// The exported API's version (README.md, "API for other extensions").
+const API_VERSION = 1;
 
 // type="module" so it runs after the viewer's own module script; re-applies on theme
 // change (VS Code rewrites the --vscode-* vars on <html> and the theme class on <body>).
@@ -30,14 +33,12 @@ const THEME_SCRIPT = `
     obs.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
     obs.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
-    // The viewer reports a failed model load only on the console; keep the
-    // last error so showModel can surface it as a VS Code notification.
+    // Only the viewer's public API: handleMessage, getObject, getLoadState,
+    // frameAll, setBackground. A failed model load is reported on the console
+    // only, so the notification points there.
     let lastError = '';
-    const consoleError = console.error.bind(console);
-    console.error = (...args) => {
-        lastError = args.map((a) => (a && a.stack) || String(a)).join(' ');
-        consoleError(...args);
-    };
+    const CONSOLE_HINT = 'see Developer: Open Webview Developer Tools';
+    const has = (id) => !!viewer.getObject(id);
 
     async function showModel(msg) {
         const url = URL.createObjectURL(new Blob([msg.bytes]));
@@ -50,15 +51,16 @@ const THEME_SCRIPT = `
         } finally {
             URL.revokeObjectURL(url);
         }
-        if (!viewer._objects.has(msg.id)) {
-            throw new Error(\`\${lastError || 'load failed'} (received \${msg.bytes.byteLength} of \${msg.size} bytes)\`);
+        if (!has(msg.id)) {
+            throw new Error(\`load failed, \${CONSOLE_HINT} (received \${msg.bytes.byteLength} of \${msg.size} bytes)\`);
         }
         if (msg.frame === 'all') viewer.frameAll();
         else if (msg.frame) await viewer.handleMessage({ type: 'frame_object', id: msg.id });
     }
 
     // Scenes another extension builds (see the exported showScene API):
-    // key -> { roots: top-level ids it added, urls: id -> Blob URL it owns }.
+    // key -> { roots: top-level ids it added, urls: id -> Blob URL it owns,
+    // ids: every object id of the scene, failed: those that did not load }.
     const scenes = new Map();
     let sceneChain = Promise.resolve();
 
@@ -97,32 +99,41 @@ const THEME_SCRIPT = `
         // Binary models load after handleMessage returns; wait for them.
         while (viewer.getLoadState().pending) await new Promise((r) => setTimeout(r, 100));
         for (const [id, url] of entry.urls) {
-            if (!viewer._objects.has(id)) { URL.revokeObjectURL(url); entry.urls.delete(id); }
+            if (!has(id)) { URL.revokeObjectURL(url); entry.urls.delete(id); }
         }
         return failed;
     }
 
     function reportScene(msg, failed) {
-        const missing = msg.messages.filter((m) => m.type === 'add_model_binary'
-            && !viewer._objects.has(m.id)).length;
+        const missing = msg.messages.filter((m) => m.type === 'add_model_binary' && !has(m.id)).length;
         if (msg.frame) viewer.frameAll();
         if (failed || missing) {
             // The extension no longer knows what this scene shows, so its
             // next update is sent whole instead of as a patch.
             vscodeApi.postMessage({ type: 'sceneFailed', key: msg.key });
             vscodeApi.postMessage({ type: 'error', text:
-                \`\${msg.title || msg.key}: \${missing} model(s) failed to load, \${failed} message(s) failed. Last error: \${lastError}\` });
+                \`\${msg.title || msg.key}: \${missing} model(s) failed to load, \${failed} message(s) failed. Last error: \${lastError || CONSOLE_HINT}\` });
         }
+    }
+
+    // After an update: which of the scene's ids are there, so the next patch
+    // can tell one that never became an object (a failed load, an add_menu)
+    // from an object removed since.
+    function recordObjects(entry, msg) {
+        entry.ids = msg.ids || [];
+        entry.failed = new Set(entry.ids.filter((id) => !has(id)));
     }
 
     async function applyScene(msg) {
         dropScene(msg.key);
-        const entry = { roots: [], urls: new Map() };
+        const entry = { roots: [], urls: new Map(), ids: [], failed: new Set() };
         for (const m of msg.messages) {
             if (String(m.type).startsWith('add_') && m.id && !m.parent) entry.roots.push(m.id);
         }
         scenes.set(msg.key, entry);
-        reportScene(msg, await applyMessages(entry, msg.messages));
+        const failed = await applyMessages(entry, msg.messages);
+        recordObjects(entry, msg);
+        reportScene(msg, failed);
     }
 
     // Update a shown scene in place; the extension computed the difference
@@ -135,8 +146,20 @@ const THEME_SCRIPT = `
             vscodeApi.postMessage({ type: 'sceneResync', key: msg.key });
             return;
         }
+        // A patch assumes the webview still shows the scene the extension
+        // last sent. A Python client's clear_scene or delete (or any other
+        // client's) changes it behind the extension's back: then the
+        // unchanged objects would stay missing. Every object of the scene that
+        // loaded must still be there, else the scene is sent whole.
+        if (entry.ids.some((id) => !entry.failed.has(id) && !has(id))) {
+            dropScene(msg.key);
+            vscodeApi.postMessage({ type: 'sceneResync', key: msg.key });
+            return;
+        }
         entry.roots = msg.roots;
-        reportScene(msg, await applyMessages(entry, msg.messages));
+        const failed = await applyMessages(entry, msg.messages);
+        recordObjects(entry, msg);
+        reportScene(msg, failed);
     }
 
     const queueScene = (msg, apply, verb) => {
@@ -153,7 +176,7 @@ const THEME_SCRIPT = `
         if (!msg) return;
         if (msg.type === 'clearScene') {
             for (const key of [...scenes.keys()]) dropScene(key);
-            viewer._clearScene();
+            viewer.handleMessage({ type: 'clear_scene' });
         } else if (msg.type === 'applyScene') {
             queueScene(msg, applyScene, 'show');
         } else if (msg.type === 'patchScene') {
@@ -176,14 +199,37 @@ function yUp() {
     return vscode.workspace.getConfiguration('threejsViewer').get('gltfYUp') === true;
 }
 
+/**
+ * The webview's Content-Security-Policy. Scripts: the page's own inline ones
+ * and the three.js build its import map pins on unpkg, nothing else. Network:
+ * the viewer's WebSocket and blob sidecar on this machine, and the Blob/data
+ * URLs models arrive as. `html` names the pinned three.js version.
+ * @param {string} html
+ */
+function contentSecurityPolicy(html) {
+    const three = /https:\/\/unpkg\.com\/three@[^/"']+\//.exec(html);
+    const cdn = three ? three[0] : 'https://unpkg.com/three@0.0.0/';
+    const local = 'ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:*';
+    return [
+        "default-src 'none'",
+        `script-src 'unsafe-inline' 'wasm-unsafe-eval' ${cdn}`,
+        "worker-src blob:",
+        "style-src 'unsafe-inline'",
+        "img-src data: blob:",
+        "font-src data:",
+        "media-src data: blob:",
+        `connect-src ${local} ${cdn} blob: data:`,
+    ].join('; ');
+}
+
 // `standalone` previews a single file: no WebSocket, so a running Python
-// session cannot push its scene into (or clear) the preview.
+// session cannot push its scene into (or clear) the preview. The viewer's
+// bootstrap merges `window.threejsViewerOptions` into its constructor options.
 function viewerHtml(file, standalone) {
-    let html = fs.readFileSync(file, 'utf8');
-    if (standalone) {
-        html = html.replace('new ThreeJSViewer(container, {', 'new ThreeJSViewer(container, {\n    autoConnect: false,');
-    }
-    return html.replace(/<\/body>/i, THEME_SCRIPT + '\n</body>');
+    const html = fs.readFileSync(file, 'utf8');
+    const head = `<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(html)}">\n`
+        + (standalone ? '<script>window.threejsViewerOptions = { autoConnect: false };</script>\n' : '');
+    return html.replace(/<head>/i, (m) => `${m}\n${head}`).replace(/<\/body>/i, THEME_SCRIPT + '\n</body>');
 }
 
 /**
@@ -226,103 +272,6 @@ function dirtyText(uri) {
     return doc && doc.isDirty ? doc.getText() : undefined;
 }
 
-/** @type {WeakMap<Uint8Array, string>} payload -> sha1, so a payload shared by several messages hashes once */
-const digests = new WeakMap();
-
-function digestOf(bytes) {
-    let d = digests.get(bytes);
-    if (!d) digests.set(bytes, d = crypto.createHash('sha1').update(bytes).digest('hex'));
-    return d;
-}
-
-/**
- * The final state a scene's messages leave, per object id: its add message
- * (`sig` compares header and payload), its transform (the last batch_update
- * or update_transform naming it), and its other per-object messages
- * (set_color, ...). Messages naming no object are kept in order in `other`.
- * @param {any[]} messages
- */
-function sceneState(messages) {
-    const defs = new Map();
-    const transforms = new Map();
-    const props = new Map();
-    const other = [];
-    for (const m of messages) {
-        const type = String(m.type);
-        if (type === 'batch_update') {
-            for (const [id, tf] of Object.entries(m.transforms || {})) transforms.set(id, JSON.stringify(tf));
-        } else if (type === 'update_transform' && m.id) {
-            transforms.set(m.id, JSON.stringify(m.transform));
-        } else if (type.startsWith('add_') && m.id) {
-            const { bytes, ...header } = m;
-            const sig = JSON.stringify(header) + (bytes ? `#${digestOf(bytes)}` : '');
-            defs.set(m.id, { msg: m, sig, parent: m.parent });
-            props.delete(m.id);
-        } else if (m.id && type !== 'delete_object') {
-            if (!props.has(m.id)) props.set(m.id, []);
-            props.get(m.id).push(m);
-        } else {
-            other.push(JSON.stringify(m));
-        }
-    }
-    const propSigs = new Map([...props].map(([id, list]) => [id, JSON.stringify(list)]));
-    return { defs, transforms, props, propSigs, other: other.join('\n') };
-}
-
-/**
- * The messages that turn a shown scene `prev` into `next`, or null when only
- * a full replace can (their id-less messages differ).
- *
- * Every object whose transform changed gets its own entry in one
- * batch_update: each is moved individually, none relies on a parent carrying
- * it. An object whose add message or other per-object messages changed is
- * deleted and added again, and so is everything added under it (a delete
- * takes its children along). Unchanged objects are not touched.
- */
-function diffScene(prev, next) {
-    if (prev.other !== next.other) return null;
-    const readd = new Set();
-    for (const [id, def] of next.defs) {
-        const old = prev.defs.get(id);
-        if (!old || old.sig !== def.sig || prev.propSigs.get(id) !== next.propSigs.get(id)
-            || (prev.transforms.has(id) && !next.transforms.has(id))) readd.add(id);
-    }
-    const children = new Map();
-    for (const [id, def] of next.defs) {
-        if (!def.parent) continue;
-        if (!children.has(def.parent)) children.set(def.parent, []);
-        children.get(def.parent).push(id);
-    }
-    const stack = [...readd];
-    while (stack.length) {
-        for (const child of children.get(stack.pop()) || []) {
-            if (!readd.has(child)) { readd.add(child); stack.push(child); }
-        }
-    }
-    const gone = new Set([...prev.defs.keys()].filter((id) => !next.defs.has(id) || readd.has(id)));
-    const underGone = (id) => {
-        const seen = new Set();
-        for (let p = prev.defs.get(id).parent; p && !seen.has(p); p = prev.defs.get(p)?.parent) {
-            if (gone.has(p)) return true;
-            seen.add(p);
-        }
-        return false;
-    };
-    const messages = [...gone].filter((id) => !underGone(id)).map((id) => ({ type: 'delete_object', id }));
-    for (const [id, def] of next.defs) if (readd.has(id)) messages.push(def.msg);
-    for (const id of readd) messages.push(...(next.props.get(id) || []));
-    const transforms = {};
-    let moved = 0;
-    for (const [id, tf] of next.transforms) {
-        if (readd.has(id)) transforms[id] = JSON.parse(tf);
-        else if (prev.transforms.get(id) !== tf) { transforms[id] = JSON.parse(tf); moved++; }
-    }
-    if (Object.keys(transforms).length) messages.push({ type: 'batch_update', transforms });
-    const roots = [...next.defs].filter(([, def]) => !def.parent).map(([id]) => id);
-    const removed = [...prev.defs.keys()].filter((id) => !next.defs.has(id)).length;
-    return { messages, roots, readded: readd.size, removed, moved };
-}
-
 /** @type {Set<ViewerWebview>} every open viewer, main and previews */
 const viewers = new Set();
 
@@ -354,13 +303,18 @@ class ViewerWebview {
         this.file = viewerHtmlPath();
         this.disposables = [];
         viewers.add(this);
-        panel.webview.options = { enableScripts: true };
+        // No local file access: models arrive as bytes over postMessage.
+        panel.webview.options = { enableScripts: true, localResourceRoots: [] };
         this.disposables.push(panel.webview.onDidReceiveMessage((msg) => {
             if (msg.type === 'ready') this._onReady();
             else if (msg.type === 'error') vscode.window.showErrorMessage(msg.text);
             // The webview's copy of the scene is unknown: stop patching it.
             else if (msg.type === 'sceneFailed') this.sceneStates.delete(msg.key);
-            else if (msg.type === 'sceneResync' && this.scenes.has(msg.key)) this.post(this.scenes.get(msg.key));
+            // The webview no longer shows what the extension sent (dropped, or
+            // changed by another client): send the scene whole, keeping the camera.
+            else if (msg.type === 'sceneResync' && this.scenes.has(msg.key)) {
+                this.post({ ...this.scenes.get(msg.key), frame: false });
+            }
         }));
         panel.onDidDispose(() => this.dispose());
     }
@@ -443,8 +397,11 @@ class ViewerWebview {
      * @returns {{ full: boolean, readded: number, removed: number, moved: number }}
      */
     showScene(key, scene, frame) {
-        const msg = { type: 'applyScene', key, title: scene.title, messages: scene.messages, frame };
         const next = sceneState(scene.messages);
+        // Every id the scene adds: the webview checks they are all still there
+        // before it applies a patch, and asks for the scene whole if not.
+        const ids = [...next.defs.keys()];
+        const msg = { type: 'applyScene', key, title: scene.title, messages: scene.messages, ids, frame };
         const prev = this.sceneStates.get(key);
         this.scenes.set(key, msg);
         this.sceneStates.set(key, next);
@@ -455,7 +412,7 @@ class ViewerWebview {
         }
         if (patch.messages.length || frame) {
             this.post({ type: 'patchScene', key, title: scene.title, messages: patch.messages,
-                roots: patch.roots, frame });
+                roots: patch.roots, ids, frame });
         }
         return { full: false, readded: patch.readded, removed: patch.removed, moved: patch.moved };
     }
@@ -482,21 +439,23 @@ class ViewerWebview {
     }
 
     // Reload when viewer.html changes (git pull, build.py). The viewer
-    // reconnects to the Python server, which replays its scene.
+    // reconnects to the Python server, which replays its scene. A VS Code
+    // watcher, not fs.watch: git replaces the file, and fs.watch stops
+    // reporting after the first replace.
     watch() {
         let timer;
-        try {
-            const watcher = fs.watch(this.file, () => {
-                clearTimeout(timer);
-                timer = setTimeout(() => {
-                    // Mid-write or briefly deleted by git; the next event retries.
-                    if (fs.existsSync(this.file)) this.render();
-                }, 300);
-            });
-            this.disposables.push({ dispose: () => { clearTimeout(timer); watcher.close(); } });
-        } catch (err) {
-            // Watching is a convenience; the tab still works without it.
-        }
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(vscode.Uri.file(path.dirname(this.file)), path.basename(this.file)));
+        const changed = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                // Mid-write or briefly deleted by git; the next event retries.
+                if (fs.existsSync(this.file)) this.render();
+            }, 300);
+        };
+        watcher.onDidChange(changed);
+        watcher.onDidCreate(changed);
+        this.disposables.push(watcher, { dispose: () => clearTimeout(timer) });
     }
 
     dispose() {
@@ -571,7 +530,8 @@ function targetModel(uri) {
     const editor = vscode.window.activeTextEditor;
     if (editor) return editor.document.uri;
     const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    return tab && tab.input && tab.input.uri;
+    const input = /** @type {{ uri?: vscode.Uri } | undefined} */ (tab && tab.input);
+    return input && input.uri;
 }
 
 /** Custom editor: opening a .glb (or "Open With..." on a .gltf) previews it alone. */
@@ -624,8 +584,11 @@ function activate(context) {
         ));
     }
 
-    // API for other extensions: vscode.extensions.getExtension('local.threejs-viewer-webview').exports
+    // API for other extensions: vscode.extensions.getExtension('local.threejs-viewer-webview').exports.
+    // A public contract, documented in README.md ("API for other extensions").
     return {
+        /** Bumped on any incompatible change to showScene/hasScene; a consumer refuses one it does not know. */
+        apiVersion: API_VERSION,
         /**
          * Show a scene in the viewer tab, opening it beside the active editor
          * if needed. A scene is a list of viewer protocol messages (the JSON

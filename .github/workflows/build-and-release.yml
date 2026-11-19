@@ -63,6 +63,24 @@ jobs:
       - name: Minimize uv cache
         run: uv cache prune --ci
 
+  vscode-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install type packages
+        run: npm install --no-audit --no-fund
+
+      - name: Type-check the extension
+        run: npx tsc --noEmit -p vscode-extension/jsconfig.json
+
+      - name: Test the scene diff
+        run: node --test vscode-extension/test
+
   test-browser:
     runs-on: ubuntu-24.04  # Playwright has no browser builds for 26.04 yet
     steps:

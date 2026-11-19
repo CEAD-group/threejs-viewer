@@ -1,9 +1,11 @@
 {
   "name": "threejs-viewer-dev",
   "private": true,
-  "description": "Dev-only: TypeScript + three.js types for IDE IntelliSense on viewer/*.js. No runtime deps; build.py is the real build. Run `npm install` once; then `npx tsc --noEmit -p jsconfig.json` to type-check.",
+  "description": "Dev-only: TypeScript + three.js types for IDE IntelliSense on viewer/*.js. No runtime deps; build.py is the real build. Run `npm install` once; then `npx tsc --noEmit -p jsconfig.json` to type-check. The VS Code extension: `npx tsc --noEmit -p vscode-extension/jsconfig.json` and `node --test vscode-extension/test`.",
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "@types/three": "^0.180.0",
+    "@types/vscode": "~1.80.0",
     "typescript": "^5.6.0"
   }
 }

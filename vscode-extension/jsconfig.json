@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": false,
+    "noImplicitAny": false,
+    "allowJs": true,
+    "noEmit": true,
+    "lib": ["ES2022"],
+    "types": ["node", "vscode"],
+    "typeRoots": ["../node_modules/@types"]
+  },
+  "include": ["*.js", "test/*.js"]
+}

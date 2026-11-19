@@ -4,13 +4,22 @@
 	"description": "Opens threejs-viewer's viewer.html in a VS Code tab, themed to the editor background, and previews .glb/.gltf files.",
 	"version": "0.0.4",
 	"publisher": "local",
-	"license": "UNLICENSED",
+	"license": "MIT",
 	"private": true,
 	"engines": {
 		"vscode": "^1.80.0"
 	},
 	"main": "./extension.js",
 	"activationEvents": [],
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": "limited",
+			"description": "In an untrusted workspace the viewer ignores a workspace's threejsViewer.viewerHtml, whose content runs in the webview.",
+			"restrictedConfigurations": [
+				"threejsViewer.viewerHtml"
+			]
+		}
+	},
 	"contributes": {
 		"commands": [
 			{

@@ -20,6 +20,80 @@ Viewer** from the command palette, then connect from Python as usual.
 - Models are loaded as-is (Z-up). Set `threejsViewer.gltfYUp` for Y-up
   exports, like `add_model(y_up=True)`.
 
+## API for other extensions
+
+Other extensions can show a scene in the viewer tab without a Python
+process. This API is a public contract of this repository:
+
+```js
+const api = await vscode.extensions.getExtension('local.threejs-viewer-webview').activate();
+if (api.apiVersion !== 1) throw new Error(`unsupported threejs-viewer API ${api.apiVersion}`);
+const sent = api.showScene('my-scene', { title: 'Cell', messages }, { frame: true });
+api.hasScene('my-scene');   // whether the viewer tab shows it
+```
+
+- **`apiVersion`** is `1`. It goes up with any incompatible change to
+  `showScene`/`hasScene`, so check it and refuse a version you don't know.
+- **`showScene(key, { title, messages }, { frame })`** shows the scene `key`,
+  opening the viewer tab beside the active editor if needed.
+  - `messages` are the viewer's own wire messages, the JSON that
+    `ViewerClient` sends, applied in order.
+  - A binary message (`add_model_binary`, `add_mesh_binary`, ...) carries its
+    payload as `bytes` (a `Uint8Array`) instead of a `blob_url`.
+  - `frame` (default `true`) frames the whole scene once loaded.
+  - Other scenes, and objects a Python session pushed, are left alone.
+- **Showing the same `key` again sends only the difference.**
+  - An object whose transform changed is moved by its own matrix.
+  - An object whose add message, payload or per-object messages changed is
+    deleted and added again, together with everything parented under it.
+    Per-object messages are any message naming its `id`, such as `set_color`
+    or `set_visibility`.
+  - A removed object is deleted, and an unchanged one is left alone.
+  - Any change to a message that names no object sends the scene whole.
+- **The webview checks before it patches.** If an object of the scene that
+  had loaded has disappeared since, the scene is sent whole instead. That
+  happens when a Python client sent `clear_scene` or deleted one of its ids.
+- **Returns** `false` when no viewer tab could be opened, otherwise
+  `{ full, readded, removed, moved }`: whether the scene was sent whole, and
+  the counts of a patch.
+  - The call returns once the update is queued; the webview applies queued
+    updates one at a time, in order.
+  - Model load failures show up as a VS Code error notification, and the
+    next update is then sent whole.
+- **`hasScene(key)`** tells whether the viewer tab currently shows scene `key`.
+  It is false after the tab is closed or cleared.
+
+The diff is `scene_diff.js`, tested with `node --test vscode-extension/test`.
+
+## Distribution and limits
+
+- **An internal development tool, run from a checkout.** It has no
+  marketplace listing and no `.vsix`: the extension loads
+  `../src/threejs_viewer/viewer.html` from the checkout it is linked from,
+  unless `threejsViewer.viewerHtml` names another.
+- **No Remote or WSL windows yet.** The extension would run remotely while
+  the webview's `ws://localhost:5666` resolves on the local machine.
+- **Content-Security-Policy.** The webview allows only its inline scripts, the
+  three.js build pinned in `viewer.html` (so it needs network access to
+  unpkg), and WebSocket/HTTP connections to `localhost`. It reads no local
+  files.
+- **Untrusted workspaces:** a workspace's `threejsViewer.viewerHtml` is ignored.
+- **Known costs, not fixed yet:**
+  - The extension host keeps the last full copy of each scene, mesh payloads
+    included, so it can resend it after the page reloads.
+  - Typing in a shown `.gltf` re-reads and base64-inlines its buffers and
+    textures on each pause.
+
+## Development
+
+```bash
+npm install                                     # type packages, once
+npx tsc --noEmit -p vscode-extension/jsconfig.json
+node --test vscode-extension/test
+```
+
+CI runs both (the `vscode-extension` job).
+
 ## Install (linked to this checkout)
 
 Link this folder into VS Code's extensions directory instead of installing a
