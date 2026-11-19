@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.0.78
+
+### Touch: pinch zoom and two-finger pan (#348)
+
+- Two fingers on the canvas zoom about their midpoint by the change in their distance, in perspective and orthographic views, and pan as the midpoint moves. Lifting one finger hands the gesture back to a one-finger rotate from where that finger is, so the view does not jump. Mouse and pen input are unchanged.
+- A pinch never counts as an object click, also when one finger stays still and lifts first, so `onObjectClick` hooks and `object_clicked` messages only see single-pointer clicks.
+
+### Off-screen rendering, UI text size and WebGL context loss (#347, issues #340, #341, #342)
+
+- While the viewer is scrolled out of view, rendering stops (`content-visibility: auto` plus an IntersectionObserver), and playback holds with it: the playhead and `onAnimationTime` stop and continue without a jump once the viewer is visible again. `isPaused()` stays false, and scrolling never resumes an explicit `pause()`. An embedder that drives its own timeline from playback sees it hold while the viewer is off-screen.
+- UI font sizes are in rem, so text follows the user's font-size setting; at the default 16 px root every size is unchanged. Every size goes through the new `--tjsv-rem` custom property (default `1rem`): an embedding page whose root font size is not the browser default, for example `html { font-size: 62.5% }`, sets `--tjsv-rem: 16px` on the viewer container to keep the previous sizes. The round view-button labels, dimension labels and canvas text stay in px.
+- After a lost and restored WebGL context the render loop resumes, the environment map is rebuilt from the kept cubemap and the shadows are redrawn.
+
+### Pointer input and accessibility (#344, issues #336, #337, #338)
+
+- The timeline scrubber uses pointer events with pointer capture, so touch and pen can scrub and a drag keeps following outside the bar. Pressing a marker still lands on its time. The scrubber is a focusable `role="slider"` with `aria-valuenow` and `aria-valuetext`, operated by the existing arrow, Home and End keys.
+- An orbit or pan drag ends on `pointercancel`, so a touch gesture the browser takes over no longer leaves the camera controls stuck.
+- Accessible names and states changed. Panel inputs and selects have an `aria-label`. The switch checkboxes have `role="switch"`, and the clipping on/off button is now `role="switch"` with `aria-checked` instead of `aria-pressed`. The clip axis, clip mode, Loop and menu `segmented` buttons carry `aria-pressed`. Menu `toggle` items are `role="switch"` with `aria-checked`, `eye` items carry `aria-pressed`, and menu `select` and `segmented` controls are named after the item label. Embedder code or tests that query these attributes may need updating.
+
+### Repository (#348)
+
+- `.gitignore` ignores `node_modules` as a directory or a link.
+
 ## 0.0.77
 
 ### Vector entities: DXF-style curves (#333)
