@@ -1,0 +1,112 @@
+{
+	"name": "threejs-viewer-webview",
+	"displayName": "Three.js Viewer (webview)",
+	"description": "Opens threejs-viewer's viewer.html in a VS Code tab, themed to the editor background, and previews .glb/.gltf files.",
+	"version": "0.0.4",
+	"publisher": "local",
+	"license": "MIT",
+	"private": true,
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"main": "./extension.js",
+	"activationEvents": [],
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": "limited",
+			"description": "In an untrusted workspace the viewer ignores a workspace's threejsViewer.viewerHtml, whose content runs in the webview.",
+			"restrictedConfigurations": [
+				"threejsViewer.viewerHtml"
+			]
+		}
+	},
+	"contributes": {
+		"commands": [
+			{
+				"command": "threejsViewer.open",
+				"title": "Open Viewer",
+				"category": "Three.js"
+			},
+			{
+				"command": "threejsViewer.clearScene",
+				"title": "Clear All Objects",
+				"category": "Three.js",
+				"icon": "$(clear-all)"
+			},
+			{
+				"command": "threejsViewer.showModel",
+				"title": "Show in Viewer",
+				"category": "Three.js",
+				"icon": "$(eye)"
+			}
+		],
+		"configuration": {
+			"title": "Three.js Viewer",
+			"properties": {
+				"threejsViewer.viewerHtml": {
+					"type": "string",
+					"default": "",
+					"description": "Path to viewer.html. Empty uses src/threejs_viewer/viewer.html from the repo this extension is linked from."
+				},
+				"threejsViewer.gltfYUp": {
+					"type": "boolean",
+					"default": false,
+					"description": "Rotate glTF models from Y-up to the viewer's Z-up (like add_model(y_up=True)). Leave off for Z-up CAD exports."
+				}
+			}
+		},
+		"menus": {
+			"editor/title": [
+				{
+					"command": "threejsViewer.clearScene",
+					"when": "activeWebviewPanelId == 'threejsViewer'",
+					"group": "navigation"
+				},
+				{
+					"command": "threejsViewer.showModel",
+					"when": "resourceExtname =~ /^\\.(gltf|glb)$/i",
+					"group": "navigation"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "threejsViewer.clearScene",
+					"when": "activeWebviewPanelId == 'threejsViewer'"
+				},
+				{
+					"command": "threejsViewer.showModel",
+					"when": "resourceExtname =~ /^\\.(gltf|glb)$/i"
+				}
+			],
+			"explorer/context": [
+				{
+					"command": "threejsViewer.showModel",
+					"when": "resourceExtname =~ /^\\.(gltf|glb)$/i",
+					"group": "navigation"
+				}
+			]
+		},
+		"customEditors": [
+			{
+				"viewType": "threejsViewer.modelPreview",
+				"displayName": "Three.js Model Preview",
+				"selector": [
+					{
+						"filenamePattern": "*.glb"
+					}
+				],
+				"priority": "default"
+			},
+			{
+				"viewType": "threejsViewer.modelPreviewGltf",
+				"displayName": "Three.js Model Preview",
+				"selector": [
+					{
+						"filenamePattern": "*.gltf"
+					}
+				],
+				"priority": "option"
+			}
+		]
+	}
+}
