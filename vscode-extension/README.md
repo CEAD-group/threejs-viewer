@@ -44,10 +44,13 @@ api.hasScene('my-scene');   // whether the viewer tab shows it
   - Other scenes, and objects a Python session pushed, are left alone.
 - **Showing the same `key` again sends only the difference.**
   - An object whose transform changed is moved by its own matrix.
-  - An object whose add message, payload or per-object messages changed is
-    deleted and added again, together with everything parented under it.
-    Per-object messages are any message naming its `id`, such as `set_color`
-    or `set_visibility`.
+  - `set_visibility` is keyed by object `id` and an `add_menu` by its menu
+    `id`. A visibility toggle or a menu update is sent as that one message
+    and never rebuilds the scene: the result has `full` false and `readded`
+    0. A menu left out of the next call is removed.
+  - An object whose add message, payload or other per-object messages (any
+    message naming its `id`, such as `set_color`) changed is deleted and
+    added again, together with everything parented under it.
   - A removed object is deleted, and an unchanged one is left alone.
   - Any change to a message that names no object sends the scene whole.
 - **The webview checks before it patches.** If an object of the scene that

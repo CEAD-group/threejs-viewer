@@ -596,7 +596,8 @@ function activate(context) {
          * `bytes` (Uint8Array) instead of a `blob_url`. Showing the same
          * `key` again replaces that scene and leaves everything else. It
          * only sends the difference: objects whose transform changed are
-         * moved, each by its own matrix; objects whose add message, payload
+         * moved, each by its own matrix; a changed set_visibility or add_menu
+         * (keyed by id) is sent alone; objects whose add message, payload
          * or other per-object messages changed are deleted and added again,
          * together with anything parented under them; removed objects are
          * deleted; unchanged objects are left alone. A change to a message

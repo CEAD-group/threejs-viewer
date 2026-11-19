@@ -24,6 +24,8 @@ function apply(store, messages) {
             const { bytes, ...def } = m;
             store.set(m.id, { def: JSON.stringify(def) + (bytes ? `#${[...bytes]}` : ''), transform: null, props: [] });
             store.get(m.id).def = { ...def, sig: store.get(m.id).def };
+        } else if (m.type === 'set_visibility') {
+            if (store.has(m.id)) store.get(m.id).visible = m.visible;
         } else if (m.type === 'batch_update') {
             for (const [id, t] of Object.entries(m.transforms)) if (store.has(id)) store.get(id).transform = JSON.stringify(t);
         } else if (m.id && store.has(m.id)) {
@@ -33,7 +35,7 @@ function apply(store, messages) {
     return store;
 }
 
-const view = (store) => Object.fromEntries([...store].map(([id, o]) => [id, [o.def.sig, o.transform, o.props]]));
+const view = (store) => Object.fromEntries([...store].map(([id, o]) => [id, [o.def.sig, o.transform, o.props, o.visible]]));
 
 /** @returns {any[]} */
 const base = () => [
@@ -69,10 +71,41 @@ test('a changed payload re-adds the object and everything under it', () => {
 });
 
 test('an object whose per-object messages change is re-added with them', () => {
+    const prev = [...base(), { type: 'set_color', id: 'table', color: 1 }];
+    const next = [...base(), { type: 'set_color', id: 'table', color: 2 }];
+    const patch = diffScene(sceneState(prev), sceneState(next));
+    assert.equal(patch.readded, 1);
+    assert.ok(patch.messages.some((m) => m.type === 'set_color' && m.id === 'table' && m.color === 2));
+});
+
+// Contract (README, "API for other extensions"): set_visibility and the
+// add_menu object are keyed by id, so a toggle never rebuilds the scene.
+test('a visibility toggle sends only set_visibility', () => {
     const next = base();
     next[4] = { type: 'set_visibility', id: 'table', visible: true };
     const patch = diffScene(sceneState(base()), sceneState(next));
-    assert.ok(patch.messages.some((m) => m.type === 'set_visibility' && m.id === 'table' && m.visible === true));
+    assert.ok(patch, 'not a full send');
+    assert.deepEqual(patch.messages, [{ type: 'set_visibility', id: 'table', visible: true }]);
+    assert.equal(patch.readded + patch.removed + patch.moved, 0);
+});
+
+test('a visibility toggle of a parent re-adds none of its children', () => {
+    const prev = [...base(), { type: 'set_visibility', id: 'root', visible: true }];
+    const next = [...base(), { type: 'set_visibility', id: 'root', visible: false }];
+    const patch = diffScene(sceneState(prev), sceneState(next));
+    assert.deepEqual(patch.messages, [{ type: 'set_visibility', id: 'root', visible: false }]);
+    assert.equal(patch.readded, 0);
+});
+
+test('a menu update sends only that add_menu', () => {
+    const menu = (state) => ({ type: 'add_menu',
+        menu: { id: 'parts', items: [{ type: 'eye', id: 'arm_eye', ids: ['arm'], state }] } });
+    const patch = diffScene(sceneState([...base(), menu(true)]), sceneState([...base(), menu(false)]));
+    assert.ok(patch, 'not a full send');
+    assert.deepEqual(patch.messages, [menu(false)]);
+    assert.equal(patch.readded + patch.removed + patch.moved, 0);
+    const gone = diffScene(sceneState([...base(), menu(true)]), sceneState(base()));
+    assert.deepEqual(gone.messages, [{ type: 'remove_menu', id: 'parts' }]);
 });
 
 test('a change to a message naming no object needs a full send', () => {
