@@ -275,6 +275,10 @@ and Home, F and a double click on empty space frame without reorienting. JS: `vi
 damping, `set_camera`, framing, tweens, projection, resize) with the pose and `worldPerPixel`,
 so an overlay such as a scale bar follows the camera without polling.
 
+`await viewer.whenObjectReady(id)` resolves once a blob-backed add (`add_*_binary`, models)
+has fetched and registered its object (false when it failed or was deleted), so an embedder
+that measures or adjusts a new object needs no polling.
+
 In JS the same calls are `viewer.setProjection(mode)`, `viewer.setCameraPose({..., projection})`
 and `viewer.getCameraPose().projection`. `viewer.hasFeature(name)` tells an embedder
 whether the viewer it runs against has an optional addition (`viewer.features` lists them),

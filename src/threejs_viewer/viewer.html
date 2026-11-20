@@ -1785,6 +1785,7 @@ const VIEWER_FEATURES = Object.freeze([
     'set_projection',
     'set_navigation',
     'camera_change',
+    'object_ready',
 ]);
 
 /**
@@ -20656,6 +20657,33 @@ class ThreeJSViewer {
         this._cameraHooks.push(cb);
         this._cameraSig[0] = NaN;
         return () => { const i = this._cameraHooks.indexOf(cb); if (i >= 0) this._cameraHooks.splice(i, 1); };
+    }
+
+    /**
+     * Resolve once the object with this id is in the scene: at once for an
+     * object that exists and has no load running, else when its blob-backed
+     * add (`add_*_binary`, models) has fetched, built and registered it. A
+     * newer add for the same id is followed to its end. Resolves false when
+     * the load failed, was cancelled or deleted, or there is no such object,
+     * so `await Promise.all(ids.map((id) => viewer.whenObjectReady(id)))`
+     * after dispatching the adds is the barrier for measuring them.
+     * @param {string} id
+     * @returns {Promise<boolean>}
+     */
+    async whenObjectReady(id) {
+        let last = null;
+        for (;;) {
+            const inflight = this._inflightLoads.get(id);
+            // A load that resolved but is still listed has registered its object.
+            if (!inflight || inflight === last) return this._objects.has(id);
+            last = inflight;
+            try {
+                await inflight.promise;
+            } catch {
+                const next = this._inflightLoads.get(id);
+                if (!next || next === inflight) return false;
+            }
+        }
     }
 
     /** @returns {number} world units per CSS pixel at the orbit target */

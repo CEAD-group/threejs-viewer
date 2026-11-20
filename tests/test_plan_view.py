@@ -250,3 +250,54 @@ def test_camera_change_fires_once_per_changed_frame(viewer_client, viewer_page):
     settle(viewer_client)
     frames(viewer_page, 3)
     assert viewer_page.evaluate("() => window.__cam.length") == n
+
+
+_BLOB_LINE_JS = (
+    """(points) => URL.createObjectURL(new Blob([new Float32Array(points)]))"""
+)
+
+
+def test_when_object_ready_resolves_after_the_blob_add(viewer_client, viewer_page):
+    """whenObjectReady resolves after a blob-backed add has registered its object,
+    false for a failed or deleted load and for an unknown id, true at once for an
+    existing object, and follows a newer add for the same id."""
+    url = viewer_page.evaluate(_BLOB_LINE_JS, [0, 0, 0, 1, 0, 0, 1, 1, 0])
+    result = viewer_page.evaluate(
+        """async (url) => {
+            const v = window.threejsViewer;
+            v.handleMessage({type: 'add_polyline_binary', id: 'l', blob_url: url, numPoints: 3});
+            const before = !!v.getObject('l');
+            const ready = await v.whenObjectReady('l');
+            return {before, ready, after: !!v.getObject('l')};
+        }""",
+        url,
+    )
+    assert result == {"before": False, "ready": True, "after": True}
+
+    flags = viewer_page.evaluate(
+        """async (url) => {
+            const v = window.threejsViewer;
+            v.handleMessage({type: 'add_polyline_binary', id: 'bad', blob_url: url + 'x', numPoints: 3});
+            const bad = await v.whenObjectReady('bad');
+            v.handleMessage({type: 'add_polyline_binary', id: 'gone', blob_url: url, numPoints: 3});
+            const pending = v.whenObjectReady('gone');
+            v.handleMessage({type: 'delete_object', id: 'gone'});
+            const gone = await pending;
+            v.handleMessage({type: 'add_polyline_binary', id: 'twice', blob_url: url, numPoints: 3});
+            const first = v.whenObjectReady('twice');
+            v.handleMessage({type: 'add_polyline_binary', id: 'twice', blob_url: url, numPoints: 2});
+            const twice = await first;
+            const n = v.getObject('twice').userData.pickPoints.length / 3;
+            return {bad, gone, twice, n, unknown: await v.whenObjectReady('nope'),
+                    existing: await v.whenObjectReady('l')};
+        }""",
+        url,
+    )
+    assert flags == {
+        "bad": False,
+        "gone": False,
+        "twice": True,
+        "n": 2,
+        "unknown": False,
+        "existing": True,
+    }
