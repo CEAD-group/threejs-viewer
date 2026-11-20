@@ -258,6 +258,11 @@ JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)
 2048 points is scanned through a box index of 64-segment runs, so a hover costs well under
 a millisecond on a 400k-point tube (about 80 ms with a full scan) and finds the same point.
 
+A fractional `set_draw_range` (or `draw_range` channel value) on a connected fat polyline draws
+the last visible segment up to the exact point, as a parametric tube's frontier does, so a reveal
+grows smoothly instead of segment by segment; picks stop at the cut. `hasFeature('line_draw_frontier')`
+marks it. Native (`fat=False`) lines and disjoint segments still cut at whole vertices.
+
 ### Camera projection and plan views
 
 ```python

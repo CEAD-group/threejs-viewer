@@ -466,3 +466,81 @@ def test_pick_index_matches_the_full_scan(viewer_client, viewer_page, projection
     )
     assert same
     assert hits > 20
+
+
+_FRONTIER_JS = """(id) => { const o = window.threejsViewer.getObject(id);
+    const a = o.geometry.getAttribute('instanceStart').data.array;
+    const c = o.geometry.getAttribute('instanceColorStart').data.array;
+    return { count: o.geometry.instanceCount, pos: Array.from(a), col: Array.from(c),
+             frontier: o.userData.lineFrontier ? [o.userData.lineFrontier.seg, o.userData.lineFrontier.w] : null }; }"""
+
+
+def test_fat_line_draw_range_cuts_inside_a_segment(viewer_client, viewer_page):
+    """A fractional draw range on a connected fat line draws the last segment up
+    to the exact point, restores it when the frontier moves on, and picks stop there."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=np.float32)
+    colors = np.array(
+        [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]], dtype=np.uint8
+    )
+    viewer_client.add_polyline("p", pts, colors=colors)
+    _top_view(viewer_client)
+    settle(viewer_client)
+    full = viewer_page.evaluate(_FRONTIER_JS, "p")
+    viewer_client.set_draw_range("p", 1.25 / 3)  # a quarter into the second segment
+    settle(viewer_client)
+    cut = viewer_page.evaluate(_FRONTIER_JS, "p")
+    assert cut["count"] == 2 and cut["frontier"][0] == 1
+    assert cut["frontier"][1] == pytest.approx(0.25, abs=1e-5)
+    assert cut["pos"][9:12] == pytest.approx(
+        [1.0, 0.25, 0.0], abs=1e-6
+    )  # segment 1's end
+    assert cut["pos"][:9] == full["pos"][:9] and cut["pos"][12:] == full["pos"][12:]
+    # The colour at the cut is interpolated the same way.
+    lerp = [
+        a + 0.25 * (b - a)
+        for a, b in zip(full["col"][6:9], full["col"][9:12], strict=True)
+    ]
+    assert cut["col"][9:12] == pytest.approx(lerp, abs=1e-5)
+    # Hover beyond the cut finds nothing; before it, the segment.
+    viewer_page.evaluate("() => window.threejsViewer.enablePolylinePicking({})")
+    picks = viewer_page.evaluate(
+        """([a, b]) => { const pp = window.threejsViewer._polylinePick; return [a, b].map(([x, y]) => pp._pickAt(x, y)); }""",
+        [
+            viewer_page.evaluate(_PROJECT_JS, [1, 0.1, 0]),
+            viewer_page.evaluate(_PROJECT_JS, [1, 0.6, 0]),
+        ],
+    )
+    assert picks[0] is not None and picks[0]["segment"] == 1
+    assert picks[1] is None
+    # Moving on restores the segment; whole values keep whole instances.
+    viewer_client.set_draw_range("p", 2 / 3)
+    settle(viewer_client)
+    again = viewer_page.evaluate(_FRONTIER_JS, "p")
+    assert again["count"] == 2 and again["frontier"] is None
+    assert again["pos"] == full["pos"] and again["col"] == full["col"]
+
+
+def test_fat_line_recolour_keeps_the_cut(viewer_client, viewer_page):
+    """New colours on a line cut inside a segment keep the cut, with the cut
+    point's colour taken from the new colours."""
+    pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline(
+        "p", pts, colors=np.array([[255, 0, 0]] * 3, dtype=np.uint8)
+    )
+    viewer_client.set_draw_range("p", 0.25)  # half of the first segment
+    viewer_client.update_polyline_colors(
+        "p", np.array([[0, 0, 1.0], [0, 1.0, 0], [0, 1.0, 0]])
+    )
+    settle(viewer_client)
+    cut = viewer_page.evaluate(_FRONTIER_JS, "p")
+    assert cut["count"] == 1 and cut["frontier"][1] == pytest.approx(0.5)
+    assert cut["pos"][3:6] == pytest.approx([0.5, 0, 0], abs=1e-6)
+    start, end = cut["col"][0:3], cut["col"][3:6]
+    assert end[1] > 0 and end[2] > 0 and end[1] < 1 and end[2] < start[2]
+    viewer_client.set_draw_range("p", 1.0)
+    settle(viewer_client)
+    whole = viewer_page.evaluate(_FRONTIER_JS, "p")
+    assert whole["count"] == 2 and whole["pos"][3:6] == pytest.approx([1, 0, 0])
+    assert whole["col"][3:6] == pytest.approx(
+        whole["col"][6:9]
+    )  # vertex 1 colour restored

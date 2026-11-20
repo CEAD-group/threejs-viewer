@@ -1788,6 +1788,7 @@ const VIEWER_FEATURES = Object.freeze([
     'object_ready',
     'depth_offset',
     'tube_pick',
+    'line_draw_frontier',
 ]);
 
 /**
@@ -2527,7 +2528,7 @@ function makeChannelApply(viewer) {
                 } else if (obj.userData.isNativeLine) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 } else if (obj.userData.isPolyline) {
-                    obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                    applyFatLineDrawRange(obj, value);
                 } else if (obj.userData.isParametricTube) {
                     applyParametricTubeDrawRange(obj, value);
                 } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
@@ -8887,6 +8888,53 @@ class ParametricTube {
         const capOffset = this.relocateEndCap(visiblePairs);
         obj.geometry.setDrawRange(0, capOffset + capPer);
     }
+}
+
+/**
+ * Draw range on a fat connected polyline (Line2): a fractional value draws the
+ * last visible segment up to the exact point, as a tube's frontier ring does,
+ * so a reveal grows smoothly instead of segment by segment. The cut segment's
+ * end (position and colour) is overwritten in place and restored when the
+ * frontier moves on. Disjoint segments (LineSegments2) keep whole instances.
+ * @param {THREE.Object3D} obj @param {number} value
+ */
+function applyFatLineDrawRange(obj, value) {
+    const line = /** @type {any} */ (obj);
+    const ud = line.userData;
+    const max = ud.maxInstanceCount;
+    const geom = line.geometry;
+    const clamped = Math.max(0, Math.min(1, value));
+    const frontier = ud.lineFrontier;
+    const attrs = ['instanceStart', 'instanceColorStart'].map((n) => geom.getAttribute(n)).filter(Boolean);
+    if (frontier) {
+        attrs.forEach((/** @type {any} */ a, /** @type {number} */ i) => {
+            a.data.array.set(frontier.saved[i], frontier.seg * 6 + 3);
+            a.data.addUpdateRange(frontier.seg * 6 + 3, 3);
+            a.data.needsUpdate = true;
+        });
+        ud.lineFrontier = null;
+    }
+    if (ud.isLineSegments || !(max > 0)) {
+        geom.instanceCount = Math.round(clamped * max);
+        return;
+    }
+    const f = clamped * max;
+    const seg = Math.floor(f), w = f - seg;
+    ud.pickDrawFrac = clamped;
+    if (w < 1e-6 || seg >= max) {
+        geom.instanceCount = Math.min(max, seg);
+        return;
+    }
+    const saved = attrs.map((/** @type {any} */ a) => {
+        const arr = a.data.array, o = seg * 6;
+        const keep = arr.slice(o + 3, o + 6);
+        for (let k = 0; k < 3; k++) arr[o + 3 + k] = arr[o + k] + w * (keep[k] - arr[o + k]);
+        a.data.addUpdateRange(o + 3, 3);
+        a.data.needsUpdate = true;
+        return keep;
+    });
+    ud.lineFrontier = { seg, w, saved };
+    geom.instanceCount = seg + 1;
 }
 
 // Back-compat free-function shims — these keep existing call sites simple
@@ -16804,6 +16852,9 @@ class PolylinePickController {
             const c = o.geometry.drawRange.count;
             return { endNode: Number.isFinite(c) ? Math.min(n - 1, c - 1) : n - 1, endT: 1 };
         }
+        if (ud.lineFrontier) {   // fat line cut inside a segment
+            return { endNode: Math.min(n - 1, ud.lineFrontier.seg + 1), endT: ud.lineFrontier.w };
+        }
         const ic = o.geometry.instanceCount;   // fat line: drawn segments
         return { endNode: Number.isFinite(ic) ? Math.min(n - 1, ic) : n - 1, endT: 1 };
     }
@@ -21384,7 +21435,7 @@ class ThreeJSViewer {
         } else if (obj.userData.isNativeLine) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
         } else if (obj.userData.isPolyline) {
-            obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+            applyFatLineDrawRange(obj, value);
         } else if (obj.userData.isParametricTube) {
             applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
@@ -24355,8 +24406,12 @@ class ThreeJSViewer {
                                 obj.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
                             } else {
                                 // setColors rebuilds the instanceColorStart/End
-                                // instanced attributes on the LineGeometry.
+                                // instanced attributes on the LineGeometry; a
+                                // cut frontier segment is restored and cut again.
+                                const cut = obj.userData.lineFrontier ? obj.userData.pickDrawFrac : null;
+                                if (cut != null) applyFatLineDrawRange(obj, 1);
                                 obj.geometry.setColors(colorData);
+                                if (cut != null) applyFatLineDrawRange(obj, cut);
                             }
                             // If the polyline was created without vertex colors,
                             // the material is in flat-color mode — flip it.
