@@ -832,6 +832,8 @@ class ViewerClient:
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
+        # Navigation mode set via set_navigation, merged; re-sent on reconnect.
+        self._navigation: Optional[dict] = None
         # Accumulated set_sun fields, re-sent on reconnect.
         self._sun_state: Dict[str, Any] = {}
         # Runtime set_display_quality value, re-sent on reconnect.
@@ -1113,6 +1115,13 @@ class ViewerClient:
         if self._toolbar_visible is not None:
             try:
                 websocket.send(json.dumps(self._toolbar_visible))
+            except Exception:
+                pass
+
+        # Re-apply the navigation mode (set_navigation).
+        if self._navigation is not None:
+            try:
+                websocket.send(json.dumps(self._navigation))
             except Exception:
                 pass
 
@@ -5213,6 +5222,45 @@ class ViewerClient:
         if projection is not None:
             msg["projection"] = _validate_projection(projection)
         self._send(msg)
+
+    def set_navigation(
+        self,
+        rotate: Optional[bool] = None,
+        pan: Optional[bool] = None,
+        zoom: Optional[bool] = None,
+        left_button: Optional[str] = None,
+    ) -> None:
+        """Choose which gestures move the camera. Omitted fields are unchanged.
+
+        A plan view that pans and zooms but never rotates is
+        ``set_navigation(rotate=False, left_button="pan")``. While rotation is
+        off a click does not move the orbit pivot; the gimbal's axis bubbles,
+        the projection key, button and menu item, and the V key do nothing;
+        and Home, F and a double click on empty space frame the scene without
+        reorienting it. Polyline and tube picking keep the plain left click,
+        also when the left button pans. :meth:`set_projection` and
+        :meth:`set_camera` still change the view. Re-sent on reconnect.
+
+        Args:
+            rotate: Orbit with the left drag (or one finger).
+            pan: Pan with the right drag, Shift+left drag and two fingers.
+            zoom: Zoom with the wheel and a pinch.
+            left_button: ``"rotate"`` (default) or ``"pan"``: what a plain
+                left drag does.
+        """
+        msg: dict = {"type": "set_navigation"}
+        for key, value in (("rotate", rotate), ("pan", pan), ("zoom", zoom)):
+            if value is not None:
+                msg[key] = bool(value)
+        if left_button is not None:
+            if left_button not in ("rotate", "pan"):
+                raise ValueError(
+                    f"left_button must be 'rotate' or 'pan' (got {left_button!r})"
+                )
+            msg["leftButton"] = left_button
+        self._navigation = {**(self._navigation or {}), **msg}
+        if self._ws is not None:
+            self._send(msg)
 
     def set_projection(self, mode: str) -> None:
         """Switch the camera projection, as the toolbar button and the O key do.

@@ -1391,6 +1391,25 @@ def test_set_projection_message(client):
         client.set_projection("iso")
 
 
+def test_set_navigation_message(connected_client):
+    client = connected_client
+    client.set_navigation(rotate=False, left_button="pan")
+    client.set_navigation(zoom=False)
+    assert client._messages == [
+        {"type": "set_navigation", "rotate": False, "leftButton": "pan"},
+        {"type": "set_navigation", "zoom": False},
+    ]
+    # Merged for the reconnect replay.
+    assert client._navigation == {
+        "type": "set_navigation",
+        "rotate": False,
+        "leftButton": "pan",
+        "zoom": False,
+    }
+    with pytest.raises(ValueError, match="left_button"):
+        client.set_navigation(left_button="orbit")
+
+
 # === set_view ===
 
 

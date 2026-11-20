@@ -30,6 +30,7 @@ const VIEWER_VERSION = '0.0.0-dev';
 // page can use them and still run against an older viewer that lacks them.
 const VIEWER_FEATURES = Object.freeze([
     'set_projection',
+    'set_navigation',
 ]);
 
 /**
@@ -17330,7 +17331,7 @@ export class ThreeJSViewer {
                 { type: 'segmented', id: 'projection', label: 'Projection', shortcut: 'O',
                   options: [{ value: 'persp', label: 'Persp' }, { value: 'ortho', label: 'Ortho' }],
                   value: () => v._isOrtho ? 'ortho' : 'persp',
-                  onChange: (val) => { if ((val === 'ortho') !== !!v._isOrtho) v._switchCamera(val === 'ortho'); } },
+                  onChange: (val) => { if ((val === 'ortho') !== !!v._isOrtho) v._userSwitchCamera(val === 'ortho'); } },
                 { type: 'segmented', id: 'orbit', label: 'Orbit', shortcut: 'R',
                   hint: 'Turntable keeps Z up; Free is trackball-style. Hold Alt while dragging for the other mode.',
                   options: [{ value: 'turntable', label: 'Turntable' }, { value: 'free', label: 'Free' }],
@@ -17846,7 +17847,7 @@ export class ThreeJSViewer {
         this._renderer.domElement.addEventListener('dblclick', (e) => {
             if (!this._dblclickFrame || this.isGizmoHandleActive()) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
-            if (hit) this.frameObject(hit.object); else this.resetView();
+            if (hit) this.frameObject(hit.object); else this._userResetView();
         });
         // Single-click object pick (issue #178). Fires on pointerup rather than
         // `click` so the button is known and a right-click reports too. A press
@@ -18572,6 +18573,7 @@ export class ThreeJSViewer {
 
     /** Snap an orthographic camera onto the clip normal (the `V` key). */
     _viewAlongClipNormal() {
+        if (this._rotationLocked()) return;
         const center = this._clipPlane.normal.clone().multiplyScalar(this._clipPosition);
         this._controls.target.copy(center);
         const camPos = center.clone().addScaledVector(this._clipPlane.normal, 50);
@@ -18879,6 +18881,24 @@ export class ThreeJSViewer {
 
     /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
+
+    /** True while the navigation mode has rotation off: user input keeps the view direction. */
+    _rotationLocked() { return !this._controls.enableRotate; }
+
+    /**
+     * A projection switch the user asked for (O key, button, View menu). A view
+     * without rotation keeps its projection; `set_projection` still switches it.
+     * @param {boolean} toOrtho
+     */
+    _userSwitchCamera(toOrtho) {
+        if (this._rotationLocked()) return;
+        this._switchCamera(toOrtho);
+    }
+
+    /** Home, F, the Home button and a double click on empty space: reorient and frame, or only frame while rotation is off. */
+    _userResetView() {
+        if (this._rotationLocked()) this.frameAll(); else this.resetView();
+    }
 
     // ========== Object Management ==========
 
@@ -20994,7 +21014,7 @@ export class ThreeJSViewer {
         // Home button: bottom of the orbit / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
-                this.resetView();
+                this._userResetView();
                 this._viewHomeBtn.blur();
             });
         }
@@ -21010,7 +21030,7 @@ export class ThreeJSViewer {
         // false, so auto-projection never overrides it.
         if (this._viewProjBtn) {
             this._viewProjBtn.addEventListener('click', () => {
-                this._switchCamera(!this._isOrtho);
+                this._userSwitchCamera(!this._isOrtho);
                 this._viewProjBtn.blur();
             });
             this._updateProjButton();
@@ -21065,7 +21085,7 @@ export class ThreeJSViewer {
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
-                this._switchCamera(!this._isOrtho);
+                this._userSwitchCamera(!this._isOrtho);
                 return;
             }
             if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey) {
@@ -21101,12 +21121,12 @@ export class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey) {
-                this.resetView();
+                this._userResetView();
                 return;
             }
             if (e.code === 'Home' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !this._animation) {
                 e.preventDefault();
-                this.resetView();
+                this._userResetView();
                 return;
             }
 
@@ -23422,6 +23442,9 @@ export class ThreeJSViewer {
             case 'set_projection':
                 this.setProjection(data.mode);
                 break;
+            case 'set_navigation':
+                this.setNavigation(data);
+                break;
             case 'set_view':
                 this.setView(data.name, { animate: data.animate !== false });
                 break;
@@ -24401,7 +24424,7 @@ export class ThreeJSViewer {
      * @param {string} view one of GIZMO_SPRITE_VIEWS' target views
      */
     _gizmoAxisClick(view) {
-        if (!VIEW_PRESETS[view]) return;
+        if (!VIEW_PRESETS[view] || this._rotationLocked()) return;
         const effective = (this._isOrtho && this._gizmoAxisView === view && OPPOSITE_VIEW[view])
             ? OPPOSITE_VIEW[view]
             : view;
@@ -24885,6 +24908,30 @@ export class ThreeJSViewer {
      * @param {boolean} enabled
      */
     setControlsEnabled(enabled) { this._controls.enabled = !!enabled; }
+
+    /**
+     * Choose which gestures move the camera, e.g. a plan view that pans and
+     * zooms but never rotates: `{rotate: false, leftButton: 'pan'}`. Fields
+     * left out are unchanged. While rotation is off a click does not move the
+     * orbit pivot, the gimbal's axis bubbles, the projection key, button and
+     * menu item, and the V key do nothing, and Home, F and a double click on
+     * empty space frame the scene without reorienting it. Picking keeps the
+     * plain left click, also when the left button pans. Also the
+     * implementation behind the `set_navigation` message.
+     * @param {{rotate?: boolean, pan?: boolean, zoom?: boolean, leftButton?: 'rotate' | 'pan'}} opts
+     */
+    setNavigation(opts) {
+        if (!opts) return;
+        if (opts.leftButton != null && opts.leftButton !== 'rotate' && opts.leftButton !== 'pan') {
+            console.warn(`setNavigation: leftButton is 'rotate' or 'pan', got '${opts.leftButton}'`);
+        }
+        this._controls.setNavigation(opts);
+        this._viewProjBtn?.classList.toggle('tjsv-locked', this._rotationLocked());
+        this._menus?.refresh();
+    }
+
+    /** @returns {{rotate: boolean, pan: boolean, zoom: boolean, leftButton: 'rotate' | 'pan'}} the navigation mode */
+    getNavigation() { return this._controls.getNavigation(); }
 
     /**
      * Set the scene background colour, for embedders that theme the viewer.

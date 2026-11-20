@@ -1,9 +1,12 @@
 """Browser tests for the plan-view additions: projection, navigation, camera events,
 depth order, add completion and tube picking."""
 
+import math
+
+import numpy as np
 import pytest
 
-from conftest import settle
+from conftest import frames, settle
 
 pytestmark = pytest.mark.browser
 
@@ -74,3 +77,121 @@ def test_set_camera_projection_lands_with_the_pose(viewer_client, viewer_page):
     pose = viewer_page.evaluate(_POSE_JS)
     assert pose["projection"] == "perspective"
     assert _vec(pose["position"]) == pytest.approx([5, -5, 5], abs=1e-9)
+
+
+_PROJECT_JS = """([x, y, z]) => {
+    const v = window.threejsViewer;
+    const r = v.getCanvas().getBoundingClientRect();
+    v._camera.updateMatrixWorld(true);
+    const p = new v._camera.position.constructor(x, y, z).project(v._camera);
+    return [r.left + (p.x + 1) / 2 * r.width, r.top + (1 - p.y) / 2 * r.height];
+}"""
+
+
+def _plan_view(viewer_client, viewer_page):
+    """A polyline seen from above in orthographic, left drag panning, rotation off."""
+    pts = np.array([[-2, 0, 0], [0, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("path", pts, color=0x44AAFF, line_width=6)
+    viewer_client.set_camera(
+        position=[0, 0, 10],
+        target=[0, 0, 0],
+        up=[0, 1, 0],
+        zoom=2,
+        projection="orthographic",
+    )
+    viewer_client.set_navigation(rotate=False, left_button="pan")
+    settle(viewer_client)
+    frames(viewer_page)
+
+
+def _dir(pose):
+    d = [pose["position"][k] - pose["target"][k] for k in "xyz"]
+    n = math.sqrt(sum(x * x for x in d))
+    return [x / n for x in d]
+
+
+def test_navigation_left_drag_pans_without_rotating(viewer_client, viewer_page):
+    _plan_view(viewer_client, viewer_page)
+    nav = viewer_page.evaluate("() => window.threejsViewer.getNavigation()")
+    assert nav == {"rotate": False, "pan": True, "zoom": True, "leftButton": "pan"}
+    before = viewer_page.evaluate(_POSE_JS)
+    box = viewer_page.locator("canvas").first.bounding_box()
+    x, y = box["x"] + box["width"] * 0.3, box["y"] + box["height"] * 0.7
+    viewer_page.mouse.move(x, y)
+    viewer_page.mouse.down()
+    viewer_page.mouse.move(x + 120, y - 60, steps=10)
+    viewer_page.mouse.up()
+    frames(viewer_page, 30)
+    after = viewer_page.evaluate(_POSE_JS)
+    assert _dir(after) == pytest.approx(_dir(before), abs=1e-9)
+    assert _vec(after["up"]) == pytest.approx(_vec(before["up"]), abs=1e-9)
+    moved = [after["target"][k] - before["target"][k] for k in "xyz"]
+    assert abs(moved[0]) > 0.1 and abs(moved[2]) < 1e-9, moved
+
+
+def test_navigation_click_picks_without_moving_the_pivot(viewer_client, viewer_page):
+    """A plain click on a line picks it while the left button pans, and does not
+    move the orbit target (click-to-pivot is off with rotation)."""
+    _plan_view(viewer_client, viewer_page)
+    viewer_page.evaluate(
+        "() => { window.__picks = [];"
+        " window.threejsViewer.onPolylinePick(p => window.__picks.push(p)); }"
+    )
+    before = viewer_page.evaluate(_POSE_JS)
+    cx, cy = viewer_page.evaluate(_PROJECT_JS, [1.0, 0.0, 0.0])
+    viewer_page.mouse.move(cx, cy)
+    frames(viewer_page)
+    viewer_page.mouse.down()
+    viewer_page.mouse.up()
+    frames(viewer_page, 3)
+    picks = viewer_page.evaluate("() => window.__picks")
+    assert picks and picks[-1]["id"] == "path"
+    assert picks[-1]["point"]["x"] == pytest.approx(1.0, abs=0.05)
+    after = viewer_page.evaluate(_POSE_JS)
+    assert _vec(after["target"]) == pytest.approx(_vec(before["target"]), abs=1e-12)
+    assert _vec(after["position"]) == pytest.approx(_vec(before["position"]), abs=1e-12)
+
+
+def test_navigation_without_rotation_keeps_the_view(viewer_client, viewer_page):
+    """With rotation off the projection key, the gimbal's axis bubbles and the
+    projection button keep the view; F frames without reorienting; set_projection
+    still switches."""
+    _plan_view(viewer_client, viewer_page)
+    before = viewer_page.evaluate(_POSE_JS)
+    viewer_page.locator("canvas").first.focus()
+    viewer_page.keyboard.press("o")
+    viewer_page.evaluate("() => window.threejsViewer._gizmoAxisClick('front')")
+    viewer_page.evaluate("() => document.querySelector('.tjsv-view-proj').click()")
+    frames(viewer_page, 30)
+    after = viewer_page.evaluate(_POSE_JS)
+    assert after["projection"] == "orthographic"
+    assert _dir(after) == pytest.approx(_dir(before), abs=1e-9)
+    viewer_page.keyboard.press("f")
+    frames(viewer_page, 30)
+    framed = viewer_page.evaluate(_POSE_JS)
+    assert _dir(framed) == pytest.approx(_dir(before), abs=1e-9)
+    assert _vec(framed["up"]) == pytest.approx([0, 1, 0], abs=1e-9)
+    viewer_client.set_projection("perspective")
+    settle(viewer_client)
+    assert viewer_page.evaluate(_POSE_JS)["projection"] == "perspective"
+
+
+def test_navigation_zoom_off_ignores_the_wheel(viewer_client, viewer_page):
+    _plan_view(viewer_client, viewer_page)
+    viewer_client.set_navigation(zoom=False)
+    settle(viewer_client)
+    before = viewer_page.evaluate(_POSE_JS)
+    box = viewer_page.locator("canvas").first.bounding_box()
+    viewer_page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    viewer_page.mouse.wheel(0, -400)
+    frames(viewer_page, 5)
+    assert viewer_page.evaluate(_POSE_JS)["zoom"] == pytest.approx(before["zoom"])
+    # Defaults restore orbiting.
+    viewer_client.set_navigation(rotate=True, zoom=True, left_button="rotate")
+    settle(viewer_client)
+    assert viewer_page.evaluate("() => window.threejsViewer.getNavigation()") == {
+        "rotate": True,
+        "pan": True,
+        "zoom": True,
+        "leftButton": "rotate",
+    }

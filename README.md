@@ -264,7 +264,12 @@ v.set_camera(position=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0],
              projection="orthographic")   # pose and projection in one frame
 v.set_projection("perspective")            # or switch on its own
 v.get_camera()["projection"]               # "perspective" | "orthographic"
+v.set_navigation(rotate=False, left_button="pan")   # pan and zoom only
 ```
+
+While rotation is off a click never moves the orbit pivot, picking keeps the plain left
+click, the gimbal bubbles and the projection key, button and menu item leave the view alone,
+and Home, F and a double click on empty space frame without reorienting. JS: `viewer.setNavigation({rotate, pan, zoom, leftButton})`.
 
 In JS the same calls are `viewer.setProjection(mode)`, `viewer.setCameraPose({..., projection})`
 and `viewer.getCameraPose().projection`. `viewer.hasFeature(name)` tells an embedder

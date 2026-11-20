@@ -15,6 +15,10 @@
 // the camera. Because update() never calls camera.lookAt(target), the view does not
 // shift; subsequent left-drag orbits exactly around the new pivot.
 //
+// Navigation mode (setNavigation): rotate, pan and zoom can each be switched off, and
+// leftButton: 'pan' makes a plain left drag pan (a plan view). With rotation off a click
+// never moves the pivot.
+//
 // Pan (right-drag or shift+left-drag): translates camera + target together in screen
 // space. Wheel: dollies camera toward/away from the point under the cursor
 // (perspective) or scales zoom about the cursor (orthographic), shifting `target`
@@ -30,6 +34,7 @@
 //   ctrl.dispose()        — removes listeners
 //   ctrl.setMode(mode)
 //   ctrl.setRaycastObjects(getterFn)  // () => Iterable<Object3D>
+//   ctrl.setNavigation({rotate, pan, zoom, leftButton}) / ctrl.getNavigation()
 //   ctrl.addEventListener('change', fn) / removeEventListener
 //
 // Implementation note on the no-view-shift guarantee:
@@ -80,6 +85,12 @@ class ViewerControls extends THREE.EventDispatcher {
 
         this.enabled = true;
         this.mode = 'turntable';
+        // Navigation mode (setNavigation): which gestures move the camera.
+        this.enableRotate = true;
+        this.enablePan = true;
+        this.enableZoom = true;
+        /** @type {'rotate' | 'pan'} */
+        this.leftButton = 'rotate';
         this.target = new THREE.Vector3();
 
         this._state = STATE.NONE;
@@ -174,6 +185,41 @@ class ViewerControls extends THREE.EventDispatcher {
         this.mode = mode;
     }
 
+    /**
+     * Choose which gestures move the camera. Fields left out are unchanged.
+     * `leftButton: 'pan'` makes a plain left drag pan; Shift+left and the
+     * right button pan either way. Rotation off also stops a click from
+     * moving the orbit pivot. Switching rotation or pan off drops their inertia.
+     * @param {{rotate?: boolean, pan?: boolean, zoom?: boolean, leftButton?: 'rotate' | 'pan'}} opts
+     */
+    setNavigation(opts) {
+        if (typeof opts.rotate === 'boolean') this.enableRotate = opts.rotate;
+        if (typeof opts.pan === 'boolean') this.enablePan = opts.pan;
+        if (typeof opts.zoom === 'boolean') this.enableZoom = opts.zoom;
+        if (opts.leftButton === 'rotate' || opts.leftButton === 'pan') this.leftButton = opts.leftButton;
+        if (!this.enableRotate) { this._rotDeltaTheta = 0; this._rotDeltaPhi = 0; }
+        if (!this.enablePan) { this._panDeltaX = 0; this._panDeltaY = 0; }
+    }
+
+    /** @returns {{rotate: boolean, pan: boolean, zoom: boolean, leftButton: 'rotate' | 'pan'}} */
+    getNavigation() {
+        return { rotate: this.enableRotate, pan: this.enablePan, zoom: this.enableZoom, leftButton: this.leftButton };
+    }
+
+    /**
+     * The drag a button starts under the navigation mode, NONE when that gesture is off.
+     * @param {number} button @param {boolean} shift
+     */
+    _dragState(button, shift) {
+        let state;
+        if (button === 0) state = (shift || this.leftButton === 'pan') ? STATE.PAN : STATE.ROTATE;
+        else if (button === 2) state = STATE.PAN;
+        else return STATE.NONE;
+        if (state === STATE.ROTATE && !this.enableRotate) return STATE.NONE;
+        if (state === STATE.PAN && !this.enablePan) return STATE.NONE;
+        return state;
+    }
+
     setRaycastObjects(getter) {
         this._raycastObjectsGetter = getter;
     }
@@ -238,21 +284,17 @@ class ViewerControls extends THREE.EventDispatcher {
 
         // Decide intent. Shift+left = pan (existing). Alt+left = rotate, but with
         // the OPPOSITE rotation mode (temporary flip — released when Alt comes up).
-        let nextState = STATE.NONE;
-        if (e.button === 0) {
-            if (e.shiftKey) nextState = STATE.PAN;
-            else nextState = STATE.ROTATE;
-        } else if (e.button === 2) {
-            nextState = STATE.PAN;
-        } else {
-            return;
-        }
+        // The navigation mode can map a plain left drag to pan or switch a gesture off.
+        if (e.button !== 0 && e.button !== 2) return;
+        const nextState = this._dragState(e.button, e.shiftKey);
 
         // Click-to-pivot: on left-click without pan modifiers. Alt is OK (it's
-        // our temp-mode-flip modifier, not a pan modifier).
-        if (e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        // our temp-mode-flip modifier, not a pan modifier). The pivot only
+        // serves orbiting, so a view that cannot rotate keeps its pivot.
+        if (e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey && this.enableRotate) {
             this._tryPickPivot(e);
         }
+        if (nextState === STATE.NONE) return;
 
         // Lock the rotation mode for the entire drag — toggling Alt mid-stroke
         // must not switch axes mid-rotation.
@@ -282,6 +324,10 @@ class ViewerControls extends THREE.EventDispatcher {
     }
 
     _startPinch() {
+        // The first finger may have started no drag (its gesture is off), so listen here too.
+        window.addEventListener('pointermove', this._onPointerMove);
+        window.addEventListener('pointerup', this._onPointerUp);
+        window.addEventListener('pointercancel', this._onPointerUp);
         this._state = STATE.TOUCH;
         this._activePointerId = null;
         this._dragMode = null;
@@ -304,12 +350,12 @@ class ViewerControls extends THREE.EventDispatcher {
         const prev = this._pinch;
         const next = this._pinchSample({ dist: 0, x: 0, y: 0 });
         const rect = this.domElement.getBoundingClientRect();
-        if (prev.dist > 0 && next.dist > 0) {
+        if (prev.dist > 0 && next.dist > 0 && this.enableZoom) {
             const ndcX = ((next.x - rect.left) / Math.max(1, rect.width)) * 2 - 1;
             const ndcY = -((next.y - rect.top) / Math.max(1, rect.height)) * 2 + 1;
             this._applyZoom(next.dist / prev.dist, ndcX, ndcY);
         }
-        this._addPan(next.x - prev.x, next.y - prev.y, Math.max(1, rect.height));
+        if (this.enablePan) this._addPan(next.x - prev.x, next.y - prev.y, Math.max(1, rect.height));
         this._pinch = next;
         this.dispatchEvent(_changeEvent);
     }
@@ -361,9 +407,9 @@ class ViewerControls extends THREE.EventDispatcher {
             if (this._state === STATE.TOUCH) {
                 if (this._touches.size >= 2) { this._pinchSample(this._pinch); return; }
                 if (this._touches.size === 1) {
-                    // The finger left behind rotates from where it is, so the view does not jump.
+                    // The finger left behind drags from where it is, so the view does not jump.
                     const [[id, t]] = this._touches;
-                    this._state = STATE.ROTATE;
+                    this._state = this._dragState(0, false);
                     this._activePointerId = id;
                     this._altHeld = false;
                     this._dragMode = this._effectiveMode();
@@ -386,7 +432,7 @@ class ViewerControls extends THREE.EventDispatcher {
     }
 
     _onWheel(e) {
-        if (!this.enabled) return;
+        if (!this.enabled || !this.enableZoom) return;
         e.preventDefault();
         // Positive deltaY = scroll down = zoom out; scale >1 zooms in (dist/scale)
         const scale = Math.pow(ZOOM_SCALE_PER_WHEEL, e.deltaY / 100);

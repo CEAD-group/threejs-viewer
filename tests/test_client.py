@@ -1227,6 +1227,18 @@ def test_reconnect_replays_runtime_lighting_state(bound_client):
     assert seen["set_cubemap"]["name"] == "paul-lobe-haus"
 
 
+def test_reconnect_replays_navigation_mode(bound_client):
+    """set_navigation calls merge into one state that is sent on connect."""
+    bound_client.set_navigation(rotate=False)
+    bound_client.set_navigation(left_button="pan")
+    with ws_connect(f"ws://127.0.0.1:{bound_client.port}", open_timeout=5) as ws:
+        while True:
+            msg = json.loads(ws.recv(timeout=5))
+            if msg["type"] == "set_navigation":
+                break
+    assert msg == {"type": "set_navigation", "rotate": False, "leftButton": "pan"}
+
+
 def test_dimension_specs_record_for_reconnect_and_survive_clear():
     """add_dimension normalises and records its spec without a connected
     viewer; clear() keeps dimensions, clear_dimensions() drops them."""
