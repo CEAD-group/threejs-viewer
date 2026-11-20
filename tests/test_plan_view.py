@@ -565,3 +565,46 @@ def test_bottom_inset_lifts_the_gizmo_stack(viewer_client, viewer_page):
     assert r["lifted"]["css"] == pytest.approx(r["before"]["css"] + 60)
     assert r["before"]["btn"] - r["lifted"]["btn"] == pytest.approx(60, abs=1)
     assert r["after"] == r["before"]
+
+
+def test_set_rendering_off_keeps_playback_and_draws_nothing(viewer_client, viewer_page):
+    """With drawing off the playback clock runs and messages apply, but no frame is
+    rendered; turning it on draws the current state."""
+    from threejs_viewer import Animation, Frame
+
+    viewer_client.add_box("b")
+    viewer_client.load_animation(
+        Animation(
+            frames=[
+                Frame(
+                    time=0.0,
+                    transforms={"b": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]},
+                ),
+                Frame(
+                    time=10.0,
+                    transforms={"b": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1]},
+                ),
+            ],
+            loop=False,
+        )
+    )
+    settle(viewer_client)
+    viewer_client.set_rendering(False)
+    settle(viewer_client)
+    js = """async () => {
+        const v = window.threejsViewer;
+        v.setAnimationPlaying(true);
+        const f0 = v._renderer.info.render.frame, t0 = v.getAnimationState().time;
+        await new Promise((r) => setTimeout(r, 400));
+        const off = { frames: v._renderer.info.render.frame - f0, dt: v.getAnimationState().time - t0,
+                      rendering: v.isRendering() };
+        v.setRendering(true);
+        const f1 = v._renderer.info.render.frame;
+        await new Promise((r) => setTimeout(r, 200));
+        return { off, on: v._renderer.info.render.frame - f1, feature: v.hasFeature('set_rendering') };
+    }"""
+    r = viewer_page.evaluate(js)
+    assert r["feature"] and not r["off"]["rendering"]
+    assert r["off"]["frames"] == 0
+    assert r["off"]["dt"] > 0.2
+    assert r["on"] > 0

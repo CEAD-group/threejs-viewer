@@ -1790,6 +1790,7 @@ const VIEWER_FEATURES = Object.freeze([
     'tube_pick',
     'line_draw_frontier',
     'bottom_inset',
+    'set_rendering',
 ]);
 
 /**
@@ -19441,6 +19442,7 @@ class ThreeJSViewer {
         this._animLiftCss = 0;
         this._animToolbarH = 0;
         this._bottomInset = 0;
+        this._renderingOff = false;
         // Toolbar height tracks viewport width: the timeline-row wraps when
         // controls don't fit, so the lift is a function of viewport size, not
         // just show/hide state. Observe the toolbar and push its height into
@@ -25519,6 +25521,9 @@ class ThreeJSViewer {
             case 'set_projection':
                 this.setProjection(data.mode);
                 break;
+            case 'set_rendering':
+                this.setRendering(data.enabled !== false);
+                break;
             case 'set_navigation':
                 this.setNavigation(data);
                 break;
@@ -25908,6 +25913,8 @@ class ThreeJSViewer {
                 this._lastUIUpdate = now;
             }
         }
+        // setRendering(false): the playback clock above keeps running, nothing is drawn.
+        if (this._renderingOff) return;
 
         // Live jog/drag clip bindings (issue #225) — unaffected by, and runs
         // regardless of, recorded-animation scrubbing above (that path drives
@@ -26198,6 +26205,20 @@ class ThreeJSViewer {
             });
         this._offscreenObserver?.observe(this.el);
     }
+
+    /**
+     * Stop or restart drawing while keeping the loop: with `enabled` false the
+     * playback clock, its onAnimationTime hooks and the transport keep running
+     * and messages still apply, but no frame is rendered, for a page that
+     * covers the canvas with a view of its own. The next frame after turning
+     * it back on renders the current state.
+     * @param {boolean} enabled
+     */
+    setRendering(enabled) {
+        this._renderingOff = !enabled;
+    }
+    /** @returns {boolean} whether frames are rendered (setRendering) */
+    isRendering() { return !this._renderingOff; }
 
     /** @returns {boolean} whether pause() has stopped the render loop */
     isPaused() {

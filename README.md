@@ -290,6 +290,11 @@ that measures or adjusts a new object needs no polling.
 at the bottom of the canvas: the view gimbal and its orbit / P / Home buttons move up by `px`,
 and their hit-testing follows. `hasFeature('bottom_inset')` marks it.
 
+`viewer.setRendering(false)` (`set_rendering` from Python) stops drawing frames while keeping the
+loop: the playback clock, its `onAnimationTime` hooks and the transport keep running and messages
+still apply, for a page that covers the canvas with a view of its own. `setRendering(true)` draws
+the current state on the next frame. `hasFeature('set_rendering')` marks it.
+
 Coplanar paths, such as a planned and a measured one, are ordered with `depth_offset` on
 `add_polyline` / `add_parametric_tube` (`depthOffset` on the messages): a depth bias toward
 the camera in world units, applied in the shader, so nothing moves on screen and native lines
