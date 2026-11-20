@@ -400,3 +400,69 @@ def test_orthographic_near_far_fit_the_scene(viewer_client, viewer_page):
     r = math.sqrt(3) / 2
     assert 20 - 1.2 * r < near < 20 - r, near
     assert 20 + r < far < 20 + 1.2 * r, far
+
+
+def test_tube_hover_payload(viewer_client, viewer_page):
+    """Hover over a parametric tube reports the polyline payload with kind 'tube':
+    id, segment, t, point, on the bead body as well as on its spine."""
+    spine = np.array([[-1, 0, 0], [0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    w = np.full(3, 0.2, dtype=np.float32)
+    viewer_client.add_parametric_tube("bead", spine, w, w, color=0xFF0000)
+    _top_view(viewer_client)
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { window.__hov = [];"
+        " window.threejsViewer.onPolylineHover(p => window.__hov.push(p)); }"
+    )
+    frames(viewer_page)
+    for y in (0.0, 0.08):  # on the spine, then on the bead body off the spine
+        x, yy = viewer_page.evaluate(_PROJECT_JS, [0.5, y, 0.0])
+        viewer_page.mouse.move(x, yy)
+        frames(viewer_page, 3)
+        pick = viewer_page.evaluate("() => window.__hov[window.__hov.length - 1]")
+        assert pick["id"] == "bead" and pick["kind"] == "tube"
+        assert pick["segment"] == 1 and pick["t"] == pytest.approx(0.5, abs=0.02)
+        assert pick["point"]["x"] == pytest.approx(0.5, abs=0.02)
+        assert pick["point"]["y"] == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("projection", ["orthographic", "perspective"])
+def test_pick_index_matches_the_full_scan(viewer_client, viewer_page, projection):
+    """On a long spine the box index finds the same segment and t as scanning
+    every segment, including where the path doubles back on itself."""
+    n = 20_000
+    s = np.linspace(0, 1, n)
+    spine = np.stack(
+        [np.sin(40 * np.pi * s), 2 * s - 1, 0.01 * np.cos(7 * np.pi * s)], 1
+    )
+    w = np.full(n, 0.02, dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "long", spine.astype(np.float32), w, w, color=0xFF0000
+    )
+    viewer_client.add_polyline(
+        "line", (spine * [1, 1, 0] + [0, 0, 0.2]).astype(np.float32)
+    )
+    if projection == "orthographic":
+        _top_view(viewer_client)
+    else:
+        viewer_client.set_camera(
+            position=[1.5, -2, 2.5],
+            target=[0, 0, 0],
+            up=[0, 0, 1],
+            projection="perspective",
+        )
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    same, hits = viewer_page.evaluate(
+        """() => { const v = window.threejsViewer; v.enablePolylinePicking({});
+        const r = v.getCanvas().getBoundingClientRect(), pp = v._polylinePick;
+        const run = (idx) => { pp.useIndex = idx; const out = [];
+            for (let i = 0; i < 15; i++) for (let j = 0; j < 15; j++) {
+                const h = pp._pickAt(r.left + r.width * (0.2 + 0.04 * i), r.top + r.height * (0.2 + 0.04 * j));
+                out.push(h && [h.id, h.segment, Math.round(h.t * 1e6)]); }
+            return out; };
+        const full = run(false), indexed = run(true);
+        return [JSON.stringify(full) === JSON.stringify(indexed), indexed.filter(Boolean).length]; }"""
+    )
+    assert same
+    assert hits > 20

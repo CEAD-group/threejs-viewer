@@ -1787,6 +1787,7 @@ const VIEWER_FEATURES = Object.freeze([
     'camera_change',
     'object_ready',
     'depth_offset',
+    'tube_pick',
 ]);
 
 /**
@@ -16350,6 +16351,12 @@ class VectorEntityController {
 //
 // The marker lives in the scene like the pivot marker (NOT in `_objects`) so it
 // can't be picked or treated as a public object, and it survives clear_scene.
+// Pick index (PolylinePickController._ensurePickIndex): segments per leaf box,
+// leaves per branch box, and the spine length from which it pays off.
+const PICK_INDEX_LEAF = 64;
+const PICK_INDEX_BRANCH = 64;
+const PICK_INDEX_MIN_NODES = 2048;
+
 class PolylinePickController {
     /** @param {ThreeJSViewer} viewer */
     constructor(viewer) {
@@ -16365,6 +16372,8 @@ class PolylinePickController {
         // Drop candidates hidden behind a bead the cursor ray enters first
         // (issue #311). `false` restores plain screen-nearest selection.
         this.occlusion = true;
+        // Box index over long spines (_scanIndexed); off only to compare against the full scan.
+        this.useIndex = true;
         /** @type {{id:string, kind:string, segment:number, t:number, fraction:number, point:THREE.Vector3}|null} */
         this.hover = null;
 
@@ -16666,6 +16675,104 @@ class PolylinePickController {
     }
 
     /**
+     * Lazily build a two-level box index over a spine: local AABBs of runs of
+     * PICK_INDEX_LEAF segments and of PICK_INDEX_BRANCH leaves, inflated by
+     * the run's largest tube half-extent so a box holds the whole bead. Built
+     * once per spine (O(n)) and cached like the arc-length table.
+     * @param {any} ud @param {Float32Array} pts @param {number} n @param {Float32Array|null} halfExtents
+     */
+    _ensurePickIndex(ud, pts, n, halfExtents) {
+        const cached = ud.pickIndex;
+        if (cached && cached.pts === pts && cached.n === n && cached.ext === halfExtents) return cached;
+        const nLeaf = Math.ceil((n - 1) / PICK_INDEX_LEAF);
+        const leaves = new Float32Array(nLeaf * 6);
+        for (let c = 0; c < nLeaf; c++) {
+            const a = c * PICK_INDEX_LEAF, b = Math.min(n - 1, a + PICK_INDEX_LEAF);
+            let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity, e = 0;
+            for (let i = a; i <= b; i++) {
+                const x = pts[i * 3], y = pts[i * 3 + 1], z = pts[i * 3 + 2];
+                if (x < x0) x0 = x; if (x > x1) x1 = x;
+                if (y < y0) y0 = y; if (y > y1) y1 = y;
+                if (z < z0) z0 = z; if (z > z1) z1 = z;
+                if (halfExtents && halfExtents[i] > e) e = halfExtents[i];
+            }
+            leaves.set([x0 - e, y0 - e, z0 - e, x1 + e, y1 + e, z1 + e], c * 6);
+        }
+        const nBranch = Math.ceil(nLeaf / PICK_INDEX_BRANCH);
+        const branches = new Float32Array(nBranch * 6);
+        for (let g = 0; g < nBranch; g++) {
+            const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+            for (let c = g * PICK_INDEX_BRANCH; c < Math.min(nLeaf, (g + 1) * PICK_INDEX_BRANCH); c++) {
+                for (let k = 0; k < 3; k++) {
+                    box[k] = Math.min(box[k], leaves[c * 6 + k]);
+                    box[k + 3] = Math.max(box[k + 3], leaves[c * 6 + k + 3]);
+                }
+            }
+            branches.set(box, g * 6);
+        }
+        ud.pickIndex = { pts, n, ext: halfExtents, leaves, branches, nLeaf };
+        return ud.pickIndex;
+    }
+
+    /**
+     * Whether a local box can hold a point within `gate` px of the cursor: its
+     * eight corners projected to a screen rect, grown by the gate. A box with
+     * a corner behind a perspective camera is kept (its projection is not a rect).
+     * @param {Float32Array} boxes @param {number} i @param {Float64Array} m local to clip, column-major
+     * @param {number} W @param {number} H @param {number} cx @param {number} cy @param {number} gate
+     */
+    _boxNearCursor(boxes, i, m, W, H, cx, cy, gate) {
+        let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
+        const o = i * 6;
+        for (let k = 0; k < 8; k++) {
+            const x = boxes[o + (k & 1 ? 3 : 0)], y = boxes[o + (k & 2 ? 4 : 1)], z = boxes[o + (k & 4 ? 5 : 2)];
+            const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (!(w > 1e-9)) return true;
+            const sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / w * 0.5 + 0.5) * W;
+            const sy = (-(m[1] * x + m[5] * y + m[9] * z + m[13]) / w * 0.5 + 0.5) * H;
+            if (sx < sx0) sx0 = sx; if (sx > sx1) sx1 = sx;
+            if (sy < sy0) sy0 = sy; if (sy > sy1) sy1 = sy;
+        }
+        return cx >= sx0 - gate && cx <= sx1 + gate && cy >= sy0 - gate && cy <= sy1 + gate;
+    }
+
+    /**
+     * `_scanObjectSegments` over the full-resolution spine, skipping runs whose
+     * index box projects away from the cursor. Same hits as a full scan; the
+     * per-move cost is the visited boxes (n / 4096 + survivors' leaves) plus
+     * the segments of leaves near the cursor, instead of every segment.
+     * @param {any} ud @param {Float32Array} pts @param {number} n @param {THREE.Matrix4} mw @param {any} cam
+     * @param {number} W @param {number} H @param {number} cx @param {number} cy @param {boolean} isTube
+     * @param {Float32Array|null} halfExtents @param {number} lineGate @param {number} endNode @param {number} endT
+     * @returns {Array<{seg:number, end:number, dist2:number}>}
+     */
+    _scanIndexed(ud, pts, n, mw, cam, W, H, cx, cy, isTube, halfExtents, lineGate, endNode, endT) {
+        const index = this._ensurePickIndex(ud, pts, n, halfExtents);
+        const m = this._pickClip || (this._pickClip = new Float64Array(16));
+        const mm = this._pickClipM || (this._pickClipM = new THREE.Matrix4());
+        mm.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).multiply(mw);
+        for (let k = 0; k < 16; k++) m[k] = mm.elements[k];
+        // Boxes already hold the bead, so the screen gate is the pick radius plus a line's half width.
+        const gate = isTube ? this.thresholdPx : lineGate;
+        /** @type {Array<{seg:number, end:number, dist2:number}>} */
+        const hits = [];
+        const lastLeaf = Math.min(index.nLeaf - 1, Math.floor((endNode - 1) / PICK_INDEX_LEAF));
+        for (let g = 0; g * PICK_INDEX_BRANCH <= lastLeaf; g++) {
+            if (!this._boxNearCursor(index.branches, g, m, W, H, cx, cy, gate)) continue;
+            const cEnd = Math.min(lastLeaf, (g + 1) * PICK_INDEX_BRANCH - 1);
+            for (let c = g * PICK_INDEX_BRANCH; c <= cEnd; c++) {
+                if (!this._boxNearCursor(index.leaves, c, m, W, H, cx, cy, gate)) continue;
+                const a = c * PICK_INDEX_LEAF;
+                const b = Math.min(endNode, a + PICK_INDEX_LEAF);
+                const leafHits = this._scanObjectSegments(pts, n, mw, cam, W, H, cx, cy, isTube, halfExtents,
+                    lineGate, a, b, 1, b === endNode ? endT : 1);
+                for (const h of leafHits) hits.push(h);
+            }
+        }
+        return hits;
+    }
+
+    /**
      * Local spine point at node `j`, or for `endT < 1` the point `endT` of the
      * way from node `j - 1` to `j` (the drawn end of a frontier segment).
      * @param {Float32Array} pts @param {number} j @param {number} endT @param {THREE.Vector3} out
@@ -16830,7 +16937,9 @@ class PolylinePickController {
             // Decimate the coarse scan to ~maxPickPoints nodes for a big spine;
             // the winner is refined at full resolution below.
             const stride = (maxPP && endNode + 1 > maxPP) ? Math.ceil(endNode / (maxPP - 1)) : 1;
-            const hits = this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, endNode, stride, endT);
+            const hits = this.useIndex && stride === 1 && endNode >= PICK_INDEX_MIN_NODES
+                ? this._scanIndexed(ud, pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, endNode, endT)
+                : this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, endNode, stride, endT);
             for (const r of hits) {
                 cands.push({ o, ud, seg: r.seg, end: r.end, dist2: r.dist2, isTube, stride, n, endNode, endT });
             }
