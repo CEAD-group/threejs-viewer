@@ -256,6 +256,21 @@ JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)
 (every hover move) — for a live readout with no Python round-trip. See
 [examples/22_polyline_picking.py](examples/22_polyline_picking.py).
 
+### Camera projection and plan views
+
+```python
+# An orthographic plan view of one slice of a path, seen along its plane normal.
+v.set_camera(position=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0],
+             projection="orthographic")   # pose and projection in one frame
+v.set_projection("perspective")            # or switch on its own
+v.get_camera()["projection"]               # "perspective" | "orthographic"
+```
+
+In JS the same calls are `viewer.setProjection(mode)`, `viewer.setCameraPose({..., projection})`
+and `viewer.getCameraPose().projection`. `viewer.hasFeature(name)` tells an embedder
+whether the viewer it runs against has an optional addition (`viewer.features` lists them),
+so a page can fall back on an older release.
+
 ### Point clouds: live append, time windows & octree LOD
 
 ```python

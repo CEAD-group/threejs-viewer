@@ -288,6 +288,16 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
     return f
 
 
+_PROJECTIONS = ("perspective", "orthographic")
+
+
+def _validate_projection(value: str) -> str:
+    """Validate a camera projection name."""
+    if value not in _PROJECTIONS:
+        raise ValueError(f"projection must be one of {_PROJECTIONS} (got {value!r})")
+    return value
+
+
 # "Unbounded" sentinel for point-cloud time-window ends: NaN/±inf in
 # birth_times/removal_times are mapped to ±FLT_MAX before packing, because
 # NaN comparisons in GLSL are undefined and would make points flicker in or
@@ -5144,7 +5154,10 @@ class ViewerClient:
             raise TimeoutError("No response from viewer")
         response = self._responses.pop(request_id, {})
         self._pending_responses.pop(request_id, None)
-        return {k: response.get(k) for k in ("position", "target", "up", "fov", "zoom")}
+        return {
+            k: response.get(k)
+            for k in ("position", "target", "up", "fov", "zoom", "projection")
+        }
 
     def set_camera(
         self,
@@ -5153,6 +5166,7 @@ class ViewerClient:
         up: Optional[List[float]] = None,
         fov: Optional[float] = None,
         zoom: Optional[float] = None,
+        projection: Optional[str] = None,
     ) -> None:
         """Set the viewer camera pose. Omitted fields are left unchanged.
 
@@ -5166,6 +5180,9 @@ class ViewerClient:
                 (0, 180). Ignored while the orthographic camera is active.
             zoom: Camera zoom factor (> 0) — the framing control for the
                 orthographic camera.
+            projection: ``"perspective"`` or ``"orthographic"``. Applied
+                before the other fields, so the pose and the projection land
+                in the same frame (see :meth:`set_projection`).
 
         Pair with :meth:`get_camera` to capture a hand-tuned view and replay
         it from a script.
@@ -5193,7 +5210,20 @@ class ViewerClient:
             if z is not None and z <= 0:
                 raise ValueError(f"zoom must be > 0 (got {zoom!r})")
             msg["zoom"] = z
+        if projection is not None:
+            msg["projection"] = _validate_projection(projection)
         self._send(msg)
+
+    def set_projection(self, mode: str) -> None:
+        """Switch the camera projection, as the toolbar button and the O key do.
+
+        The view direction, target and apparent scale are kept.
+        :meth:`get_camera` reports the active projection.
+
+        Args:
+            mode: ``"perspective"`` or ``"orthographic"``.
+        """
+        self._send({"type": "set_projection", "mode": _validate_projection(mode)})
 
     def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
         """Toggle strand_collapse on a parametric_tube without re-uploading geometry.

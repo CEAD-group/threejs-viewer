@@ -1368,7 +1368,27 @@ def test_set_camera_validation(client):
         client.set_camera(fov=200)
     with pytest.raises(ValueError, match="zoom"):
         client.set_camera(zoom=0)
+    with pytest.raises(ValueError, match="projection"):
+        client.set_camera(projection="ortho")
     assert client._messages == []
+
+
+def test_set_camera_with_projection(client):
+    client.set_camera(target=[0, 0, 0], projection="orthographic")
+    assert client._messages == [
+        {"type": "set_camera", "target": [0.0, 0.0, 0.0], "projection": "orthographic"}
+    ]
+
+
+def test_set_projection_message(client):
+    client.set_projection("orthographic")
+    client.set_projection("perspective")
+    assert client._messages == [
+        {"type": "set_projection", "mode": "orthographic"},
+        {"type": "set_projection", "mode": "perspective"},
+    ]
+    with pytest.raises(ValueError, match="projection"):
+        client.set_projection("iso")
 
 
 # === set_view ===

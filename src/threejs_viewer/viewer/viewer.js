@@ -26,6 +26,12 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
 
+// Optional protocol additions an embedder can test for with `hasFeature`, so a
+// page can use them and still run against an older viewer that lacks them.
+const VIEWER_FEATURES = Object.freeze([
+    'set_projection',
+]);
+
 /**
  * Is this a development build rather than a released version?
  *
@@ -42,6 +48,9 @@ function isDevVersion(v) {
 }
 
 const ORTHO_FRUSTUM = 10;
+/** @typedef {'perspective' | 'orthographic'} CameraProjection */
+/** @type {ReadonlyArray<string>} */
+const CAMERA_PROJECTIONS = Object.freeze(['perspective', 'orthographic']);
 
 // Scene clear / background colour. Used both as scene.background (direct render
 // path) and as the canvas CSS background-color so it shows through where the
@@ -23404,10 +23413,14 @@ export class ThreeJSViewer {
                     up: [u.x, u.y, u.z],
                     fov: cam.isPerspectiveCamera ? cam.fov : null,
                     zoom: cam.zoom,
+                    projection: this.getProjection(),
                 });
             }
             case 'set_camera':
                 this.setCameraPose(data);
+                break;
+            case 'set_projection':
+                this.setProjection(data.mode);
                 break;
             case 'set_view':
                 this.setView(data.name, { animate: data.animate !== false });
@@ -24627,8 +24640,8 @@ export class ThreeJSViewer {
     /**
      * Read the live camera pose. `fov` is null while the ortho camera is
      * active; `zoom` is the ortho framing control (round-trips faithfully
-     * under both cameras).
-     * @returns {{position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number}}
+     * under both cameras); `projection` names the active camera.
+     * @returns {{position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number, projection:CameraProjection}}
      */
     getCameraPose() {
         const p = this._camera.position, t = this._controls.target, u = this._camera.up;
@@ -24639,7 +24652,27 @@ export class ThreeJSViewer {
             up: { x: u.x, y: u.y, z: u.z },
             fov: cam.isPerspectiveCamera ? cam.fov : null,
             zoom: cam.zoom,
+            projection: this.getProjection(),
         };
+    }
+
+    /** @returns {CameraProjection} the active camera's projection */
+    getProjection() { return this._isOrtho ? 'orthographic' : 'perspective'; }
+
+    /**
+     * Switch the camera projection, as the toolbar button and the O key do,
+     * keeping the view direction, target and apparent scale. Also the
+     * implementation behind the `set_projection` message.
+     * @param {CameraProjection} mode 'perspective' or 'orthographic'
+     * @returns {boolean} false (with a warning) for an unknown mode
+     */
+    setProjection(mode) {
+        if (!CAMERA_PROJECTIONS.includes(mode)) {
+            console.warn(`setProjection: unknown projection '${mode}' (perspective or orthographic)`);
+            return false;
+        }
+        this._switchCamera(mode === 'orthographic');
+        return true;
     }
 
     /**
@@ -24648,11 +24681,13 @@ export class ThreeJSViewer {
      * consistent and re-orients explicitly — ViewerControls.update()
      * deliberately never calls lookAt, so without it the camera would move
      * while still facing its old direction. Also the implementation behind
-     * the `set_camera` WS message.
-     * @param {{position?:any, target?:any, up?:any, fov?:number, zoom?:number}} pose
+     * the `set_camera` WS message. `projection` switches the camera first,
+     * so a pose and its projection land in the same frame.
+     * @param {{position?:any, target?:any, up?:any, fov?:number, zoom?:number, projection?:CameraProjection}} pose
      */
     setCameraPose(pose) {
         if (!pose) return;
+        if (pose.projection != null) this.setProjection(pose.projection);
         const cam = /** @type {any} */ (this._camera);
         const p = vec3Tuple(pose.position);
         if (p) cam.position.set(p[0], p[1], p[2]);
@@ -24773,6 +24808,17 @@ export class ThreeJSViewer {
      * @returns {{triangles:number, calls:number}}
      */
     getRenderStats() { return { ...this._renderStats }; }
+
+    /**
+     * Whether this viewer has an optional protocol addition, for embedders
+     * that also run against older releases. Names: see `features`.
+     * @param {string} name e.g. 'set_projection'
+     * @returns {boolean}
+     */
+    hasFeature(name) { return VIEWER_FEATURES.includes(name); }
+
+    /** @returns {ReadonlyArray<string>} the optional protocol additions this viewer has */
+    get features() { return VIEWER_FEATURES; }
 
     /**
      * Pick a world point on the displayed content (meshes + point clouds)
