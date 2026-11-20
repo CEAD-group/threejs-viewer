@@ -544,3 +544,24 @@ def test_fat_line_recolour_keeps_the_cut(viewer_client, viewer_page):
     assert whole["col"][3:6] == pytest.approx(
         whole["col"][6:9]
     )  # vertex 1 colour restored
+
+
+def test_bottom_inset_lifts_the_gizmo_stack(viewer_client, viewer_page):
+    """A page overlay at the bottom of the canvas lifts the view gimbal and its
+    buttons by the reserved inset; 0 puts them back."""
+    js = """(inset) => {
+        const v = window.threejsViewer;
+        const btn = () => v.el.querySelector('.tjsv-view-home').getBoundingClientRect().bottom;
+        const before = { css: v._gizmoLiftCss(), btn: btn() };
+        v.setBottomInset(inset);
+        const lifted = { css: v._gizmoLiftCss(), btn: btn(), inset: v.getBottomInset() };
+        v.setBottomInset(0);
+        return { before, lifted, after: { css: v._gizmoLiftCss(), btn: btn() },
+                 feature: v.hasFeature('bottom_inset') };
+    }"""
+    r = viewer_page.evaluate(js, 60)
+    assert r["feature"]
+    assert r["lifted"]["inset"] == 60
+    assert r["lifted"]["css"] == pytest.approx(r["before"]["css"] + 60)
+    assert r["before"]["btn"] - r["lifted"]["btn"] == pytest.approx(60, abs=1)
+    assert r["after"] == r["before"]

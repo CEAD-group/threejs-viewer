@@ -286,6 +286,10 @@ so an overlay such as a scale bar follows the camera without polling.
 has fetched and registered its object (false when it failed or was deleted), so an embedder
 that measures or adjusts a new object needs no polling.
 
+`viewer.setBottomInset(px)` reserves room above the animation toolbar for a bar the page draws
+at the bottom of the canvas: the view gimbal and its orbit / P / Home buttons move up by `px`,
+and their hit-testing follows. `hasFeature('bottom_inset')` marks it.
+
 Coplanar paths, such as a planned and a measured one, are ordered with `depth_offset` on
 `add_polyline` / `add_parametric_tube` (`depthOffset` on the messages): a depth bias toward
 the camera in world units, applied in the shader, so nothing moves on screen and native lines

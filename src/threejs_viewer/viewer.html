@@ -1789,6 +1789,7 @@ const VIEWER_FEATURES = Object.freeze([
     'depth_offset',
     'tube_pick',
     'line_draw_frontier',
+    'bottom_inset',
 ]);
 
 /**
@@ -19438,6 +19439,8 @@ class ThreeJSViewer {
         this._clipShowPlaneCheck = q('.tjsv-clip-show-plane');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
+        this._animToolbarH = 0;
+        this._bottomInset = 0;
         // Toolbar height tracks viewport width: the timeline-row wraps when
         // controls don't fit, so the lift is a function of viewport size, not
         // just show/hide state. Observe the toolbar and push its height into
@@ -26260,6 +26263,20 @@ class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
+     * Reserve `px` CSS pixels above the animation toolbar for an overlay the
+     * page draws at the bottom of the canvas: the view gimbal and the orbit /
+     * P / Home buttons move up by that much, and their hit-testing follows.
+     * 0 (the default) restores the normal placement.
+     * @param {number} px
+     */
+    setBottomInset(px) {
+        this._bottomInset = Number.isFinite(px) && px > 0 ? px : 0;
+        this._refreshAnimLift(this._animToolbarH);
+    }
+    /** @returns {number} the reserved bottom inset in CSS px */
+    getBottomInset() { return this._bottomInset || 0; }
+
+    /**
      * Set the view gimbal size in CSS px (issue #233), clamped to 32-512.
      * `null` restores the automatic size: 128, or 80 when the canvas' shorter
      * side is under 500 px. Hit-testing, the animation-toolbar lift and the
@@ -26554,9 +26571,11 @@ class ThreeJSViewer {
      * @param {number} [measuredHeight]
      */
     _refreshAnimLift(measuredHeight) {
-        const h = Number.isFinite(measuredHeight)
+        this._animToolbarH = Number.isFinite(measuredHeight)
             ? /** @type {number} */ (measuredHeight)
             : this._animControlsEl.offsetHeight;
+        // An embedder's overlay above the toolbar (setBottomInset) lifts the gizmo stack further.
+        const h = this._animToolbarH + (this._bottomInset || 0);
         if (h === this._animLiftCss) return;
         this._animLiftCss = h;
         this.el.style.setProperty('--tjsv-anim-lift', `${h}px`);
