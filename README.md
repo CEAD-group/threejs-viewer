@@ -271,6 +271,10 @@ While rotation is off a click never moves the orbit pivot, picking keeps the pla
 click, the gimbal bubbles and the projection key, button and menu item leave the view alone,
 and Home, F and a double click on empty space frame without reorienting. JS: `viewer.setNavigation({rotate, pan, zoom, leftButton})`.
 
+`viewer.onCameraChange(cb)` reports each rendered frame in which the view changed (controls,
+damping, `set_camera`, framing, tweens, projection, resize) with the pose and `worldPerPixel`,
+so an overlay such as a scale bar follows the camera without polling.
+
 In JS the same calls are `viewer.setProjection(mode)`, `viewer.setCameraPose({..., projection})`
 and `viewer.getCameraPose().projection`. `viewer.hasFeature(name)` tells an embedder
 whether the viewer it runs against has an optional addition (`viewer.features` lists them),

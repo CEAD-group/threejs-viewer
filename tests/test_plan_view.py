@@ -195,3 +195,58 @@ def test_navigation_zoom_off_ignores_the_wheel(viewer_client, viewer_page):
         "zoom": True,
         "leftButton": "rotate",
     }
+
+
+def test_camera_change_fires_once_per_changed_frame(viewer_client, viewer_page):
+    """onCameraChange reports the current view after subscribing, stays quiet while
+    nothing moves, reports set_camera and zoom with world units per pixel, and
+    stops after unsubscribing."""
+    viewer_client.add_box("b")
+    viewer_client.set_camera(
+        position=[0, 0, 10],
+        target=[0, 0, 0],
+        up=[0, 1, 0],
+        zoom=2,
+        projection="orthographic",
+    )
+    settle(viewer_client)
+    viewer_page.evaluate(
+        "() => { window.__cam = [];"
+        " window.__unsub = window.threejsViewer.onCameraChange(c => window.__cam.push(c)); }"
+    )
+    frames(viewer_page, 3)
+    events = viewer_page.evaluate("() => window.__cam")
+    assert len(events) == 1
+    first = events[0]
+    assert first["projection"] == "orthographic"
+    expected = viewer_page.evaluate(
+        "() => { const v = window.threejsViewer, c = v._camera;"
+        " return (c.top - c.bottom) / c.zoom / v.getCanvas().clientHeight; }"
+    )
+    assert first["worldPerPixel"] == pytest.approx(expected, rel=1e-12)
+    frames(viewer_page, 10)
+    assert viewer_page.evaluate("() => window.__cam.length") == 1
+
+    viewer_client.set_camera(zoom=4)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    events = viewer_page.evaluate("() => window.__cam")
+    assert len(events) == 2
+    assert events[1]["zoom"] == pytest.approx(4)
+    assert events[1]["worldPerPixel"] == pytest.approx(
+        first["worldPerPixel"] / 2, rel=1e-9
+    )
+
+    # A wheel zoom from the controls is reported too.
+    box = viewer_page.locator("canvas").first.bounding_box()
+    viewer_page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    viewer_page.mouse.wheel(0, -200)
+    frames(viewer_page, 3)
+    assert viewer_page.evaluate("() => window.__cam.length") >= 3
+
+    viewer_page.evaluate("() => window.__unsub()")
+    n = viewer_page.evaluate("() => window.__cam.length")
+    viewer_client.set_camera(zoom=1)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    assert viewer_page.evaluate("() => window.__cam.length") == n

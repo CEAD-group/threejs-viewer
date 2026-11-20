@@ -31,6 +31,7 @@ const VIEWER_VERSION = '0.0.0-dev';
 const VIEWER_FEATURES = Object.freeze([
     'set_projection',
     'set_navigation',
+    'camera_change',
 ]);
 
 /**
@@ -17523,6 +17524,10 @@ export class ThreeJSViewer {
         this._renderer.info.autoReset = false;
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
+        // onCameraChange hooks and the view they last saw (pose, zoom, projection, canvas size).
+        /** @type {Array<(change: any) => void>} */
+        this._cameraHooks = [];
+        this._cameraSig = new Float64Array(15).fill(NaN);
         this.el.appendChild(this._renderer.domElement);
         // GPU reset or driver eviction (issue #342). three.js re-initialises its
         // own state on restore; the loop stops meanwhile and GPU-generated data is rebuilt.
@@ -18881,6 +18886,52 @@ export class ThreeJSViewer {
 
     /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
+
+    /**
+     * Register a hook fired once per rendered frame in which the view changed:
+     * orbit, pan, zoom, damping, `set_camera`, framing, a view tween, a
+     * projection switch or a canvas resize. It runs before that frame renders,
+     * so an overlay drawn from it (a scale bar, HTML labels) stays in step.
+     * The payload is `getCameraPose()` plus `worldPerPixel`: world units per
+     * CSS pixel, at the target under perspective and anywhere under
+     * orthographic. The frame after subscribing reports the current view.
+     * @param {(change: {position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number, projection:CameraProjection, worldPerPixel:number}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onCameraChange(cb) {
+        if (typeof cb !== 'function') throw new Error('onCameraChange: callback must be a function');
+        this._cameraHooks.push(cb);
+        this._cameraSig[0] = NaN;
+        return () => { const i = this._cameraHooks.indexOf(cb); if (i >= 0) this._cameraHooks.splice(i, 1); };
+    }
+
+    /** @returns {number} world units per CSS pixel at the orbit target */
+    _worldPerPixelAtTarget() {
+        const cam = /** @type {any} */ (this._camera);
+        const h = Math.max(1, this._renderer.domElement.clientHeight);
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(this._controls.target);
+            return (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
+        }
+        return (cam.top - cam.bottom) / cam.zoom / h;
+    }
+
+    /** Compare the view with the one the hooks last saw and report a change. */
+    _emitCameraChange() {
+        const cam = /** @type {any} */ (this._camera);
+        const p = cam.position, q = cam.quaternion, t = this._controls.target;
+        const dom = this._renderer.domElement;
+        const now = [p.x, p.y, p.z, q.x, q.y, q.z, q.w, t.x, t.y, t.z, cam.zoom,
+            cam.isPerspectiveCamera ? cam.fov : -1, this._isOrtho ? 1 : 0, dom.clientWidth, dom.clientHeight];
+        const sig = this._cameraSig;
+        let same = true;
+        for (let i = 0; i < now.length; i++) if (sig[i] !== now[i]) { same = false; sig[i] = now[i]; }
+        if (same) return;
+        const change = { ...this.getCameraPose(), worldPerPixel: this._worldPerPixelAtTarget() };
+        for (const cb of this._cameraHooks.slice()) {
+            try { cb(change); } catch (err) { console.error('camera change hook error', err); }
+        }
+    }
 
     /** True while the navigation mode has rotation off: user input keeps the view direction. */
     _rotationLocked() { return !this._controls.enableRotate; }
@@ -23886,6 +23937,7 @@ export class ThreeJSViewer {
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
         this._updateViewTween(frameNow);
         this._camController.updateFrameTween(frameNow);
+        if (this._cameraHooks.length) this._emitCameraChange();
         if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
