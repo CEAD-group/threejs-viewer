@@ -288,6 +288,16 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
     return f
 
 
+def _add_draw_order(
+    header: dict, render_order: Optional[float], depth_offset: Optional[float]
+) -> None:
+    """Put the optional renderOrder and depthOffset of a line or tube on its header."""
+    if render_order is not None:
+        header["renderOrder"] = _validate_finite("render_order", render_order)
+    if depth_offset is not None:
+        header["depthOffset"] = _validate_finite("depth_offset", depth_offset)
+
+
 _PROJECTIONS = ("perspective", "orthographic")
 
 
@@ -2114,6 +2124,8 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         matrix: Optional[List[float]] = None,
         exact_colors: bool = False,
+        render_order: Optional[float] = None,
+        depth_offset: Optional[float] = None,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -2169,6 +2181,13 @@ class ViewerClient:
                 the bytes from sRGB and skips tone mapping. The default keeps
                 the historical look, where colours come out lighter. Fog and
                 eye-dome lighting still darken the line with depth.
+            render_order: Draw order among objects that do not settle it
+                by depth (transparent or depth-ignoring ones); THREE's
+                ``renderOrder``.
+            depth_offset: Depth bias toward the camera, in world units of
+                view distance (negative: away), applied in the shader without
+                moving the object on screen. Orders coplanar paths, such as a
+                planned and a measured one, on any line or tube.
         """
         if not isinstance(exact_colors, bool):
             raise ValueError(f"exact_colors must be a bool, got {exact_colors!r}")
@@ -2225,6 +2244,7 @@ class ViewerClient:
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
+        _add_draw_order(header, render_order, depth_offset)
         self._send_binary(header, raw_bytes)
 
     # === Vector entities ===
@@ -3471,6 +3491,8 @@ class ViewerClient:
         join_tolerance: float = 0.015,
         join_budget: Optional[float] = 0.15,
         clip_cap: Optional[bool] = None,
+        render_order: Optional[float] = None,
+        depth_offset: Optional[float] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -3610,6 +3632,13 @@ class ViewerClient:
                 pass through it too.
             clip_cap: Override :meth:`set_clipping_caps` for this tube (also
                 accepted by :meth:`add_toolpath`).
+            render_order: Draw order among objects that do not settle it
+                by depth (transparent or depth-ignoring ones); THREE's
+                ``renderOrder``.
+            depth_offset: Depth bias toward the camera, in world units of
+                view distance (negative: away), applied in the shader without
+                moving the object on screen. Orders coplanar paths, such as a
+                planned and a measured one, on any line or tube.
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at
@@ -3826,6 +3855,7 @@ class ViewerClient:
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
+        _add_draw_order(header, render_order, depth_offset)
         self._send_binary(header, b"".join(parts))
 
     def _texture_url(self, image: Union[str, Path, bytes]) -> str:

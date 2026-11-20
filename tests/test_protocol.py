@@ -2072,3 +2072,16 @@ def test_frame_object_and_frame_points_fill(client):
         client.frame_points([[0, 0, float("nan")]])
     with pytest.raises(ValueError, match="fill"):
         client.frame_points([[0, 0, 0]], fill=2)
+
+
+def test_draw_order_fields_on_lines_and_tubes(client):
+    pts = [[0, 0, 0], [1, 0, 0]]
+    client.add_polyline("l", pts, render_order=2, depth_offset=0.001)
+    client.add_polyline("plain", pts)
+    client.add_parametric_tube("t", pts, [0.1, 0.1], [0.1, 0.1], depth_offset=-0.5)
+    headers = [h for h, _ in client._binary_messages]
+    assert headers[0]["renderOrder"] == 2.0 and headers[0]["depthOffset"] == 0.001
+    assert "renderOrder" not in headers[1] and "depthOffset" not in headers[1]
+    assert headers[2]["depthOffset"] == -0.5 and "renderOrder" not in headers[2]
+    with pytest.raises(ValueError, match="depth_offset"):
+        client.add_polyline("bad", pts, depth_offset=float("nan"))

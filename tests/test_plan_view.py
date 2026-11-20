@@ -301,3 +301,102 @@ def test_when_object_ready_resolves_after_the_blob_add(viewer_client, viewer_pag
         "unknown": False,
         "existing": True,
     }
+
+
+_PIXELS_JS = """(pts) => { const v = window.threejsViewer;
+    v._camera.updateMatrixWorld(true);
+    v._renderer.render(v._scene, v._camera);
+    const gl = v._renderer.getContext();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    const px = new Uint8Array(4);
+    return pts.map(([x, y, z]) => {
+        const p = v._camera.position.clone().set(x, y, z).project(v._camera);
+        gl.readPixels(Math.round((p.x + 1) / 2 * w), Math.round((p.y + 1) / 2 * h),
+                      1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        return [px[0], px[1], px[2]]; }); }"""
+
+
+def _top_view(viewer_client):
+    viewer_client.set_camera(
+        position=[0, 0, 5],
+        target=[0, 0, 0],
+        up=[0, 1, 0],
+        zoom=4,
+        projection="orthographic",
+    )
+
+
+def test_depth_offset_orders_coplanar_lines(viewer_client, viewer_page):
+    """At equal depth the later line wins; a depthOffset toward the camera makes the
+    earlier one win instead, for fat and native lines alike, without moving it."""
+    for k, fat in enumerate((True, False)):
+        y = 0.5 * k
+        pts = np.array([[-1, y, 0], [1, y, 0]], dtype=np.float32)
+        # Pair at x < 0: no offset. Pair at x > 0: the first line is offset.
+        left = pts * [0.5, 1, 1] - [0.6, 0, 0]
+        right = pts * [0.5, 1, 1] + [0.6, 0, 0]
+        for side, ps, offset in (("l", left, None), ("r", right, 0.01)):
+            viewer_client.add_polyline(
+                f"red{side}{k}",
+                ps,
+                color=0xFF0000,
+                fat=fat,
+                line_width=8,
+                depth_offset=offset,
+            )
+            settle(viewer_client)
+            viewer_client.add_polyline(
+                f"blue{side}{k}", ps, color=0x0000FF, fat=fat, line_width=8
+            )
+            settle(viewer_client)
+    _top_view(viewer_client)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    px = viewer_page.evaluate(
+        _PIXELS_JS, [[-0.6, 0, 0], [0.6, 0, 0], [-0.6, 0.5, 0], [0.6, 0.5, 0]]
+    )
+    for l_px, r_px in ((px[0], px[1]), (px[2], px[3])):
+        assert l_px[2] > l_px[0], f"no offset: the later (blue) line wins, got {px}"
+        assert r_px[0] > r_px[2], f"offset: the earlier (red) line wins, got {px}"
+    assert viewer_page.evaluate(
+        "() => window.threejsViewer.getObject('redr0').material.userData.depthOffset"
+    ) == pytest.approx(0.01)
+
+
+def test_render_order_and_tube_depth_offset(viewer_client, viewer_page):
+    """renderOrder lands on the object; a tube pushed away by depthOffset lets the
+    centreline inside it show."""
+    spine = np.array([[-1, 0, 0], [0, 0, 0], [1, 0, 0]], dtype=np.float32)
+    w = np.full(3, 0.3, dtype=np.float32)
+    viewer_client.add_parametric_tube(
+        "tube", spine, w, w, color=0xFF0000, depth_offset=-1.0, render_order=3
+    )
+    viewer_client.add_polyline(
+        "centre", spine, color=0x0000FF, line_width=6, render_order=-2
+    )
+    _top_view(viewer_client)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    orders = viewer_page.evaluate(
+        "() => ['tube', 'centre'].map((id) => window.threejsViewer.getObject(id).renderOrder)"
+    )
+    assert orders == [3, -2]
+    (px,) = viewer_page.evaluate(_PIXELS_JS, [[0.5, 0, 0]])
+    assert px[2] > px[0], px
+
+
+def test_orthographic_near_far_fit_the_scene(viewer_client, viewer_page):
+    """The orthographic camera fits near and far around the content along the view
+    instead of the fixed 0.1 to 1000 m."""
+    viewer_client.add_box("b")
+    viewer_client.set_camera(
+        position=[0, 0, 20], target=[0, 0, 0], up=[0, 1, 0], projection="orthographic"
+    )
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    near, far = viewer_page.evaluate(
+        "() => [window.threejsViewer._camera.near, window.threejsViewer._camera.far]"
+    )
+    r = math.sqrt(3) / 2
+    assert 20 - 1.2 * r < near < 20 - r, near
+    assert 20 + r < far < 20 + 1.2 * r, far

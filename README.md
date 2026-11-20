@@ -279,6 +279,12 @@ so an overlay such as a scale bar follows the camera without polling.
 has fetched and registered its object (false when it failed or was deleted), so an embedder
 that measures or adjusts a new object needs no polling.
 
+Coplanar paths, such as a planned and a measured one, are ordered with `depth_offset` on
+`add_polyline` / `add_parametric_tube` (`depthOffset` on the messages): a depth bias toward
+the camera in world units, applied in the shader, so nothing moves on screen and native lines
+honour it too. `render_order` sets THREE's `renderOrder`. The orthographic camera fits its
+near and far planes to the scene along the view, as the perspective camera does.
+
 In JS the same calls are `viewer.setProjection(mode)`, `viewer.setCameraPose({..., projection})`
 and `viewer.getCameraPose().projection`. `viewer.hasFeature(name)` tells an embedder
 whether the viewer it runs against has an optional addition (`viewer.features` lists them),

@@ -1786,6 +1786,7 @@ const VIEWER_FEATURES = Object.freeze([
     'set_navigation',
     'camera_change',
     'object_ready',
+    'depth_offset',
 ]);
 
 /**
@@ -4011,6 +4012,57 @@ function depthMaterialFields(params, defaultDepthWrite) {
         fields.polygonOffsetUnits = params.polygonOffsetUnits != null ? params.polygonOffsetUnits : 0;
     }
     return { fields, depthWriteExplicit };
+}
+
+/**
+ * Bias a material's depth toward the camera by `offset` world units of view
+ * distance (negative: away), keeping its screen position. Unlike polygon
+ * offset it also works on native lines, and it does not depend on the
+ * near/far planes or the surface slope. Chains existing hooks and program keys.
+ * @param {THREE.Material} material @param {number} offset
+ */
+function applyDepthOffset(material, offset) {
+    const m = /** @type {any} */ (material);
+    const uniform = { value: offset };
+    m.userData.depthOffset = offset;
+    const before = material.onBeforeCompile;
+    const previousKey = material.customProgramCacheKey;
+    const stockKey = previousKey === THREE.Material.prototype.customProgramCacheKey;
+    material.onBeforeCompile = function (shader, renderer) {
+        before.call(this, shader, renderer);
+        shader.uniforms.tjsvDepthOffset = uniform;
+        // Every stock vertex shader and LineMaterial's define mvPosition before logdepthbuf_vertex.
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nuniform float tjsvDepthOffset;')
+            .replace('#include <logdepthbuf_vertex>', `{
+    vec4 tjsvBiased = projectionMatrix * vec4( mvPosition.xy, mvPosition.z + tjsvDepthOffset, 1.0 );
+    gl_Position.z = tjsvBiased.z / tjsvBiased.w * gl_Position.w;
+}
+#include <logdepthbuf_vertex>`);
+    };
+    material.customProgramCacheKey = function () {
+        return (stockKey ? before.toString() : previousKey.call(this)) + '|tjsv-depth-offset-v1';
+    };
+    material.needsUpdate = true;
+}
+
+/**
+ * Optional `renderOrder` and `depthOffset` of an add message (polylines and
+ * parametric tubes): draw order among transparent or depth-ignoring objects,
+ * and a depth bias that orders coplanar paths without moving them.
+ * @param {THREE.Object3D} obj @param {THREE.Material} material @param {any} data
+ */
+function applyDrawOrder(obj, material, data) {
+    if (data.renderOrder != null) {
+        const order = Number(data.renderOrder);
+        if (Number.isFinite(order)) obj.renderOrder = order;
+        else console.warn(`renderOrder ignored on '${data.id}': not a finite number`, data.renderOrder);
+    }
+    if (data.depthOffset != null && data.depthOffset !== 0) {
+        const offset = Number(data.depthOffset);
+        if (Number.isFinite(offset)) applyDepthOffset(material, offset);
+        else console.warn(`depthOffset ignored on '${data.id}': not a finite number`, data.depthOffset);
+    }
 }
 
 // Default exponent of the grazing-angle opacity falloff (see applyGrazingOpacity).
@@ -8897,6 +8949,9 @@ function resetParametricTubeColors(obj, baseColor, lodWorker, tubeId) {
  * Groups camera-related methods (persp/ortho switch, dynamic near/far,
  * frame-to-bbox). Camera objects themselves remain on the viewer.
  */
+const _orthoForward = new THREE.Vector3();
+const _orthoToCenter = new THREE.Vector3();
+
 class CameraController {
     // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
@@ -9018,7 +9073,6 @@ class CameraController {
 
     updateNearFar() {
         const v = this.v;
-        if (v._isOrtho) return;
         // Recompute bounds on the dirty flag (object add/delete, transform
         // streaming, animation playback — anything that can move content out
         // of the cached sphere) or every 30 rendered frames as a fallback.
@@ -9029,6 +9083,7 @@ class CameraController {
         }
         const radius = v._nearFarSphere.radius;
         if (radius === 0) return;
+        if (v._isOrtho) { this._fitOrthoNearFar(radius); return; }
         const dist = v._perspCamera.position.distanceTo(v._nearFarSphere.center);
         // No geometry can sit closer than dist - radius (camera to sphere
         // surface); halving that leaves 2x clearance for bounds-recompute
@@ -9055,6 +9110,27 @@ class CameraController {
         v._perspCamera.near = nextNear;
         v._perspCamera.far = nextFar;
         v._perspCamera.updateProjectionMatrix();
+    }
+
+    /**
+     * Orthographic near/far around the content sphere along the view, so
+     * depth precision follows the scene instead of a fixed 0.1 to 1000 range
+     * (24-bit depth over 1000 m resolves about 60 um). Nothing behind the
+     * camera is drawn, as before. Uses the same bounds refresh as perspective.
+     * @param {number} radius
+     */
+    _fitOrthoNearFar(radius) {
+        const v = this.v;
+        const cam = v._orthoCamera;
+        const forward = _orthoForward.set(0, 0, -1).applyQuaternion(cam.quaternion);
+        const along = _orthoToCenter.subVectors(v._nearFarSphere.center, cam.position).dot(forward);
+        const margin = radius * 0.05 + 1e-6;
+        const nextNear = Math.max(0, along - radius - margin);
+        const nextFar = Math.max(along + radius + margin, nextNear + 1e-3);
+        if (Math.abs(cam.near - nextNear) < 1e-9 && Math.abs(cam.far - nextFar) < 1e-9) return;
+        cam.near = nextNear;
+        cam.far = nextFar;
+        cam.updateProjectionMatrix();
     }
 
     /**
@@ -23814,6 +23890,7 @@ class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
+                        applyDrawOrder(line, line.material, data);
                         // Same ordering as add_mesh_binary: the pose lands
                         // after registration so a pending re-parent sees it.
                         if (data.transform) this._applyTransform(line, data.transform);
@@ -24733,6 +24810,7 @@ class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
+                        applyDrawOrder(mesh, material, data);
                         if (data.transform) this._applyTransform(mesh, data.transform);
                         deferred.resolve();
                         if (tubeLOD) {
