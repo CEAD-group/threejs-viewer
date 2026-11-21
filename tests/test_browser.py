@@ -8164,6 +8164,40 @@ def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
+def test_eye_that_is_off_wins_over_later_visibility_messages(viewer_client, viewer_page):
+    """A visibility message or an animation baseline cannot show an object an eye hides;
+    switching the eye on again shows what those messages asked for."""
+    page = viewer_page
+    viewer_client.add_box("box_a", 1, 1, 1)
+    viewer_client.add_box("box_b", 1, 1, 1, position=[2, 0, 0])
+    viewer_client.add_box("other", 1, 1, 1, position=[4, 0, 0])
+    settle(viewer_client)
+    page.evaluate(
+        "() => {"
+        " try { localStorage.removeItem('tjsv-test.eyewins'); } catch (e) {}"
+        " window.__eyeMenu = window.threejsViewer.addMenu({id: 'layers', label: 'Layers',"
+        "   storageKey: 'tjsv-test.eyewins', items: [{type: 'eye', id: 'boxes', prefix: 'box_'}]});"
+        " window.__eyeMenu.setItem('boxes', {checked: false});"
+        "}"
+    )
+    vis = "() => ['box_a', 'box_b', 'other'].map((id) => window.threejsViewer.getObject(id).visible)"
+    assert page.evaluate(vis) == [False, False, True]
+    viewer_client.set_scene_visibility({"box_a": True, "box_b": False, "other": True})
+    page.evaluate("() => window.threejsViewer.handleMessage({type: 'set_visibility', id: 'box_b', visible: true})")
+    settle(viewer_client)
+    assert page.evaluate(vis) == [False, False, True]
+    viewer_client.load_animation(_spin_animation("other"), autoplay=False)
+    settle(viewer_client)
+    page.evaluate("() => window.threejsViewer._seekToTime(3.0)")
+    assert page.evaluate(vis) == [False, False, True]
+    page.evaluate("() => window.__eyeMenu.setItem('boxes', {checked: true})")
+    assert page.evaluate(vis) == [True, True, True]
+    # Playback restores only what the animation switches: a page-side hide survives a seek.
+    page.evaluate("() => { window.threejsViewer.getObject('other').visible = false; window.threejsViewer._seekToTime(4.0); }")
+    assert page.evaluate(vis) == [True, True, False]
+
+
+@pytest.mark.browser
 def test_add_menu_eye_glyph_animates_between_states(viewer_client, viewer_page):
     """The eye glyph is one SVG whose open/closed transition is a pair of SMIL
     animations: each eye mounts them, an eye that starts hidden rests closed

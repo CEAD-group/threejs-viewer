@@ -747,7 +747,7 @@ function makeChannelApply(viewer) {
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
                 const obj = refs[i];
-                if (obj) obj.visible = (ch.data[base + i] === 1);
+                if (obj) obj.visible = (ch.data[base + i] === 1) && viewer._eyeAllows(ch.ids[i]);
             }
         },
 
@@ -8420,8 +8420,37 @@ class MenuController {
         return false;
     }
 
+    /**
+     * Whether an eye that is off owns `objId`, so nothing else may show it.
+     * Cached per object generation and eye change; the eyes' matchers run once per id.
+     * @param {string} objId
+     */
+    hiddenByEye(objId) {
+        const key = `${this._viewer._objGeneration}:${this._eyeEpoch || 0}`;
+        if (this._hiddenKey !== key) {
+            this._hiddenKey = key;
+            /** @type {Map<string, boolean>} */
+            this._hiddenIds = new Map();
+        }
+        let hit = this._hiddenIds.get(objId);
+        if (hit === undefined) {
+            hit = false;
+            for (const m of this._menus.values()) {
+                for (const rec of m.items.values()) {
+                    const it = rec.spec;
+                    if ((it.type || '') === 'eye' && typeof it.apply !== 'function'
+                        && !this._valueOf(m, it) && this._eyeOwns(it, objId)) { hit = true; break; }
+                }
+                if (hit) break;
+            }
+            this._hiddenIds.set(objId, hit);
+        }
+        return hit;
+    }
+
     /** @param {MenuItemSpec} it @param {boolean} on */
     _applyEye(it, on) {
+        this._eyeEpoch = (this._eyeEpoch || 0) + 1;
         this._viewer._shadowDirty = true;
         if (typeof it.apply === 'function') return it.apply(on, it) !== false;
         for (const [objId, obj] of this._viewer._objects) {
@@ -19390,6 +19419,11 @@ export class ThreeJSViewer {
      * @param {THREE.Object3D} obj
      * @param {boolean | undefined} [dataVisibility]
      */
+    /** Whether no Display eye that is off owns `id` (server and animation visibility AND the eyes). @param {string} id */
+    _eyeAllows(id) {
+        return !this._menus?.hiddenByEye(id);
+    }
+
     _applyInitialVisibility(id, obj, dataVisibility) {
         if (dataVisibility === false) obj.visible = false;
         else if (dataVisibility === true) obj.visible = true;
@@ -20509,7 +20543,7 @@ export class ThreeJSViewer {
             // that arrived during the load isn't silently dropped.
             this._baselineVisibility.set(id, visible);
             const obj = this._objects.get(id);
-            if (obj) obj.visible = visible;
+            if (obj) obj.visible = visible && this._eyeAllows(id);
         }
     }
 
@@ -20603,7 +20637,13 @@ export class ThreeJSViewer {
 
         this._baselineVisibility.clear();
         for (const [id, obj] of this._objects) {
-            this._baselineVisibility.set(id, obj.visible);
+            // An object an eye hides keeps its own baseline: shown, so the eye alone decides.
+            this._baselineVisibility.set(id, obj.visible || !this._eyeAllows(id));
+        }
+        // Only what the animation itself switches is restored per frame; the rest belongs to the page.
+        this._animVisIds = new Set(this._animation.channels?.visibility?.ids || []);
+        for (const f of this._animation.frames) {
+            if (f.visibility) for (const id of Object.keys(f.visibility)) this._animVisIds.add(id);
         }
 
         this._animControlsEl.classList.add('visible');
@@ -20695,7 +20735,16 @@ export class ThreeJSViewer {
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s${isSwap ? ' (swap)' : ''}`);
     }
 
+    /** Put the objects the animation switches back to their visibility at load (the eyes still win). */
+    _restoreAnimVisibility() {
+        for (const id of this._animVisIds || []) {
+            const obj = this._objects.get(id), was = this._baselineVisibility.get(id);
+            if (obj && was !== undefined) obj.visible = was && this._eyeAllows(id);
+        }
+    }
+
     _resetAnimationState() {
+        this._animVisIds = new Set();
         this._animation = null;
         this._animationPlaying = false;
         this._baselineVisibility.clear();
@@ -20716,10 +20765,7 @@ export class ThreeJSViewer {
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
         this._kinematics.onUnloadAnimation();
         if (restoreVisibility) {
-            for (const [id, baselineVisible] of this._baselineVisibility) {
-                const obj = this._objects.get(id);
-                if (obj) obj.visible = baselineVisible;
-            }
+            this._restoreAnimVisibility();
         }
         // Reset draw ranges to full
         for (const id of this._objects.keys()) {
@@ -20751,10 +20797,7 @@ export class ThreeJSViewer {
 
         if (this._animation.channels) {
             if (this._animation.channels.visibility) {
-                for (const [id, baselineVisible] of this._baselineVisibility) {
-                    const obj = this._objects.get(id);
-                    if (obj) obj.visible = baselineVisible;
-                }
+                this._restoreAnimVisibility();
             }
             for (const [name, ch] of Object.entries(this._animation.channels)) {
                 const applyFn = this._CHANNEL_APPLY[/** @type {keyof typeof this._CHANNEL_APPLY} */ (name)];
@@ -20813,16 +20856,13 @@ export class ThreeJSViewer {
             }
         }
         if (!this._animation.channels || !this._animation.channels.visibility) {
-            for (const [id, baselineVisible] of this._baselineVisibility) {
-                const obj = this._objects.get(id);
-                if (obj) obj.visible = baselineVisible;
-            }
+            this._restoreAnimVisibility();
         }
         if (frame.visibility) {
             // Left-hold regardless (booleans have no meaningful lerp).
             for (const [id, visible] of Object.entries(frame.visibility)) {
                 const obj = this._objects.get(id);
-                if (obj) obj.visible = visible;
+                if (obj) obj.visible = visible && this._eyeAllows(id);
             }
         }
         if (frame.opacity) {
@@ -21832,7 +21872,7 @@ export class ThreeJSViewer {
                 this._deleteObject(data.id);
                 break;
             case 'set_visibility':
-                this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
+                this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible && this._eyeAllows(data.id); });
                 break;
             case 'frame_object':
                 this._withObject(data.id, 'frame_object', (obj) => {
