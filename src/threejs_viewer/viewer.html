@@ -11492,8 +11492,6 @@ const CLIP_CAP_THROTTLE_MS = 500;
 const CLIP_CAP_WORKER_TRIANGLES = 20000;
 // Main-thread cap rebuilds stop for the frame once they took this long; the rest wait, hidden.
 const CLIP_CAP_FRAME_BUDGET_MS = 4;
-/** A cap that stopped matching its owner stays shown this long (ms) while its rebuild catches up. */
-const CLIP_CAP_STALE_MS = 300;
 // Closed convex primitives; a plane is a sheet and gets no cap. The torus is
 // closed but not convex, so it goes through the mesh slicer.
 const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
@@ -12892,8 +12890,7 @@ function tubeClipCapArrays(mesh, withColor, copy) {
  * Owns every clip cap: decides per frame which capped solids need a rebuild
  * (plane, transform, geometry, draw range or colour layout changed; a tube's draw
  * range only redraws its cap), skips owners no plane cuts or out of view, keeps
- * showing a cap that no longer matches its owner while the rebuild catches up
- * (hidden once older than CLIP_CAP_STALE_MS), keeps
+ * showing a cap that no longer matches its owner until its rebuild replaces it, keeps
  * each cap's material in step with its owner, and removes caps when clipping
  * or the cap switch goes off. Caps are children of their owner mesh marked
  * `userData.__clipCap`, never in `_objects`. Tubes and meshes over
@@ -13215,7 +13212,6 @@ class ClipCapController {
         const reveal = !!md && md.savedCapOffset >= 0;
         const last = reveal ? md.savedCapPairs - 1 : -1;
         const pairStart = last >= 0 ? tubePairOffset(ud, last) : -1;
-        const prevStart = last >= 1 ? tubePairOffset(ud, last - 1) : -1;
         const drawn = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
         const bands = pairStart >= 0 ? Math.floor(pairStart / block) : reveal ? 0 : Math.floor(drawn / block);
         for (const cap of st.caps) {
@@ -13226,42 +13222,70 @@ class ClipCapController {
             while (lo < hi) { const mid = (lo + hi) >> 1; if (fans.band[mid] < bands) lo = mid + 1; else hi = mid; }
             const count = lo ? fans.end[lo - 1] : 0;
             if (cap.geometry.drawRange.count !== count) cap.geometry.setDrawRange(0, count);
-            this._drawTubeFrontier(mesh, cap, pairStart, bands * block < pairStart ? prevStart : -1);
+            this._drawTubeFrontier(mesh, cap, pairStart, bands * block);
         }
     }
 
     /**
-     * Slice the frontier pair, and the pair before it when the last drawn band
-     * stops inside that one, from the owner's live arrays into the cap's frontier piece.
+     * Slice what the drawn bands leave out, from the owner's live arrays into the cap's frontier
+     * piece: the indices from the bands' end to the frontier pair (pair tail, joints) in
+     * band-sized chunks, then the frontier pair on its own.
      * @param {any} mesh @param {any} cap
      * @param {number} pairStart  first index of the frontier pair, -1 without a reveal
-     * @param {number} prevStart  first index of the pair before it, -1 when not needed
+     * @param {number} bandEnd  index where the cap's drawn bands end
      */
-    _drawTubeFrontier(mesh, cap, pairStart, prevStart) {
+    _drawTubeFrontier(mesh, cap, pairStart, bandEnd) {
         const geom = mesh.geometry, block = mesh.userData.tubeIndicesPerRingPair;
         const plane = cap.userData.__plane;
         const posAttr = geom.getAttribute('position'), index = geom.getIndex();
         const colAttr = cap.geometry.getAttribute('color') ? geom.getAttribute('color') : null;
-        const key = pairStart < 0 || !plane ? '' : [pairStart, prevStart, attrVersion(posAttr), attrVersion(index),
+        const key = pairStart < 0 || !plane ? '' : [pairStart, bandEnd, attrVersion(posAttr), attrVersion(index),
             colAttr ? attrVersion(colAttr) : -1, ...plane].join(':');
         if ((cap.userData.__frontierKey || '') === key) return;
         cap.userData.__frontierKey = key;
-        let g = null;
-        if (key) {
-            const idx = new Uint32Array(prevStart >= 0 ? 2 * block : block);
-            if (prevStart >= 0) idx.set(index.array.subarray(prevStart, prevStart + block));
-            idx.set(index.array.subarray(pairStart, pairStart + block), prevStart >= 0 ? block : 0);
-            const [r] = sliceTubeClipCap(posAttr.array, colAttr ? colAttr.array : null, idx, idx.length, [plane], block);
-            g = clipCapGeometry(r.pos, r.col, plane[0], plane[1], plane[2]);
-        }
         let piece = cap.userData.__frontier;
-        if (piece) piece.geometry.dispose();
-        if (!g) {
-            if (piece) { cap.remove(piece); cap.userData.__frontier = null; }
+        /** @type {ClipCapPiece | null} */ let r = null;
+        if (key) {
+            const src = index.array;
+            const chunks = Math.ceil((pairStart - bandEnd) / block);
+            const idx = new Uint32Array((chunks + 1) * block);
+            for (let k = 0; k <= chunks; k++) {
+                const from = k < chunks ? bandEnd + k * block : pairStart;
+                const to = k < chunks ? Math.min(pairStart, from + block) : pairStart + block;
+                const o = k * block;
+                idx.set(src.subarray(from, to), o);
+                // Pad a short chunk with its last triangle, which adds no new crossing points.
+                for (let i = o + (to - from); i < o + block; i += 3) idx.set(src.subarray(to - 3, to), i);
+            }
+            [r] = sliceTubeClipCap(posAttr.array, colAttr ? colAttr.array : null, idx, idx.length, [plane], block);
+        }
+        const n = r ? r.pos.length / 3 : 0;
+        if (!n) {
+            if (piece) piece.visible = false;
             return;
         }
+        const r0 = /** @type {ClipCapPiece} */ (r);
+        let g = piece ? piece.geometry : null;
+        // Reuse the piece's buffers while they are large enough and carry the same attributes.
+        if (!g || g.getAttribute('position').count < n || !!g.getAttribute('color') !== !!r0.col) {
+            const cap2 = Math.max(n, 2 * (g ? g.getAttribute('position').count : 0), 96);
+            const grown = clipCapGeometry(new Float32Array(cap2 * 3), r0.col ? new Float32Array(cap2 * 3) : null, plane[0], plane[1], plane[2]);
+            if (g) g.dispose();
+            g = /** @type {any} */ (grown);
+        } else {
+            const nrm = g.getAttribute('normal').array;
+            for (let i = 0; i < nrm.length; i += 3) { nrm[i] = -plane[0]; nrm[i + 1] = -plane[1]; nrm[i + 2] = -plane[2]; }
+            g.getAttribute('normal').needsUpdate = true;
+        }
+        g.getAttribute('position').array.set(r0.pos);
+        g.getAttribute('position').needsUpdate = true;
+        if (r0.col) { g.getAttribute('color').array.set(r0.col); g.getAttribute('color').needsUpdate = true; }
+        g.setDrawRange(0, n);
+        g.computeBoundingSphere();
         if (!piece) {
             piece = new THREE.Mesh(g, cap.material);
+            // Also a cap to every path that skips caps (materials, outlines, picking).
+            piece.userData.__clipCap = true;
             piece.userData.__clipCapFrontier = true;
             piece.castShadow = cap.castShadow;
             piece.receiveShadow = cap.receiveShadow;
@@ -13270,6 +13294,7 @@ class ClipCapController {
         } else {
             piece.geometry = g;
         }
+        piece.visible = true;
         this.v._shadowDirty = true;
     }
 
@@ -13285,7 +13310,7 @@ class ClipCapController {
         let st = mesh.userData.__clipCapState;
         if (!st) {
             st = mesh.userData.__clipCapState = {
-                sig: null, staleAt: Infinity, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
+                sig: null, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
             };
         }
         const current = sameSignature(st.sig, sig);
@@ -13331,10 +13356,8 @@ class ClipCapController {
                 }
             }
         }
-        // A stale cap stays shown while the rebuild catches up, timed from the first frame it was stale.
-        if (sameSignature(st.sig, sig)) st.staleAt = Infinity;
-        else if (st.staleAt === Infinity) st.staleAt = now;
-        this._showCaps(st, now - st.staleAt <= CLIP_CAP_STALE_MS);
+        // A stale cap stays shown: a cut owner in view always has its rebuild pending, which replaces it.
+        this._showCaps(st, true);
         this._drawTubeCap(mesh, st);
         this._syncMaterials(mesh, st, own, withColor);
         return st.caps.some(Boolean);
@@ -13425,7 +13448,6 @@ class ClipCapController {
         st.inflight = msg.reqId;
         st.inflightSig = sig;
         st.inflightLocal = local;
-        st.inflightAt = performance.now();
         this.pending++;
         this.requests++;
         this.v._lodWorker.postMessage(msg, transfer);
@@ -13454,9 +13476,11 @@ class ClipCapController {
         const t0 = performance.now();
         this._install(mesh, st, msg.caps, st.inflightLocal);
         st.sig = st.inflightSig;
-        // Shown even if the owner moved meanwhile; it can be stale only since its snapshot.
-        st.staleAt = st.inflightAt;
+        // Shown even if the owner moved meanwhile: the next frame asks again.
         this._drawTubeCap(mesh, st);
+        // Materials now, not at the next frame: settled() may already hold.
+        const s = this._signature(mesh);
+        if (s) this._syncMaterials(mesh, st, s.own, s.withColor);
         st.last = performance.now();
         this.lastInstallMs = st.last - t0;
     }
@@ -25883,7 +25907,7 @@ class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._syncClipEnabledUI();
-                if (!wasClipOn) this._openRailPanel('clip');
+                if (!wasClipOn && data.panel !== false) this._openRailPanel('clip');
                 this._menus.refresh();
                 this._updateClipMaterials();
                 break;
@@ -27391,15 +27415,17 @@ class ThreeJSViewer {
     /**
      * The clipping state in the terms of `set_clipping_plane` / `set_clipping_slab`,
      * so a page that takes the plane over can put the user's back on release.
+     * Fields carry the setters' names: `distance` for a plane, `center` and `thickness` for a slab
+     * (both always present), so the object can be passed back as that message.
      * @returns {{enabled: boolean, mode: 'plane' | 'slab', normal: number[], distance: number,
-     *     thickness: number, showHelper: boolean, caps: boolean}}
+     *     center: number, thickness: number, show_helper: boolean, caps: boolean}}
      */
     getClipping() {
         const n = this._clipPlane.normal;
         return {
             enabled: this._clipEnabled, mode: this._clipSlabMode ? 'slab' : 'plane', normal: [n.x, n.y, n.z],
-            distance: this._clipPosition, thickness: this._clipSlabThickness,
-            showHelper: this._clipHelperVisible, caps: this._clipCaps.enabled,
+            distance: this._clipPosition, center: this._clipPosition, thickness: this._clipSlabThickness,
+            show_helper: this._clipHelperVisible, caps: this._clipCaps.enabled,
         };
     }
 

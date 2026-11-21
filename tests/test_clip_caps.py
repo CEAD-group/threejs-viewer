@@ -20,7 +20,7 @@ _CAP_STATS = """(id) => {
     if (!obj) return null;
     obj.updateWorldMatrix(true, true);
     const caps = [];
-    obj.traverse((n) => { if (n.userData.__clipCap) caps.push(n); });
+    obj.traverse((n) => { if (n.userData.__clipCap && !n.userData.__clipCapFrontier) caps.push(n); });
     const planes = v._clipPlanes.map((p) => [p.normal.x, p.normal.y, p.normal.z, p.constant]);
     return caps.filter((c) => c.visible).map((cap) => {
         cap.updateWorldMatrix(true, false);
@@ -87,7 +87,7 @@ def _wait_caps(page, id, n):
     page.wait_for_function(
         "([id, n]) => { const v = window.threejsViewer; const o = v.getObject(id);"
         " if (!o || !v._clipCaps.settled()) return false;"
-        " let k = 0; o.traverse((c) => { if (c.userData.__clipCap && c.visible) k++; });"
+        " let k = 0; o.traverse((c) => { if (c.userData.__clipCap && !c.userData.__clipCapFrontier && c.visible) k++; });"
         " return k === n; }",
         arg=[id, n],
         timeout=10_000,
@@ -128,26 +128,67 @@ def _cap_count(page, id):
 
 
 @pytest.mark.browser
-def test_get_clipping_reports_what_restores_it(viewer_client, viewer_page):
-    """getClipping returns the plane, slab and caps in message terms."""
+@pytest.mark.parametrize("mode", ["plane", "slab"])
+def test_get_clipping_round_trips_as_its_message(viewer_client, viewer_page, mode):
+    """getClipping names its fields as the setters do, so passing it back as
+    set_clipping_plane or set_clipping_slab (panel false) restores the same state
+    without unfolding the Clipping panel."""
     page = viewer_page
-    get = "() => window.threejsViewer.getClipping()"
     assert page.evaluate("() => window.threejsViewer.hasFeature('clipping_state')")
-    assert page.evaluate(get)["enabled"] is False
+    assert page.evaluate("() => window.threejsViewer.getClipping()")["enabled"] is False
     viewer_client.set_clipping_caps(True)
-    viewer_client.set_clipping_plane(normal=[0, 0, 2], distance=0.5, show_helper=False)
+    if mode == "plane":
+        viewer_client.set_clipping_plane(
+            normal=[0, 0, 2], distance=0.5, show_helper=False
+        )
+    else:
+        viewer_client.set_clipping_slab(normal=[1, 0, 0], center=1.5, thickness=3)
     settle(viewer_client)
-    st = page.evaluate(get)
-    assert st["enabled"] is True and st["mode"] == "plane" and st["caps"] is True
-    assert st["normal"] == pytest.approx([0, 0, 1])
-    assert st["distance"] == pytest.approx(0.5)
-    assert st["showHelper"] is False
-    viewer_client.set_clipping_slab(normal=[1, 0, 0], center=1.5, thickness=3)
+    saved = page.evaluate("() => window.threejsViewer.getClipping()")
+    assert saved["mode"] == mode and saved["caps"] is True
+    assert saved["normal"] == pytest.approx([0, 0, 1] if mode == "plane" else [1, 0, 0])
+    if mode == "plane":
+        assert saved["distance"] == pytest.approx(0.5) and saved["show_helper"] is False
+    else:
+        assert saved["center"] == pytest.approx(1.5) and saved[
+            "thickness"
+        ] == pytest.approx(3)
+    viewer_client.disable_clipping_plane()
+    viewer_client.set_clipping_caps(False)
     settle(viewer_client)
-    st = page.evaluate(get)
-    assert st["mode"] == "slab"
-    assert st["distance"] == pytest.approx(1.5)
-    assert st["thickness"] == pytest.approx(3)
+    page.evaluate(
+        "(s) => { const v = window.threejsViewer;"
+        " v.handleMessage({...s, type: s.mode === 'slab' ? 'set_clipping_slab' : 'set_clipping_plane', panel: false});"
+        " v.setClipCaps(s.caps); }",
+        saved,
+    )
+    restored = page.evaluate("() => window.threejsViewer.getClipping()")
+    assert restored.keys() == saved.keys()
+    for k, v in saved.items():
+        assert restored[k] == (
+            pytest.approx(v) if not isinstance(v, (bool, str)) else v
+        ), k
+
+
+@pytest.mark.browser
+def test_slab_with_panel_false_leaves_the_clipping_panel_folded(
+    viewer_client, viewer_page
+):
+    """set_clipping_slab with panel false, as a page restoring a slab sends it,
+    does not unfold the Clipping panel."""
+    page = viewer_page
+    page.evaluate(
+        "() => { try { localStorage.removeItem('tjsv.toolPanel.clip'); } catch (e) {} }"
+    )
+    viewer_client.set_clipping_slab(
+        normal=[0, 0, 1], center=0.5, thickness=1, panel=False
+    )
+    settle(viewer_client)
+    st = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " return [v.getClipping().mode, v.getMenu('clip').isOpen(), !!v._toolPanels.clip]; }"
+    )
+    assert st == ["slab", False, False]
 
 
 @pytest.mark.browser
@@ -363,8 +404,8 @@ _CAP_UNION_AREA = """([id, plane, grid]) => {
     const tris = [];
     obj.traverse((cap) => {
         // A revealed tube's cap carries its frontier pair as a child piece.
-        const piece = cap.userData.__clipCapFrontier && cap.parent.visible;
-        if (!piece && (!cap.userData.__clipCap || !cap.visible)) return;
+        if (!cap.userData.__clipCap || !cap.visible) return;
+        if (cap.userData.__clipCapFrontier && !cap.parent.visible) return;
         cap.updateWorldMatrix(true, false);
         const e = cap.matrixWorld.elements;
         const arr = cap.geometry.getAttribute('position').array;

@@ -5358,6 +5358,7 @@ class ViewerClient:
         center: float = 0.0,
         thickness: float = 2.0,
         show_helper: bool = True,
+        panel: bool = True,
     ) -> None:
         """
         Enable a clipping slab (two parallel clipping planes) to see only a slice.
@@ -5368,6 +5369,8 @@ class ViewerClient:
             center: Position of the slab center along the normal.
             thickness: Distance between the two clipping planes.
             show_helper: Whether to show the visual plane helpers.
+            panel: Whether turning clipping on unfolds the Clipping panel. False
+                    for a slab the page owns.
         """
         msg: dict = {
             "type": "set_clipping_slab",
@@ -5375,6 +5378,8 @@ class ViewerClient:
             "thickness": float(thickness),
             "show_helper": show_helper,
         }
+        if not panel:
+            msg["panel"] = False
         if normal is not None:
             msg["normal"] = list(normal)
         self._send(msg)

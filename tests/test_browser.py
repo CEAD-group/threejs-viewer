@@ -6227,9 +6227,10 @@ def test_set_view_cancels_drag_inertia(viewer_client, viewer_page):
     injected and setView called in one evaluate so the check is
     deterministic (no damping decay between the two)."""
     viewer_client.add_box("b")
-    time.sleep(0.2)
     viewer_client.set_camera(position=[6.0, -6.0, 3.0], target=[1.0, 2.0, 0.5])
-    time.sleep(0.3)
+    # The camera message must land before the preset, or it overwrites it.
+    settle(viewer_client)
+    frames(viewer_page, 2)
     dist = math.sqrt(5.0**2 + 8.0**2 + 2.5**2)
 
     viewer_page.evaluate(
@@ -6240,7 +6241,9 @@ def test_set_view_cancels_drag_inertia(viewer_client, viewer_page):
         " window.threejsViewer.setView('top', { animate: false });"
         "}"
     )
-    time.sleep(0.4)  # several frames of controls.update() — would drain inertia
+    frames(
+        viewer_page, 20
+    )  # controls.update() runs every frame and would drain inertia
     state = viewer_page.evaluate(_VIEW_STATE_JS)
     assert state["target"] == pytest.approx([1.0, 2.0, 0.5], abs=1e-6)
     assert state["pos"] == pytest.approx([1.0, 2.0, 0.5 + dist], abs=1e-4)

@@ -1304,6 +1304,13 @@ def test_set_clipping_plane_owned_by_the_page(client):
     assert "panel" not in client._messages[1]
 
 
+def test_set_clipping_slab_owned_by_the_page(client):
+    client.set_clipping_slab(normal=[0, 0, 1], center=0.5, thickness=1.0, panel=False)
+    assert client._messages[0]["panel"] is False
+    client.set_clipping_slab(center=1.0)
+    assert "panel" not in client._messages[1]
+
+
 def test_set_clipping_plane_no_normal(client):
     client.set_clipping_plane(distance=1.0)
     msg = client._messages[0]

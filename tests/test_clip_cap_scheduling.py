@@ -21,7 +21,7 @@ _STATS = """() => { const c = window.threejsViewer._clipCaps;
     return { builds: c.builds, requests: c.requests, lastFrameBuilds: c.lastFrameBuilds }; }"""
 
 _VISIBLE_CAPS = """(id) => { let k = 0; window.threejsViewer.getObject(id).traverse(
-    (c) => { if (c.userData.__clipCap && c.visible) k++; }); return k; }"""
+    (c) => { if (c.userData.__clipCap && !c.userData.__clipCapFrontier && c.visible) k++; }); return k; }"""
 
 
 def _stats(page):
@@ -136,7 +136,7 @@ _MOVE_AND_COUNT = """async ([ids, frames, amp]) => {
     for (let f = 0; f < frames; f++) {
         await new Promise((r) => requestAnimationFrame(r));
         let k = 0;
-        for (const o of objs) o.traverse((c) => { if (c.userData.__clipCap && c.visible) k++; });
+        for (const o of objs) o.traverse((c) => { if (c.userData.__clipCap && !c.userData.__clipCapFrontier && c.visible) k++; });
         shown.push(k);
         objs.forEach((o, i) => { o.position.z = base[i] + amp * Math.sin(f * 0.15); });
     }
@@ -193,9 +193,9 @@ def test_moving_owner_keeps_showing_a_cap(viewer_client, viewer_page, worker):
     assert sum(shown) >= 0.95 * 90 * len(ids), shown
 
 
-def test_cap_too_old_for_its_owner_is_hidden(viewer_client, viewer_page):
-    """A cap whose rebuild does not land within CLIP_CAP_STALE_MS is hidden;
-    the new one appears on the plane once the result lands."""
+def test_stale_cap_stays_shown_until_its_rebuild_lands(viewer_client, viewer_page):
+    """While the worker result for a moved owner is held back, its old cap stays
+    shown however many frames pass; the new one replaces it on the plane."""
     page = viewer_page
     _use_worker(page, True)
     pos, _, idx = _box_arrays()
@@ -212,14 +212,8 @@ def test_cap_too_old_for_its_owner_is_hidden(viewer_client, viewer_page):
     viewer_client.set_matrix("m", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0.3, 1])
     settle(viewer_client)
     page.wait_for_function("() => window.__held.length > 0", timeout=10_000)
-    frames(page, 2)
+    frames(page, 60)
     assert page.evaluate(_VISIBLE_CAPS, "m") == 1
-    page.wait_for_function(
-        "(id) => { let k = 0; window.threejsViewer.getObject(id).traverse("
-        "(c) => { if (c.userData.__clipCap && c.visible) k++; }); return k === 0; }",
-        arg="m",
-        timeout=5_000,
-    )
     page.evaluate(
         "() => { const c = window.threejsViewer._clipCaps; c.onWorkerResult = window.__onResult;"
         " for (const m of window.__held) c.onWorkerResult(m); }"
