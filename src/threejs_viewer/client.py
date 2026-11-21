@@ -5303,17 +5303,6 @@ class ViewerClient:
         """
         self._send({"type": "set_projection", "mode": _validate_projection(mode)})
 
-    def set_rendering(self, enabled: bool) -> None:
-        """Stop or restart drawing frames, for a page that covers the canvas.
-
-        Playback, its clock and incoming messages keep working while drawing is off;
-        the first frame after turning it back on shows the current state.
-
-        Args:
-            enabled: ``False`` to stop drawing, ``True`` to draw again.
-        """
-        self._send({"type": "set_rendering", "enabled": bool(enabled)})
-
     def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
         """Toggle strand_collapse on a parametric_tube without re-uploading geometry.
 

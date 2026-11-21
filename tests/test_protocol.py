@@ -1391,15 +1391,6 @@ def test_set_projection_message(client):
         client.set_projection("iso")
 
 
-def test_set_rendering_message(client):
-    client.set_rendering(False)
-    client.set_rendering(True)
-    assert client._messages == [
-        {"type": "set_rendering", "enabled": False},
-        {"type": "set_rendering", "enabled": True},
-    ]
-
-
 def test_set_navigation_message(connected_client):
     client = connected_client
     client.set_navigation(rotate=False, left_button="pan")
