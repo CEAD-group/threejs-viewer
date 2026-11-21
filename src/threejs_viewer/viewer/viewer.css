@@ -715,6 +715,12 @@
 .threejs-viewer .tjsv-view-home:active {
     transform: scale(0.96);
 }
+/* setNavigation({rotate: false}): the projection stays, so the toggle reads as inert. */
+.threejs-viewer .tjsv-view-proj.tjsv-locked {
+    opacity: 0.45;
+    cursor: default;
+    pointer-events: none;
+}
 .threejs-viewer .tjsv-view-orbit:focus,
 .threejs-viewer .tjsv-view-proj:focus,
 .threejs-viewer .tjsv-view-home:focus {

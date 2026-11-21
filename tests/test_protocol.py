@@ -1295,6 +1295,22 @@ def test_set_clipping_plane_with_normal(client):
     ]
 
 
+def test_set_clipping_plane_owned_by_the_page(client):
+    client.set_clipping_plane(
+        normal=[0, 0, -1], distance=-1.0, show_helper=False, panel=False
+    )
+    assert client._messages[0]["panel"] is False
+    client.set_clipping_plane(distance=1.0)
+    assert "panel" not in client._messages[1]
+
+
+def test_set_clipping_slab_owned_by_the_page(client):
+    client.set_clipping_slab(normal=[0, 0, 1], center=0.5, thickness=1.0, panel=False)
+    assert client._messages[0]["panel"] is False
+    client.set_clipping_slab(center=1.0)
+    assert "panel" not in client._messages[1]
+
+
 def test_set_clipping_plane_no_normal(client):
     client.set_clipping_plane(distance=1.0)
     msg = client._messages[0]
@@ -1368,7 +1384,46 @@ def test_set_camera_validation(client):
         client.set_camera(fov=200)
     with pytest.raises(ValueError, match="zoom"):
         client.set_camera(zoom=0)
+    with pytest.raises(ValueError, match="projection"):
+        client.set_camera(projection="ortho")
     assert client._messages == []
+
+
+def test_set_camera_with_projection(client):
+    client.set_camera(target=[0, 0, 0], projection="orthographic")
+    assert client._messages == [
+        {"type": "set_camera", "target": [0.0, 0.0, 0.0], "projection": "orthographic"}
+    ]
+
+
+def test_set_projection_message(client):
+    client.set_projection("orthographic")
+    client.set_projection("perspective")
+    assert client._messages == [
+        {"type": "set_projection", "mode": "orthographic"},
+        {"type": "set_projection", "mode": "perspective"},
+    ]
+    with pytest.raises(ValueError, match="projection"):
+        client.set_projection("iso")
+
+
+def test_set_navigation_message(connected_client):
+    client = connected_client
+    client.set_navigation(rotate=False, left_button="pan")
+    client.set_navigation(zoom=False)
+    assert client._messages == [
+        {"type": "set_navigation", "rotate": False, "leftButton": "pan"},
+        {"type": "set_navigation", "zoom": False},
+    ]
+    # Merged for the reconnect replay.
+    assert client._navigation == {
+        "type": "set_navigation",
+        "rotate": False,
+        "leftButton": "pan",
+        "zoom": False,
+    }
+    with pytest.raises(ValueError, match="left_button"):
+        client.set_navigation(left_button="orbit")
 
 
 # === set_view ===
@@ -2033,3 +2088,16 @@ def test_frame_object_and_frame_points_fill(client):
         client.frame_points([[0, 0, float("nan")]])
     with pytest.raises(ValueError, match="fill"):
         client.frame_points([[0, 0, 0]], fill=2)
+
+
+def test_draw_order_fields_on_lines_and_tubes(client):
+    pts = [[0, 0, 0], [1, 0, 0]]
+    client.add_polyline("l", pts, render_order=2, depth_offset=0.001)
+    client.add_polyline("plain", pts)
+    client.add_parametric_tube("t", pts, [0.1, 0.1], [0.1, 0.1], depth_offset=-0.5)
+    headers = [h for h, _ in client._binary_messages]
+    assert headers[0]["renderOrder"] == 2.0 and headers[0]["depthOffset"] == 0.001
+    assert "renderOrder" not in headers[1] and "depthOffset" not in headers[1]
+    assert headers[2]["depthOffset"] == -0.5 and "renderOrder" not in headers[2]
+    with pytest.raises(ValueError, match="depth_offset"):
+        client.add_polyline("bad", pts, depth_offset=float("nan"))
