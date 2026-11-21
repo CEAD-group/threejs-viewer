@@ -1790,6 +1790,7 @@ const VIEWER_FEATURES = Object.freeze([
     'tube_pick',
     'line_draw_frontier',
     'bottom_inset',
+    'hover_follows_camera',
 ]);
 
 /**
@@ -16550,6 +16551,12 @@ class PolylinePickController {
         dom.addEventListener('pointerleave', this._onLeave);
         // pointerup on window so a release outside the canvas still ends cleanly.
         window.addEventListener('pointerup', this._onUp);
+        // A zoom or pan under a resting pointer moves the scene, not the pointer: pick again there.
+        this.v.onCameraChange(() => {
+            if (!this.enabled || !this._pointerOver || this._rafPending) return;
+            this._rafPending = true;
+            requestAnimationFrame(this._onMoveRaf);
+        });
     }
 
     /** @param {{markerColor?:number, thresholdPx?:number, maxPickPoints?:number, occlusion?:boolean}} [opts] */

@@ -4304,6 +4304,35 @@ def test_polyline_hover_cursor_does_not_flicker(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
+def test_polyline_hover_follows_a_zoom_under_a_resting_pointer(viewer_client, viewer_page):
+    """A zoom or pan with the pointer at rest picks again under it: the hover
+    reports the point now under the cursor, and clears once the line has left it."""
+    viewer_client.enable_polyline_picking()
+    pts = np.array([[-2, 0, 0], [2, 0, 0]], dtype=np.float32)
+    viewer_client.add_polyline("ln", pts, line_width=6)
+    viewer_client.set_camera(position=[0, -8, 0], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    viewer_page.evaluate(
+        "() => { window.__hov = []; window.threejsViewer.onPolylineHover(p => window.__hov.push(p ? (p.point.x ?? p.point[0]) : null)); }"
+    )
+    x, y = viewer_page.evaluate(_PROJECT_WORLD_TO_PIXELS, [1.0, 0.0, 0.0])
+    viewer_page.mouse.move(x, y)
+    frames(viewer_page, 3)
+    assert abs(viewer_page.evaluate("() => window.__hov.at(-1)") - 1.0) < 0.1
+    # Pan sideways without moving the pointer: the point under it shifts by the pan.
+    viewer_client.set_camera(position=[0.5, -8, 0], target=[0.5, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 4)
+    assert abs(viewer_page.evaluate("() => window.__hov.at(-1)") - 1.5) < 0.1
+    # Pan the line out from under the pointer: the hover clears.
+    viewer_client.set_camera(position=[0.5, -8, 3], target=[0.5, 0, 3])
+    settle(viewer_client)
+    frames(viewer_page, 4)
+    assert viewer_page.evaluate("() => window.__hov.at(-1)") is None
+
+
+@pytest.mark.browser
 def test_polyline_pick_js_hook(viewer_client, viewer_page):
     """A client-side JS hook (``viewer.onPolylinePick`` / ``onPolylineHover``)
     receives picks directly in the browser — no Python round-trip — and
