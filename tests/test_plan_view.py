@@ -565,3 +565,37 @@ def test_bottom_inset_lifts_the_gizmo_stack(viewer_client, viewer_page):
     assert r["lifted"]["css"] == pytest.approx(r["before"]["css"] + 60)
     assert r["before"]["btn"] - r["lifted"]["btn"] == pytest.approx(60, abs=1)
     assert r["after"] == r["before"]
+
+
+def test_public_camera_accessors(viewer_client, viewer_page):
+    """worldToCanvas, getWorldPerPixel and the camera tracking pair replace reads of the
+    camera, controls and tracking fields."""
+    viewer_client.add_polyline("t", np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32))
+    viewer_client.set_camera(position=[0, -8, 0], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 2)
+    r = viewer_page.evaluate(
+        """() => {
+        const v = window.threejsViewer, dom = v.getCanvas();
+        const centre = v.worldToCanvas(0, 0, 0);
+        const behind = v.worldToCanvas(0, -20, 0);
+        const right = v.worldToCanvas(1, 0, 0);
+        const wpp = v.getWorldPerPixel();
+        const features = ['hover_follows_camera', 'camera_tracking', 'world_to_canvas']
+            .map((f) => v.hasFeature(f));
+        const bad = v.setCameraTracking('follow', null);
+        const set = v.setCameraTracking('lookat', 't');
+        const tracked = v.getCameraTracking();
+        v.setCameraTracking('off');
+        return { centre, behind, right, wpp, w: dom.clientWidth, h: dom.clientHeight,
+                 features, bad, set, tracked, off: v.getCameraTracking() };
+    }"""
+    )
+    assert all(r["features"])
+    assert r["centre"] == pytest.approx([r["w"] / 2, r["h"] / 2], abs=0.5)
+    assert r["behind"] is None
+    # One world unit to the right spans 1 / worldPerPixel pixels at the target.
+    assert r["right"][0] - r["centre"][0] == pytest.approx(1 / r["wpp"], rel=1e-3)
+    assert r["bad"] is False and r["set"] is True
+    assert r["tracked"] == {"mode": "lookat", "targetId": "t", "interactive": False}
+    assert r["off"]["mode"] == "off" and r["off"]["targetId"] is None

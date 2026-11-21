@@ -1791,6 +1791,8 @@ const VIEWER_FEATURES = Object.freeze([
     'line_draw_frontier',
     'bottom_inset',
     'hover_follows_camera',
+    'camera_tracking',
+    'world_to_canvas',
 ]);
 
 /**
@@ -26323,6 +26325,51 @@ class ThreeJSViewer {
     }
     /** @returns {number} the reserved bottom inset in CSS px */
     getBottomInset() { return this._bottomInset || 0; }
+
+    /** @returns {number} world units per CSS pixel at the orbit target, in either projection */
+    getWorldPerPixel() { return this._worldPerPixelAtTarget(); }
+
+    /**
+     * A world point in canvas CSS pixels, or null behind the camera.
+     * @param {number} x @param {number} y @param {number} z
+     * @returns {[number, number] | null}
+     */
+    worldToCanvas(x, y, z) {
+        this._camera.updateMatrixWorld();
+        const p = new THREE.Vector3(x, y, z).applyMatrix4(this._camera.matrixWorldInverse);
+        if (this._camera.isPerspectiveCamera ? p.z >= 0 : false) return null;
+        p.applyMatrix4(this._camera.projectionMatrix);
+        const dom = this._renderer.domElement;
+        return [(p.x + 1) / 2 * dom.clientWidth, (1 - p.y) / 2 * dom.clientHeight];
+    }
+
+    /**
+     * Camera tracking as the T key and animation metadata set it.
+     * @returns {{mode: 'off' | 'follow' | 'lookat' | 'scripted', targetId: string | null, interactive: boolean}}
+     */
+    getCameraTracking() {
+        const mode = /** @type {'off' | 'follow' | 'lookat' | 'scripted'} */ (this._trackMode);
+        return { mode, targetId: this._trackTargetId, interactive: this._trackInteractive };
+    }
+
+    /**
+     * Follow or look at an object, or stop tracking. The next tick snaps the target rather
+     * than moving by a delta from an earlier position.
+     * @param {'off' | 'follow' | 'lookat'} mode
+     * @param {string | null} [targetId] the tracked object; ignored for 'off'
+     * @returns {boolean} false (with a warning) for an unknown mode or a missing target
+     */
+    setCameraTracking(mode, targetId = null) {
+        if (!['off', 'follow', 'lookat'].includes(mode) || (mode !== 'off' && !targetId)) {
+            console.warn(`setCameraTracking: unsupported mode ${mode} or missing target`);
+            return false;
+        }
+        this._trackMode = mode;
+        this._trackTargetId = mode === 'off' ? null : targetId;
+        this._trackHasLastPos = false;
+        this._updateTrackingUI();
+        return true;
+    }
 
     /**
      * Set the view gimbal size in CSS px (issue #233), clamped to 32-512.
