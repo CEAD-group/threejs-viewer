@@ -1295,6 +1295,13 @@ def test_set_clipping_plane_with_normal(client):
     ]
 
 
+def test_set_clipping_plane_owned_by_the_page(client):
+    client.set_clipping_plane(normal=[0, 0, -1], distance=-1.0, show_helper=False, panel=False)
+    assert client._messages[0]["panel"] is False
+    client.set_clipping_plane(distance=1.0)
+    assert "panel" not in client._messages[1]
+
+
 def test_set_clipping_plane_no_normal(client):
     client.set_clipping_plane(distance=1.0)
     msg = client._messages[0]

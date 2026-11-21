@@ -5328,6 +5328,7 @@ class ViewerClient:
         normal: list[float] | None = None,
         distance: float = 0.0,
         show_helper: bool = True,
+        panel: bool = True,
     ) -> None:
         """
         Enable a clipping plane that cuts through the scene.
@@ -5337,12 +5338,16 @@ class ViewerClient:
                     If None, uses the viewer's current axis selection.
             distance: Distance along the normal to place the plane.
             show_helper: Whether to show the visual plane helper.
+            panel: Whether turning clipping on unfolds the Clipping panel. False
+                    for a plane the page owns, cut without showing its controls.
         """
         msg: dict = {
             "type": "set_clipping_plane",
             "distance": float(distance),
             "show_helper": show_helper,
         }
+        if not panel:
+            msg["panel"] = False
         if normal is not None:
             msg["normal"] = list(normal)
         self._send(msg)

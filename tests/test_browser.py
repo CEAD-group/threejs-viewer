@@ -7831,6 +7831,23 @@ def test_streamed_clipping_plane_never_reopens_a_folded_panel(
 
 
 @pytest.mark.browser
+def test_page_owned_clipping_plane_leaves_the_panel_alone(viewer_client, viewer_page):
+    """panel=False cuts without unfolding the Clipping panel or adding its tab, and
+    the cut drops picks on the clipped side as any plane does."""
+    page = viewer_page
+    page.evaluate("() => { try { localStorage.removeItem('tjsv.toolPanel.clip'); } catch (e) {} }")
+    viewer_client.set_clipping_plane(normal=[0, 0, -1], distance=-0.5, show_helper=False, panel=False)
+    settle(viewer_client)
+    st = page.evaluate(
+        "() => { const v = window.threejsViewer;"
+        " let stored = null; try { stored = localStorage.getItem('tjsv.toolPanel.clip'); } catch (e) {}"
+        " return [v._clipEnabled, v.getMenu('clip').isOpen(), v._toolPanels.clip, stored,"
+        "         v._clipPlanes[0].distanceToPoint({x: 0, y: 0, z: 1}) < 0]; }"
+    )
+    assert st == [True, False, False, None, True]
+
+
+@pytest.mark.browser
 def test_space_on_panel_buttons_stays_with_the_button(viewer_client, viewer_page):
     """Space on a focused panel button (the clip switch, a segmented button)
     activates that button and never reaches the play/pause key."""

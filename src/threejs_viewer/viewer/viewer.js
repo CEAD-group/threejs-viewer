@@ -23867,7 +23867,8 @@ export class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._syncClipEnabledUI();
-                if (!wasClipOn) this._openRailPanel('clip');
+                // A page-owned plane (panel: false) cuts without unfolding or enabling the Clipping panel.
+                if (!wasClipOn && data.panel !== false) this._openRailPanel('clip');
                 this._menus.refresh();
                 this._updateClipMaterials();
                 break;
