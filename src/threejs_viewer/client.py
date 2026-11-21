@@ -288,6 +288,26 @@ def _validate_fov(value: Optional[float]) -> Optional[float]:
     return f
 
 
+def _add_draw_order(
+    header: dict, render_order: Optional[float], depth_offset: Optional[float]
+) -> None:
+    """Put the optional renderOrder and depthOffset of a line or tube on its header."""
+    if render_order is not None:
+        header["renderOrder"] = _validate_finite("render_order", render_order)
+    if depth_offset is not None:
+        header["depthOffset"] = _validate_finite("depth_offset", depth_offset)
+
+
+_PROJECTIONS = ("perspective", "orthographic")
+
+
+def _validate_projection(value: str) -> str:
+    """Validate a camera projection name."""
+    if value not in _PROJECTIONS:
+        raise ValueError(f"projection must be one of {_PROJECTIONS} (got {value!r})")
+    return value
+
+
 # "Unbounded" sentinel for point-cloud time-window ends: NaN/±inf in
 # birth_times/removal_times are mapped to ±FLT_MAX before packing, because
 # NaN comparisons in GLSL are undefined and would make points flicker in or
@@ -822,6 +842,8 @@ class ViewerClient:
         # Runtime toolbar visibility set via set_toolbar_visible; re-sent on
         # reconnect so a browser refresh keeps the menu the script asked for.
         self._toolbar_visible: Optional[dict] = None
+        # Navigation mode set via set_navigation, merged; re-sent on reconnect.
+        self._navigation: Optional[dict] = None
         # Accumulated set_sun fields, re-sent on reconnect.
         self._sun_state: Dict[str, Any] = {}
         # Runtime set_display_quality value, re-sent on reconnect.
@@ -1103,6 +1125,13 @@ class ViewerClient:
         if self._toolbar_visible is not None:
             try:
                 websocket.send(json.dumps(self._toolbar_visible))
+            except Exception:
+                pass
+
+        # Re-apply the navigation mode (set_navigation).
+        if self._navigation is not None:
+            try:
+                websocket.send(json.dumps(self._navigation))
             except Exception:
                 pass
 
@@ -2095,6 +2124,8 @@ class ViewerClient:
         scale: Optional[List[float]] = None,
         matrix: Optional[List[float]] = None,
         exact_colors: bool = False,
+        render_order: Optional[float] = None,
+        depth_offset: Optional[float] = None,
     ) -> None:
         """
         Add a polyline to the scene using binary transfer.
@@ -2150,6 +2181,13 @@ class ViewerClient:
                 the bytes from sRGB and skips tone mapping. The default keeps
                 the historical look, where colours come out lighter. Fog and
                 eye-dome lighting still darken the line with depth.
+            render_order: Draw order among objects that do not settle it
+                by depth (transparent or depth-ignoring ones); THREE's
+                ``renderOrder``.
+            depth_offset: Depth bias toward the camera, in world units of
+                view distance (negative: away), applied in the shader without
+                moving the object on screen. Orders coplanar paths, such as a
+                planned and a measured one, on any line or tube.
         """
         if not isinstance(exact_colors, bool):
             raise ValueError(f"exact_colors must be a bool, got {exact_colors!r}")
@@ -2206,6 +2244,7 @@ class ViewerClient:
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
+        _add_draw_order(header, render_order, depth_offset)
         self._send_binary(header, raw_bytes)
 
     # === Vector entities ===
@@ -3452,6 +3491,8 @@ class ViewerClient:
         join_tolerance: float = 0.015,
         join_budget: Optional[float] = 0.15,
         clip_cap: Optional[bool] = None,
+        render_order: Optional[float] = None,
+        depth_offset: Optional[float] = None,
     ) -> None:
         """Add a variable-cross-section extruded tube built from per-spine-point
         parameters.
@@ -3591,6 +3632,13 @@ class ViewerClient:
                 pass through it too.
             clip_cap: Override :meth:`set_clipping_caps` for this tube (also
                 accepted by :meth:`add_toolpath`).
+            render_order: Draw order among objects that do not settle it
+                by depth (transparent or depth-ignoring ones); THREE's
+                ``renderOrder``.
+            depth_offset: Depth bias toward the camera, in world units of
+                view distance (negative: away), applied in the shader without
+                moving the object on screen. Orders coplanar paths, such as a
+                planned and a measured one, on any line or tube.
             bias_index_offset / bias_index_total: Deposition-order bias ramp
                 continuation for tubes that are segments of one logical
                 toolpath (used by :meth:`add_toolpath` when splitting at
@@ -3807,6 +3855,7 @@ class ViewerClient:
         transform = _transform_header(position, rotation, scale, matrix)
         if transform:
             header["transform"] = transform
+        _add_draw_order(header, render_order, depth_offset)
         self._send_binary(header, b"".join(parts))
 
     def _texture_url(self, image: Union[str, Path, bytes]) -> str:
@@ -5144,7 +5193,10 @@ class ViewerClient:
             raise TimeoutError("No response from viewer")
         response = self._responses.pop(request_id, {})
         self._pending_responses.pop(request_id, None)
-        return {k: response.get(k) for k in ("position", "target", "up", "fov", "zoom")}
+        return {
+            k: response.get(k)
+            for k in ("position", "target", "up", "fov", "zoom", "projection")
+        }
 
     def set_camera(
         self,
@@ -5153,6 +5205,7 @@ class ViewerClient:
         up: Optional[List[float]] = None,
         fov: Optional[float] = None,
         zoom: Optional[float] = None,
+        projection: Optional[str] = None,
     ) -> None:
         """Set the viewer camera pose. Omitted fields are left unchanged.
 
@@ -5166,6 +5219,9 @@ class ViewerClient:
                 (0, 180). Ignored while the orthographic camera is active.
             zoom: Camera zoom factor (> 0) — the framing control for the
                 orthographic camera.
+            projection: ``"perspective"`` or ``"orthographic"``. Applied
+                before the other fields, so the pose and the projection land
+                in the same frame (see :meth:`set_projection`).
 
         Pair with :meth:`get_camera` to capture a hand-tuned view and replay
         it from a script.
@@ -5193,7 +5249,59 @@ class ViewerClient:
             if z is not None and z <= 0:
                 raise ValueError(f"zoom must be > 0 (got {zoom!r})")
             msg["zoom"] = z
+        if projection is not None:
+            msg["projection"] = _validate_projection(projection)
         self._send(msg)
+
+    def set_navigation(
+        self,
+        rotate: Optional[bool] = None,
+        pan: Optional[bool] = None,
+        zoom: Optional[bool] = None,
+        left_button: Optional[str] = None,
+    ) -> None:
+        """Choose which gestures move the camera. Omitted fields are unchanged.
+
+        A plan view that pans and zooms but never rotates is
+        ``set_navigation(rotate=False, left_button="pan")``. While rotation is
+        off a click does not move the orbit pivot; the gimbal's axis bubbles,
+        the projection key, button and menu item, and the V key do nothing;
+        and Home, F and a double click on empty space frame the scene without
+        reorienting it. Polyline and tube picking keep the plain left click,
+        also when the left button pans. :meth:`set_projection` and
+        :meth:`set_camera` still change the view. Re-sent on reconnect.
+
+        Args:
+            rotate: Orbit with the left drag (or one finger).
+            pan: Pan with the right drag, Shift+left drag and two fingers.
+            zoom: Zoom with the wheel and a pinch.
+            left_button: ``"rotate"`` (default) or ``"pan"``: what a plain
+                left drag does.
+        """
+        msg: dict = {"type": "set_navigation"}
+        for key, value in (("rotate", rotate), ("pan", pan), ("zoom", zoom)):
+            if value is not None:
+                msg[key] = bool(value)
+        if left_button is not None:
+            if left_button not in ("rotate", "pan"):
+                raise ValueError(
+                    f"left_button must be 'rotate' or 'pan' (got {left_button!r})"
+                )
+            msg["leftButton"] = left_button
+        self._navigation = {**(self._navigation or {}), **msg}
+        if self._ws is not None:
+            self._send(msg)
+
+    def set_projection(self, mode: str) -> None:
+        """Switch the camera projection, as the toolbar button and the O key do.
+
+        The view direction, target and apparent scale are kept.
+        :meth:`get_camera` reports the active projection.
+
+        Args:
+            mode: ``"perspective"`` or ``"orthographic"``.
+        """
+        self._send({"type": "set_projection", "mode": _validate_projection(mode)})
 
     def set_strand_collapse_enabled(self, id: str, enabled: bool) -> None:
         """Toggle strand_collapse on a parametric_tube without re-uploading geometry.
@@ -5220,6 +5328,7 @@ class ViewerClient:
         normal: list[float] | None = None,
         distance: float = 0.0,
         show_helper: bool = True,
+        panel: bool = True,
     ) -> None:
         """
         Enable a clipping plane that cuts through the scene.
@@ -5229,12 +5338,16 @@ class ViewerClient:
                     If None, uses the viewer's current axis selection.
             distance: Distance along the normal to place the plane.
             show_helper: Whether to show the visual plane helper.
+            panel: Whether turning clipping on unfolds the Clipping panel. False
+                    for a plane the page owns, cut without showing its controls.
         """
         msg: dict = {
             "type": "set_clipping_plane",
             "distance": float(distance),
             "show_helper": show_helper,
         }
+        if not panel:
+            msg["panel"] = False
         if normal is not None:
             msg["normal"] = list(normal)
         self._send(msg)

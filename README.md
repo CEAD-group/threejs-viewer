@@ -254,7 +254,52 @@ with the per-point arrays you built it from, so it doubles as a lookup key for
 other per-point data at the picked point. A browser embedder can subscribe in
 JS instead — `viewer.onPolylinePick(cb)` (click) / `viewer.onPolylineHover(cb)`
 (every hover move) — for a live readout with no Python round-trip. See
-[examples/22_polyline_picking.py](examples/22_polyline_picking.py).
+[examples/22_polyline_picking.py](examples/22_polyline_picking.py). A spine of more than
+2048 points is scanned through a box index of 64-segment runs, so a hover costs well under
+a millisecond on a 400k-point tube (about 80 ms with a full scan) and finds the same point.
+
+A fractional `set_draw_range` (or `draw_range` channel value) on a connected fat polyline draws
+the last visible segment up to the exact point, as a parametric tube's frontier does, so a reveal
+grows smoothly instead of segment by segment; picks stop at the cut. `hasFeature('line_draw_frontier')`
+marks it. Native (`fat=False`) lines and disjoint segments still cut at whole vertices.
+
+### Camera projection and plan views
+
+```python
+# An orthographic plan view of one slice of a path, seen along its plane normal.
+v.set_camera(position=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0],
+             projection="orthographic")   # pose and projection in one frame
+v.set_projection("perspective")            # or switch on its own
+v.get_camera()["projection"]               # "perspective" | "orthographic"
+v.set_navigation(rotate=False, left_button="pan")   # pan and zoom only
+```
+
+While rotation is off a click never moves the orbit pivot, picking keeps the plain left
+click, the gimbal bubbles and the projection key, button and menu item leave the view alone,
+and Home, F and a double click on empty space frame without reorienting. JS: `viewer.setNavigation({rotate, pan, zoom, leftButton})`.
+
+`viewer.onCameraChange(cb)` reports each rendered frame in which the view changed (controls,
+damping, `set_camera`, framing, tweens, projection, resize) with the pose and `worldPerPixel`,
+so an overlay such as a scale bar follows the camera without polling.
+
+`await viewer.whenObjectReady(id)` resolves once a blob-backed add (`add_*_binary`, models)
+has fetched and registered its object (false when it failed or was deleted), so an embedder
+that measures or adjusts a new object needs no polling.
+
+`viewer.setBottomInset(px)` reserves room above the animation toolbar for a bar the page draws
+at the bottom of the canvas: the view gimbal and its orbit / P / Home buttons move up by `px`,
+and their hit-testing follows. `hasFeature('bottom_inset')` marks it.
+
+Coplanar paths, such as a planned and a measured one, are ordered with `depth_offset` on
+`add_polyline` / `add_parametric_tube` (`depthOffset` on the messages): a depth bias toward
+the camera in world units, applied in the shader, so nothing moves on screen and native lines
+honour it too. `render_order` sets THREE's `renderOrder`. The orthographic camera fits its
+near and far planes to the scene along the view, as the perspective camera does.
+
+In JS the same calls are `viewer.setProjection(mode)`, `viewer.setCameraPose({..., projection})`
+and `viewer.getCameraPose().projection`. `viewer.hasFeature(name)` tells an embedder
+whether the viewer it runs against has an optional addition (`viewer.features` lists them),
+so a page can fall back on an older release.
 
 ### Point clouds: live append, time windows & octree LOD
 

@@ -26,8 +26,11 @@ _CAP_STATS = """(id) => {
         cap.updateWorldMatrix(true, false);
         const e = cap.matrixWorld.elements;
         const a = cap.geometry.getAttribute('position').array;
+        // A tube cap draws only up to its owner's drawn bands.
+        const dr = cap.geometry.drawRange;
+        const last = Math.min(a.length, Number.isFinite(dr.count) ? (dr.start + dr.count) * 3 : a.length);
         const W = [];
-        for (let i = 0; i < a.length; i += 3) {
+        for (let i = dr.start * 3; i < last; i += 3) {
             const x = a[i], y = a[i + 1], z = a[i + 2];
             W.push([e[0] * x + e[4] * y + e[8] * z + e[12],
                     e[1] * x + e[5] * y + e[9] * z + e[13],
@@ -122,6 +125,29 @@ def _cap_count(page, id):
         "(c) => { if (c.userData.__clipCap) k++; }); return k; }",
         id,
     )
+
+
+@pytest.mark.browser
+def test_get_clipping_reports_what_restores_it(viewer_client, viewer_page):
+    """getClipping returns the plane, slab and caps in message terms."""
+    page = viewer_page
+    get = "() => window.threejsViewer.getClipping()"
+    assert page.evaluate("() => window.threejsViewer.hasFeature('clipping_state')")
+    assert page.evaluate(get)["enabled"] is False
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 0, 2], distance=0.5, show_helper=False)
+    settle(viewer_client)
+    st = page.evaluate(get)
+    assert st["enabled"] is True and st["mode"] == "plane" and st["caps"] is True
+    assert st["normal"] == pytest.approx([0, 0, 1])
+    assert st["distance"] == pytest.approx(0.5)
+    assert st["showHelper"] is False
+    viewer_client.set_clipping_slab(normal=[1, 0, 0], center=1.5, thickness=3)
+    settle(viewer_client)
+    st = page.evaluate(get)
+    assert st["mode"] == "slab"
+    assert st["distance"] == pytest.approx(1.5)
+    assert st["thickness"] == pytest.approx(3)
 
 
 @pytest.mark.browser
@@ -336,13 +362,17 @@ _CAP_UNION_AREA = """([id, plane, grid]) => {
     const w = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
     const tris = [];
     obj.traverse((cap) => {
-        if (!cap.userData.__clipCap || !cap.visible) return;
+        // A revealed tube's cap carries its frontier pair as a child piece.
+        const piece = cap.userData.__clipCapFrontier && cap.parent.visible;
+        if (!piece && (!cap.userData.__clipCap || !cap.visible)) return;
         cap.updateWorldMatrix(true, false);
         const e = cap.matrixWorld.elements;
         const arr = cap.geometry.getAttribute('position').array;
+        const dr = cap.geometry.drawRange;
+        const last = Math.min(arr.length, Number.isFinite(dr.count) ? (dr.start + dr.count) * 3 : arr.length);
         const pts = [];
         let onPlane = true;
-        for (let i = 0; i < arr.length; i += 3) {
+        for (let i = dr.start * 3; i < last; i += 3) {
             const x = arr[i], y = arr[i + 1], z = arr[i + 2];
             const p = [e[0] * x + e[4] * y + e[8] * z + e[12], e[1] * x + e[5] * y + e[9] * z + e[13],
                        e[2] * x + e[6] * y + e[10] * z + e[14]];
@@ -1049,6 +1079,8 @@ def test_model_cache_clones_carry_their_own_caps(viewer_client, viewer_page):
     url = _model_url(viewer_client, "/clipcap_boxes.glb", _three_box_glb())
     viewer_client.add_model("a", url, format="glb")
     viewer_client.add_model("b", url, format="glb", position=[0, 0, 5])
+    # Caps are built only for owners in view.
+    viewer_client.set_camera(position=[0, -40, 3], target=[0, 0, 3])
     viewer_client.set_clipping_caps(True)
     viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
     settle(viewer_client)
@@ -1089,6 +1121,7 @@ def test_model_clones_share_one_worker_copy(viewer_client, viewer_page):
     url = _model_url(viewer_client, "/clipcap_share.glb", _three_box_glb())
     for i in range(3):
         viewer_client.add_model(f"m{i}", url, format="glb", position=[0, 0, 5 * i])
+    viewer_client.set_camera(position=[0, -60, 5], target=[0, 0, 5])
     viewer_client.set_clipping_caps(True)
     viewer_client.set_clipping_plane(normal=[0, 1, 0], distance=0.0, show_helper=False)
     settle(viewer_client)

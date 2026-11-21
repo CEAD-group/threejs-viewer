@@ -26,6 +26,23 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 
 const VIEWER_VERSION = '0.0.0-dev';
 
+// Optional protocol additions an embedder can test for with `hasFeature`, so a
+// page can use them and still run against an older viewer that lacks them.
+const VIEWER_FEATURES = Object.freeze([
+    'set_projection',
+    'set_navigation',
+    'camera_change',
+    'object_ready',
+    'depth_offset',
+    'tube_pick',
+    'line_draw_frontier',
+    'bottom_inset',
+    'hover_follows_camera',
+    'camera_tracking',
+    'world_to_canvas',
+    'clipping_state',
+]);
+
 /**
  * Is this a development build rather than a released version?
  *
@@ -42,6 +59,9 @@ function isDevVersion(v) {
 }
 
 const ORTHO_FRUSTUM = 10;
+/** @typedef {'perspective' | 'orthographic'} CameraProjection */
+/** @type {ReadonlyArray<string>} */
+const CAMERA_PROJECTIONS = Object.freeze(['perspective', 'orthographic']);
 
 // Scene clear / background colour. Used both as scene.background (direct render
 // path) and as the canvas CSS background-color so it shows through where the
@@ -730,7 +750,7 @@ function makeChannelApply(viewer) {
             const nObj = ch.ids.length;
             for (let i = 0; i < nObj; i++) {
                 const obj = refs[i];
-                if (obj) obj.visible = (ch.data[base + i] === 1);
+                if (obj) obj.visible = (ch.data[base + i] === 1) && viewer._eyeAllows(ch.ids[i]);
             }
         },
 
@@ -760,7 +780,7 @@ function makeChannelApply(viewer) {
                 } else if (obj.userData.isNativeLine) {
                     obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
                 } else if (obj.userData.isPolyline) {
-                    obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+                    applyFatLineDrawRange(obj, value);
                 } else if (obj.userData.isParametricTube) {
                     applyParametricTubeDrawRange(obj, value);
                 } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
@@ -2246,6 +2266,57 @@ function depthMaterialFields(params, defaultDepthWrite) {
         fields.polygonOffsetUnits = params.polygonOffsetUnits != null ? params.polygonOffsetUnits : 0;
     }
     return { fields, depthWriteExplicit };
+}
+
+/**
+ * Bias a material's depth toward the camera by `offset` world units of view
+ * distance (negative: away), keeping its screen position. Unlike polygon
+ * offset it also works on native lines, and it does not depend on the
+ * near/far planes or the surface slope. Chains existing hooks and program keys.
+ * @param {THREE.Material} material @param {number} offset
+ */
+function applyDepthOffset(material, offset) {
+    const m = /** @type {any} */ (material);
+    const uniform = { value: offset };
+    m.userData.depthOffset = offset;
+    const before = material.onBeforeCompile;
+    const previousKey = material.customProgramCacheKey;
+    const stockKey = previousKey === THREE.Material.prototype.customProgramCacheKey;
+    material.onBeforeCompile = function (shader, renderer) {
+        before.call(this, shader, renderer);
+        shader.uniforms.tjsvDepthOffset = uniform;
+        // Every stock vertex shader and LineMaterial's define mvPosition before logdepthbuf_vertex.
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nuniform float tjsvDepthOffset;')
+            .replace('#include <logdepthbuf_vertex>', `{
+    vec4 tjsvBiased = projectionMatrix * vec4( mvPosition.xy, mvPosition.z + tjsvDepthOffset, 1.0 );
+    gl_Position.z = tjsvBiased.z / tjsvBiased.w * gl_Position.w;
+}
+#include <logdepthbuf_vertex>`);
+    };
+    material.customProgramCacheKey = function () {
+        return (stockKey ? before.toString() : previousKey.call(this)) + '|tjsv-depth-offset-v1';
+    };
+    material.needsUpdate = true;
+}
+
+/**
+ * Optional `renderOrder` and `depthOffset` of an add message (polylines and
+ * parametric tubes): draw order among transparent or depth-ignoring objects,
+ * and a depth bias that orders coplanar paths without moving them.
+ * @param {THREE.Object3D} obj @param {THREE.Material} material @param {any} data
+ */
+function applyDrawOrder(obj, material, data) {
+    if (data.renderOrder != null) {
+        const order = Number(data.renderOrder);
+        if (Number.isFinite(order)) obj.renderOrder = order;
+        else console.warn(`renderOrder ignored on '${data.id}': not a finite number`, data.renderOrder);
+    }
+    if (data.depthOffset != null && data.depthOffset !== 0) {
+        const offset = Number(data.depthOffset);
+        if (Number.isFinite(offset)) applyDepthOffset(material, offset);
+        else console.warn(`depthOffset ignored on '${data.id}': not a finite number`, data.depthOffset);
+    }
 }
 
 // Default exponent of the grazing-angle opacity falloff (see applyGrazingOpacity).
@@ -5226,6 +5297,7 @@ self.onmessage = function(e) {
             if (c.col) transfer.push(c.col.buffer);
             if (c.ruv) transfer.push(c.ruv.buffer, c.reg.buffer, c.ruvEnd.buffer);
             if (c.rmat) transfer.push(c.rmat.buffer);
+            if (c.fanBand) transfer.push(c.fanBand.buffer, c.fanEnd.buffer);
         }
         self.postMessage({ type: 'clipCapResult', capId: msg.capId, reqId: msg.reqId, caps, error }, transfer);
         return;
@@ -6555,6 +6627,7 @@ class ParametricTube {
             endCapPattern: msg.endCapPattern,
             savedCapIndices: new (/** @type {any} */ (msg.endCapPattern.constructor))(msg.endCapPattern.length),
             savedCapOffset: -1,
+            savedCapPairs: 0,
             vOffs: msg.reducedVOffs || null,
             arc: msg.reducedArc || null,
             uvPeriod: msg.uvPeriod || 0,
@@ -6999,6 +7072,7 @@ class ParametricTube {
         const offset = visiblePairs > 0 ? tubePairOffset(ud, visiblePairs - 1) + perPair : capPer;
         md.savedCapIndices.set(idx.subarray(offset, offset + capPer));
         md.savedCapOffset = offset;
+        md.savedCapPairs = visiblePairs;
         // Write end cap pattern, adjusting tube ring references from the
         // original last ring to the current frontier ring.
         const nCs = ud.tubeNCs;
@@ -7019,8 +7093,23 @@ class ParametricTube {
         return offset;
     }
 
-    /** @param {number} value */
+    /**
+     * A reveal rewrites the frontier ring and end cap in place; the clip cap
+     * controller is told those edits are not a new tube.
+     * @param {number} value
+     */
     setDrawRange(value) {
+        const g = this._mesh.geometry, ud = this._mesh.userData;
+        const before = [attrVersion(g.getAttribute('position')), attrVersion(g.getIndex())];
+        this._setDrawRange(value);
+        const seen = ud.__clipCapSeenVersions;
+        if (seen && seen[0] === before[0] && seen[1] === before[1]) {
+            ud.__clipCapSeenVersions = [attrVersion(g.getAttribute('position')), attrVersion(g.getIndex())];
+        }
+    }
+
+    /** @param {number} value */
+    _setDrawRange(value) {
         const obj = this._mesh;
         const ud = obj.userData;
         const ringPairs = ud.tubeRingPairs;
@@ -7069,6 +7158,53 @@ class ParametricTube {
         const capOffset = this.relocateEndCap(visiblePairs);
         obj.geometry.setDrawRange(0, capOffset + capPer);
     }
+}
+
+/**
+ * Draw range on a fat connected polyline (Line2): a fractional value draws the
+ * last visible segment up to the exact point, as a tube's frontier ring does,
+ * so a reveal grows smoothly instead of segment by segment. The cut segment's
+ * end (position and colour) is overwritten in place and restored when the
+ * frontier moves on. Disjoint segments (LineSegments2) keep whole instances.
+ * @param {THREE.Object3D} obj @param {number} value
+ */
+function applyFatLineDrawRange(obj, value) {
+    const line = /** @type {any} */ (obj);
+    const ud = line.userData;
+    const max = ud.maxInstanceCount;
+    const geom = line.geometry;
+    const clamped = Math.max(0, Math.min(1, value));
+    const frontier = ud.lineFrontier;
+    const attrs = ['instanceStart', 'instanceColorStart'].map((n) => geom.getAttribute(n)).filter(Boolean);
+    if (frontier) {
+        attrs.forEach((/** @type {any} */ a, /** @type {number} */ i) => {
+            a.data.array.set(frontier.saved[i], frontier.seg * 6 + 3);
+            a.data.addUpdateRange(frontier.seg * 6 + 3, 3);
+            a.data.needsUpdate = true;
+        });
+        ud.lineFrontier = null;
+    }
+    if (ud.isLineSegments || !(max > 0)) {
+        geom.instanceCount = Math.round(clamped * max);
+        return;
+    }
+    const f = clamped * max;
+    const seg = Math.floor(f), w = f - seg;
+    ud.pickDrawFrac = clamped;
+    if (w < 1e-6 || seg >= max) {
+        geom.instanceCount = Math.min(max, seg);
+        return;
+    }
+    const saved = attrs.map((/** @type {any} */ a) => {
+        const arr = a.data.array, o = seg * 6;
+        const keep = arr.slice(o + 3, o + 6);
+        for (let k = 0; k < 3; k++) arr[o + 3 + k] = arr[o + k] + w * (keep[k] - arr[o + k]);
+        a.data.addUpdateRange(o + 3, 3);
+        a.data.needsUpdate = true;
+        return keep;
+    });
+    ud.lineFrontier = { seg, w, saved };
+    geom.instanceCount = seg + 1;
 }
 
 // Back-compat free-function shims — these keep existing call sites simple
@@ -7132,6 +7268,9 @@ function resetParametricTubeColors(obj, baseColor, lodWorker, tubeId) {
  * Groups camera-related methods (persp/ortho switch, dynamic near/far,
  * frame-to-bbox). Camera objects themselves remain on the viewer.
  */
+const _orthoForward = new THREE.Vector3();
+const _orthoToCenter = new THREE.Vector3();
+
 class CameraController {
     // TODO(types): see comment on makeChannelApply — keeping `viewer` loose.
     /** @param {any} viewer */
@@ -7253,7 +7392,6 @@ class CameraController {
 
     updateNearFar() {
         const v = this.v;
-        if (v._isOrtho) return;
         // Recompute bounds on the dirty flag (object add/delete, transform
         // streaming, animation playback — anything that can move content out
         // of the cached sphere) or every 30 rendered frames as a fallback.
@@ -7264,6 +7402,7 @@ class CameraController {
         }
         const radius = v._nearFarSphere.radius;
         if (radius === 0) return;
+        if (v._isOrtho) { this._fitOrthoNearFar(radius); return; }
         const dist = v._perspCamera.position.distanceTo(v._nearFarSphere.center);
         // No geometry can sit closer than dist - radius (camera to sphere
         // surface); halving that leaves 2x clearance for bounds-recompute
@@ -7290,6 +7429,27 @@ class CameraController {
         v._perspCamera.near = nextNear;
         v._perspCamera.far = nextFar;
         v._perspCamera.updateProjectionMatrix();
+    }
+
+    /**
+     * Orthographic near/far around the content sphere along the view, so
+     * depth precision follows the scene instead of a fixed 0.1 to 1000 range
+     * (24-bit depth over 1000 m resolves about 60 um). Nothing behind the
+     * camera is drawn, as before. Uses the same bounds refresh as perspective.
+     * @param {number} radius
+     */
+    _fitOrthoNearFar(radius) {
+        const v = this.v;
+        const cam = v._orthoCamera;
+        const forward = _orthoForward.set(0, 0, -1).applyQuaternion(cam.quaternion);
+        const along = _orthoToCenter.subVectors(v._nearFarSphere.center, cam.position).dot(forward);
+        const margin = radius * 0.05 + 1e-6;
+        const nextNear = Math.max(0, along - radius - margin);
+        const nextFar = Math.max(along + radius + margin, nextNear + 1e-3);
+        if (Math.abs(cam.near - nextNear) < 1e-9 && Math.abs(cam.far - nextFar) < 1e-9) return;
+        cam.near = nextNear;
+        cam.far = nextFar;
+        cam.updateProjectionMatrix();
     }
 
     /**
@@ -8281,8 +8441,37 @@ class MenuController {
         return false;
     }
 
+    /**
+     * Whether an eye that is off owns `objId`, so nothing else may show it.
+     * Cached per object generation and eye change; the eyes' matchers run once per id.
+     * @param {string} objId
+     */
+    hiddenByEye(objId) {
+        const key = `${this._viewer._objGeneration}:${this._eyeEpoch || 0}`;
+        if (this._hiddenKey !== key) {
+            this._hiddenKey = key;
+            /** @type {Map<string, boolean>} */
+            this._hiddenIds = new Map();
+        }
+        let hit = this._hiddenIds.get(objId);
+        if (hit === undefined) {
+            hit = false;
+            for (const m of this._menus.values()) {
+                for (const rec of m.items.values()) {
+                    const it = rec.spec;
+                    if ((it.type || '') === 'eye' && typeof it.apply !== 'function'
+                        && !this._valueOf(m, it) && this._eyeOwns(it, objId)) { hit = true; break; }
+                }
+                if (hit) break;
+            }
+            this._hiddenIds.set(objId, hit);
+        }
+        return hit;
+    }
+
     /** @param {MenuItemSpec} it @param {boolean} on */
     _applyEye(it, on) {
+        this._eyeEpoch = (this._eyeEpoch || 0) + 1;
         this._viewer._shadowDirty = true;
         if (typeof it.apply === 'function') return it.apply(on, it) !== false;
         for (const [objId, obj] of this._viewer._objects) {
@@ -9548,6 +9737,10 @@ const CLIP_CAP_SYNC_MS = 8;
 const CLIP_CAP_THROTTLE_MS = 500;
 // Tubes and meshes drawing more triangles than this are sliced on the LOD worker.
 const CLIP_CAP_WORKER_TRIANGLES = 20000;
+// Main-thread cap rebuilds stop for the frame once they took this long; the rest wait, hidden.
+const CLIP_CAP_FRAME_BUDGET_MS = 4;
+/** A cap that stopped matching its owner stays shown this long (ms) while its rebuild catches up. */
+const CLIP_CAP_STALE_MS = 300;
 // Closed convex primitives; a plane is a sheet and gets no cap. The torus is
 // closed but not convex, so it goes through the mesh slicer.
 const CLIP_CAP_CONVEX_PRIMITIVES = new Set(['box', 'sphere', 'cylinder', 'capsule', 'cone']);
@@ -9804,6 +9997,10 @@ function sliceTubeClipCap(pos, col, idx, end, planes, block) {
         const basis = clipCapBasis(nx, ny, nz);
         /** @type {number[]} */ const tp = [];
         /** @type {number[]} */ const tc = [];
+        // Fans come out in band order: band and vertex count after each, so a cap built
+        // over the whole tube can be drawn up to the owner's draw range.
+        /** @type {number[]} */ const fanBand = [];
+        /** @type {number[]} */ const fanEnd = [];
         for (let k = 0; k < nBlocks; k++) {
             const o = k * block;
             let lo = Infinity, hi = -Infinity;
@@ -9852,8 +10049,10 @@ function sliceTubeClipCap(pos, col, idx, end, planes, block) {
                     if (col) tc.push(C[q], C[q + 1], C[q + 2]);
                 }
             }
+            if (hull.length > 2) { fanBand.push(k); fanEnd.push(tp.length / 3); }
         }
-        out.push({ pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null });
+        out.push({ pos: new Float32Array(tp), col: col ? new Float32Array(tc) : null,
+            fanBand: new Int32Array(fanBand), fanEnd: new Int32Array(fanEnd) });
     }
     return out;
 }
@@ -10220,9 +10419,10 @@ THIS SOFTWARE.
 }
 
 /**
- * A cap's triangles and colours; mesh caps of textured owners add the uv samples per filled region.
+ * A cap's triangles and colours; mesh caps of textured owners add the uv samples per filled region,
+ * tube caps the band of each fan and the vertex count after it.
  * @typedef {{pos: Float32Array, col: Float32Array | null, reg?: Int32Array, ruv?: Float32Array,
- *   ruvEnd?: Int32Array, rmat?: Uint16Array | null}} ClipCapPiece
+ *   ruvEnd?: Int32Array, rmat?: Uint16Array | null, fanBand?: Int32Array, fanEnd?: Int32Array}} ClipCapPiece
  */
 /**
  * Clip cap of an arbitrary triangle mesh (add_mesh, loaded models, the
@@ -10897,8 +11097,50 @@ function clipCapGeometry(pos, col, nx, ny, nz) {
 }
 
 /**
+ * Change counter of a tube for its clip cap: bumps on any position or index
+ * edit except the ones a reveal makes (ParametricTube.setDrawRange).
+ * @param {any} mesh
+ */
+function tubeClipCapGeneration(mesh) {
+    const ud = mesh.userData, g = mesh.geometry;
+    const pv = attrVersion(g.getAttribute('position')), iv = attrVersion(g.getIndex());
+    const seen = ud.__clipCapSeenVersions;
+    if (!seen || seen[0] !== pv || seen[1] !== iv) {
+        ud.__clipCapSeenVersions = [pv, iv];
+        ud.__clipCapGeneration = (ud.__clipCapGeneration || 0) + 1;
+    }
+    return ud.__clipCapGeneration;
+}
+
+/**
+ * A tube's arrays as built, without the reveal's frontier ring and relocated
+ * end cap, so its cap covers the whole tube. Copies when `copy` or when a
+ * reveal edit has to be undone.
+ * @param {any} mesh @param {boolean} withColor @param {boolean} copy
+ */
+function tubeClipCapArrays(mesh, withColor, copy) {
+    const g = mesh.geometry, ud = mesh.userData, md = ud.tubeMorphData;
+    const ring = md && md.savedRingIndex != null;
+    const capSlot = md && md.savedCapOffset >= 0;
+    const colAttr = withColor ? g.getAttribute('color') : null;
+    let pos = g.getAttribute('position').array, idx = g.getIndex().array, col = colAttr ? colAttr.array : null;
+    if (copy || ring) { pos = new Float32Array(pos); if (col) col = new Float32Array(col); }
+    if (copy || capSlot) idx = idx.slice();
+    if (ring) {
+        const base = md.savedRingIndex * ud.tubeNCs * 3;
+        pos.set(md.savedRing, base);
+        if (col && md.savedRingColors) col.set(md.savedRingColors, base);
+    }
+    if (capSlot) idx.set(md.savedCapIndices, md.savedCapOffset);
+    return { pos, col, idx };
+}
+
+/**
  * Owns every clip cap: decides per frame which capped solids need a rebuild
- * (plane, transform, geometry, draw range or colour layout changed), keeps
+ * (plane, transform, geometry, draw range or colour layout changed; a tube's draw
+ * range only redraws its cap), skips owners no plane cuts or out of view, keeps
+ * showing a cap that no longer matches its owner while the rebuild catches up
+ * (hidden once older than CLIP_CAP_STALE_MS), keeps
  * each cap's material in step with its owner, and removes caps when clipping
  * or the cap switch goes off. Caps are children of their owner mesh marked
  * `userData.__clipCap`, never in `_objects`. Tubes and meshes over
@@ -10932,6 +11174,16 @@ class ClipCapController {
         /** Main-thread ms spent on the last worker request and install (bench seam). */
         this.lastRequestMs = 0;
         this.lastInstallMs = 0;
+        /** Main-thread cap builds so far, and in the last frame (test seams). */
+        this.builds = 0;
+        this.lastFrameBuilds = 0;
+        /** Main-thread ms spent on cap rebuilds in the last frame (bench seam). */
+        this.lastFrameMs = 0;
+        /** Rotating start, so a frame budget does not starve the same targets. */
+        this._cursor = 0;
+        this._frustum = new THREE.Frustum();
+        this._viewProj = new THREE.Matrix4();
+        this._worldBox = new THREE.Box3();
     }
 
     /** @param {any} mesh */
@@ -10971,10 +11223,26 @@ class ClipCapController {
         if (this._targetsGen !== v._objGeneration) this._collectTargets();
         let any = false;
         const now = performance.now();
-        for (const mesh of this._targets) {
+        const cam = v._camera;
+        cam.updateMatrixWorld();
+        this._viewProj.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+        this._frustum.setFromProjectionMatrix(this._viewProj);
+        const w = typeof window !== 'undefined' ? /** @type {any} */ (window) : {};
+        const budget = { left: w.__clipCapFrameBudgetMs ?? CLIP_CAP_FRAME_BUDGET_MS, builds: 0, ms: 0 };
+        const n = this._targets.length;
+        const start = n ? this._cursor % n : 0;
+        let next = start;
+        for (let j = 0; j < n; j++) {
+            const mesh = this._targets[(start + j) % n];
             if (!active || !mesh.parent || !this._wants(mesh)) { this._remove(mesh); continue; }
-            if (this._updateTarget(mesh, now)) any = true;
+            const built = budget.builds;
+            if (this._updateTarget(mesh, now, budget)) any = true;
+            if (budget.builds > built) next = start + j + 1;
         }
+        // The next frame starts after this one's last build.
+        this._cursor = next;
+        this.lastFrameBuilds = budget.builds;
+        this.lastFrameMs = budget.ms;
         this._hasCaps = any || this.pending > 0;
         if (any) this._rankCaps();
     }
@@ -11048,7 +11316,10 @@ class ClipCapController {
             const s = this._signature(mesh);
             if (!s) continue;
             const st = mesh.userData.__clipCapState;
-            if (!st || !sameSignature(st.sig, s.sig)) return false;
+            if (st && sameSignature(st.sig, s.sig)) continue;
+            // Uncut or off-screen targets wait on nothing.
+            if (!this._isCut(mesh, s.local) || !this._inView(mesh)) continue;
+            return false;
         }
         return true;
     }
@@ -11057,13 +11328,7 @@ class ClipCapController {
     _remove(mesh) {
         const st = mesh.userData.__clipCapState;
         if (!st) return;
-        for (const cap of st.caps) {
-            if (!cap) continue;
-            mesh.remove(cap);
-            cap.geometry.dispose();
-            cap.material.dispose();
-            cap.userData.wireframeOverlay?.material.dispose();
-        }
+        for (const cap of st.caps) if (cap) this._disposeCap(mesh, cap);
         if (st.inflight) { st.inflight = 0; this.pending--; }
         this._forgetWorkerCopy(mesh);
         delete mesh.userData.__clipCapState;
@@ -11115,8 +11380,10 @@ class ClipCapController {
         mesh.updateWorldMatrix(true, false);
         this._inv.copy(mesh.matrixWorld).invert();
         const planes = this.v._clipPlanes;
-        const sig = [geom.id, attrVersion(posAttr), attrVersion(index),
-            geom.drawRange.start, geom.drawRange.count, withColor ? 1 : 0,
+        // A tube cap covers the whole tube and follows the draw range by its own (_drawTubeCap).
+        const tube = mesh.userData.clipCapKind === 'tube';
+        const sig = [geom.id, tube ? tubeClipCapGeneration(mesh) : attrVersion(posAttr), tube ? 0 : attrVersion(index),
+            tube ? -1 : geom.drawRange.start, tube ? -1 : geom.drawRange.count, withColor ? 1 : 0,
             withColor ? attrVersion(colAttr) : -1, withUV ? attrVersion(geom.getAttribute(uvName)) : -2,
             withUV ? uvName.length + (mapped.map.channel || 0) : -1, withGroups ? geom.groups.length : 0, planes.length,
             clipCapAttributeId(posAttr), clipCapAttributeId(index),
@@ -11135,22 +11402,149 @@ class ClipCapController {
     }
 
     /**
+     * Whether a plane passes through the owner's bounding box; a box wholly on one
+     * side of every plane has no cut.
+     * @param {any} mesh @param {number[][]} local
+     */
+    _isCut(mesh, local) {
+        const geom = mesh.geometry;
+        const ver = attrVersion(geom.getAttribute('position'));
+        if (!geom.boundingBox || geom.userData.__clipCapBoxVer !== ver) {
+            geom.computeBoundingBox();
+            geom.userData.__clipCapBoxVer = ver;
+        }
+        const b = geom.boundingBox;
+        for (const [nx, ny, nz, c] of local) {
+            // Signed distances of the nearest and farthest box corner along the normal.
+            const lo = (nx > 0 ? b.min.x : b.max.x) * nx + (ny > 0 ? b.min.y : b.max.y) * ny + (nz > 0 ? b.min.z : b.max.z) * nz + c;
+            const hi = (nx > 0 ? b.max.x : b.min.x) * nx + (ny > 0 ? b.max.y : b.min.y) * ny + (nz > 0 ? b.max.z : b.min.z) * nz + c;
+            if (lo < 0 && hi > 0) return true;
+        }
+        return false;
+    }
+
+    /** @param {any} mesh */
+    _inView(mesh) {
+        const g = mesh.geometry;
+        if (!g.boundingBox) return true;
+        return this._frustum.intersectsBox(this._worldBox.copy(g.boundingBox).applyMatrix4(mesh.matrixWorld));
+    }
+
+    /** @param {any} mesh @param {any} cap */
+    _disposeCap(mesh, cap) {
+        mesh.remove(cap);
+        cap.geometry.dispose();
+        cap.userData.__frontier?.geometry.dispose();
+        cap.material.dispose();
+        cap.userData.wireframeOverlay?.material.dispose();
+    }
+
+    /** Show or hide a target's caps; a cap whose slice came out empty stays hidden. @param {any} st @param {boolean} shown */
+    _showCaps(st, shown) {
+        for (const cap of st.caps) {
+            const want = shown && !cap?.userData.__empty;
+            if (cap && cap.visible !== want) { cap.visible = want; this._rankDirty = true; this.v._shadowDirty = true; }
+        }
+    }
+
+    /**
+     * Draw a tube cap up to the owner's drawn bands. Mid reveal the bands stop
+     * before the frontier pair, and that pair (with the one before it, which a
+     * band may straddle) is sliced from the live arrays into the cap's frontier piece.
+     * @param {any} mesh @param {any} st
+     */
+    _drawTubeCap(mesh, st) {
+        if (mesh.userData.clipCapKind !== 'tube') return;
+        const geom = mesh.geometry, index = geom.getIndex();
+        const ud = mesh.userData, block = ud.tubeIndicesPerRingPair;
+        if (!index || !block) return;
+        const md = ud.tubeMorphData;
+        const reveal = !!md && md.savedCapOffset >= 0;
+        const last = reveal ? md.savedCapPairs - 1 : -1;
+        const pairStart = last >= 0 ? tubePairOffset(ud, last) : -1;
+        const prevStart = last >= 1 ? tubePairOffset(ud, last - 1) : -1;
+        const drawn = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+        const bands = pairStart >= 0 ? Math.floor(pairStart / block) : reveal ? 0 : Math.floor(drawn / block);
+        for (const cap of st.caps) {
+            const fans = cap && cap.userData.__tubeFans;
+            if (!fans) continue;
+            // Fans in bands below `bands`: binary search on the ascending band list.
+            let lo = 0, hi = fans.band.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (fans.band[mid] < bands) lo = mid + 1; else hi = mid; }
+            const count = lo ? fans.end[lo - 1] : 0;
+            if (cap.geometry.drawRange.count !== count) cap.geometry.setDrawRange(0, count);
+            this._drawTubeFrontier(mesh, cap, pairStart, bands * block < pairStart ? prevStart : -1);
+        }
+    }
+
+    /**
+     * Slice the frontier pair, and the pair before it when the last drawn band
+     * stops inside that one, from the owner's live arrays into the cap's frontier piece.
+     * @param {any} mesh @param {any} cap
+     * @param {number} pairStart  first index of the frontier pair, -1 without a reveal
+     * @param {number} prevStart  first index of the pair before it, -1 when not needed
+     */
+    _drawTubeFrontier(mesh, cap, pairStart, prevStart) {
+        const geom = mesh.geometry, block = mesh.userData.tubeIndicesPerRingPair;
+        const plane = cap.userData.__plane;
+        const posAttr = geom.getAttribute('position'), index = geom.getIndex();
+        const colAttr = cap.geometry.getAttribute('color') ? geom.getAttribute('color') : null;
+        const key = pairStart < 0 || !plane ? '' : [pairStart, prevStart, attrVersion(posAttr), attrVersion(index),
+            colAttr ? attrVersion(colAttr) : -1, ...plane].join(':');
+        if ((cap.userData.__frontierKey || '') === key) return;
+        cap.userData.__frontierKey = key;
+        let g = null;
+        if (key) {
+            const idx = new Uint32Array(prevStart >= 0 ? 2 * block : block);
+            if (prevStart >= 0) idx.set(index.array.subarray(prevStart, prevStart + block));
+            idx.set(index.array.subarray(pairStart, pairStart + block), prevStart >= 0 ? block : 0);
+            const [r] = sliceTubeClipCap(posAttr.array, colAttr ? colAttr.array : null, idx, idx.length, [plane], block);
+            g = clipCapGeometry(r.pos, r.col, plane[0], plane[1], plane[2]);
+        }
+        let piece = cap.userData.__frontier;
+        if (piece) piece.geometry.dispose();
+        if (!g) {
+            if (piece) { cap.remove(piece); cap.userData.__frontier = null; }
+            return;
+        }
+        if (!piece) {
+            piece = new THREE.Mesh(g, cap.material);
+            piece.userData.__clipCapFrontier = true;
+            piece.castShadow = cap.castShadow;
+            piece.receiveShadow = cap.receiveShadow;
+            cap.add(piece);
+            cap.userData.__frontier = piece;
+        } else {
+            piece.geometry = g;
+        }
+        this.v._shadowDirty = true;
+    }
+
+    /**
      * @param {any} mesh @param {number} now
+     * @param {{left: number, builds: number, ms: number}} budget  main-thread time left this frame
      * @returns {boolean} whether the mesh carries a cap afterwards
      */
-    _updateTarget(mesh, now) {
+    _updateTarget(mesh, now, budget) {
         const s = this._signature(mesh);
         if (!s) { this._remove(mesh); return false; }
         const { own, sig, local, withColor, uvName, withGroups } = s;
         let st = mesh.userData.__clipCapState;
         if (!st) {
             st = mesh.userData.__clipCapState = {
-                sig: null, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
+                sig: null, staleAt: Infinity, caps: [], last: -Infinity, cost: 0, inflight: 0, workerGeomKey: '', workerEnd: 0,
             };
+        }
+        const current = sameSignature(st.sig, sig);
+        if (!current) {
+            // No plane cuts it: nothing to build. Off screen: build once it comes into view.
+            // Hidden caps still exist, so they are reported and removed when clipping goes off.
+            if (!this._isCut(mesh, local)) { this._showCaps(st, false); st.sig = null; return st.caps.some(Boolean); }
+            if (!this._inView(mesh)) { this._showCaps(st, false); return st.caps.some(Boolean); }
         }
         // One request in flight per target: when it lands its signature is
         // compared again, so the final state always gets built.
-        if (!st.inflight && !sameSignature(st.sig, sig)) {
+        if (!st.inflight && !current) {
             const geom = mesh.geometry;
             const index = geom.getIndex();
             const total = index ? index.count : geom.getAttribute('position').count;
@@ -11162,7 +11556,9 @@ class ClipCapController {
                 this._request(mesh, st, sig, local, withColor, uvName, withGroups);
             } else {
                 const slow = drawn > CLIP_CAP_SYNC_TRIANGLES || st.cost > CLIP_CAP_SYNC_MS;
-                if (!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) {
+                // The first build of a frame always runs, so a tiny budget still makes progress.
+                const affordable = budget.builds === 0 || budget.ms < budget.left;
+                if ((!slow || now - st.last >= CLIP_CAP_THROTTLE_MS) && affordable) {
                     const t0 = performance.now();
                     /** @type {ClipCapPiece[]} */ let caps;
                     try {
@@ -11176,9 +11572,17 @@ class ClipCapController {
                     st.sig = sig;
                     st.last = now;
                     st.cost = performance.now() - t0;
+                    budget.builds++;
+                    budget.ms += st.cost;
+                    this.builds++;
                 }
             }
         }
+        // A stale cap stays shown while the rebuild catches up, timed from the first frame it was stale.
+        if (sameSignature(st.sig, sig)) st.staleAt = Infinity;
+        else if (st.staleAt === Infinity) st.staleAt = now;
+        this._showCaps(st, now - st.staleAt <= CLIP_CAP_STALE_MS);
+        this._drawTubeCap(mesh, st);
         this._syncMaterials(mesh, st, own, withColor);
         return st.caps.some(Boolean);
     }
@@ -11193,11 +11597,8 @@ class ClipCapController {
         const kind = mesh.userData.clipCapKind;
         const geom = mesh.geometry;
         if (kind === 'tube') {
-            const index = geom.getIndex();
-            const colAttr = geom.getAttribute('color');
-            const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
-            return sliceTubeClipCap(geom.getAttribute('position').array, withColor ? colAttr.array : null,
-                index.array, end, local, mesh.userData.tubeIndicesPerRingPair);
+            const a = tubeClipCapArrays(mesh, withColor, false);
+            return sliceTubeClipCap(a.pos, a.col, a.idx, a.idx.length, local, mesh.userData.tubeIndicesPerRingPair);
         }
         if (kind === 'mesh') {
             const src = meshClipCapSource(geom, withColor, uvName, withGroups);
@@ -11252,18 +11653,16 @@ class ClipCapController {
                 st.workerGeomKey = src.key;
             }
         } else {
-            const posAttr = geom.getAttribute('position');
-            const index = geom.getIndex();
-            const colAttr = geom.getAttribute('color');
-            const end = Math.min(index.count, geom.drawRange.start + geom.drawRange.count);
+            const end = geom.getIndex().count;
             msg = {
                 type: 'clipCap', capId: mesh.uuid, reqId: ++this._reqId, geomKey,
                 planes: local, end, block: mesh.userData.tubeIndicesPerRingPair,
             };
             if (st.workerGeomKey !== geomKey || st.workerEnd < end) {
-                msg.positions = new Float32Array(/** @type {Float32Array} */ (posAttr.array));
-                msg.indices = /** @type {Uint32Array} */ (index.array).slice(0, end);
-                msg.colors = withColor ? new Float32Array(/** @type {Float32Array} */ (colAttr.array)) : null;
+                const a = tubeClipCapArrays(mesh, withColor, true);
+                msg.positions = /** @type {Float32Array} */ (a.pos);
+                msg.indices = /** @type {Uint32Array} */ (a.idx);
+                msg.colors = /** @type {Float32Array | null} */ (a.col);
                 transfer.push(msg.positions.buffer, msg.indices.buffer);
                 if (msg.colors) transfer.push(msg.colors.buffer);
                 st.workerGeomKey = geomKey;
@@ -11273,6 +11672,7 @@ class ClipCapController {
         st.inflight = msg.reqId;
         st.inflightSig = sig;
         st.inflightLocal = local;
+        st.inflightAt = performance.now();
         this.pending++;
         this.requests++;
         this.v._lodWorker.postMessage(msg, transfer);
@@ -11301,6 +11701,9 @@ class ClipCapController {
         const t0 = performance.now();
         this._install(mesh, st, msg.caps, st.inflightLocal);
         st.sig = st.inflightSig;
+        // Shown even if the owner moved meanwhile; it can be stale only since its snapshot.
+        st.staleAt = st.inflightAt;
+        this._drawTubeCap(mesh, st);
         st.last = performance.now();
         this.lastInstallMs = st.last - t0;
     }
@@ -11325,7 +11728,7 @@ class ClipCapController {
             const g = clipCapGeometry(results[i].pos, results[i].col, local[i][0], local[i][1], local[i][2]);
             let cap = st.caps[i];
             if (!g) {
-                if (cap) cap.visible = false;
+                if (cap) { cap.visible = false; cap.userData.__empty = true; }
                 continue;
             }
             if (!cap) {
@@ -11345,10 +11748,13 @@ class ClipCapController {
                 cap.geometry = g;
             }
             cap.visible = true;
+            cap.userData.__empty = false;
+            cap.userData.__plane = local[i];
             const r = /** @type {any} */ (results[i]);
             // Uvs along the cut, per filled region, for sampling the colour map.
             cap.userData.__regions = r.ruv ? { reg: r.reg, ruv: r.ruv, ruvEnd: r.ruvEnd, rmat: r.rmat || null, base: r.col ? r.col.slice() : null } : null;
             cap.userData.__regionKey = '';
+            cap.userData.__tubeFans = r.fanBand ? { band: r.fanBand, end: r.fanEnd } : null;
             // Clipped by every plane but its own, which it lies on.
             const others = planes.filter((/** @type {any} */ _, /** @type {number} */ j) => j !== i);
             const mat = cap.material;
@@ -11360,14 +11766,7 @@ class ClipCapController {
             }
             this.v._shading._applyWireframeTo(cap);
         }
-        for (let i = n; i < st.caps.length; i++) {
-            const cap = st.caps[i];
-            if (!cap) continue;
-            mesh.remove(cap);
-            cap.geometry.dispose();
-            cap.material.dispose();
-            cap.userData.wireframeOverlay?.material.dispose();
-        }
+        for (let i = n; i < st.caps.length; i++) if (st.caps[i]) this._disposeCap(mesh, st.caps[i]);
         st.caps.length = n;
         this.v._shadowDirty = true;
     }
@@ -11393,6 +11792,8 @@ class ClipCapController {
             mat.wireframe = wire;
             cap.castShadow = mesh.castShadow;
             cap.receiveShadow = mesh.receiveShadow;
+            const piece = cap.userData.__frontier;
+            if (piece) { piece.castShadow = mesh.castShadow; piece.receiveShadow = mesh.receiveShadow; }
         }
     }
 
@@ -14509,6 +14910,12 @@ class VectorEntityController {
 //
 // The marker lives in the scene like the pivot marker (NOT in `_objects`) so it
 // can't be picked or treated as a public object, and it survives clear_scene.
+// Pick index (PolylinePickController._ensurePickIndex): segments per leaf box,
+// leaves per branch box, and the spine length from which it pays off.
+const PICK_INDEX_LEAF = 64;
+const PICK_INDEX_BRANCH = 64;
+const PICK_INDEX_MIN_NODES = 2048;
+
 class PolylinePickController {
     /** @param {ThreeJSViewer} viewer */
     constructor(viewer) {
@@ -14524,6 +14931,8 @@ class PolylinePickController {
         // Drop candidates hidden behind a bead the cursor ray enters first
         // (issue #311). `false` restores plain screen-nearest selection.
         this.occlusion = true;
+        // Box index over long spines (_scanIndexed); off only to compare against the full scan.
+        this.useIndex = true;
         /** @type {{id:string, kind:string, segment:number, t:number, fraction:number, point:THREE.Vector3}|null} */
         this.hover = null;
 
@@ -14622,6 +15031,12 @@ class PolylinePickController {
         dom.addEventListener('pointerleave', this._onLeave);
         // pointerup on window so a release outside the canvas still ends cleanly.
         window.addEventListener('pointerup', this._onUp);
+        // A zoom or pan under a resting pointer moves the scene, not the pointer: pick again there.
+        this.v.onCameraChange(() => {
+            if (!this.enabled || !this._pointerOver || this._rafPending) return;
+            this._rafPending = true;
+            requestAnimationFrame(this._onMoveRaf);
+        });
     }
 
     /** @param {{markerColor?:number, thresholdPx?:number, maxPickPoints?:number, occlusion?:boolean}} [opts] */
@@ -14825,6 +15240,104 @@ class PolylinePickController {
     }
 
     /**
+     * Lazily build a two-level box index over a spine: local AABBs of runs of
+     * PICK_INDEX_LEAF segments and of PICK_INDEX_BRANCH leaves, inflated by
+     * the run's largest tube half-extent so a box holds the whole bead. Built
+     * once per spine (O(n)) and cached like the arc-length table.
+     * @param {any} ud @param {Float32Array} pts @param {number} n @param {Float32Array|null} halfExtents
+     */
+    _ensurePickIndex(ud, pts, n, halfExtents) {
+        const cached = ud.pickIndex;
+        if (cached && cached.pts === pts && cached.n === n && cached.ext === halfExtents) return cached;
+        const nLeaf = Math.ceil((n - 1) / PICK_INDEX_LEAF);
+        const leaves = new Float32Array(nLeaf * 6);
+        for (let c = 0; c < nLeaf; c++) {
+            const a = c * PICK_INDEX_LEAF, b = Math.min(n - 1, a + PICK_INDEX_LEAF);
+            let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity, e = 0;
+            for (let i = a; i <= b; i++) {
+                const x = pts[i * 3], y = pts[i * 3 + 1], z = pts[i * 3 + 2];
+                if (x < x0) x0 = x; if (x > x1) x1 = x;
+                if (y < y0) y0 = y; if (y > y1) y1 = y;
+                if (z < z0) z0 = z; if (z > z1) z1 = z;
+                if (halfExtents && halfExtents[i] > e) e = halfExtents[i];
+            }
+            leaves.set([x0 - e, y0 - e, z0 - e, x1 + e, y1 + e, z1 + e], c * 6);
+        }
+        const nBranch = Math.ceil(nLeaf / PICK_INDEX_BRANCH);
+        const branches = new Float32Array(nBranch * 6);
+        for (let g = 0; g < nBranch; g++) {
+            const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+            for (let c = g * PICK_INDEX_BRANCH; c < Math.min(nLeaf, (g + 1) * PICK_INDEX_BRANCH); c++) {
+                for (let k = 0; k < 3; k++) {
+                    box[k] = Math.min(box[k], leaves[c * 6 + k]);
+                    box[k + 3] = Math.max(box[k + 3], leaves[c * 6 + k + 3]);
+                }
+            }
+            branches.set(box, g * 6);
+        }
+        ud.pickIndex = { pts, n, ext: halfExtents, leaves, branches, nLeaf };
+        return ud.pickIndex;
+    }
+
+    /**
+     * Whether a local box can hold a point within `gate` px of the cursor: its
+     * eight corners projected to a screen rect, grown by the gate. A box with
+     * a corner behind a perspective camera is kept (its projection is not a rect).
+     * @param {Float32Array} boxes @param {number} i @param {Float64Array} m local to clip, column-major
+     * @param {number} W @param {number} H @param {number} cx @param {number} cy @param {number} gate
+     */
+    _boxNearCursor(boxes, i, m, W, H, cx, cy, gate) {
+        let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
+        const o = i * 6;
+        for (let k = 0; k < 8; k++) {
+            const x = boxes[o + (k & 1 ? 3 : 0)], y = boxes[o + (k & 2 ? 4 : 1)], z = boxes[o + (k & 4 ? 5 : 2)];
+            const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (!(w > 1e-9)) return true;
+            const sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / w * 0.5 + 0.5) * W;
+            const sy = (-(m[1] * x + m[5] * y + m[9] * z + m[13]) / w * 0.5 + 0.5) * H;
+            if (sx < sx0) sx0 = sx; if (sx > sx1) sx1 = sx;
+            if (sy < sy0) sy0 = sy; if (sy > sy1) sy1 = sy;
+        }
+        return cx >= sx0 - gate && cx <= sx1 + gate && cy >= sy0 - gate && cy <= sy1 + gate;
+    }
+
+    /**
+     * `_scanObjectSegments` over the full-resolution spine, skipping runs whose
+     * index box projects away from the cursor. Same hits as a full scan; the
+     * per-move cost is the visited boxes (n / 4096 + survivors' leaves) plus
+     * the segments of leaves near the cursor, instead of every segment.
+     * @param {any} ud @param {Float32Array} pts @param {number} n @param {THREE.Matrix4} mw @param {any} cam
+     * @param {number} W @param {number} H @param {number} cx @param {number} cy @param {boolean} isTube
+     * @param {Float32Array|null} halfExtents @param {number} lineGate @param {number} endNode @param {number} endT
+     * @returns {Array<{seg:number, end:number, dist2:number}>}
+     */
+    _scanIndexed(ud, pts, n, mw, cam, W, H, cx, cy, isTube, halfExtents, lineGate, endNode, endT) {
+        const index = this._ensurePickIndex(ud, pts, n, halfExtents);
+        const m = this._pickClip || (this._pickClip = new Float64Array(16));
+        const mm = this._pickClipM || (this._pickClipM = new THREE.Matrix4());
+        mm.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).multiply(mw);
+        for (let k = 0; k < 16; k++) m[k] = mm.elements[k];
+        // Boxes already hold the bead, so the screen gate is the pick radius plus a line's half width.
+        const gate = isTube ? this.thresholdPx : lineGate;
+        /** @type {Array<{seg:number, end:number, dist2:number}>} */
+        const hits = [];
+        const lastLeaf = Math.min(index.nLeaf - 1, Math.floor((endNode - 1) / PICK_INDEX_LEAF));
+        for (let g = 0; g * PICK_INDEX_BRANCH <= lastLeaf; g++) {
+            if (!this._boxNearCursor(index.branches, g, m, W, H, cx, cy, gate)) continue;
+            const cEnd = Math.min(lastLeaf, (g + 1) * PICK_INDEX_BRANCH - 1);
+            for (let c = g * PICK_INDEX_BRANCH; c <= cEnd; c++) {
+                if (!this._boxNearCursor(index.leaves, c, m, W, H, cx, cy, gate)) continue;
+                const a = c * PICK_INDEX_LEAF;
+                const b = Math.min(endNode, a + PICK_INDEX_LEAF);
+                const leafHits = this._scanObjectSegments(pts, n, mw, cam, W, H, cx, cy, isTube, halfExtents,
+                    lineGate, a, b, 1, b === endNode ? endT : 1);
+                for (const h of leafHits) hits.push(h);
+            }
+        }
+        return hits;
+    }
+
+    /**
      * Local spine point at node `j`, or for `endT < 1` the point `endT` of the
      * way from node `j - 1` to `j` (the drawn end of a frontier segment).
      * @param {Float32Array} pts @param {number} j @param {number} endT @param {THREE.Vector3} out
@@ -14855,6 +15368,9 @@ class PolylinePickController {
         if (ud.isNativeLine) {
             const c = o.geometry.drawRange.count;
             return { endNode: Number.isFinite(c) ? Math.min(n - 1, c - 1) : n - 1, endT: 1 };
+        }
+        if (ud.lineFrontier) {   // fat line cut inside a segment
+            return { endNode: Math.min(n - 1, ud.lineFrontier.seg + 1), endT: ud.lineFrontier.w };
         }
         const ic = o.geometry.instanceCount;   // fat line: drawn segments
         return { endNode: Number.isFinite(ic) ? Math.min(n - 1, ic) : n - 1, endT: 1 };
@@ -14989,7 +15505,9 @@ class PolylinePickController {
             // Decimate the coarse scan to ~maxPickPoints nodes for a big spine;
             // the winner is refined at full resolution below.
             const stride = (maxPP && endNode + 1 > maxPP) ? Math.ceil(endNode / (maxPP - 1)) : 1;
-            const hits = this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, endNode, stride, endT);
+            const hits = this.useIndex && stride === 1 && endNode >= PICK_INDEX_MIN_NODES
+                ? this._scanIndexed(ud, pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, endNode, endT)
+                : this._scanObjectSegments(pts, n, mw, cam, W, H, cursorX, cursorY, isTube, halfExtents, lineGate, 0, endNode, stride, endT);
             for (const r of hits) {
                 cands.push({ o, ud, seg: r.seg, end: r.end, dist2: r.dist2, isTube, stride, n, endNode, endT });
             }
@@ -17321,7 +17839,7 @@ export class ThreeJSViewer {
                 { type: 'segmented', id: 'projection', label: 'Projection', shortcut: 'O',
                   options: [{ value: 'persp', label: 'Persp' }, { value: 'ortho', label: 'Ortho' }],
                   value: () => v._isOrtho ? 'ortho' : 'persp',
-                  onChange: (val) => { if ((val === 'ortho') !== !!v._isOrtho) v._switchCamera(val === 'ortho'); } },
+                  onChange: (val) => { if ((val === 'ortho') !== !!v._isOrtho) v._userSwitchCamera(val === 'ortho'); } },
                 { type: 'segmented', id: 'orbit', label: 'Orbit', shortcut: 'R',
                   hint: 'Turntable keeps Z up; Free is trackball-style. Hold Alt while dragging for the other mode.',
                   options: [{ value: 'turntable', label: 'Turntable' }, { value: 'free', label: 'Free' }],
@@ -17437,6 +17955,8 @@ export class ThreeJSViewer {
         this._clipShowPlaneCheck = q('.tjsv-clip-show-plane');
         this._animControlsEl = q('.tjsv-animation-controls');
         this._animLiftCss = 0;
+        this._animToolbarH = 0;
+        this._bottomInset = 0;
         // Toolbar height tracks viewport width: the timeline-row wraps when
         // controls don't fit, so the lift is a function of viewport size, not
         // just show/hide state. Observe the toolbar and push its height into
@@ -17513,6 +18033,10 @@ export class ThreeJSViewer {
         this._renderer.info.autoReset = false;
         /** @type {{triangles:number, calls:number}} */
         this._renderStats = { triangles: 0, calls: 0 };
+        // onCameraChange hooks and the view they last saw (pose, zoom, projection, canvas size).
+        /** @type {Array<(change: any) => void>} */
+        this._cameraHooks = [];
+        this._cameraSig = new Float64Array(15).fill(NaN);
         this.el.appendChild(this._renderer.domElement);
         // GPU reset or driver eviction (issue #342). three.js re-initialises its
         // own state on restore; the loop stops meanwhile and GPU-generated data is rebuilt.
@@ -17837,7 +18361,7 @@ export class ThreeJSViewer {
         this._renderer.domElement.addEventListener('dblclick', (e) => {
             if (!this._dblclickFrame || this.isGizmoHandleActive()) return;
             const hit = this._hitTrackedObject(e.clientX, e.clientY);
-            if (hit) this.frameObject(hit.object); else this.resetView();
+            if (hit) this.frameObject(hit.object); else this._userResetView();
         });
         // Single-click object pick (issue #178). Fires on pointerup rather than
         // `click` so the button is known and a right-click reports too. A press
@@ -18563,6 +19087,7 @@ export class ThreeJSViewer {
 
     /** Snap an orthographic camera onto the clip normal (the `V` key). */
     _viewAlongClipNormal() {
+        if (this._rotationLocked()) return;
         const center = this._clipPlane.normal.clone().multiplyScalar(this._clipPosition);
         this._controls.target.copy(center);
         const camPos = center.clone().addScaledVector(this._clipPlane.normal, 50);
@@ -18871,6 +19396,97 @@ export class ThreeJSViewer {
     /** @param {boolean} toOrtho */
     _switchCamera(toOrtho) { this._camController.switch(toOrtho); }
 
+    /**
+     * Register a hook fired once per rendered frame in which the view changed:
+     * orbit, pan, zoom, damping, `set_camera`, framing, a view tween, a
+     * projection switch or a canvas resize. It runs before that frame renders,
+     * so an overlay drawn from it (a scale bar, HTML labels) stays in step.
+     * The payload is `getCameraPose()` plus `worldPerPixel`: world units per
+     * CSS pixel, at the target under perspective and anywhere under
+     * orthographic. The frame after subscribing reports the current view.
+     * @param {(change: {position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number, projection:CameraProjection, worldPerPixel:number}) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onCameraChange(cb) {
+        if (typeof cb !== 'function') throw new Error('onCameraChange: callback must be a function');
+        this._cameraHooks.push(cb);
+        this._cameraSig[0] = NaN;
+        return () => { const i = this._cameraHooks.indexOf(cb); if (i >= 0) this._cameraHooks.splice(i, 1); };
+    }
+
+    /**
+     * Resolve once the object with this id is in the scene: at once for an
+     * object that exists and has no load running, else when its blob-backed
+     * add (`add_*_binary`, models) has fetched, built and registered it. A
+     * newer add for the same id is followed to its end. Resolves false when
+     * the load failed, was cancelled or deleted, or there is no such object,
+     * so `await Promise.all(ids.map((id) => viewer.whenObjectReady(id)))`
+     * after dispatching the adds is the barrier for measuring them.
+     * @param {string} id
+     * @returns {Promise<boolean>}
+     */
+    async whenObjectReady(id) {
+        let last = null;
+        for (;;) {
+            const inflight = this._inflightLoads.get(id);
+            // A load that resolved but is still listed has registered its object.
+            if (!inflight || inflight === last) return this._objects.has(id);
+            last = inflight;
+            try {
+                await inflight.promise;
+            } catch {
+                const next = this._inflightLoads.get(id);
+                if (!next || next === inflight) return false;
+            }
+        }
+    }
+
+    /** @returns {number} world units per CSS pixel at the orbit target */
+    _worldPerPixelAtTarget() {
+        const cam = /** @type {any} */ (this._camera);
+        const h = Math.max(1, this._renderer.domElement.clientHeight);
+        if (cam.isPerspectiveCamera) {
+            const dist = cam.position.distanceTo(this._controls.target);
+            return (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / h;
+        }
+        return (cam.top - cam.bottom) / cam.zoom / h;
+    }
+
+    /** Compare the view with the one the hooks last saw and report a change. */
+    _emitCameraChange() {
+        const cam = /** @type {any} */ (this._camera);
+        const p = cam.position, q = cam.quaternion, t = this._controls.target;
+        const dom = this._renderer.domElement;
+        const now = [p.x, p.y, p.z, q.x, q.y, q.z, q.w, t.x, t.y, t.z, cam.zoom,
+            cam.isPerspectiveCamera ? cam.fov : -1, this._isOrtho ? 1 : 0, dom.clientWidth, dom.clientHeight];
+        const sig = this._cameraSig;
+        let same = true;
+        for (let i = 0; i < now.length; i++) if (sig[i] !== now[i]) { same = false; sig[i] = now[i]; }
+        if (same) return;
+        const change = { ...this.getCameraPose(), worldPerPixel: this._worldPerPixelAtTarget() };
+        for (const cb of this._cameraHooks.slice()) {
+            try { cb(change); } catch (err) { console.error('camera change hook error', err); }
+        }
+    }
+
+    /** True while the navigation mode has rotation off: user input keeps the view direction. */
+    _rotationLocked() { return !this._controls.enableRotate; }
+
+    /**
+     * A projection switch the user asked for (O key, button, View menu). A view
+     * without rotation keeps its projection; `set_projection` still switches it.
+     * @param {boolean} toOrtho
+     */
+    _userSwitchCamera(toOrtho) {
+        if (this._rotationLocked()) return;
+        this._switchCamera(toOrtho);
+    }
+
+    /** Home, F, the Home button and a double click on empty space: reorient and frame, or only frame while rotation is off. */
+    _userResetView() {
+        if (this._rotationLocked()) this.frameAll(); else this.resetView();
+    }
+
     // ========== Object Management ==========
 
     /** @param {any} params */
@@ -19034,6 +19650,11 @@ export class ThreeJSViewer {
         // up to the 30-frame fallback cadence. Dirtying here bounds the
         // staleness to one frame whenever transforms stream in.
         this._sceneBoundsDirty = true;
+    }
+
+    /** Whether no Display eye that is off owns `id` (server and animation visibility AND the eyes). @param {string} id */
+    _eyeAllows(id) {
+        return !this._menus?.hiddenByEye(id);
     }
 
     /**
@@ -19338,7 +19959,7 @@ export class ThreeJSViewer {
         } else if (obj.userData.isNativeLine) {
             obj.geometry.setDrawRange(0, Math.round(value * obj.userData.totalPointCount));
         } else if (obj.userData.isPolyline) {
-            obj.geometry.instanceCount = Math.round(value * obj.userData.maxInstanceCount);
+            applyFatLineDrawRange(obj, value);
         } else if (obj.userData.isParametricTube) {
             applyParametricTubeDrawRange(obj, value);
         } else if (obj.userData.isMesh || obj.userData.isSweptTool) {
@@ -20160,7 +20781,7 @@ export class ThreeJSViewer {
             // that arrived during the load isn't silently dropped.
             this._baselineVisibility.set(id, visible);
             const obj = this._objects.get(id);
-            if (obj) obj.visible = visible;
+            if (obj) obj.visible = visible && this._eyeAllows(id);
         }
     }
 
@@ -20254,7 +20875,13 @@ export class ThreeJSViewer {
 
         this._baselineVisibility.clear();
         for (const [id, obj] of this._objects) {
-            this._baselineVisibility.set(id, obj.visible);
+            // An object an eye hides keeps its own baseline: shown, so the eye alone decides.
+            this._baselineVisibility.set(id, obj.visible || !this._eyeAllows(id));
+        }
+        // Only what the animation itself switches is restored per frame; the rest belongs to the page.
+        this._animVisIds = new Set(this._animation.channels?.visibility?.ids || []);
+        for (const f of this._animation.frames) {
+            if (f.visibility) for (const id of Object.keys(f.visibility)) this._animVisIds.add(id);
         }
 
         this._animControlsEl.classList.add('visible');
@@ -20346,7 +20973,16 @@ export class ThreeJSViewer {
         console.log(`Animation loaded: ${this._animation.frames.length} frames, ${this._animation.duration.toFixed(2)}s${isSwap ? ' (swap)' : ''}`);
     }
 
+    /** Put the objects the animation switches back to their visibility at load (the eyes still win). */
+    _restoreAnimVisibility() {
+        for (const id of this._animVisIds || []) {
+            const obj = this._objects.get(id), was = this._baselineVisibility.get(id);
+            if (obj && was !== undefined) obj.visible = was && this._eyeAllows(id);
+        }
+    }
+
     _resetAnimationState() {
+        this._animVisIds = new Set();
         this._animation = null;
         this._animationPlaying = false;
         this._baselineVisibility.clear();
@@ -20367,10 +21003,7 @@ export class ThreeJSViewer {
         this._objects.forEach((obj) => { obj.matrixAutoUpdate = true; });
         this._kinematics.onUnloadAnimation();
         if (restoreVisibility) {
-            for (const [id, baselineVisible] of this._baselineVisibility) {
-                const obj = this._objects.get(id);
-                if (obj) obj.visible = baselineVisible;
-            }
+            this._restoreAnimVisibility();
         }
         // Reset draw ranges to full
         for (const id of this._objects.keys()) {
@@ -20402,10 +21035,7 @@ export class ThreeJSViewer {
 
         if (this._animation.channels) {
             if (this._animation.channels.visibility) {
-                for (const [id, baselineVisible] of this._baselineVisibility) {
-                    const obj = this._objects.get(id);
-                    if (obj) obj.visible = baselineVisible;
-                }
+                this._restoreAnimVisibility();
             }
             for (const [name, ch] of Object.entries(this._animation.channels)) {
                 const applyFn = this._CHANNEL_APPLY[/** @type {keyof typeof this._CHANNEL_APPLY} */ (name)];
@@ -20464,16 +21094,13 @@ export class ThreeJSViewer {
             }
         }
         if (!this._animation.channels || !this._animation.channels.visibility) {
-            for (const [id, baselineVisible] of this._baselineVisibility) {
-                const obj = this._objects.get(id);
-                if (obj) obj.visible = baselineVisible;
-            }
+            this._restoreAnimVisibility();
         }
         if (frame.visibility) {
             // Left-hold regardless (booleans have no meaningful lerp).
             for (const [id, visible] of Object.entries(frame.visibility)) {
                 const obj = this._objects.get(id);
-                if (obj) obj.visible = visible;
+                if (obj) obj.visible = visible && this._eyeAllows(id);
             }
         }
         if (frame.opacity) {
@@ -20985,7 +21612,7 @@ export class ThreeJSViewer {
         // Home button: bottom of the orbit / P / Home stack left of the gimbal; resets the view.
         if (this._viewHomeBtn) {
             this._viewHomeBtn.addEventListener('click', () => {
-                this.resetView();
+                this._userResetView();
                 this._viewHomeBtn.blur();
             });
         }
@@ -21001,7 +21628,7 @@ export class ThreeJSViewer {
         // false, so auto-projection never overrides it.
         if (this._viewProjBtn) {
             this._viewProjBtn.addEventListener('click', () => {
-                this._switchCamera(!this._isOrtho);
+                this._userSwitchCamera(!this._isOrtho);
                 this._viewProjBtn.blur();
             });
             this._updateProjButton();
@@ -21056,7 +21683,7 @@ export class ThreeJSViewer {
 
             // Global shortcuts
             if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
-                this._switchCamera(!this._isOrtho);
+                this._userSwitchCamera(!this._isOrtho);
                 return;
             }
             if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey) {
@@ -21092,12 +21719,12 @@ export class ThreeJSViewer {
                 return;
             }
             if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey) {
-                this.resetView();
+                this._userResetView();
                 return;
             }
             if (e.code === 'Home' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !this._animation) {
                 e.preventDefault();
-                this.resetView();
+                this._userResetView();
                 return;
             }
 
@@ -21483,7 +22110,7 @@ export class ThreeJSViewer {
                 this._deleteObject(data.id);
                 break;
             case 'set_visibility':
-                this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible; });
+                this._withObject(data.id, 'set_visibility', (obj) => { obj.visible = data.visible && this._eyeAllows(data.id); });
                 break;
             case 'frame_object':
                 this._withObject(data.id, 'frame_object', (obj) => {
@@ -21953,6 +22580,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(line, data.parent);
                         this._registerObject(data.id, line);
+                        applyDrawOrder(line, line.material, data);
                         // Same ordering as add_mesh_binary: the pose lands
                         // after registration so a pending re-parent sees it.
                         if (data.transform) this._applyTransform(line, data.transform);
@@ -22308,8 +22936,12 @@ export class ThreeJSViewer {
                                 obj.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
                             } else {
                                 // setColors rebuilds the instanceColorStart/End
-                                // instanced attributes on the LineGeometry.
+                                // instanced attributes on the LineGeometry; a
+                                // cut frontier segment is restored and cut again.
+                                const cut = obj.userData.lineFrontier ? obj.userData.pickDrawFrac : null;
+                                if (cut != null) applyFatLineDrawRange(obj, 1);
                                 obj.geometry.setColors(colorData);
+                                if (cut != null) applyFatLineDrawRange(obj, cut);
                             }
                             // If the polyline was created without vertex colors,
                             // the material is in flat-color mode — flip it.
@@ -22852,6 +23484,7 @@ export class ThreeJSViewer {
                             endCapPattern,
                             savedCapIndices: new (/** @type {any} */ (endCapPattern.constructor))(endCapPattern.length),
                             savedCapOffset: -1,
+                            savedCapPairs: 0,
                             vOffs: buildVOffs ? new Float32Array(buildVOffs) : null,
                             arc: buildArc,
                             uvPeriod,
@@ -22872,6 +23505,7 @@ export class ThreeJSViewer {
                         this._deleteObject(data.id, { preserveInflight: true });
                         this._addToParentOrScene(mesh, data.parent);
                         this._registerObject(data.id, mesh);
+                        applyDrawOrder(mesh, material, data);
                         if (data.transform) this._applyTransform(mesh, data.transform);
                         deferred.resolve();
                         if (tubeLOD) {
@@ -23404,10 +24038,17 @@ export class ThreeJSViewer {
                     up: [u.x, u.y, u.z],
                     fov: cam.isPerspectiveCamera ? cam.fov : null,
                     zoom: cam.zoom,
+                    projection: this.getProjection(),
                 });
             }
             case 'set_camera':
                 this.setCameraPose(data);
+                break;
+            case 'set_projection':
+                this.setProjection(data.mode);
+                break;
+            case 'set_navigation':
+                this.setNavigation(data);
                 break;
             case 'set_view':
                 this.setView(data.name, { animate: data.animate !== false });
@@ -23460,7 +24101,8 @@ export class ThreeJSViewer {
                 this._updateClipSliderRange();
                 this._syncAnchorFromPlane();
                 this._syncClipEnabledUI();
-                if (!wasClipOn) this._openRailPanel('clip');
+                // A page-owned plane (panel: false) cuts without unfolding or enabling the Clipping panel.
+                if (!wasClipOn && data.panel !== false) this._openRailPanel('clip');
                 this._menus.refresh();
                 this._updateClipMaterials();
                 break;
@@ -23850,6 +24492,7 @@ export class ThreeJSViewer {
         // setView() snap tween (replaces ViewHelper's own Y-up animation).
         this._updateViewTween(frameNow);
         this._camController.updateFrameTween(frameNow);
+        if (this._cameraHooks.length) this._emitCameraChange();
         if (this._shading.shadingMode === 3) {
             this._scene.traverse((obj) => {
                 const h = obj.userData && obj.userData.vertexNormalsHelper;
@@ -24149,6 +24792,65 @@ export class ThreeJSViewer {
     // ========== ViewHelper (corner gizmo) ==========
 
     /**
+     * Reserve `px` CSS pixels above the animation toolbar for an overlay the
+     * page draws at the bottom of the canvas: the view gimbal and the orbit /
+     * P / Home buttons move up by that much, and their hit-testing follows.
+     * 0 (the default) restores the normal placement.
+     * @param {number} px
+     */
+    setBottomInset(px) {
+        this._bottomInset = Number.isFinite(px) && px > 0 ? px : 0;
+        this._refreshAnimLift(this._animToolbarH);
+    }
+    /** @returns {number} the reserved bottom inset in CSS px */
+    getBottomInset() { return this._bottomInset || 0; }
+
+    /** @returns {number} world units per CSS pixel at the orbit target, in either projection */
+    getWorldPerPixel() { return this._worldPerPixelAtTarget(); }
+
+    /**
+     * A world point in canvas CSS pixels, or null behind the camera.
+     * @param {number} x @param {number} y @param {number} z
+     * @returns {[number, number] | null}
+     */
+    worldToCanvas(x, y, z) {
+        this._camera.updateMatrixWorld();
+        const p = new THREE.Vector3(x, y, z).applyMatrix4(this._camera.matrixWorldInverse);
+        if (this._camera.isPerspectiveCamera ? p.z >= 0 : false) return null;
+        p.applyMatrix4(this._camera.projectionMatrix);
+        const dom = this._renderer.domElement;
+        return [(p.x + 1) / 2 * dom.clientWidth, (1 - p.y) / 2 * dom.clientHeight];
+    }
+
+    /**
+     * Camera tracking as the T key and animation metadata set it.
+     * @returns {{mode: 'off' | 'follow' | 'lookat' | 'scripted', targetId: string | null, interactive: boolean}}
+     */
+    getCameraTracking() {
+        const mode = /** @type {'off' | 'follow' | 'lookat' | 'scripted'} */ (this._trackMode);
+        return { mode, targetId: this._trackTargetId, interactive: this._trackInteractive };
+    }
+
+    /**
+     * Follow or look at an object, or stop tracking. The next tick snaps the target rather
+     * than moving by a delta from an earlier position.
+     * @param {'off' | 'follow' | 'lookat'} mode
+     * @param {string | null} [targetId] the tracked object; ignored for 'off'
+     * @returns {boolean} false (with a warning) for an unknown mode or a missing target
+     */
+    setCameraTracking(mode, targetId = null) {
+        if (!['off', 'follow', 'lookat'].includes(mode) || (mode !== 'off' && !targetId)) {
+            console.warn(`setCameraTracking: unsupported mode ${mode} or missing target`);
+            return false;
+        }
+        this._trackMode = mode;
+        this._trackTargetId = mode === 'off' ? null : targetId;
+        this._trackHasLastPos = false;
+        this._updateTrackingUI();
+        return true;
+    }
+
+    /**
      * Set the view gimbal size in CSS px (issue #233), clamped to 32-512.
      * `null` restores the automatic size: 128, or 80 when the canvas' shorter
      * side is under 500 px. Hit-testing, the animation-toolbar lift and the
@@ -24388,7 +25090,7 @@ export class ThreeJSViewer {
      * @param {string} view one of GIZMO_SPRITE_VIEWS' target views
      */
     _gizmoAxisClick(view) {
-        if (!VIEW_PRESETS[view]) return;
+        if (!VIEW_PRESETS[view] || this._rotationLocked()) return;
         const effective = (this._isOrtho && this._gizmoAxisView === view && OPPOSITE_VIEW[view])
             ? OPPOSITE_VIEW[view]
             : view;
@@ -24443,9 +25145,11 @@ export class ThreeJSViewer {
      * @param {number} [measuredHeight]
      */
     _refreshAnimLift(measuredHeight) {
-        const h = Number.isFinite(measuredHeight)
+        this._animToolbarH = Number.isFinite(measuredHeight)
             ? /** @type {number} */ (measuredHeight)
             : this._animControlsEl.offsetHeight;
+        // An embedder's overlay above the toolbar (setBottomInset) lifts the gizmo stack further.
+        const h = this._animToolbarH + (this._bottomInset || 0);
         if (h === this._animLiftCss) return;
         this._animLiftCss = h;
         this.el.style.setProperty('--tjsv-anim-lift', `${h}px`);
@@ -24627,8 +25331,8 @@ export class ThreeJSViewer {
     /**
      * Read the live camera pose. `fov` is null while the ortho camera is
      * active; `zoom` is the ortho framing control (round-trips faithfully
-     * under both cameras).
-     * @returns {{position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number}}
+     * under both cameras); `projection` names the active camera.
+     * @returns {{position:{x:number,y:number,z:number}, target:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}, fov:number|null, zoom:number, projection:CameraProjection}}
      */
     getCameraPose() {
         const p = this._camera.position, t = this._controls.target, u = this._camera.up;
@@ -24639,7 +25343,27 @@ export class ThreeJSViewer {
             up: { x: u.x, y: u.y, z: u.z },
             fov: cam.isPerspectiveCamera ? cam.fov : null,
             zoom: cam.zoom,
+            projection: this.getProjection(),
         };
+    }
+
+    /** @returns {CameraProjection} the active camera's projection */
+    getProjection() { return this._isOrtho ? 'orthographic' : 'perspective'; }
+
+    /**
+     * Switch the camera projection, as the toolbar button and the O key do,
+     * keeping the view direction, target and apparent scale. Also the
+     * implementation behind the `set_projection` message.
+     * @param {CameraProjection} mode 'perspective' or 'orthographic'
+     * @returns {boolean} false (with a warning) for an unknown mode
+     */
+    setProjection(mode) {
+        if (!CAMERA_PROJECTIONS.includes(mode)) {
+            console.warn(`setProjection: unknown projection '${mode}' (perspective or orthographic)`);
+            return false;
+        }
+        this._switchCamera(mode === 'orthographic');
+        return true;
     }
 
     /**
@@ -24648,11 +25372,13 @@ export class ThreeJSViewer {
      * consistent and re-orients explicitly — ViewerControls.update()
      * deliberately never calls lookAt, so without it the camera would move
      * while still facing its old direction. Also the implementation behind
-     * the `set_camera` WS message.
-     * @param {{position?:any, target?:any, up?:any, fov?:number, zoom?:number}} pose
+     * the `set_camera` WS message. `projection` switches the camera first,
+     * so a pose and its projection land in the same frame.
+     * @param {{position?:any, target?:any, up?:any, fov?:number, zoom?:number, projection?:CameraProjection}} pose
      */
     setCameraPose(pose) {
         if (!pose) return;
+        if (pose.projection != null) this.setProjection(pose.projection);
         const cam = /** @type {any} */ (this._camera);
         const p = vec3Tuple(pose.position);
         if (p) cam.position.set(p[0], p[1], p[2]);
@@ -24775,6 +25501,17 @@ export class ThreeJSViewer {
     getRenderStats() { return { ...this._renderStats }; }
 
     /**
+     * Whether this viewer has an optional protocol addition, for embedders
+     * that also run against older releases. Names: see `features`.
+     * @param {string} name e.g. 'set_projection'
+     * @returns {boolean}
+     */
+    hasFeature(name) { return VIEWER_FEATURES.includes(name); }
+
+    /** @returns {ReadonlyArray<string>} the optional protocol additions this viewer has */
+    get features() { return VIEWER_FEATURES; }
+
+    /**
      * Pick a world point on the displayed content (meshes + point clouds)
      * from a screen position — e.g. to seat an embedder-owned selection box.
      * `clientX/clientY` are viewport (event.clientX-style) coordinates.
@@ -24841,6 +25578,30 @@ export class ThreeJSViewer {
     setControlsEnabled(enabled) { this._controls.enabled = !!enabled; }
 
     /**
+     * Choose which gestures move the camera, e.g. a plan view that pans and
+     * zooms but never rotates: `{rotate: false, leftButton: 'pan'}`. Fields
+     * left out are unchanged. While rotation is off a click does not move the
+     * orbit pivot, the gimbal's axis bubbles, the projection key, button and
+     * menu item, and the V key do nothing, and Home, F and a double click on
+     * empty space frame the scene without reorienting it. Picking keeps the
+     * plain left click, also when the left button pans. Also the
+     * implementation behind the `set_navigation` message.
+     * @param {{rotate?: boolean, pan?: boolean, zoom?: boolean, leftButton?: 'rotate' | 'pan'}} opts
+     */
+    setNavigation(opts) {
+        if (!opts) return;
+        if (opts.leftButton != null && opts.leftButton !== 'rotate' && opts.leftButton !== 'pan') {
+            console.warn(`setNavigation: leftButton is 'rotate' or 'pan', got '${opts.leftButton}'`);
+        }
+        this._controls.setNavigation(opts);
+        this._viewProjBtn?.classList.toggle('tjsv-locked', this._rotationLocked());
+        this._menus?.refresh();
+    }
+
+    /** @returns {{rotate: boolean, pan: boolean, zoom: boolean, leftButton: 'rotate' | 'pan'}} the navigation mode */
+    getNavigation() { return this._controls.getNavigation(); }
+
+    /**
      * Set the scene background colour, for embedders that theme the viewer.
      * Drives both render paths: `scene.background` (direct) and the canvas CSS
      * colour the EDL composer path shows through (see renderComposer), and the
@@ -24872,6 +25633,21 @@ export class ThreeJSViewer {
     /** @returns {boolean} whether the global clip-cap switch is on */
     getClipCaps() {
         return this._clipCaps.enabled;
+    }
+
+    /**
+     * The clipping state in the terms of `set_clipping_plane` / `set_clipping_slab`,
+     * so a page that takes the plane over can put the user's back on release.
+     * @returns {{enabled: boolean, mode: 'plane' | 'slab', normal: number[], distance: number,
+     *     thickness: number, showHelper: boolean, caps: boolean}}
+     */
+    getClipping() {
+        const n = this._clipPlane.normal;
+        return {
+            enabled: this._clipEnabled, mode: this._clipSlabMode ? 'slab' : 'plane', normal: [n.x, n.y, n.z],
+            distance: this._clipPosition, thickness: this._clipSlabThickness,
+            showHelper: this._clipHelperVisible, caps: this._clipCaps.enabled,
+        };
     }
 
     /**
