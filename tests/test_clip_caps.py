@@ -128,6 +128,29 @@ def _cap_count(page, id):
 
 
 @pytest.mark.browser
+def test_get_clipping_reports_what_restores_it(viewer_client, viewer_page):
+    """getClipping returns the plane, slab and caps in message terms."""
+    page = viewer_page
+    get = "() => window.threejsViewer.getClipping()"
+    assert page.evaluate("() => window.threejsViewer.hasFeature('clipping_state')")
+    assert page.evaluate(get)["enabled"] is False
+    viewer_client.set_clipping_caps(True)
+    viewer_client.set_clipping_plane(normal=[0, 0, 2], distance=0.5, show_helper=False)
+    settle(viewer_client)
+    st = page.evaluate(get)
+    assert st["enabled"] is True and st["mode"] == "plane" and st["caps"] is True
+    assert st["normal"] == pytest.approx([0, 0, 1])
+    assert st["distance"] == pytest.approx(0.5)
+    assert st["showHelper"] is False
+    viewer_client.set_clipping_slab(normal=[1, 0, 0], center=1.5, thickness=3)
+    settle(viewer_client)
+    st = page.evaluate(get)
+    assert st["mode"] == "slab"
+    assert st["distance"] == pytest.approx(1.5)
+    assert st["thickness"] == pytest.approx(3)
+
+
+@pytest.mark.browser
 def test_caps_off_by_default(viewer_client, viewer_page):
     viewer_client.add_box("b", width=2, height=2, depth=2)
     viewer_client.set_clipping_plane(normal=[1, 0, 0], distance=0.3, show_helper=False)
@@ -339,7 +362,9 @@ _CAP_UNION_AREA = """([id, plane, grid]) => {
     const w = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
     const tris = [];
     obj.traverse((cap) => {
-        if (!cap.userData.__clipCap || !cap.visible) return;
+        // A revealed tube's cap carries its frontier pair as a child piece.
+        const piece = cap.userData.__clipCapFrontier && cap.parent.visible;
+        if (!piece && (!cap.userData.__clipCap || !cap.visible)) return;
         cap.updateWorldMatrix(true, false);
         const e = cap.matrixWorld.elements;
         const arr = cap.geometry.getAttribute('position').array;
