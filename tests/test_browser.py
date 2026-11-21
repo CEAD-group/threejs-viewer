@@ -1113,8 +1113,7 @@ def test_billboard_pinned_hinge_absorbs_own_rotation_browser(
     b = viewer_page.evaluate(_BB_PROBE_JS, "pinned_b")
     assert a is not None and b is not None
     assert np.allclose(a["quat"], b["quat"], atol=1e-5), (
-        f"pinned hinge should not depend on the object's own rotation: "
-        f"{a['quat']} vs {b['quat']}"
+        f"pinned hinge should not depend on the object's own rotation: {a['quat']} vs {b['quat']}"
     )
 
 
@@ -1737,8 +1736,7 @@ def _load_animated_glb(viewer_client, obj_id="anim"):
 
 def _node_scale(viewer_page, obj_id="anim"):
     return viewer_page.evaluate(
-        f"() => window.threejsViewer._objects.get('{obj_id}')"
-        ".getObjectByName('anode').scale.x"
+        f"() => window.threejsViewer._objects.get('{obj_id}').getObjectByName('anode').scale.x"
     )
 
 
@@ -3234,8 +3232,7 @@ def test_anim_lift_tracks_toolbar_reflow_on_resize(viewer_client, viewer_page):
     )
     narrow = snapshot()
     assert narrow["tbHeight"] > wide["tbHeight"], (
-        f"toolbar didn't grow on shrink: wide={wide['tbHeight']} "
-        f"narrow={narrow['tbHeight']}"
+        f"toolbar didn't grow on shrink: wide={wide['tbHeight']} narrow={narrow['tbHeight']}"
     )
     assert narrow["animLiftCss"] == narrow["tbHeight"], (
         f"cache stale after shrink: {narrow}"
@@ -3462,8 +3459,7 @@ def test_environment_map_toggle_drops_and_restores(page):
         # `tjsv.environmentMap=false` from another test/run can't make the
         # "starts enabled" assertion flaky.
         page.goto(
-            f"{client.viewer_path.resolve().as_uri()}"
-            f"?ws_port={client.port}&environment_map=true"
+            f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}&environment_map=true"
         )
         _wait_for_viewer(page)
         # Wait for the cubemap PMREM env map to finish loading (async images).
@@ -3500,8 +3496,7 @@ def test_environment_map_url_param_starts_disabled(page):
     client = _start_client()
     try:
         page.goto(
-            f"{client.viewer_path.resolve().as_uri()}"
-            f"?ws_port={client.port}&environment_map=false"
+            f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}&environment_map=false"
         )
         _wait_for_viewer(page)
         page.wait_for_function(
@@ -3590,8 +3585,7 @@ def test_environment_background_toggle(page):
     client = _start_client()
     try:
         page.goto(
-            f"{client.viewer_path.resolve().as_uri()}"
-            f"?ws_port={client.port}&env_background=true"
+            f"{client.viewer_path.resolve().as_uri()}?ws_port={client.port}&env_background=true"
         )
         _wait_for_viewer(page)
         page.wait_for_function(
@@ -4304,7 +4298,9 @@ def test_polyline_hover_cursor_does_not_flicker(viewer_client, viewer_page):
 
 
 @pytest.mark.browser
-def test_polyline_hover_follows_a_zoom_under_a_resting_pointer(viewer_client, viewer_page):
+def test_polyline_hover_follows_a_zoom_under_a_resting_pointer(
+    viewer_client, viewer_page
+):
     """A zoom or pan with the pointer at rest picks again under it: the hover
     reports the point now under the cursor, and clears once the line has left it."""
     viewer_client.enable_polyline_picking()
@@ -7014,8 +7010,7 @@ def test_embedder_pick_and_controls_toggle(viewer_client, viewer_page):
 
     # Point cloud pick with a world-space threshold.
     viewer_page.evaluate(
-        "() => window.threejsViewer.setCameraPose("
-        "{position: [6, 0, 9], target: [6, 0, 0]})"
+        "() => window.threejsViewer.setCameraPose({position: [6, 0, 9], target: [6, 0, 0]})"
     )
     hit = viewer_page.evaluate(pick_at, [6.0, 0.0, 0.0, {"pointsThreshold": 0.5}])
     assert hit is not None and hit["objectId"] == "cloud"
@@ -7116,8 +7111,7 @@ def test_embedder_get_object_and_message_replies(viewer_client, viewer_page):
     assert viewer_page.evaluate("() => window.threejsViewer.getObject('nope')") is None
 
     reply = viewer_page.evaluate(
-        "async () => await window.threejsViewer.handleMessage("
-        "{type: 'list_objects', requestId: 7})"
+        "async () => await window.threejsViewer.handleMessage({type: 'list_objects', requestId: 7})"
     )
     assert reply["type"] == "list_objects_response"
     assert reply["requestId"] == 7
@@ -7125,8 +7119,7 @@ def test_embedder_get_object_and_message_replies(viewer_client, viewer_page):
     # non-query messages resolve to null
     assert (
         viewer_page.evaluate(
-            "async () => await window.threejsViewer.handleMessage("
-            "{type: 'add_group', id: 'g2'})"
+            "async () => await window.threejsViewer.handleMessage({type: 'add_group', id: 'g2'})"
         )
         is None
     )
@@ -7505,8 +7498,7 @@ def test_parented_overlay_gets_active_clipping_planes(viewer_client, viewer_page
         page, "() => window.__ov.parent === window.threejsViewer.getObject('late_link')"
     )
     assert page.evaluate(
-        "() => window.__ov.material.clippingPlanes"
-        " === window.threejsViewer._activeClippingPlanes()"
+        "() => window.__ov.material.clippingPlanes === window.threejsViewer._activeClippingPlanes()"
     )
 
     viewer_client.disable_clipping_plane()
@@ -7835,8 +7827,12 @@ def test_page_owned_clipping_plane_leaves_the_panel_alone(viewer_client, viewer_
     """panel=False cuts without unfolding the Clipping panel or adding its tab, and
     the cut drops picks on the clipped side as any plane does."""
     page = viewer_page
-    page.evaluate("() => { try { localStorage.removeItem('tjsv.toolPanel.clip'); } catch (e) {} }")
-    viewer_client.set_clipping_plane(normal=[0, 0, -1], distance=-0.5, show_helper=False, panel=False)
+    page.evaluate(
+        "() => { try { localStorage.removeItem('tjsv.toolPanel.clip'); } catch (e) {} }"
+    )
+    viewer_client.set_clipping_plane(
+        normal=[0, 0, -1], distance=-0.5, show_helper=False, panel=False
+    )
     settle(viewer_client)
     st = page.evaluate(
         "() => { const v = window.threejsViewer;"
@@ -8210,7 +8206,9 @@ def test_add_menu_eyes_persist_and_follow_late_objects(viewer_client, viewer_pag
 
 
 @pytest.mark.browser
-def test_eye_that_is_off_wins_over_later_visibility_messages(viewer_client, viewer_page):
+def test_eye_that_is_off_wins_over_later_visibility_messages(
+    viewer_client, viewer_page
+):
     """A visibility message or an animation baseline cannot show an object an eye hides;
     switching the eye on again shows what those messages asked for."""
     page = viewer_page
@@ -8229,7 +8227,9 @@ def test_eye_that_is_off_wins_over_later_visibility_messages(viewer_client, view
     vis = "() => ['box_a', 'box_b', 'other'].map((id) => window.threejsViewer.getObject(id).visible)"
     assert page.evaluate(vis) == [False, False, True]
     viewer_client.set_scene_visibility({"box_a": True, "box_b": False, "other": True})
-    page.evaluate("() => window.threejsViewer.handleMessage({type: 'set_visibility', id: 'box_b', visible: true})")
+    page.evaluate(
+        "() => window.threejsViewer.handleMessage({type: 'set_visibility', id: 'box_b', visible: true})"
+    )
     settle(viewer_client)
     assert page.evaluate(vis) == [False, False, True]
     viewer_client.load_animation(_spin_animation("other"), autoplay=False)
@@ -8239,7 +8239,9 @@ def test_eye_that_is_off_wins_over_later_visibility_messages(viewer_client, view
     page.evaluate("() => window.__eyeMenu.setItem('boxes', {checked: true})")
     assert page.evaluate(vis) == [True, True, True]
     # Playback restores only what the animation switches: a page-side hide survives a seek.
-    page.evaluate("() => { window.threejsViewer.getObject('other').visible = false; window.threejsViewer._seekToTime(4.0); }")
+    page.evaluate(
+        "() => { window.threejsViewer.getObject('other').visible = false; window.threejsViewer._seekToTime(4.0); }"
+    )
     assert page.evaluate(vis) == [True, True, False]
 
 
@@ -8698,8 +8700,7 @@ def test_toolpath_travel_line_lockstep_reveal(viewer_client, viewer_page):
         viewer_client.set_draw_range("tl", frac)
         time.sleep(0.15)
         return viewer_page.evaluate(
-            "() => window.threejsViewer._objects.get('tl_travel')"
-            ".geometry.drawRange.count"
+            "() => window.threejsViewer._objects.get('tl_travel').geometry.drawRange.count"
         )
 
     # end fracs are [2/7, 3/7, 4/7, 6/7, 7/7] (draw_range convention
@@ -9763,8 +9764,7 @@ def test_set_highlight_does_not_paint_a_shell_over_a_translucent_mesh(
     # A silhouette hull on a non-depth-writing mesh covers essentially the
     # whole footprint; an outline is a thin fraction of it.
     assert seen["orange"] < 0.35 * seen["covered"], (
-        f"highlight painted a shell, not an outline: "
-        f"{seen['orange']}/{seen['covered']} px"
+        f"highlight painted a shell, not an outline: {seen['orange']}/{seen['covered']} px"
     )
 
 
@@ -11406,8 +11406,7 @@ def test_model_cache_eviction_and_clear(viewer_client, viewer_page):
     assert _fetches_of(viewer_page, urls[2]) == 1
     # Evicting an entry whose clones are still live leaves them rendering.
     assert viewer_page.evaluate(
-        "() => ['e0', 'e1', 'e2', 'e0b', 'e2b']"
-        ".every(id => window.threejsViewer._objects.has(id))"
+        "() => ['e0', 'e1', 'e2', 'e0b', 'e2b'].every(id => window.threejsViewer._objects.has(id))"
     )
 
     viewer_page.evaluate("() => window.threejsViewer.clearModelCache()")
@@ -11835,12 +11834,10 @@ def test_axis_control_update_color(viewer_client, viewer_page):
     )
     assert handle_hex == 0x00FF00
     hover_hex = viewer_page.evaluate(
-        "() => window.threejsViewer._axisControls.controls.get('elz')"
-        "._hoverColor.getHex()"
+        "() => window.threejsViewer._axisControls.controls.get('elz')._hoverColor.getHex()"
     )
     assert hover_hex != 0xFF0000, (
-        "hover tint should be re-derived from the new color, not left at the "
-        "old explicit value"
+        "hover tint should be re-derived from the new color, not left at the old explicit value"
     )
 
 
@@ -13212,8 +13209,7 @@ def test_point_and_polyline_annotations_draw_and_follow_in_view(
         "line": True,
     }
     kinds = viewer_page.evaluate(
-        "() => Object.fromEntries(window.threejsViewer.getAnnotations()"
-        ".map(a => [a.id, a.kind]))"
+        "() => Object.fromEntries(window.threejsViewer.getAnnotations().map(a => [a.id, a.kind]))"
     )
     assert kinds == {
         "p": "point",
