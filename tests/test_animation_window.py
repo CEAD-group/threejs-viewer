@@ -123,6 +123,41 @@ def test_play_loops_to_the_window_start(viewer_client, viewer_page):
     assert _state(viewer_page)["window"] == {"start": 20, "end": 40}
 
 
+@pytest.mark.parametrize("loop", [False, True])
+@pytest.mark.parametrize("outside", [5, 60, 100])
+def test_play_from_outside_starts_at_the_window_start(
+    viewer_client, viewer_page, loop, outside
+):
+    _load(viewer_client, viewer_page, loop=loop)
+    _seek(viewer_page, outside)
+    _window(viewer_page, 20, 40)
+    viewer_page.evaluate(
+        "() => { const v = window.threejsViewer; window.__times = [];"
+        " window.__off = v.onAnimationTime((s) => window.__times.push(s.time));"
+        " v.setAnimationPlaying(true); }"
+    )
+    viewer_page.wait_for_function(
+        "() => window.__times.filter((t) => t > 20).length > 2"
+    )
+    times = viewer_page.evaluate(
+        "() => { window.__off(); window.threejsViewer.setAnimationPlaying(false);"
+        " return window.__times; }"
+    )
+    played = [t for t in times if t != outside]
+    assert played[0] == pytest.approx(20), times
+    assert all(20 <= t < 22 for t in played), times
+
+
+def test_aria_value_stays_on_the_bar(viewer_client, viewer_page):
+    _load(viewer_client, viewer_page)
+    _window(viewer_page, 20, 40)
+    tl = viewer_page.locator(".tjsv-timeline-container")
+    for t, now in ((60, "20.00"), (5, "0.00"), (30, "10.00")):
+        _seek(viewer_page, t)
+        assert tl.get_attribute("aria-valuenow") == now
+        assert tl.get_attribute("aria-valuemax") == "20.00"
+
+
 def test_steps_home_and_end_stay_inside_the_window(viewer_client, viewer_page):
     _load(viewer_client, viewer_page)
     _window(viewer_page, 20.5, 40.5)

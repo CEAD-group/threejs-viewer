@@ -21356,11 +21356,11 @@ export class ThreeJSViewer {
         const pct = this._spanFraction(this._animationTime) * 100;
         this._timelineProgressEl.style.width = `${pct}%`;
         this._timelineThumbEl.style.left = `${pct}%`;
-        // The readout counts from the start of the bar; a playhead outside a window reads below 0 or past the total.
+        // Counted from the bar's start; outside a window it reads below 0 or past the total.
         const shown = this._animationTime - span.start;
         const tl = this._timelineContainer;
         tl.setAttribute('aria-valuemax', this._formatTime(span.end - span.start));
-        tl.setAttribute('aria-valuenow', this._formatTime(shown));
+        tl.setAttribute('aria-valuenow', this._formatTime(Math.max(0, Math.min(span.end - span.start, shown))));
         tl.setAttribute('aria-valuetext', `${this._formatTime(shown)} s, frame ${frameIndex + 1}`);
         this._totalTimeEl.textContent = this._formatTime(span.end - span.start);
         this._currentTimeEl.textContent = this._formatTime(shown);
@@ -24487,9 +24487,12 @@ export class ThreeJSViewer {
             // Raw wall-clock advance, capped: a delta past the cap is a
             // stall (backgrounded tab, GC pause), not playback.
             const paced = Math.min(deltaTime, PLAYBACK_MAX_FRAME_DELTA);
-            this._animationTime += paced * this._animationSpeed;
-
             const span = this._playSpan();
+            // Playing from outside a window starts at its start.
+            const t0 = this._animationTime;
+            const outside = this._animWindow && (t0 < span.start || t0 > span.end);
+            this._animationTime = outside ? span.start : t0 + paced * this._animationSpeed;
+
             if (this._animationTime >= span.end) {
                 const length = span.end - span.start;
                 if (this._animationLoop && length > 0) {
@@ -25953,8 +25956,9 @@ export class ThreeJSViewer {
      * it. The clock stays absolute: `seekAnimationTime` may still move the
      * playhead outside the window, which keeps the window, pins the thumb to
      * the nearer end and shows the readout below 0 or past the total. Setting
-     * a window does not move the playhead. Loading an animation clears it.
-     * Feature `animation_window`.
+     * a window does not move the playhead; play from outside it starts at
+     * `start`. Loading an animation clears it, and before one is loaded the
+     * call does nothing. Feature `animation_window`.
      * @param {number|null} start
      * @param {number} [end]
      */
