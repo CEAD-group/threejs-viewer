@@ -290,6 +290,14 @@ that measures or adjusts a new object needs no polling.
 at the bottom of the canvas: the view gimbal and its orbit / P / Home buttons move up by `px`,
 and their hit-testing follows. `hasFeature('bottom_inset')` marks it.
 
+`viewer.setAnimationWindow(start, end)` limits the animation toolbar to part of the clock: the
+bar, its readout and markers span `[start, end]`, play stops or loops there, and frame steps,
+Home and End stay inside it. Starting play from a playhead outside it starts at `start`; a seek
+outside it while playing plays on from there. `null`
+clears it, and so does loading an animation; before an animation is loaded the call does
+nothing. The clock stays absolute, and `getAnimationState().window` reports the window.
+`hasFeature('animation_window')` marks it.
+
 Coplanar paths, such as a planned and a measured one, are ordered with `depth_offset` on
 `add_polyline` / `add_parametric_tube` (`depthOffset` on the messages): a depth bias toward
 the camera in world units, applied in the shader, so nothing moves on screen and native lines

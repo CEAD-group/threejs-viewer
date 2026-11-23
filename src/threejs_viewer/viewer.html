@@ -1794,6 +1794,7 @@ const VIEWER_FEATURES = Object.freeze([
     'camera_tracking',
     'world_to_canvas',
     'clipping_state',
+    'animation_window',
 ]);
 
 /**
@@ -19395,6 +19396,8 @@ class ThreeJSViewer {
         // EMA of the per-rAF wall-clock delta (s) used to pace playback
         // (issue #97); 0 = unseeded, primed from the first played frame.
         this._animationLoop = true;
+        // Embedder playback window {start, end} in seconds, or null for the whole animation.
+        this._animWindow = null;
         this._lastAnimationUpdate = 0;
         this._baselineVisibility = new Map();
         this._speedIndex = 6; // starts at 1x
@@ -22606,6 +22609,7 @@ class ThreeJSViewer {
         // camera-tracking — only the underlying frame data is swapped (and
         // opts.initial_time is ignored on a swap).
         const isSwap = this._animation != null && !opts.restart;
+        this._animWindow = null;
         const prevTime = this._animationTime;
         const prevPlaying = this._animationPlaying;
         const prevTrackMode = this._trackMode;
@@ -22668,23 +22672,12 @@ class ThreeJSViewer {
         // updates (reflow on resize, content changes) flow through the
         // observer.
         this._refreshAnimLift();
-        this._totalTimeEl.textContent = this._formatTime(this._animation.duration);
         this._totalFramesEl.textContent = this._animation.frames.length;
         this._animationLoop = this._animation.loop;
         setPressed(this._btnLoop, this._animationLoop);
         this._updateAnimationUI();
 
-        this._timelineMarkersEl.innerHTML = '';
-        if (this._animation.markers) {
-            for (const marker of this._animation.markers) {
-                const el = document.createElement('div');
-                el.className = 'timeline-marker';
-                el.style.left = `${(marker.time / this._animation.duration) * 100}%`;
-                el.setAttribute('data-label', marker.label);
-                el.dataset.time = String(marker.time);
-                this._timelineMarkersEl.appendChild(el);
-            }
-        }
+        this._layoutTimelineMarkers();
 
         if (isSwap) {
             // Preserve playback continuity across the swap.
@@ -22761,6 +22754,7 @@ class ThreeJSViewer {
     _resetAnimationState() {
         this._animVisIds = new Set();
         this._animation = null;
+        this._animWindow = null;
         this._animationPlaying = false;
         this._baselineVisibility.clear();
         this._animControlsEl.classList.remove('visible');
@@ -23111,15 +23105,18 @@ class ThreeJSViewer {
     _updateAnimationUI() {
         if (!this._animation) return;
         const { index: frameIndex } = this._getFrameAtTime(this._animationTime);
-        const progress = this._animation.duration > 0 ? (this._animationTime / this._animation.duration) * 100 : 0;
-        const pct = Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
+        const span = this._playSpan();
+        const pct = this._spanFraction(this._animationTime) * 100;
         this._timelineProgressEl.style.width = `${pct}%`;
         this._timelineThumbEl.style.left = `${pct}%`;
+        // Counted from the bar's start; outside a window it reads below 0 or past the total.
+        const shown = this._animationTime - span.start;
         const tl = this._timelineContainer;
-        tl.setAttribute('aria-valuemax', this._formatTime(this._animation.duration));
-        tl.setAttribute('aria-valuenow', this._formatTime(this._animationTime));
-        tl.setAttribute('aria-valuetext', `${this._formatTime(this._animationTime)} s, frame ${frameIndex + 1}`);
-        this._currentTimeEl.textContent = this._formatTime(this._animationTime);
+        tl.setAttribute('aria-valuemax', this._formatTime(span.end - span.start));
+        tl.setAttribute('aria-valuenow', this._formatTime(Math.max(0, Math.min(span.end - span.start, shown))));
+        tl.setAttribute('aria-valuetext', `${this._formatTime(shown)} s, frame ${frameIndex + 1}`);
+        this._totalTimeEl.textContent = this._formatTime(span.end - span.start);
+        this._currentTimeEl.textContent = this._formatTime(shown);
         this._currentFrameEl.textContent = frameIndex + 1;
         this._btnPlay.classList.toggle('playing', !!this._animationPlaying);
     }
@@ -23129,7 +23126,14 @@ class ThreeJSViewer {
         if (!this._animation) return;
         const { index: currentFrame } = this._getFrameAtTime(this._animationTime);
         const newFrame = Math.max(0, Math.min(this._animation.frames.length - 1, currentFrame + delta));
-        this._animationTime = this._animation.frames[newFrame].time;
+        const span = this._playSpan();
+        const time = this._animation.frames[newFrame].time;
+        // Inside a window a step that would leave it stops at its edge.
+        if (this._animWindow && (time < span.start || time > span.end)) {
+            this._seekToTime(time < span.start ? span.start : span.end);
+            return;
+        }
+        this._animationTime = time;
         this._applyFrame(newFrame);
         this._updateAnimationUI();
         this._fireAnimationTime();
@@ -23188,6 +23192,48 @@ class ThreeJSViewer {
         this._shadowDirty = true;
     }
 
+    /**
+     * The stretch of the clock the transport bar spans: the embedder's window, or the whole animation.
+     * @returns {{start: number, end: number}}
+     */
+    _playSpan() {
+        return this._animWindow || { start: 0, end: this._animation?.duration || 0 };
+    }
+
+    /**
+     * Where `time` sits on the bar, 0 at its left end and 1 at its right, clamped.
+     * @param {number} time
+     */
+    _spanFraction(time) {
+        const { start, end } = this._playSpan();
+        const f = end > start ? (time - start) / (end - start) : 0;
+        return Number.isFinite(f) ? Math.max(0, Math.min(1, f)) : 0;
+    }
+
+    /**
+     * The clock time at fraction `f` of the bar (inverse of `_spanFraction`).
+     * @param {number} f
+     */
+    _spanTime(f) {
+        const { start, end } = this._playSpan();
+        return start + Math.max(0, Math.min(1, f)) * (end - start);
+    }
+
+    /** Place the animation's markers on the bar; a marker outside the window is hidden. */
+    _layoutTimelineMarkers() {
+        this._timelineMarkersEl.innerHTML = '';
+        const { start, end } = this._playSpan();
+        for (const marker of this._animation?.markers || []) {
+            if (marker.time < start || marker.time > end) continue;
+            const el = document.createElement('div');
+            el.className = 'timeline-marker';
+            el.style.left = `${this._spanFraction(marker.time) * 100}%`;
+            el.setAttribute('data-label', marker.label);
+            el.dataset.time = String(marker.time);
+            this._timelineMarkersEl.appendChild(el);
+        }
+    }
+
     /** @param {number} time */
     _seekToTime(time) {
         if (!this._animation) return;
@@ -23201,6 +23247,9 @@ class ThreeJSViewer {
     _togglePlay() {
         this._animationPlaying = !this._animationPlaying;
         if (this._animationPlaying) {
+            // Play from a playhead outside the window starts at the window's start.
+            const w = this._animWindow;
+            if (w && (this._animationTime < w.start || this._animationTime > w.end)) this._seekToTime(w.start);
             this._lastAnimationUpdate = performance.now();
         }
         this._updateAnimationUI();
@@ -23224,8 +23273,7 @@ class ThreeJSViewer {
         if (!this._animation) return;
         const rect = this._timelineContainer.getBoundingClientRect();
         const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-        const ratio = x / rect.width;
-        this._seekToTime(ratio * this._animation.duration);
+        this._seekToTime(this._spanTime(x / rect.width));
     }
 
     // ========== Asset Tracking ==========
@@ -23374,8 +23422,8 @@ class ThreeJSViewer {
         this._syncClipEnabledUI();
 
         // Animation controls
-        this.el.querySelector('.tjsv-btn-start').addEventListener('click', () => this._seekToTime(0));
-        this.el.querySelector('.tjsv-btn-end').addEventListener('click', () => this._seekToTime(this._animation?.duration || 0));
+        this.el.querySelector('.tjsv-btn-start').addEventListener('click', () => this._seekToTime(this._spanTime(0)));
+        this.el.querySelector('.tjsv-btn-end').addEventListener('click', () => this._seekToTime(this._spanTime(1)));
         this.el.querySelector('.tjsv-btn-prev-frame').addEventListener('click', () => this._stepFrames(-1));
         this.el.querySelector('.tjsv-btn-next-frame').addEventListener('click', () => this._stepFrames(1));
         this._btnPlay.addEventListener('click', () => this._togglePlay());
@@ -23565,11 +23613,11 @@ class ThreeJSViewer {
                     break;
                 case 'Home':
                     e.preventDefault();
-                    this._seekToTime(0);
+                    this._seekToTime(this._spanTime(0));
                     break;
                 case 'End':
                     e.preventDefault();
-                    this._seekToTime(this._animation.duration);
+                    this._seekToTime(this._spanTime(1));
                     break;
                 case 'KeyL':
                     this._animationLoop = !this._animationLoop;
@@ -26195,13 +26243,18 @@ class ThreeJSViewer {
             // Raw wall-clock advance, capped: a delta past the cap is a
             // stall (backgrounded tab, GC pause), not playback.
             const paced = Math.min(deltaTime, PLAYBACK_MAX_FRAME_DELTA);
-            this._animationTime += paced * this._animationSpeed;
+            const t0 = this._animationTime;
+            this._animationTime = t0 + paced * this._animationSpeed;
+            // Past the window (a seek while playing) it plays on as without one; before it, into it.
+            const past = this._animWindow && t0 > this._animWindow.end;
+            const span = past ? { start: 0, end: this._animation.duration } : this._playSpan();
 
-            if (this._animationTime >= this._animation.duration) {
-                if (this._animationLoop) {
-                    this._animationTime = this._animationTime % this._animation.duration;
+            if (this._animationTime >= span.end) {
+                const length = span.end - span.start;
+                if (this._animationLoop && length > 0) {
+                    this._animationTime = span.start + ((this._animationTime - span.start) % length);
                 } else {
-                    this._animationTime = this._animation.duration;
+                    this._animationTime = span.end;
                     this._animationPlaying = false;
                 }
             }
@@ -27652,10 +27705,42 @@ class ThreeJSViewer {
     }
 
     /**
+     * Limit the transport to `[start, end]` seconds, or pass `null` to span the
+     * whole animation again. While a window is set the bar, its time readout
+     * (counted from `start`) and its markers cover only the window; play stops
+     * at `end` or loops back to `start`; frame steps, Home and End stay inside
+     * it. The clock stays absolute: `seekAnimationTime` may still move the
+     * playhead outside the window, which keeps the window, pins the thumb to
+     * the nearer end and shows the readout below 0 or past the total. Setting
+     * a window does not move the playhead. Starting play from outside it
+     * starts at `start`; a seek outside it while playing plays on from there. Loading an animation clears it, and before one is loaded the
+     * call does nothing. Feature `animation_window`.
+     * @param {number|null} start
+     * @param {number} [end]
+     */
+    setAnimationWindow(start, end) {
+        if (!this._animation) return;
+        if (start == null) {
+            this._animWindow = null;
+        } else {
+            const d = this._animation.duration;
+            const a = Math.max(0, Math.min(d, Number(start)));
+            const b = Math.max(0, Math.min(d, Number(end)));
+            if (!Number.isFinite(a) || !Number.isFinite(b) || !(b > a)) {
+                console.warn(`setAnimationWindow: invalid window [${start}, ${end}]`);
+                return;
+            }
+            this._animWindow = { start: a, end: b };
+        }
+        this._layoutTimelineMarkers();
+        this._updateAnimationUI();
+    }
+
+    /**
      * Read the animation transport state, or null when no animation is
      * loaded. One clock: this is the same time that drives draw_range
      * reveals, follow-path tracks, and the native transport UI.
-     * @returns {{time:number, duration:number, playing:boolean, speed:number, loop:boolean}|null}
+     * @returns {{time:number, duration:number, playing:boolean, speed:number, loop:boolean, window:{start:number, end:number}|null}|null}
      */
     getAnimationState() {
         if (!this._animation) return null;
@@ -27665,6 +27750,7 @@ class ThreeJSViewer {
             playing: this._animationPlaying,
             speed: this._animationSpeed,
             loop: !!this._animationLoop,
+            window: this._animWindow ? { ...this._animWindow } : null,
         };
     }
 
@@ -27704,7 +27790,7 @@ class ThreeJSViewer {
      * animation frame (playback tick, seek, frame step) and on play/pause
      * flips — saves an embedder the per-rAF poll when docking its own
      * scrubber/graph around the viewer's clock.
-     * @param {(state: {time:number, duration:number, playing:boolean, speed:number, loop:boolean}) => void} cb
+     * @param {(state: {time:number, duration:number, playing:boolean, speed:number, loop:boolean, window:{start:number, end:number}|null}) => void} cb
      * @returns {() => void} unsubscribe
      */
     onAnimationTime(cb) {
