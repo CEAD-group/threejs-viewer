@@ -21494,6 +21494,9 @@ export class ThreeJSViewer {
     _togglePlay() {
         this._animationPlaying = !this._animationPlaying;
         if (this._animationPlaying) {
+            // Play from a playhead outside the window starts at the window's start.
+            const w = this._animWindow;
+            if (w && (this._animationTime < w.start || this._animationTime > w.end)) this._seekToTime(w.start);
             this._lastAnimationUpdate = performance.now();
         }
         this._updateAnimationUI();
@@ -24487,11 +24490,11 @@ export class ThreeJSViewer {
             // Raw wall-clock advance, capped: a delta past the cap is a
             // stall (backgrounded tab, GC pause), not playback.
             const paced = Math.min(deltaTime, PLAYBACK_MAX_FRAME_DELTA);
-            const span = this._playSpan();
-            // Playing from outside a window starts at its start.
             const t0 = this._animationTime;
-            const outside = this._animWindow && (t0 < span.start || t0 > span.end);
-            this._animationTime = outside ? span.start : t0 + paced * this._animationSpeed;
+            this._animationTime = t0 + paced * this._animationSpeed;
+            // Past the window (a seek while playing) it plays on as without one; before it, into it.
+            const past = this._animWindow && t0 > this._animWindow.end;
+            const span = past ? { start: 0, end: this._animation.duration } : this._playSpan();
 
             if (this._animationTime >= span.end) {
                 const length = span.end - span.start;
@@ -25956,8 +25959,8 @@ export class ThreeJSViewer {
      * it. The clock stays absolute: `seekAnimationTime` may still move the
      * playhead outside the window, which keeps the window, pins the thumb to
      * the nearer end and shows the readout below 0 or past the total. Setting
-     * a window does not move the playhead; play from outside it starts at
-     * `start`. Loading an animation clears it, and before one is loaded the
+     * a window does not move the playhead. Starting play from outside it
+     * starts at `start`; a seek outside it while playing plays on from there. Loading an animation clears it, and before one is loaded the
      * call does nothing. Feature `animation_window`.
      * @param {number|null} start
      * @param {number} [end]

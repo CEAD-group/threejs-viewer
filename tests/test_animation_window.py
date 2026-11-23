@@ -148,6 +148,32 @@ def test_play_from_outside_starts_at_the_window_start(
     assert all(20 <= t < 22 for t in played), times
 
 
+@pytest.mark.parametrize("loop", [False, True])
+@pytest.mark.parametrize("target", [5, 60])
+def test_seek_outside_while_playing_plays_on_from_there(
+    viewer_client, viewer_page, loop, target
+):
+    _load(viewer_client, viewer_page, loop=loop)
+    _window(viewer_page, 20, 40)
+    _seek(viewer_page, 25)
+    viewer_page.evaluate(
+        "(target) => { const v = window.threejsViewer; window.__times = [];"
+        " v.setAnimationPlaying(true);"
+        " window.__off = v.onAnimationTime((s) => window.__times.push(s.time));"
+        " v.seekAnimationTime(target); }",
+        target,
+    )
+    viewer_page.wait_for_function("() => window.__times.length > 8")
+    times = viewer_page.evaluate(
+        "() => { window.__off(); window.threejsViewer.setAnimationPlaying(false);"
+        " return window.__times; }"
+    )
+    after = times[times.index(target) :]
+    assert all(target <= t < target + 2 for t in after), times
+    assert after == sorted(after), times
+    assert _state(viewer_page)["window"] == {"start": 20, "end": 40}
+
+
 def test_aria_value_stays_on_the_bar(viewer_client, viewer_page):
     _load(viewer_client, viewer_page)
     _window(viewer_page, 20, 40)

@@ -292,7 +292,8 @@ and their hit-testing follows. `hasFeature('bottom_inset')` marks it.
 
 `viewer.setAnimationWindow(start, end)` limits the animation toolbar to part of the clock: the
 bar, its readout and markers span `[start, end]`, play stops or loops there, and frame steps,
-Home and End stay inside it, and play from a playhead outside it starts at `start`. `null`
+Home and End stay inside it. Starting play from a playhead outside it starts at `start`; a seek
+outside it while playing plays on from there. `null`
 clears it, and so does loading an animation; before an animation is loaded the call does
 nothing. The clock stays absolute, and `getAnimationState().window` reports the window.
 `hasFeature('animation_window')` marks it.
