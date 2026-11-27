@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.81
+
+- Rail dropdowns open above embedding-page overlays and support native dismissal. Persistent rail panels stay open across outside clicks (#363).
+- Stationary scenes skip GPU draws. Camera or scene changes and playback redraw the view. Live mesh access, embedder overlays and streamed point clouds retain continuous drawing (#364).
 ## 0.0.78
 
 ### Touch: pinch zoom and two-finger pan (#348)
