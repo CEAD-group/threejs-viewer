@@ -14504,6 +14504,7 @@ def test_webgl_context_loss_stops_loop_and_restore_renders_again(
     assert all(abs(a - b) <= 2 for a, b in zip(after, before)), (before, after)
 
 
+@pytest.mark.browser
 def test_visible_stationary_scene_stops_drawing(viewer_client, viewer_page):
     viewer_client.add_box("idle-box", width=2, height=2, depth=2)
     settle(viewer_client)
