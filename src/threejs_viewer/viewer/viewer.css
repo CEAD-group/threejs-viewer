@@ -63,10 +63,10 @@
     position: absolute;
     top: var(--tjsv-rail-top, 16px);
     right: 0;
+    padding-right: var(--tjsv-body-w, 190px);
     display: flex;
     align-items: flex-start;
     transform: translateX(calc(var(--tjsv-body-w, 190px) - var(--tjsv-rail-shift, 0px)));
-    transition: transform 0.18s ease;
     pointer-events: none;   /* children re-enable; the gap stays click-through */
     /* Each panel is its own stacking context (the transform); a closed one
        shows only its tab, so it sits above the open one. */
@@ -77,6 +77,8 @@
 .threejs-viewer .tjsv-rail-panel.tjsv-side-left {
     right: auto;
     left: 0;
+    padding-right: 0;
+    padding-left: var(--tjsv-body-w, 190px);
     flex-direction: row-reverse;
     transform: translateX(calc(var(--tjsv-rail-shift, 0px) - var(--tjsv-body-w, 190px)));
 }
@@ -136,6 +138,9 @@
 /* Embedder-set neutral state (setStatus / autoConnect:false — no backend expected) */
 .threejs-viewer .tjsv-status-dot.neutral { background: #8a8a8a; }
 .threejs-viewer .tjsv-rail-panel > .tjsv-menu {
+    position: fixed;
+    inset: auto;
+    margin: 0;
     pointer-events: auto;
     width: var(--tjsv-body-w, 190px);
     box-sizing: border-box;
