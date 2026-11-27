@@ -7799,23 +7799,19 @@ class MenuController {
         this._actionHooks = [];
         /** @type {Set<string>} shortcut labels owned by the viewer's own key handler */
         this._reservedKeys = new Set();
-        this._onDocPointerDown = /** @param {PointerEvent} e */ (e) => {
-            const t = /** @type {Node} */ (e.target);
-            for (const m of this._menus.values()) {
-                if (m.spec.mode === 'dropdown' && m.open && !m.root.contains(t)) this._setOpen(m, false);
-            }
-            // A panel-mode menu stays open across outside clicks.
-        };
-        document.addEventListener('pointerdown', this._onDocPointerDown);
         // An open body re-places whenever its content or the viewport resizes.
         this._resizeObs = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
             for (const m of this._menus.values()) if (m.open) this._placeBody(m);
         });
+        this._onScroll = () => {
+            for (const m of this._menus.values()) if (m.open) this._placeBody(m);
+        };
+        window.addEventListener('scroll', this._onScroll, true);
         if (this._resizeObs && hosts.rail) this._resizeObs.observe(hosts.rail);
     }
 
     dispose() {
-        document.removeEventListener('pointerdown', this._onDocPointerDown);
+        window.removeEventListener('scroll', this._onScroll, true);
         if (this._resizeObs) this._resizeObs.disconnect();
         for (const id of [...this._menus.keys()]) this.remove(id);
     }
@@ -7927,7 +7923,9 @@ class MenuController {
         m.body.style.maxHeight = `${maxH}px`;
         const bodyH = m.body.offsetHeight;
         const lift = Math.max(0, Math.min(tabTop - RAIL_BASE_TOP, bodyH - tabH));
-        m.body.style.marginTop = `${-lift}px`;
+        const bounds = rail.getBoundingClientRect();
+        m.body.style.top = `${bounds.top + tabTop - lift}px`;
+        m.body.style.left = `${m.spec.side === 'left' ? bounds.left : bounds.right - m.body.offsetWidth}px`;
         const r = RAIL_BODY_RADIUS;
         const flushBottom = lift > 0 && lift >= bodyH - tabH;
         // Round only the corners away from the tab (its side is mirrored on the left rail).
@@ -7979,6 +7977,10 @@ class MenuController {
 
         const body = document.createElement('div');
         body.className = 'tjsv-menu';
+        body.popover = spec.mode === 'dropdown' ? 'auto' : 'manual';
+        body.addEventListener('toggle', () => {
+            if (m.open && !body.matches(':popover-open')) this._setOpen(m, false);
+        });
         // Space and Enter activate a focused button natively; they must not also reach the viewer's play key.
         body.addEventListener('keydown', (e) => {
             const t = /** @type {HTMLElement} */ (e.target);
@@ -8525,7 +8527,13 @@ class MenuController {
         }
         m.root.classList.toggle('open', want);
         m.button.setAttribute('aria-expanded', String(want));
-        if (want) { this.refresh(m); this._placeBody(m); }
+        if (want) {
+            m.body.showPopover();
+            this.refresh(m);
+            this._placeBody(m);
+        } else {
+            m.body.hidePopover();
+        }
         this._syncShift(m.spec.side);
         if (changed && typeof m.spec.onOpenChange === 'function') m.spec.onOpenChange(want);
     }
