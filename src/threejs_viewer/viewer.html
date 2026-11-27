@@ -19586,6 +19586,8 @@ class ThreeJSViewer {
         }
 
         this._needsDraw = true;
+        this._lastDrawView = new THREE.Matrix4();
+        this._lastDrawProjection = new THREE.Matrix4();
         this._liveObjectAccess = false;
         // Start render loop
         this._lastFrameTime = performance.now();
@@ -21752,6 +21754,7 @@ class ThreeJSViewer {
 
     /** @param {string} id @param {number} value */
     _setDrawRange(id, value) {
+        this._needsDraw = true;
         const obj = this._objects.get(id);
         if (!obj) return;
         if (obj.userData.isToolpathGroup) {
@@ -26363,10 +26366,16 @@ class ThreeJSViewer {
                 h.update();
             });
         }
-        if (!this._needsDraw && !moving && !this._liveObjectAccess && !this._overlays.size
+        this._camera.updateMatrixWorld();
+        const cameraUnchanged = this._lastDrawView.equals(this._camera.matrixWorld)
+            && this._lastDrawProjection.equals(this._camera.projectionMatrix);
+        if (cameraUnchanged && !this._needsDraw && !moving && !this._liveObjectAccess && !this._overlays.size
             && !this._pointsLODList.length && !this._lodDirty && !this._lodWorkerBusy
             && !this._dimensions.isToolActive() && !this._controls.isDragging()) return;
-        this._needsDraw = false;
+        this._lastDrawView.copy(this._camera.matrixWorld);
+        this._lastDrawProjection.copy(this._camera.projectionMatrix);
+        // Refresh scene-only statistics after the shadow map's extra draw calls.
+        this._needsDraw = this._renderer.shadowMap.enabled && this._renderer.shadowMap.needsUpdate;
         this._renderer.autoClear = true;
         this._renderer.info.reset();
         if (this._depthCue.edlActive) {
