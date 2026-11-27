@@ -7784,7 +7784,8 @@ def test_left_and_right_rail_bodies_open_together(viewer_client, viewer_page):
     )
     # Opening Clipping folded Lighting (same side) but not the right legend.
     assert st["clip"] and st["legend"] and not st["light"] and st["stacked"]
-    assert st["lightLeft"] == 0
+    # Closed tabs sit alongside the open body on the same rail.
+    assert st["lightLeft"] == st["clipLeft"]
 
     page.locator(".tjsv-btn-menu").click()
     page.wait_for_timeout(300)  # the 0.18 s slide transition
