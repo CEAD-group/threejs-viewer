@@ -9736,8 +9736,8 @@ class MenuController {
         const body = document.createElement('div');
         body.className = 'tjsv-menu';
         body.popover = spec.mode === 'dropdown' ? 'auto' : 'manual';
-        body.addEventListener('toggle', () => {
-            if (m.open && !body.matches(':popover-open')) this._setOpen(m, false);
+        body.addEventListener('beforetoggle', (event) => {
+            if (m.open && event.newState === 'closed') this._setOpen(m, false, true);
         });
         // Space and Enter activate a focused button natively; they must not also reach the viewer's play key.
         body.addEventListener('keydown', (e) => {
@@ -10273,8 +10273,8 @@ class MenuController {
 
     // ---- open/close + keys ----------------------------------------------
 
-    /** @param {any} m @param {boolean} open */
-    _setOpen(m, open) {
+    /** @param {any} m @param {boolean} open @param {boolean} nativeClosing */
+    _setOpen(m, open, nativeClosing = false) {
         const want = !!open && !m.spec.hidden;
         const changed = m.open !== want;
         // Set first, so hooks fired by the folds below already see this menu as open.
@@ -10289,7 +10289,7 @@ class MenuController {
             m.body.showPopover();
             this.refresh(m);
             this._placeBody(m);
-        } else {
+        } else if (!nativeClosing) {
             m.body.hidePopover();
         }
         this._syncShift(m.spec.side);
@@ -19585,6 +19585,10 @@ class ThreeJSViewer {
             this.setStatus('Local data', 'neutral');
         }
 
+        this._needsDraw = true;
+        this._lastDrawView = new THREE.Matrix4();
+        this._lastDrawProjection = new THREE.Matrix4();
+        this._liveObjectAccess = false;
         // Start render loop
         this._lastFrameTime = performance.now();
         this._lastUIUpdate = 0;
@@ -19891,6 +19895,7 @@ class ThreeJSViewer {
             return bbox.getCenter(new THREE.Vector3());
         });
         this._controls.addEventListener('change', () => {
+            this._needsDraw = true;
             this._lodDirty = true;
             // An orbit drag breaks the clean axis snap, so a later re-click
             // of a bubble starts fresh (no accidental flip). Gate on isOrbiting()
@@ -19987,6 +19992,7 @@ class ThreeJSViewer {
                 this._shadowDirty = true;
                 return;
             }
+            this._needsDraw = true;
             this._lodWorkerBusy = false;
             const obj = this._objects.get(msg.tubeId);
             if (!obj || !obj.userData.tubeLOD) return;
@@ -20423,6 +20429,7 @@ class ThreeJSViewer {
             // The raw cube is kept (not disposed) for the optional visible background.
             this._envCube = cubeTexture;
             this._envTarget = target;
+            this._needsDraw = true;
             this._envMap = target.texture;
             this._cubemapName = name;
             this._syncEnvironment();
@@ -20998,6 +21005,7 @@ class ThreeJSViewer {
     }
 
     _syncEnvironment() {
+        this._needsDraw = true;
         const on = this._envEnabled && this._displayQuality !== 'low';
         this._scene.environment = on ? (this._envMap || null) : null;
     }
@@ -21373,6 +21381,7 @@ class ThreeJSViewer {
      * @param {string} id @param {THREE.Object3D} obj
      */
     _registerObject(id, obj) {
+        this._needsDraw = true;
         this._objects.set(id, obj);
         this._objGeneration++;
         this._shadowDirty = true;
@@ -21745,6 +21754,7 @@ class ThreeJSViewer {
 
     /** @param {string} id @param {number} value */
     _setDrawRange(id, value) {
+        this._needsDraw = true;
         const obj = this._objects.get(id);
         if (!obj) return;
         if (obj.userData.isToolpathGroup) {
@@ -22399,6 +22409,7 @@ class ThreeJSViewer {
      *   delete drops the track and aborts its fetch.
      */
     _deleteObject(id, opts) {
+        this._needsDraw = true;
         // Invalidate any in-flight async add/fetch for this id so a late
         // completion can't re-add an object that was explicitly deleted or
         // cleared. Safe to call unconditionally — the load handlers'
@@ -22798,6 +22809,7 @@ class ThreeJSViewer {
 
     /** @param {number} frameIndex @param {number} [t] */
     _applyFrame(frameIndex, t = 0) {
+        this._needsDraw = true;
         if (!this._animation || frameIndex < 0 || frameIndex >= this._animation.frames.length) return;
         // Animation playback moves objects without going through
         // _applyTransform; keep the scene sphere honest every frame so the
@@ -23321,6 +23333,7 @@ class ThreeJSViewer {
         this._fireLoadProgress();
     }
     _onFetchEnd() {
+        this._needsDraw = true;
         this._pendingFetches = Math.max(0, this._pendingFetches - 1);
         this._loadBatchLoaded = Math.min(this._loadBatchTotal, this._loadBatchLoaded + 1);
         this._fireLoadProgress();
@@ -23362,6 +23375,11 @@ class ThreeJSViewer {
     // ========== Events ==========
 
     _bindEvents() {
+        this._onDrawInput = () => { this._needsDraw = true; };
+        for (const type of ['pointermove', 'pointerleave', 'pointerup', 'click', 'input', 'change', 'keydown']) {
+            this.el.addEventListener(type, this._onDrawInput, true);
+        }
+
         this._updateOrbitModeButton();
 
         // Lighting panel
@@ -23910,6 +23928,7 @@ class ThreeJSViewer {
         // Every message may change what the shadow map should hold; a query
         // buys one spurious cheap refresh rather than a denylist here.
         this._shadowDirty = true;
+        this._needsDraw = true;
         switch (data.type) {
             case 'hello':
                 console.log(`Python client v${data.client_version}`);
@@ -26153,6 +26172,7 @@ class ThreeJSViewer {
                     console.warn(`Unknown message type: '${data.type}'`);
                 }
         }
+        this._needsDraw = true;
         return null;
     }
 
@@ -26247,6 +26267,8 @@ class ThreeJSViewer {
         const frameDelta = (frameNow - this._lastFrameTime) / 1000;
         this._lastFrameTime = frameNow;
 
+        // Include the final frame when playback, a tween or the pivot marker ends.
+        const moving = this._animationPlaying || this._viewTween || this._frameTween || this._pivotMarker?.visible;
         // Update animation playback
         if (this._animation && this._animationPlaying) {
             const now = performance.now();
@@ -26344,6 +26366,16 @@ class ThreeJSViewer {
                 h.update();
             });
         }
+        this._camera.updateMatrixWorld();
+        const cameraUnchanged = this._lastDrawView.equals(this._camera.matrixWorld)
+            && this._lastDrawProjection.equals(this._camera.projectionMatrix);
+        if (cameraUnchanged && !this._needsDraw && !moving && !this._liveObjectAccess && !this._overlays.size
+            && !this._pointsLODList.length && !this._lodDirty && !this._lodWorkerBusy
+            && !this._dimensions.isToolActive() && !this._controls.isDragging()) return;
+        this._lastDrawView.copy(this._camera.matrixWorld);
+        this._lastDrawProjection.copy(this._camera.projectionMatrix);
+        // Refresh scene-only statistics after the shadow map's extra draw calls.
+        this._needsDraw = this._renderer.shadowMap.enabled && this._renderer.shadowMap.needsUpdate;
         this._renderer.autoClear = true;
         this._renderer.info.reset();
         if (this._depthCue.edlActive) {
@@ -26467,6 +26499,7 @@ class ThreeJSViewer {
         this._orthoCamera.left = -ORTHO_FRUSTUM * aspect;
         this._orthoCamera.right = ORTHO_FRUSTUM * aspect;
         this._orthoCamera.updateProjectionMatrix();
+        this._needsDraw = true;
         this._renderer.setSize(width, height);
         this._objects.forEach((obj) => {
             if (obj.material && obj.material.resolution) {
@@ -26539,6 +26572,7 @@ class ThreeJSViewer {
     _syncLoop() {
         const run = !this._paused && !this._offscreen && !this._contextLost && !this._destroyed;
         if (run && !this._animationFrameId) {
+            this._needsDraw = true;
             this._resetFrameClocks();
             this._animationFrameId = requestAnimationFrame(this._animate);
         } else if (!run && this._animationFrameId) {
@@ -26701,6 +26735,7 @@ class ThreeJSViewer {
      * @param {number | null} size
      */
     setViewHelperSize(size) {
+        this._needsDraw = true;
         this._viewHelperSizeOpt = parseViewHelperSize(size);
         const dom = this._renderer.domElement;
         this._syncViewHelperSize(dom.clientWidth, dom.clientHeight);
@@ -27148,10 +27183,16 @@ class ThreeJSViewer {
      * spine nodes and refines the nearest hit locally, for huge toolpaths.
      * @param {{markerColor?:number, thresholdPx?:number, maxPickPoints?:number}} [opts]
      */
-    enablePolylinePicking(opts) { this._polylinePick.enable(opts || {}); }
+    enablePolylinePicking(opts) {
+        this._needsDraw = true;
+        this._polylinePick.enable(opts || {});
+    }
 
     /** Disable interactive picking and hide the hover marker. */
-    disablePolylinePicking() { this._polylinePick.disable(); }
+    disablePolylinePicking() {
+        this._needsDraw = true;
+        this._polylinePick.disable();
+    }
 
     /**
      * Register a hook fired when the user picks (clicks) a point on a polyline
@@ -27201,6 +27242,7 @@ class ThreeJSViewer {
      * @returns {boolean} false (with a warning) for an unknown mode
      */
     setProjection(mode) {
+        this._needsDraw = true;
         if (!CAMERA_PROJECTIONS.includes(mode)) {
             console.warn(`setProjection: unknown projection '${mode}' (perspective or orthographic)`);
             return false;
@@ -27220,6 +27262,7 @@ class ThreeJSViewer {
      * @param {{position?:any, target?:any, up?:any, fov?:number, zoom?:number, projection?:CameraProjection}} pose
      */
     setCameraPose(pose) {
+        this._needsDraw = true;
         if (!pose) return;
         if (pose.projection != null) this.setProjection(pose.projection);
         const cam = /** @type {any} */ (this._camera);
@@ -27454,6 +27497,7 @@ class ThreeJSViewer {
      *     parses; null restores the default
      */
     setBackground(color) {
+        this._needsDraw = true;
         this._backgroundColor = new THREE.Color(color ?? VIEWER_BACKGROUND_COLOR);
         const css = `#${this._backgroundColor.getHexString()}`;
         this._renderer.domElement.style.backgroundColor = css;
@@ -27469,6 +27513,7 @@ class ThreeJSViewer {
      * @param {boolean} enabled
      */
     setClipCaps(enabled) {
+        this._needsDraw = true;
         this._clipCaps.enabled = !!enabled;
         if (this._clipCapsCheck) this._clipCapsCheck.checked = this._clipCaps.enabled;
     }
@@ -27505,6 +27550,7 @@ class ThreeJSViewer {
      *   plane, clamped to [0, 90].
      */
     setSun(opts = {}) {
+        this._needsDraw = true;
         const st = this._sunState;
         if (opts.enabled != null) st.enabled = !!opts.enabled;
         for (const k of /** @type {const} */ (['intensity', 'azimuth', 'elevation'])) {
@@ -27533,6 +27579,7 @@ class ThreeJSViewer {
      * after mutating an Object3D obtained through getObject() or an overlay.
      */
     requestShadowUpdate() {
+        this._needsDraw = true;
         this._shadowDirty = true;
     }
 
@@ -27544,6 +27591,7 @@ class ThreeJSViewer {
      * @param {string} quality "high" or "low"
      */
     setDisplayQuality(quality) {
+        this._needsDraw = true;
         const q = parseDisplayQuality(quality);
         if (!q) {
             console.warn(`setDisplayQuality: unknown quality '${quality}'`);
@@ -27674,11 +27722,13 @@ class ThreeJSViewer {
      * @param {boolean} enabled
      */
     setEnvironmentBackground(enabled) {
+        this._needsDraw = true;
         this._envBackground = !!enabled;
         this._applyBackground();
     }
 
     _applyBackground() {
+        this._needsDraw = true;
         this._scene.background = this._envBackground && this._envCube
             ? this._envCube : this._backgroundColor;
     }
@@ -27692,6 +27742,7 @@ class ThreeJSViewer {
      * @param {number|string|null} [centerColor] axis-line colour; null keeps each grid's own
      */
     setGridColor(color, centerColor = null) {
+        this._needsDraw = true;
         if (color == null) { this._gridColorOverride = null; return; }
         const style = {
             color: new THREE.Color(color).getHex(),
@@ -27713,6 +27764,7 @@ class ThreeJSViewer {
      * @param {number} seconds
      */
     seekAnimationTime(seconds) {
+        this._needsDraw = true;
         if (!this._animation || !Number.isFinite(seconds)) return;
         this._seekToTime(Number(seconds));
     }
@@ -28012,7 +28064,12 @@ class ThreeJSViewer {
      * @param {string} id
      * @returns {THREE.Object3D | undefined}
      */
-    getObject(id) { return this._objects.get(id); }
+    getObject(id) {
+        const object = this._objects.get(id);
+        // Embedders can mutate the returned mesh or material between any two frames.
+        if (object) this._liveObjectAccess = true;
+        return object;
+    }
 
     /**
      * Mount an embedder-owned Object3D in the scene, for live,
@@ -28069,6 +28126,7 @@ class ThreeJSViewer {
      * @returns {boolean} true if an overlay was removed
      */
     removeOverlay(idOrObject) {
+        this._needsDraw = true;
         let id = null;
         if (typeof idOrObject === 'string') {
             id = idOrObject;
@@ -28215,6 +28273,7 @@ class ThreeJSViewer {
      * @param {boolean} visible
      */
     setToolbarVisible(visible) {
+        this._needsDraw = true;
         this._toolbarVisible = !!visible;
         this._menus.get('viewer').setHidden(!this._toolbarVisible);
     }
@@ -28281,7 +28340,10 @@ class ThreeJSViewer {
      * @param {{id?:string, mode?:string, translateSnap?:number, translateSnapRelative?:boolean, rotateSnap?:number, clickSelect?:boolean}} [opts]
      *   `rotateSnap` is in radians.
      */
-    enableMoveGizmo(opts) { this._transformGizmo.enable(opts || {}); }
+    enableMoveGizmo(opts) {
+        this._needsDraw = true;
+        this._transformGizmo.enable(opts || {});
+    }
 
     /**
      * Attach the move/rotate gizmo to any `Object3D` — including a bare sentinel
@@ -28292,7 +28354,10 @@ class ThreeJSViewer {
      * (null if the object isn't a tracked one).
      * @param {THREE.Object3D} object3D @param {string|null} [id]
      */
-    attachMoveGizmo(object3D, id = null) { this._transformGizmo.attach(object3D, id); }
+    attachMoveGizmo(object3D, id = null) {
+        this._needsDraw = true;
+        this._transformGizmo.attach(object3D, id);
+    }
 
     /** Direct-call JS equivalent of the `add_axis_control` WS message — same
      * effect, for an embedder holding a live `viewer` reference in the same
@@ -28305,13 +28370,22 @@ class ThreeJSViewer {
      * THREE.js scene units: metres for linear(_unlimited), radians for
      * rotary(_unlimited) — no CSD-unit conversion happens here.
      * @param {string} id @param {any} opts */
-    addAxisControl(id, opts) { this._axisControls.add(id, opts); }
+    addAxisControl(id, opts) {
+        this._needsDraw = true;
+        this._axisControls.add(id, opts);
+    }
 
     /** @param {string} id @param {{value?:number, min?:number, max?:number, color?:number|string|null, hoverColor?:number|string|null, pickRadiusPx?:number|null}} opts */
-    updateAxisControl(id, opts) { this._axisControls.setValue(id, opts); }
+    updateAxisControl(id, opts) {
+        this._needsDraw = true;
+        this._axisControls.setValue(id, opts);
+    }
 
     /** @param {string} id */
-    removeAxisControl(id) { this._axisControls.remove(id); }
+    removeAxisControl(id) {
+        this._needsDraw = true;
+        this._axisControls.remove(id);
+    }
 
     /**
      * Add (or replace) a linear dimension annotation. `spec`: `{p1, p2,
@@ -28323,7 +28397,10 @@ class ThreeJSViewer {
      * See the DimensionController banner. Throws on a malformed spec.
      * @param {string} id @param {any} spec
      */
-    addDimension(id, spec) { this._dimensions.add(id, spec); }
+    addDimension(id, spec) {
+        this._needsDraw = true;
+        this._dimensions.add(id, spec);
+    }
 
     /**
      * Add (or replace) a point annotation: a fixed-size marker at `position`
@@ -28331,7 +28408,10 @@ class ThreeJSViewer {
      * It shares the dimension layer: display mode, removal and clearing.
      * @param {string} id @param {any} spec
      */
-    addPointAnnotation(id, spec) { this._dimensions.addPoint(id, spec); }
+    addPointAnnotation(id, spec) {
+        this._needsDraw = true;
+        this._dimensions.addPoint(id, spec);
+    }
 
     /**
      * Add (or replace) a polyline annotation through `points` (two or more),
@@ -28340,16 +28420,28 @@ class ThreeJSViewer {
      * when its plane faces the camera.
      * @param {string} id @param {any} spec
      */
-    addPolylineAnnotation(id, spec) { this._dimensions.addPolyline(id, spec); }
+    addPolylineAnnotation(id, spec) {
+        this._needsDraw = true;
+        this._dimensions.addPolyline(id, spec);
+    }
 
     /** Remove an annotation of any kind. @param {string} id @returns {boolean} */
-    removeDimension(id) { return this._dimensions.remove(id); }
+    removeDimension(id) {
+        this._needsDraw = true;
+        return this._dimensions.remove(id);
+    }
 
     /** @param {string} id @returns {boolean} */
-    removeAnnotation(id) { return this._dimensions.remove(id); }
+    removeAnnotation(id) {
+        this._needsDraw = true;
+        return this._dimensions.remove(id);
+    }
 
     /** Remove every annotation, dimensions, points and polylines alike. */
-    clearDimensions() { this._dimensions.clear(); }
+    clearDimensions() {
+        this._needsDraw = true;
+        this._dimensions.clear();
+    }
 
     /** @returns {Array<{id:string, kind:'dimension', p1:number[], p2:number[], drawOrigin:number[]|null, direction:string|number[]|null, value:number, color:number, label:string|null}>} */
     getDimensions() { return this._dimensions.list('dimension'); }
@@ -28362,7 +28454,10 @@ class ThreeJSViewer {
      * camera (within the in-view tolerance, default 10°), 'none' hides them.
      * @param {'all'|'in_view'|'none'} mode
      */
-    setDimensionDisplay(mode) { this._dimensions.setMode(mode); }
+    setDimensionDisplay(mode) {
+        this._needsDraw = true;
+        this._dimensions.setMode(mode);
+    }
 
     /** @returns {'all'|'in_view'|'none'} */
     getDimensionDisplay() { return this._dimensions.mode; }
@@ -28375,7 +28470,10 @@ class ThreeJSViewer {
      * scene units (default 0.1); arrowheads and extension gaps scale with it.
      * @param {{unitScale?:number, decimals?:number, unit?:string, format?:((value:number, spec:any) => string)|null, inViewToleranceDeg?:number, textHeight?:number}} opts
      */
-    setDimensionFormat(opts) { this._dimensions.setFormat(opts || {}); }
+    setDimensionFormat(opts) {
+        this._needsDraw = true;
+        this._dimensions.setFormat(opts || {});
+    }
 
     /**
      * Start the interactive dimension tool: click p1, click p2, then move the
@@ -28396,7 +28494,10 @@ class ThreeJSViewer {
      *   pick?: boolean|((clientX:number, clientY:number) => any),
      *   describe?: (info:{point:number[], hit:any, state:string}) => string|null|undefined, color?: any}} [opts]
      */
-    startDimensionTool(opts) { this._dimensions.startTool(opts || {}, 'dimension'); }
+    startDimensionTool(opts) {
+        this._needsDraw = true;
+        this._dimensions.startTool(opts || {}, 'dimension');
+    }
 
     /**
      * Start the point tool: one click on the camera-facing plane through
@@ -28404,7 +28505,10 @@ class ThreeJSViewer {
      * and ownership as startDimensionTool.
      * @param {Parameters<ThreeJSViewer['startDimensionTool']>[0]} [opts]
      */
-    startPointTool(opts) { this._dimensions.startTool(opts || {}, 'point'); }
+    startPointTool(opts) {
+        this._needsDraw = true;
+        this._dimensions.startTool(opts || {}, 'point');
+    }
 
     /**
      * Start the polyline tool: click each vertex (snapping onto axis lines
@@ -28413,10 +28517,16 @@ class ThreeJSViewer {
      * Esc cancels. Creates `{points, closed}`, plus `hits` with `pick`.
      * @param {Parameters<ThreeJSViewer['startDimensionTool']>[0]} [opts]
      */
-    startPolylineTool(opts) { this._dimensions.startTool(opts || {}, 'polyline'); }
+    startPolylineTool(opts) {
+        this._needsDraw = true;
+        this._dimensions.startTool(opts || {}, 'polyline');
+    }
 
     /** Ends whichever annotation tool is active. */
-    cancelDimensionTool() { this._dimensions.cancelTool(); }
+    cancelDimensionTool() {
+        this._needsDraw = true;
+        this._dimensions.cancelTool();
+    }
 
     /** True while any annotation tool is active. @returns {boolean} */
     isDimensionToolActive() { return this._dimensions.isToolActive(); }
@@ -28428,10 +28538,16 @@ class ThreeJSViewer {
      * clip from `source.id`'s live local `source.channel`, mapping
      * `source.from`..`source.to` onto clip progress 0..1, every render frame.
      * @param {string} id @param {{id:string, channel:string, from:number, to:number}} source */
-    bindClip(id, source) { this._bindClip(id, source); }
+    bindClip(id, source) {
+        this._needsDraw = true;
+        this._bindClip(id, source);
+    }
 
     /** @param {string} id */
-    unbindClip(id) { this._bindClip(id, null); }
+    unbindClip(id) {
+        this._needsDraw = true;
+        this._bindClip(id, null);
+    }
 
     /**
      * Direct-call JS equivalent of `set_kinematic_chain`: register (or replace)
@@ -28443,10 +28559,16 @@ class ThreeJSViewer {
      * @param {{description: KinematicDescription, object_ids: Record<string, string|null>,
      *          object_scale?: Record<string, number>}} spec
      */
-    setKinematicChain(id, spec) { this._kinematics.set(id, spec); }
+    setKinematicChain(id, spec) {
+        this._needsDraw = true;
+        this._kinematics.set(id, spec);
+    }
 
     /** @param {string} id */
-    removeKinematicChain(id) { this._kinematics.remove(id); }
+    removeKinematicChain(id) {
+        this._needsDraw = true;
+        this._kinematics.remove(id);
+    }
 
     /**
      * Pose chain `id` from axis values (description axes order, degrees rotary,
@@ -28455,7 +28577,10 @@ class ThreeJSViewer {
      * @param {string} id @param {ArrayLike<number>} values @param {ArrayLike<number>} [solved]
      * @returns {boolean}
      */
-    setJoints(id, values, solved) { return this._kinematics.setJoints(id, values, solved); }
+    setJoints(id, values, solved) {
+        this._needsDraw = true;
+        return this._kinematics.setJoints(id, values, solved);
+    }
 
     /**
      * JS twin of `query_kinematic_chain`: FK world matrices (row-major) at the
@@ -28479,6 +28604,7 @@ class ThreeJSViewer {
      * @returns {any} the created gizmo, or null if the object can't be resolved.
      */
     addGizmo(objectOrId, opts = {}) {
+        this._needsDraw = true;
         let obj = /** @type {any} */ (objectOrId);
         let id = opts.id;
         if (typeof objectOrId === 'string') { id = objectOrId; obj = this._objects.get(objectOrId); }
@@ -28490,13 +28616,22 @@ class ThreeJSViewer {
     }
 
     /** Remove every pinned gizmo added with `addGizmo` (the interactive gizmo is untouched). */
-    clearGizmos() { this._transformGizmo.clearGizmos(); }
+    clearGizmos() {
+        this._needsDraw = true;
+        this._transformGizmo.clearGizmos();
+    }
 
     /** Disable the move/rotate gizmo and detach it from its target. */
-    disableMoveGizmo() { this._transformGizmo.disable(); }
+    disableMoveGizmo() {
+        this._needsDraw = true;
+        this._transformGizmo.disable();
+    }
 
     /** @param {string} mode - 'translate' | 'rotate' */
-    setGizmoMode(mode) { this._transformGizmo.setMode(mode); }
+    setGizmoMode(mode) {
+        this._needsDraw = true;
+        this._transformGizmo.setMode(mode);
+    }
 
     /**
      * Constrain which translate/rotate axes the move gizmo exposes — e.g.
@@ -28507,7 +28642,10 @@ class ThreeJSViewer {
      * the Z ring. Resets to all-axes automatically when the gizmo detaches.
      * @param {GizmoAxesMask|null} [mask]
      */
-    setGizmoAxes(mask) { this._transformGizmo.setAxes(mask); }
+    setGizmoAxes(mask) {
+        this._needsDraw = true;
+        this._transformGizmo.setAxes(mask);
+    }
 
     /**
      * The move gizmo's axis masks as applied, one explicit `{x, y, z}` per mode,
@@ -28534,7 +28672,10 @@ class ThreeJSViewer {
      * `space` option. Holds across attaches until changed.
      * @param {'world'|'local'} space
      */
-    setGizmoSpace(space) { this._transformGizmo.setSpace(space); }
+    setGizmoSpace(space) {
+        this._needsDraw = true;
+        this._transformGizmo.setSpace(space);
+    }
 
     /**
      * Register a hook fired as the gizmo moves/rotates its target. Payload:
@@ -28629,6 +28770,10 @@ class ThreeJSViewer {
     // ========== Destroy ==========
 
     destroy() {
+        for (const type of ['pointermove', 'pointerleave', 'pointerup', 'click', 'input', 'change', 'keydown']) {
+            this.el.removeEventListener(type, this._onDrawInput, true);
+        }
+
         this._destroyed = true;
         // Drop the dev-debug handle if it still points at this instance, so
         // destroy() doesn't leave window.tjsv pinning a disposed viewer's
