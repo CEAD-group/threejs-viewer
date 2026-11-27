@@ -14517,3 +14517,16 @@ def test_visible_stationary_scene_stops_drawing(viewer_client, viewer_page):
     settle(viewer_client)
     frames(viewer_page, 3)
     assert viewer_page.evaluate(frame) > before
+
+    after_camera = viewer_page.evaluate(frame)
+    viewer_client.set_color("idle-box", 0xCC3333)
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    assert viewer_page.evaluate(frame) > after_camera
+
+    _load_long_animation(viewer_client, viewer_page)
+    playing = viewer_page.evaluate(_RENDER_STATE_JS)
+    frames(viewer_page, 5)
+    later = viewer_page.evaluate(_RENDER_STATE_JS)
+    assert later["playing"] and later["time"] > playing["time"]
+    assert later["frame"] > playing["frame"]
