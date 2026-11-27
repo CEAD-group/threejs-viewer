@@ -14502,3 +14502,17 @@ def test_webgl_context_loss_stops_loop_and_restore_renders_again(
     after = viewer_page.evaluate(_CENTRE_PIXEL_JS)
     assert before[0] > before[2] + 40, before
     assert all(abs(a - b) <= 2 for a, b in zip(after, before)), (before, after)
+
+
+def test_visible_stationary_scene_stops_drawing(viewer_client, viewer_page):
+    viewer_client.add_box("idle-box", width=2, height=2, depth=2)
+    settle(viewer_client)
+    frames(viewer_page, 30)
+    frame = "window.threejsViewer._renderer.info.render.frame"
+    before = viewer_page.evaluate(frame)
+    frames(viewer_page, 10)
+    assert viewer_page.evaluate(frame) == before
+    viewer_client.set_camera(position=[6, 6, 4], target=[0, 0, 0])
+    settle(viewer_client)
+    frames(viewer_page, 3)
+    assert viewer_page.evaluate(frame) > before
